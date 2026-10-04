@@ -1,0 +1,17 @@
+{
+  "copy_new_write": 0.75,
+  "copy_existing_write": 0.75,
+  "cas_recover_write": 0.75,
+  "missing_recover_write": 0.75,
+  "edit_replace_write": 0.75,
+  "edit_append_write": 0.75,
+  "edit_remove_write": 0.75,
+  "mkdir_write_write": 0.75,
+  "generation_markdown_write": 0.75,
+  "generation_json_write": 0.75,
+  "generation_csv_write": 0.75,
+  "generation_html_write": 0.75,
+  "generation_python_write": 0.75,
+  "generation_javascript_write": 0.75,
+  "search_write": 0.75
+}

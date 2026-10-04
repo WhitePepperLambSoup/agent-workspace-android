@@ -1,0 +1,66 @@
+{
+  "format_version": 1,
+  "seed": 20261001,
+  "synthetic_only": true,
+  "user_data_used": false,
+  "fixed_benchmark_answers_used": false,
+  "labels_visible_to_model": false,
+  "max_sequence_tokens": 1536,
+  "validated": {
+    "examples": 416,
+    "train": 320,
+    "eval": 96,
+    "tool_calls": 548,
+    "tool_names": [
+      "android_action",
+      "android_observe",
+      "android_verify",
+      "list_files",
+      "make_directory",
+      "memory_search",
+      "memory_write",
+      "move_path",
+      "read_file",
+      "search_files",
+      "select_local_tools",
+      "todo",
+      "write_file"
+    ],
+    "advertised_and_execution_schemas_valid": true,
+    "entities_and_compositions_disjoint": true
+  },
+  "token_lengths": {
+    "train": {
+      "min": 444,
+      "max": 949,
+      "total": 217121,
+      "mean": 678.5
+    },
+    "eval": {
+      "min": 463,
+      "max": 985,
+      "total": 75190,
+      "mean": 783.23
+    }
+  },
+  "files": {
+    "train.jsonl": {
+      "records": 320,
+      "bytes": 717441,
+      "sha256": "00d1a3d5a6c715af90cdb240f64ba12ca29cf518f677397c2bf39a23cb77ab03"
+    },
+    "eval.jsonl": {
+      "records": 96,
+      "bytes": 243446,
+      "sha256": "80374e70f5bcebfd2f73f2910869cc3f4418d360ee941c29590885781228b91e"
+    },
+    "catalog.json": {
+      "bytes": 28455,
+      "sha256": "0851286a885343b1c491f058f03112f64b4d6f52277aa3c89f3b0d22bd3b9b2c"
+    }
+  },
+  "limits": [
+    "Text/tool protocol training only; no vision or audio examples.",
+    "Synthetic holdout measures this protocol; it is not a mainstream Android task-success benchmark."
+  ]
+}

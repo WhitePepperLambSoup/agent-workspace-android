@@ -1,0 +1,18 @@
+{
+  "name": "agent-workspace-android-web",
+  "private": true,
+  "description": "Build tooling for the Android WebView UI (web_companion): bundles the offline Markdown renderer and icons.",
+  "scripts": {
+    "build:vendor": "node web_companion/build-vendor.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "hast-util-to-html": "9.0.5",
+    "lucide-react": "1.28.0",
+    "rehype-sanitize": "6.0.0",
+    "remark-gfm": "4.0.1",
+    "remark-parse": "11.0.0",
+    "remark-rehype": "11.1.2",
+    "unified": "11.0.5"
+  }
+}

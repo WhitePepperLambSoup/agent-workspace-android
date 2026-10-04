@@ -1,0 +1,76 @@
+# Reference material is intentionally outside this product's source history.
+GitHub sourse/
+
+# Local scratch and review artifacts
+.pytest-*/
+.task*
+.mypy-task*
+.uv-cache*
+artifacts/
+github-upload/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.superpowers/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Local application state and secrets
+.agent-workspace/
+**/.agent/terminal-registry.json*
+keys.json
+*.db
+*.db-shm
+*.db-wal
+*.log
+log.txt
+.env
+.env.*
+!.env.example
+
+# IDE and OS
+.idea/
+.vscode/
+*.user
+Thumbs.db
+Desktop.ini
+
+# Android generated inputs, local SDK paths and private device/signing state
+for Android/node_modules/
+for Android/kotlin_app/.gradle/
+for Android/kotlin_app/.cxx/
+for Android/kotlin_app/local.properties
+for Android/kotlin_app/src/main/jniLibs/
+for Android/kotlin_app/src/main/assets/web/
+for Android/kotlin_app/src/main/assets/agent_code.zip
+for Android/kotlin_app/src/main/assets/termux-bootstrap-*.zip
+for Android/kotlin_app/src/main/assets/toolchain/
+for Android/kotlin_app/src/main/assets/licenses/
+for Android/**/device-backups/
+for Android/**/device_backups/
+for Android/**/agent-data/
+for Android/**/private/
+for Android/**/*.jks
+for Android/**/*.keystore
+for Android/**/signing.properties
+for Android/**/*.gguf
+# Android training: weights, checkpoints, run outputs and unfrozen candidate datasets are large local artifacts.
+# The frozen datasets (training/data, data-v2 ... data-v5) and the training source stay in the repository.
+for Android/training/runs/
+for Android/training/models/
+for Android/training/data-*-candidate*/
+for Android/**/*.safetensors
+for Android/**/*.pt
+
+# Scratch left by local test runs at the repository root
+/.test-tmp*/
+/.tmp*

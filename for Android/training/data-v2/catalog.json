@@ -1,0 +1,1691 @@
+{
+  "android_action": {
+    "advertisement": {
+      "type": "function",
+      "function": {
+        "name": "android_action",
+        "description": "Perform one Android action using snapshot_version from the latest android_observe. Required action parameters: tap x,y; swipe x,y,x2,y2; ref ref; type_text ref,text; launch_app package_name. back/home require only action,snapshot_version. Supply only fields belonging to the chosen action.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "back",
+                "home",
+                "launch_app",
+                "ref",
+                "swipe",
+                "tap",
+                "type_text"
+              ]
+            },
+            "snapshot_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[^\\u0000]+(?![\\s\\S])"
+            },
+            "ref": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^n[0-9]{1,3}(?![\\s\\S])",
+              "description": "Copy the exact node ref (such as n1) from android_observe."
+            },
+            "x": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000
+            },
+            "y": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000
+            },
+            "x2": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000
+            },
+            "y2": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "^[^\\u0000]+(?![\\s\\S])"
+            },
+            "package_name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "pattern": "^[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]+)+(?![\\s\\S])"
+            },
+            "expect": {
+              "type": "object",
+              "properties": {
+                "package_name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300,
+                  "pattern": "^[^\\u0000]+(?![\\s\\S])"
+                },
+                "activity_name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300,
+                  "pattern": "^[^\\u0000]+(?![\\s\\S])"
+                },
+                "text_contains": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300,
+                  "pattern": "^[^\\u0000]+(?![\\s\\S])"
+                },
+                "view_id_exists": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300,
+                  "pattern": "^[^\\u0000]+(?![\\s\\S])"
+                },
+                "resource_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300,
+                  "pattern": "^[^\\u0000]+(?![\\s\\S])"
+                }
+              },
+              "minProperties": 1,
+              "maxProperties": 5,
+              "additionalProperties": false
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 5000
+            }
+          },
+          "required": [
+            "action",
+            "snapshot_version"
+          ],
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "action": {
+                    "const": "tap"
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              },
+              "then": {
+                "required": [
+                  "x",
+                  "y"
+                ],
+                "propertyNames": {
+                  "enum": [
+                    "action",
+                    "snapshot_version",
+                    "expect",
+                    "timeout_ms",
+                    "x",
+                    "y"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "action": {
+                    "const": "swipe"
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              },
+              "then": {
+                "required": [
+                  "x",
+                  "y",
+                  "x2",
+                  "y2"
+                ],
+                "propertyNames": {
+                  "enum": [
+                    "action",
+                    "snapshot_version",
+                    "expect",
+                    "timeout_ms",
+                    "x",
+                    "y",
+                    "x2",
+                    "y2"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "action": {
+                    "const": "ref"
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              },
+              "then": {
+                "required": [
+                  "ref"
+                ],
+                "propertyNames": {
+                  "enum": [
+                    "action",
+                    "snapshot_version",
+                    "expect",
+                    "timeout_ms",
+                    "ref"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "action": {
+                    "const": "type_text"
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              },
+              "then": {
+                "required": [
+                  "ref",
+                  "text"
+                ],
+                "propertyNames": {
+                  "enum": [
+                    "action",
+                    "snapshot_version",
+                    "expect",
+                    "timeout_ms",
+                    "ref",
+                    "text"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "action": {
+                    "const": "launch_app"
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              },
+              "then": {
+                "required": [
+                  "package_name"
+                ],
+                "propertyNames": {
+                  "enum": [
+                    "action",
+                    "snapshot_version",
+                    "expect",
+                    "timeout_ms",
+                    "package_name"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "action": {
+                    "const": "back"
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              },
+              "then": {
+                "required": [],
+                "propertyNames": {
+                  "enum": [
+                    "action",
+                    "snapshot_version",
+                    "expect",
+                    "timeout_ms"
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "action": {
+                    "const": "home"
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              },
+              "then": {
+                "required": [],
+                "propertyNames": {
+                  "enum": [
+                    "action",
+                    "snapshot_version",
+                    "expect",
+                    "timeout_ms"
+                  ]
+                }
+              }
+            }
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "execution_schema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "back",
+            "home",
+            "launch_app",
+            "ref",
+            "swipe",
+            "tap",
+            "type_text"
+          ]
+        },
+        "snapshot_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000]+(?![\\s\\S])"
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "^n[0-9]{1,3}(?![\\s\\S])",
+          "description": "Copy the exact node ref (such as n1) from android_observe."
+        },
+        "x": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "y": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "x2": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "y2": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^[^\\u0000]+(?![\\s\\S])"
+        },
+        "package_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]+)+(?![\\s\\S])"
+        },
+        "expect": {
+          "type": "object",
+          "properties": {
+            "package_name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300,
+              "pattern": "^[^\\u0000]+(?![\\s\\S])"
+            },
+            "activity_name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300,
+              "pattern": "^[^\\u0000]+(?![\\s\\S])"
+            },
+            "text_contains": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300,
+              "pattern": "^[^\\u0000]+(?![\\s\\S])"
+            },
+            "view_id_exists": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300,
+              "pattern": "^[^\\u0000]+(?![\\s\\S])"
+            },
+            "resource_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300,
+              "pattern": "^[^\\u0000]+(?![\\s\\S])"
+            }
+          },
+          "minProperties": 1,
+          "maxProperties": 5,
+          "additionalProperties": false
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 5000
+        }
+      },
+      "required": [
+        "action",
+        "snapshot_version"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "tap"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "x",
+              "y"
+            ],
+            "propertyNames": {
+              "enum": [
+                "action",
+                "snapshot_version",
+                "expect",
+                "timeout_ms",
+                "x",
+                "y"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "swipe"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "x",
+              "y",
+              "x2",
+              "y2"
+            ],
+            "propertyNames": {
+              "enum": [
+                "action",
+                "snapshot_version",
+                "expect",
+                "timeout_ms",
+                "x",
+                "y",
+                "x2",
+                "y2"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "ref"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "ref"
+            ],
+            "propertyNames": {
+              "enum": [
+                "action",
+                "snapshot_version",
+                "expect",
+                "timeout_ms",
+                "ref"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "type_text"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "ref",
+              "text"
+            ],
+            "propertyNames": {
+              "enum": [
+                "action",
+                "snapshot_version",
+                "expect",
+                "timeout_ms",
+                "ref",
+                "text"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "launch_app"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "package_name"
+            ],
+            "propertyNames": {
+              "enum": [
+                "action",
+                "snapshot_version",
+                "expect",
+                "timeout_ms",
+                "package_name"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "back"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [],
+            "propertyNames": {
+              "enum": [
+                "action",
+                "snapshot_version",
+                "expect",
+                "timeout_ms"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "home"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [],
+            "propertyNames": {
+              "enum": [
+                "action",
+                "snapshot_version",
+                "expect",
+                "timeout_ms"
+              ]
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "capability": "process_execute",
+    "side_effect": "external"
+  },
+  "android_observe": {
+    "advertisement": {
+      "type": "function",
+      "function": {
+        "name": "android_observe",
+        "description": "Observe the current Android app, window, bounded accessibility UI tree, and screen.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "max_nodes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 400
+            },
+            "max_depth": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 24
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "execution_schema": {
+      "type": "object",
+      "properties": {
+        "max_nodes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 400
+        },
+        "max_depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 24
+        }
+      },
+      "additionalProperties": false
+    },
+    "capability": "workspace_read",
+    "side_effect": "read"
+  },
+  "android_screenshot": {
+    "advertisement": {
+      "type": "function",
+      "function": {
+        "name": "android_screenshot",
+        "description": "Capture the Android display into the private workspace and attach the image.",
+        "parameters": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      }
+    },
+    "execution_schema": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "capability": "workspace_read",
+    "side_effect": "read"
+  },
+  "android_verify": {
+    "advertisement": {
+      "type": "function",
+      "function": {
+        "name": "android_verify",
+        "description": "Verify visible Android state using package, activity, text, or resource ID predicates.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "expect": {
+              "type": "object",
+              "properties": {
+                "package_name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300,
+                  "pattern": "^[^\\u0000]+(?![\\s\\S])"
+                },
+                "activity_name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300,
+                  "pattern": "^[^\\u0000]+(?![\\s\\S])"
+                },
+                "text_contains": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300,
+                  "pattern": "^[^\\u0000]+(?![\\s\\S])"
+                },
+                "view_id_exists": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300,
+                  "pattern": "^[^\\u0000]+(?![\\s\\S])"
+                },
+                "resource_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300,
+                  "pattern": "^[^\\u0000]+(?![\\s\\S])"
+                }
+              },
+              "minProperties": 1,
+              "maxProperties": 5,
+              "additionalProperties": false
+            },
+            "snapshot_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[^\\u0000]+(?![\\s\\S])"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 5000
+            }
+          },
+          "required": [
+            "expect"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "execution_schema": {
+      "type": "object",
+      "properties": {
+        "expect": {
+          "type": "object",
+          "properties": {
+            "package_name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300,
+              "pattern": "^[^\\u0000]+(?![\\s\\S])"
+            },
+            "activity_name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300,
+              "pattern": "^[^\\u0000]+(?![\\s\\S])"
+            },
+            "text_contains": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300,
+              "pattern": "^[^\\u0000]+(?![\\s\\S])"
+            },
+            "view_id_exists": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300,
+              "pattern": "^[^\\u0000]+(?![\\s\\S])"
+            },
+            "resource_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300,
+              "pattern": "^[^\\u0000]+(?![\\s\\S])"
+            }
+          },
+          "minProperties": 1,
+          "maxProperties": 5,
+          "additionalProperties": false
+        },
+        "snapshot_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000]+(?![\\s\\S])"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 5000
+        }
+      },
+      "required": [
+        "expect"
+      ],
+      "additionalProperties": false
+    },
+    "capability": "workspace_read",
+    "side_effect": "read"
+  },
+  "list_files": {
+    "advertisement": {
+      "type": "function",
+      "function": {
+        "name": "list_files",
+        "description": "List files and directories within the workspace. If truncated is true, the inventory is incomplete: continue by listing returned directories or using narrower paths before claiming the folder review is complete.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "default": "."
+            },
+            "recursive": {
+              "type": "boolean",
+              "default": false
+            },
+            "max_results": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10000
+            },
+            "max_entries": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100000
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "execution_schema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "default": "."
+        },
+        "recursive": {
+          "type": "boolean",
+          "default": false
+        },
+        "max_results": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "max_entries": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        }
+      },
+      "additionalProperties": false
+    },
+    "capability": "workspace_read",
+    "side_effect": "read"
+  },
+  "make_directory": {
+    "advertisement": {
+      "type": "function",
+      "function": {
+        "name": "make_directory",
+        "description": "Create one workspace directory whose parent already exists.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "execution_schema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "capability": "workspace_manage",
+    "side_effect": "mkdir"
+  },
+  "memory_search": {
+    "advertisement": {
+      "type": "function",
+      "function": {
+        "name": "memory_search",
+        "description": "Search explicit long-term memory for the current workspace. Memory is not loaded automatically; results may contain stale user-authored context.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "maxLength": 512
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "execution_schema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      },
+      "additionalProperties": false
+    },
+    "capability": "memory_read",
+    "side_effect": "none"
+  },
+  "memory_write": {
+    "advertisement": {
+      "type": "function",
+      "function": {
+        "name": "memory_write",
+        "description": "Create, update, or delete explicit long-term memory for the current workspace. Use only when the user explicitly asks to remember, update, or forget information.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "upsert",
+                "delete",
+                "forget",
+                "export"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "content": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "expires_at": {
+              "type": "string"
+            },
+            "ttl_seconds": {
+              "type": "number",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "execution_schema": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "upsert"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "content": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 10000
+            },
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "maxItems": 16,
+              "uniqueItems": true
+            },
+            "expires_at": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "ttl_seconds": {
+              "type": "number",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "action",
+            "content"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "delete"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "required": [
+            "action",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "export"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "forget"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "required": [
+            "action",
+            "id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "capability": "memory_write",
+    "side_effect": "memory_write"
+  },
+  "move_path": {
+    "advertisement": {
+      "type": "function",
+      "function": {
+        "name": "move_path",
+        "description": "Move one bounded regular workspace file without overwrite using a SHA-256 CAS check.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "type": "string",
+              "minLength": 1
+            },
+            "destination": {
+              "type": "string",
+              "minLength": 1
+            },
+            "expected_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{64}$"
+            }
+          },
+          "required": [
+            "source",
+            "destination",
+            "expected_sha256"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "execution_schema": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "destination": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expected_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        }
+      },
+      "required": [
+        "source",
+        "destination",
+        "expected_sha256"
+      ],
+      "additionalProperties": false
+    },
+    "capability": "workspace_manage",
+    "side_effect": "move"
+  },
+  "read_file": {
+    "advertisement": {
+      "type": "function",
+      "function": {
+        "name": "read_file",
+        "description": "Read a UTF-8 file from the workspace and return its SHA-256 digest.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "max_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1048576
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "execution_schema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "capability": "workspace_read",
+    "side_effect": "read"
+  },
+  "search_files": {
+    "advertisement": {
+      "type": "function",
+      "function": {
+        "name": "search_files",
+        "description": "Search UTF-8 workspace files using literal text, or a bounded regular expression with the regex flag. Regex patterns are limited to 1024 characters and each line is matched on its first 64 KiB.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string",
+              "default": "."
+            },
+            "regex": {
+              "type": "boolean",
+              "default": false,
+              "description": "Treat the query as a bounded regular expression."
+            },
+            "case_sensitive": {
+              "type": "boolean",
+              "default": true
+            },
+            "include_sensitive": {
+              "type": "boolean",
+              "default": false,
+              "description": "Requires explicit approval and includes sensitive paths."
+            },
+            "file_glob": {
+              "type": "string",
+              "default": "*"
+            },
+            "max_results": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10000
+            },
+            "max_files": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10000
+            },
+            "max_entries": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100000
+            },
+            "max_file_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16777216
+            },
+            "max_total_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 67108864
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "execution_schema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string",
+          "default": "."
+        },
+        "regex": {
+          "type": "boolean",
+          "default": false,
+          "description": "Treat the query as a bounded regular expression."
+        },
+        "case_sensitive": {
+          "type": "boolean",
+          "default": true
+        },
+        "include_sensitive": {
+          "type": "boolean",
+          "default": false,
+          "description": "Requires explicit approval and includes sensitive paths."
+        },
+        "file_glob": {
+          "type": "string",
+          "default": "*"
+        },
+        "max_results": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "max_files": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "max_entries": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "max_file_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        },
+        "max_total_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 67108864
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    },
+    "capability": "workspace_read",
+    "side_effect": "read"
+  },
+  "select_local_tools": {
+    "advertisement": {
+      "type": "function",
+      "function": {
+        "name": "select_local_tools",
+        "description": "Select up to four available tool names to advertise on the next model call.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "names": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 4,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+              }
+            }
+          },
+          "required": [
+            "names"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "execution_schema": {
+      "type": "object",
+      "properties": {
+        "names": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+          }
+        }
+      },
+      "required": [
+        "names"
+      ],
+      "additionalProperties": false
+    },
+    "capability": "workspace_read",
+    "side_effect": "read"
+  },
+  "todo": {
+    "advertisement": {
+      "type": "function",
+      "function": {
+        "name": "todo",
+        "description": "Manage durable Todo items for the current session. Actions: list; add requires content (optional zero-based position; a new item always starts pending); update requires id and at least one of content, status (pending, in_progress, completed), or position; complete and delete require id.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "list",
+                "add",
+                "update",
+                "complete",
+                "delete"
+              ]
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "content": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 10000
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "in_progress",
+                "completed"
+              ]
+            },
+            "position": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "action": {
+                    "const": "add"
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              },
+              "then": {
+                "required": [
+                  "content"
+                ],
+                "properties": {
+                  "status": {
+                    "const": "pending"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "action": {
+                    "const": "update"
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              },
+              "then": {
+                "required": [
+                  "id"
+                ],
+                "anyOf": [
+                  {
+                    "required": [
+                      "content"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "status"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "position"
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "action": {
+                    "const": "complete"
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              },
+              "then": {
+                "required": [
+                  "id"
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "action": {
+                    "const": "delete"
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              },
+              "then": {
+                "required": [
+                  "id"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    "execution_schema": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "list"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "add"
+            },
+            "content": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 10000
+            },
+            "position": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "status": {
+              "const": "pending"
+            }
+          },
+          "required": [
+            "action",
+            "content"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "update"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "content": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 10000
+            },
+            "status": {
+              "enum": [
+                "pending",
+                "in_progress",
+                "completed"
+              ]
+            },
+            "position": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "action",
+            "id"
+          ],
+          "anyOf": [
+            {
+              "required": [
+                "content"
+              ]
+            },
+            {
+              "required": [
+                "status"
+              ]
+            },
+            {
+              "required": [
+                "position"
+              ]
+            }
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "complete"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "action",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "delete"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "action",
+            "id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "capability": "todo",
+    "side_effect": "session_state"
+  },
+  "write_file": {
+    "advertisement": {
+      "type": "function",
+      "function": {
+        "name": "write_file",
+        "description": "Atomically create or replace a UTF-8 workspace file using SHA-256 CAS.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "content": {
+              "type": "string",
+              "maxLength": 16777216
+            },
+            "expected_sha256": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path",
+            "content",
+            "expected_sha256"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "execution_schema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 16777216
+        },
+        "expected_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "content",
+        "expected_sha256"
+      ],
+      "additionalProperties": false
+    },
+    "capability": "workspace_write",
+    "side_effect": "write"
+  }
+}

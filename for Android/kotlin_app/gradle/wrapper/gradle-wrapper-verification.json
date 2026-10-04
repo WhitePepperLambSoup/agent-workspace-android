@@ -1,0 +1,22 @@
+{
+  "gradle_version": "8.11.1",
+  "distribution_sha256": "f397b287023acdba1e9f6fc5ea72d22dd63669d59ed4a289a29b1a76eee151c6",
+  "verification_source": "https://services.gradle.org/distributions/gradle-8.11.1-wrapper.jar.sha256",
+  "files": {
+    "gradle/wrapper/gradle-wrapper.jar": {
+      "source": "https://raw.githubusercontent.com/gradle/gradle/v8.11.1/gradle/wrapper/gradle-wrapper.jar",
+      "sha256": "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046",
+      "size": 43583
+    },
+    "gradlew": {
+      "source": "https://raw.githubusercontent.com/gradle/gradle/v8.11.1/gradlew",
+      "sha256": "9cbbb4d68ff7fb5211c4d58f598ac9d8664c05fdcd1e5f59b7f2c3ac1ee00af0",
+      "size": 8784
+    },
+    "gradlew.bat": {
+      "source": "https://raw.githubusercontent.com/gradle/gradle/v8.11.1/gradlew.bat",
+      "sha256": "0f3ed8f03b50934cb8c48b15a470d5c20a30a5385825e48b55bcc8ea3d8f8e18",
+      "size": 2894
+    }
+  }
+}

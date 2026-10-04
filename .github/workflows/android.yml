@@ -1,0 +1,85 @@
+name: Android
+
+on:
+  pull_request:
+    paths: ["for Android/**", "src/**", "pyproject.toml", "uv.lock", ".github/workflows/android.yml"]
+  push:
+    branches: [main]
+    paths: ["for Android/**", "src/**", "pyproject.toml", "uv.lock", ".github/workflows/android.yml"]
+  workflow_dispatch:
+    inputs:
+      signed_release:
+        description: "Build release with the configured Android release secrets"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12.10"
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.11.25"
+          enable-cache: true
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          # The action's default list includes the long-removed "tools" package, which current
+          # command-line tools reject; the pinned components are installed in the next step.
+          packages: platform-tools
+      - name: Install pinned Android SDK components
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.3.13750724" "cmake;3.22.1"
+      - name: Install the pinned Python build environment
+        run: uv sync --frozen --python 3.12.10
+      - name: Verify wrapper and prepare pinned native inputs and assets
+        run: |
+          chmod +x "for Android/kotlin_app/gradlew"
+          uv run --frozen python "for Android/build_release.py" --prepare-only
+          uv run --frozen python -c "import os, sys; open(os.environ['GITHUB_ENV'], 'a').write('AGENT_WORKSPACE_BUILD_PYTHON=' + sys.executable + '\n')"
+      - name: Build debug APK (includes JNI)
+        working-directory: for Android/kotlin_app
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+      - name: Build optional signed release
+        if: github.event_name == 'workflow_dispatch' && inputs.signed_release
+        env:
+          AGENT_ANDROID_KEYSTORE_BASE64: ${{ secrets.AGENT_ANDROID_KEYSTORE_BASE64 }}
+          AGENT_ANDROID_KEY_ALIAS: ${{ secrets.AGENT_ANDROID_KEY_ALIAS }}
+          AGENT_ANDROID_STORE_PASSWORD: ${{ secrets.AGENT_ANDROID_STORE_PASSWORD }}
+          AGENT_ANDROID_KEY_PASSWORD: ${{ secrets.AGENT_ANDROID_KEY_PASSWORD }}
+        run: |
+          uv run --frozen python - <<'PY'
+          import base64, os, subprocess, sys, tempfile
+          from pathlib import Path
+          encoded = os.environ.get('AGENT_ANDROID_KEYSTORE_BASE64')
+          if not encoded:
+              raise SystemExit('Signed release requires the configured release keystore secret')
+          descriptor, name = tempfile.mkstemp(prefix='agent-release-', suffix='.jks', dir=os.environ['RUNNER_TEMP'])
+          path = Path(name)
+          try:
+              with os.fdopen(descriptor, 'wb') as stream:
+                  stream.write(base64.b64decode(encoded, validate=True))
+              environment = {**os.environ, 'AGENT_ANDROID_KEYSTORE': str(path)}
+              subprocess.run([sys.executable, 'for Android/build_release.py', '--signed'], env=environment, check=True)
+          finally:
+              path.unlink(missing_ok=True)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: android-build
+          path: |
+            for Android/kotlin_app/build/outputs/apk/**/*.apk
+            for Android/kotlin_app/src/main/assets/toolchain/launchers.json
+            for Android/kotlin_app/src/main/assets/toolchain/NOTICE.txt
+          if-no-files-found: error
+          retention-days: 7

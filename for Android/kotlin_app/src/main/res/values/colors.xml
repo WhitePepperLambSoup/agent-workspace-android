@@ -1,0 +1,8 @@
+<resources>
+    <color name="bg_primary">#0D1117</color>
+    <color name="bg_surface">#161B22</color>
+    <color name="accent_blue">#2F81F7</color>
+    <color name="text_primary">#F0F6FC</color>
+    <!-- Matches the web UI's light surface token; values-night overrides it. -->
+    <color name="web_surface">#FFFFFF</color>
+</resources>

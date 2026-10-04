@@ -1,0 +1,8 @@
+# Versions actually used by the existing Windows Python 3.14 training runtime.
+# The CUDA Torch nightly is already installed; no global environment was edited.
+torch==2.12.0.dev20260408+cu128
+transformers==5.10.2
+peft==0.21.0
+accelerate==1.13.0
+huggingface-hub==1.18.0
+safetensors==0.8.0

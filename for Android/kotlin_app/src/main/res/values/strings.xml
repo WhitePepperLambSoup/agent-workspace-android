@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">Agent Workspace</string>
+    <string name="initializing_runtime">正在准备本地开发环境...</string>
+    <string name="starting_engine">正在启动本地 Agent 守护引擎...</string>
+    <string name="connecting_webui">正在连接本地控制台...</string>
+    <string name="notification_channel_name">Agent 守护服务</string>
+    <string name="notification_running_title">Agent Workspace 运行中</string>
+    <string name="notification_running_desc">本地服务正常监听在端口 8080</string>
+</resources>

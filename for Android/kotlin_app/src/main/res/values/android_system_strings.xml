@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="android_system_accessibility_description">Allow Agent Workspace to observe visible app controls and perform actions you authorize. You can pause control or take over in Agent Workspace.</string>
+</resources>

@@ -1,0 +1,163 @@
+{
+  "format_version": 3,
+  "candidate_only": true,
+  "seed": 20261003,
+  "synthetic_only": true,
+  "private_user_data_used": false,
+  "model_inference_performed": false,
+  "weights_trained": false,
+  "samples_truncated": 0,
+  "samples_excluded": 0,
+  "max_sequence_tokens": 2048,
+  "token_lengths": {
+    "train": {
+      "official": {
+        "min": 911,
+        "max": 1628,
+        "over_preferred_1536": 46,
+        "total": 448692
+      },
+      "runtime": {
+        "min": 815,
+        "max": 1517,
+        "over_preferred_1536": 0,
+        "total": 406891
+      }
+    },
+    "dev": {
+      "official": {
+        "min": 912,
+        "max": 1798,
+        "over_preferred_1536": 11,
+        "total": 109747
+      },
+      "runtime": {
+        "min": 817,
+        "max": 1687,
+        "over_preferred_1536": 11,
+        "total": 99656
+      }
+    },
+    "eval": {
+      "official": {
+        "min": 914,
+        "max": 1689,
+        "over_preferred_1536": 11,
+        "total": 108563
+      },
+      "runtime": {
+        "min": 818,
+        "max": 1578,
+        "over_preferred_1536": 5,
+        "total": 98472
+      }
+    },
+    "canonical_tokenized_prompt_overlap": {
+      "official": {
+        "train/dev": 0,
+        "train/eval": 0,
+        "dev/eval": 0
+      },
+      "runtime": {
+        "train/dev": 0,
+        "train/eval": 0,
+        "dev/eval": 0
+      }
+    }
+  },
+  "validated": {
+    "counts": {
+      "train": 400,
+      "dev": 96,
+      "eval": 96
+    },
+    "families": {
+      "train": {
+        "retention_math_0": 20,
+        "retention_math_1": 20,
+        "retention_math_2": 20,
+        "copy_initial_read": 24,
+        "edit_initial_read": 24,
+        "copy_observed_write": 24,
+        "edit_observed_write": 24,
+        "edit_read_back": 23,
+        "edit_verified_done": 23,
+        "copy_selected_read": 23,
+        "retention_math_3": 20,
+        "retention_math_4": 20,
+        "retention_conversation": 20,
+        "mkdir_initial_select": 23,
+        "mkdir_after_select": 23,
+        "mkdir_after_directory": 23,
+        "copy_read_back": 23,
+        "copy_verified_done": 23
+      },
+      "dev": {
+        "retention_math_0": 5,
+        "retention_math_1": 5,
+        "retention_math_2": 5,
+        "copy_initial_read": 6,
+        "edit_initial_read": 6,
+        "copy_observed_write": 6,
+        "edit_observed_write": 6,
+        "edit_read_back": 6,
+        "edit_verified_done": 6,
+        "copy_selected_read": 5,
+        "retention_math_3": 5,
+        "retention_math_4": 5,
+        "retention_conversation": 5,
+        "mkdir_initial_select": 5,
+        "mkdir_after_select": 5,
+        "mkdir_after_directory": 5,
+        "copy_read_back": 5,
+        "copy_verified_done": 5
+      },
+      "eval": {
+        "retention_math_0": 5,
+        "retention_math_1": 5,
+        "retention_math_2": 5,
+        "copy_initial_read": 6,
+        "edit_initial_read": 6,
+        "copy_observed_write": 6,
+        "edit_observed_write": 6,
+        "edit_read_back": 6,
+        "edit_verified_done": 6,
+        "copy_selected_read": 5,
+        "retention_math_3": 5,
+        "retention_math_4": 5,
+        "retention_conversation": 5,
+        "mkdir_initial_select": 5,
+        "mkdir_after_select": 5,
+        "mkdir_after_directory": 5,
+        "copy_read_back": 5,
+        "copy_verified_done": 5
+      }
+    },
+    "menus_match_runtime": true,
+    "dev_covers_all_train_families": true,
+    "entities_templates_disjoint": true,
+    "shared_first_read_tool_prefixes_are_intentional": true
+  },
+  "files": {
+    "train.jsonl": {
+      "records": 400,
+      "sha256": "801a4c99d672a6ac6508281cdba51fd26589c48775f77acca222f8528dc34329"
+    },
+    "dev.jsonl": {
+      "records": 96,
+      "sha256": "e3acb0fee44e7c4687d70661ad292af4b37a639bd5430b10a74ffc875777ed54"
+    },
+    "eval.jsonl": {
+      "records": 96,
+      "sha256": "191830f1800ec1c1551f1ebc37d7bc22de463fff6102796d26879d2197d2c631"
+    },
+    "catalog.json": {
+      "sha256": "4cc40b2a2c74a42c90d8187f04097ee8f10b1c343ff5105c986f9bf6a306d97c"
+    }
+  },
+  "limits": [
+    "File task profile only; no Android UI perception or actions.",
+    "Independent entities and templates; first-read tool prefixes are intentionally shared.",
+    "Prepared as a candidate; separate weight training depends on the current round's measured result."
+  ]
+}

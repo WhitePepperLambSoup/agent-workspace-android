@@ -1,0 +1,91 @@
+{
+  "llama_cpp_revision": "7fe450e19305b828c199d602c23a8337aaa1f03b",
+  "official_configs": [
+    {
+      "repository": "Qwen/Qwen3.5-0.8B",
+      "revision": "2fc06364715b967f1860aea9cf38778875588b17",
+      "url": "https://huggingface.co/Qwen/Qwen3.5-0.8B/resolve/2fc06364715b967f1860aea9cf38778875588b17/config.json"
+    },
+    {
+      "repository": "Qwen/Qwen3.5-2B",
+      "revision": "15852e8c16360a2fea060d615a32b45270f8a8fc",
+      "url": "https://huggingface.co/Qwen/Qwen3.5-2B/resolve/15852e8c16360a2fea060d615a32b45270f8a8fc/config.json"
+    }
+  ],
+  "model_shape": {
+    "layers": 24,
+    "full_attention_layers": 6,
+    "recurrent_layers": 18,
+    "kv_heads": 2,
+    "key_dimension": 256,
+    "value_dimension": 256,
+    "recurrent_conv_kernel": 4,
+    "recurrent_state_dimension": 128,
+    "recurrent_groups": 16,
+    "recurrent_inner": 2048
+  },
+  "native_settings": {
+    "context_tokens": 4096,
+    "context_padding_multiple": 256,
+    "kv_dtype": "F16/F16",
+    "recurrent_dtype": "F32/F32",
+    "n_seq_max": 1,
+    "n_rs_seq": 0,
+    "vision": false
+  },
+  "kv_bytes_formula": "6 * 2 * (256 + 256) * 2 * ceil(context_tokens / 256) * 256",
+  "kv_bytes_at_4096": 50331648,
+  "recurrent_actual_bytes_formula": "18 * 4 * ((4 - 1) * (2048 + 2 * 16 * 128) + 128 * 2048)",
+  "recurrent_actual_bytes": 20201472,
+  "recurrent_reserve_bytes": 67108864,
+  "compute_reserve_bytes": 402653184,
+  "cold_required_bytes_formula": "requested_weight_bytes + kv_bytes + recurrent_reserve_bytes + compute_reserve_bytes",
+  "cold_catalog_round_up_bytes": 67108864,
+  "low_memory_rejected": true,
+  "unknown_digest_or_size": "fallback128KiBperPaddedContextToken plus384MiBcompute",
+  "pinned_weights": [
+    {
+      "model_id": "qwen3.5-0.8b-q4-k-m",
+      "sha256": "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517",
+      "revision": "6ab461498e2023f6e3c1baea90a8f0fe38ab64d0",
+      "size_bytes": 532517120,
+      "source_page": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/tree/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0",
+      "minimum_available_ram_bytes": 1073741824,
+      "sha256_recomputed_locally": true
+    },
+    {
+      "model_id": "qwen3.5-0.8b-q8-0",
+      "sha256": "0ad885ffd4bb022fc4f0d33a3308fa108ef8613159d3b3a67e23abca056b7a6c",
+      "revision": "6ab461498e2023f6e3c1baea90a8f0fe38ab64d0",
+      "size_bytes": 811843840,
+      "source_page": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/tree/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0",
+      "minimum_available_ram_bytes": 1342177280,
+      "sha256_recomputed_locally": false
+    },
+    {
+      "model_id": "qwen3.5-2b-q4-k-m",
+      "sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
+      "revision": "f6d5376be1edb4d416d56da11e5397a961aca8ae",
+      "size_bytes": 1280835840,
+      "source_page": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/tree/f6d5376be1edb4d416d56da11e5397a961aca8ae",
+      "minimum_available_ram_bytes": 1811939328,
+      "sha256_recomputed_locally": true
+    },
+    {
+      "model_id": "qwen3.5-2b-q8-0",
+      "sha256": "1b04acba824817554f4ce23639bc8495ff70453b8fcb047900c731521021f2c1",
+      "revision": "f6d5376be1edb4d416d56da11e5397a961aca8ae",
+      "size_bytes": 2012012800,
+      "source_page": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/tree/f6d5376be1edb4d416d56da11e5397a961aca8ae",
+      "minimum_available_ram_bytes": 2550136832,
+      "sha256_recomputed_locally": false
+    }
+  ],
+  "source_references": {
+    "full_vs_recurrent_layers": "https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/src/models/qwen35.cpp",
+    "hybrid_cache_filter": "https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/src/llama-memory-hybrid.cpp",
+    "recurrent_allocation": "https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/src/llama-memory-recurrent.cpp",
+    "cache_allocation": "https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/src/llama-kv-cache.cpp",
+    "context_padding_and_sequence_capacity": "https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/src/llama-context.cpp"
+  }
+}

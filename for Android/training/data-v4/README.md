@@ -1,0 +1,5 @@
+# V4 independent synthetic candidate
+
+Unfrozen; independent review and Root acceptance are required before training. Each record captures the actual AgentRunner provider request and complete applicable catalog from one installed capability state. TASK uses the actual raw-service system without the Android suffix; CODING uses the mobile system including that suffix. Both systems equal system-only phone evidence byte for byte. Mobile TASK with suffix, custom workspace prompt assembly and connected native UI tools are not covered by this candidate. Only disposable real file/selector tools execute here; other full-catalog advertisements reject execution in the CPU fixture.
+
+All programs are newly synthesized; V3 final labels and phone text/files are excluded. Forty percent of samples are ordinary arithmetic, literal extraction and sorting. This does not establish general conversation preservation. Arithmetic targets contain short equations and explicit final answers. Every full program completes against independently specified goal bytes. Continuation replay does not measure autonomous model success. All recorded prompts and error results are untruncated.

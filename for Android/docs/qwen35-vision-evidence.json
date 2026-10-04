@@ -1,0 +1,57 @@
+{
+  "llama_cpp_revision": "7fe450e19305b828c199d602c23a8337aaa1f03b",
+  "projectors": [
+    {
+      "projection_id": "qwen3.5-0.8b-vision-f16",
+      "repository": "unsloth/Qwen3.5-0.8B-GGUF",
+      "revision": "6ab461498e2023f6e3c1baea90a8f0fe38ab64d0",
+      "file": "mmproj-F16.gguf",
+      "size_bytes": 204987232,
+      "sha256": "56e4c6cfe73b0c82e3e82bc518d7591997e61d81f723fc41a586f4fa69ea2453",
+      "metadata_url": "https://huggingface.co/api/models/unsloth/Qwen3.5-0.8B-GGUF/revision/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0?blobs=true",
+      "download_url": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0/mmproj-F16.gguf"
+    },
+    {
+      "projection_id": "qwen3.5-2b-vision-f16",
+      "repository": "unsloth/Qwen3.5-2B-GGUF",
+      "revision": "f6d5376be1edb4d416d56da11e5397a961aca8ae",
+      "file": "mmproj-F16.gguf",
+      "size_bytes": 668227264,
+      "sha256": "7035e9cb8d7c6a9681d07eef9a364783e86ea4cd73faab2eabb4f43a101830c7",
+      "metadata_url": "https://huggingface.co/api/models/unsloth/Qwen3.5-2B-GGUF/revision/f6d5376be1edb4d416d56da11e5397a961aca8ae?blobs=true",
+      "download_url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/f6d5376be1edb4d416d56da11e5397a961aca8ae/mmproj-F16.gguf"
+    }
+  ],
+  "compatibility_source": "https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/conversion/qwen3vl.py",
+  "runtime_source": "https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/mtmd/mtmd.cpp",
+  "request_contract": {
+    "projection_path": "private model root / projection_id / model.gguf",
+    "encoded_images": [
+      "media_type",
+      "base64"
+    ],
+    "prompt_media_marker": "<__media__>",
+    "text_escapes_literal_media_markers": true,
+    "native_rgb_in_separate_byte_arrays": true
+  },
+  "limits": {
+    "max_images_per_request": 4,
+    "max_encoded_file_bytes_per_image": 5242880,
+    "max_total_file_bytes": 20971520,
+    "max_rgb_edge_pixels": 512,
+    "image_min_tokens": 64,
+    "image_max_tokens": 256,
+    "context_tokens_max": 4096,
+    "extra_compute_reserve_bytes": 268435456
+  },
+  "memory_formula": "text_required_bytes + full_projector_file_bytes + extra_compute_reserve_bytes",
+  "projector_released_after_call": true,
+  "low_memory_rejected": true,
+  "supported_input_images": [
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif (first frame)"
+  ],
+  "backend": "CPU only"
+}

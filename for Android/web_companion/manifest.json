@@ -1,0 +1,18 @@
+{
+  "name": "Agent Workspace Mobile",
+  "short_name": "Agent",
+  "description": "Local-first coding agent running on Android",
+  "start_url": "/console",
+  "display": "standalone",
+  "background_color": "#f4f6f5",
+  "theme_color": "#ffffff",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Crect width='96' height='96' rx='24' fill='%230f766e'/%3E%3Ctext x='48' y='66' font-family='sans-serif' font-size='54' font-weight='700' fill='white' text-anchor='middle'%3EA%3C/text%3E%3C/svg%3E",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "copy_new_write": 0.75,
+  "copy_existing_write": 0.75,
+  "edit_replace_write": 0.75,
+  "edit_append_write": 0.75,
+  "edit_remove_write": 0.75,
+  "cas_recover_write": 0.75,
+  "missing_recover_write": 0.75,
+  "mkdir_write_write": 0.75
+}

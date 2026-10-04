@@ -1,0 +1,70 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-workspace"
+version = "0.1.0a1"
+description = "Local-first Electron desktop and CLI agent workspace"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+authors = [{ name = "Agent Workspace contributors" }]
+dependencies = [
+  "cryptography>=50.0.0",
+  "httpx>=0.27,<1",
+  "jsonschema>=4.23,<5",
+  "pypdf>=6.16.1",
+  "tomli-w>=1.2,<2",
+  "websockets>=17.0.1",
+]
+
+[dependency-groups]
+dev = [
+  "mypy>=1.15",
+  "pytest>=8.3",
+  "pytest-asyncio>=0.25",
+  "pytest-timeout>=2.3",
+  "ruff>=0.11",
+  "types-jsonschema>=4.23",
+]
+audit = [
+  "pip-audit>=2.9,<3",
+]
+package = [
+  "pyinstaller>=6.12",
+]
+
+[project.scripts]
+agent-workspace = "agent_workspace.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_workspace"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/GitHub sourse/**"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+# Hard cap per test so a hung Qt event loop or thread wait fails loudly
+# instead of stalling the suite indefinitely (thread method: Windows-safe).
+timeout = 120
+timeout_method = "thread"
+markers = [
+    "docker_live: requires a trusted local Docker daemon and digest-pinned sandbox image",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["agent_workspace"]

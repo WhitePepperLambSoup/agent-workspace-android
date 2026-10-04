@@ -1,0 +1,9 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.AgentWorkspace" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/web_surface</item>
+        <item name="android:statusBarColor">@color/web_surface</item>
+        <item name="android:navigationBarColor">@color/web_surface</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:isLightTheme" tools:targetApi="q">false</item>
+    </style>
+</resources>

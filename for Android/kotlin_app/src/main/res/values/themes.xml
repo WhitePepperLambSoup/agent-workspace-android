@@ -1,0 +1,12 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- WebUiActivity theme. Light variant; values-night/themes.xml holds the dark one. -->
+    <style name="Theme.AgentWorkspace" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/web_surface</item>
+        <item name="android:statusBarColor">@color/web_surface</item>
+        <item name="android:navigationBarColor">@color/web_surface</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <!-- WebView (targetSdk 33+) derives prefers-color-scheme from this flag, so the web UI's
+             "follow system" option tracks the device setting. Native dialogs keep the Material theme. -->
+        <item name="android:isLightTheme" tools:targetApi="q">true</item>
+    </style>
+</resources>

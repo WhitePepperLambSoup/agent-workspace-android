@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="system" data-style="solid" data-accent="teal" data-motion="auto" data-backdrop="aurora">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#ffffff">
+  <meta name="agent-token" content="__AGENT_TOKEN__">
+  <title>Agent Workspace</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div id="appShell">
+    <header id="mobileHeader">
+      <button id="btnSessions" class="icon-button" type="button" title="会话列表" aria-label="会话列表" aria-expanded="false" aria-controls="sessionDrawer"><span data-icon="panel-left"></span></button>
+      <button id="btnSessionTitle" class="session-title" type="button" aria-controls="sessionDrawer" aria-label="切换会话">
+        <span id="sessionTitleText">正在加载会话...</span>
+        <span class="session-subtitle"><span id="connectionStatus" class="status-indicator" role="status" title="已连接" aria-label="已连接"></span><span id="workspaceTitleText"></span></span>
+      </button>
+      <!-- Native selects stay as the source of truth for navigation state; the drawer drives them. -->
+      <div class="session-navigation" aria-hidden="true">
+        <select id="workspaceSelector" aria-label="选择工作区" tabindex="-1" hidden></select>
+        <select id="sessionSelector" aria-label="选择会话" tabindex="-1"><option value="">正在加载会话...</option></select>
+      </div>
+      <div class="header-right">
+        <button id="btnNewSession" class="icon-button" type="button" title="新建会话" aria-label="新建会话"><span data-icon="square-pen"></span></button>
+        <button id="btnSettings" class="icon-button" type="button" title="菜单" aria-label="菜单" aria-expanded="false" aria-controls="settingsOverlay"><span data-icon="ellipsis"></span></button>
+      </div>
+    </header>
+    <div id="timelineArea">
+      <main id="timelineContainer" aria-live="polite">
+        <div id="timelineList"><div class="empty-state"><span class="empty-state-icon" data-icon="sparkles"></span><strong>开始一个新任务</strong><span>描述你想完成的事情，Agent 会在当前工作区中执行。</span></div></div>
+      </main>
+      <button id="btnJumpLatest" class="icon-button" type="button" title="回到最新消息" aria-label="回到最新消息" hidden><span data-icon="arrow-down"></span></button>
+    </div>
+    <div id="bottomDock">
+    <section id="approvalShelf" class="hidden" hidden aria-labelledby="approvalTitle">
+      <div class="approval-header"><span data-icon="shield"></span><strong id="approvalTitle">待审批操作</strong></div>
+      <pre id="approvalDetail"></pre>
+      <label class="approval-scope" for="approvalScopeSelector"><span>授权范围</span><select id="approvalScopeSelector"><option value="once">仅此次</option><option value="session">本会话</option></select></label>
+      <div class="approval-actions"><button id="btnRejectAction" class="button-secondary" type="button">拒绝</button><button id="btnApproveAction" class="button-primary" type="button">批准执行</button></div>
+    </section>
+    <div id="quickChipsBar" role="group" aria-label="快捷任务">
+      <button class="chip" type="button" data-fill="true" data-prompt="总结下面内容的要点，并列出需要我跟进的事项：&#10;"><span data-icon="file-text"></span><span>总结要点<small>文档、网页或聊天记录</small></span></button>
+      <button class="chip" type="button" data-fill="true" data-prompt="把下面的内容翻译成英文，语气自然：&#10;"><span data-icon="languages"></span><span>翻译润色<small>中英互译，语气自然</small></span></button>
+      <button class="chip" type="button" data-fill="true" data-prompt="做一个单页网页（HTML），主题是："><span data-icon="globe"></span><span>做个网页<small>生成可直接预览的页面</small></span></button>
+      <button class="chip" type="button" data-fill="true" data-prompt="分析附件里的数据，给出关键结论并画一张图表："><span data-icon="chart-no-axes-column"></span><span>分析数据<small>表格或 CSV 出结论与图表</small></span></button>
+    </div>
+    <footer id="inputFooter">
+      <div id="noticeText" role="status" hidden></div>
+      <div id="taskStatusBar" hidden><span id="taskStateLabel"></span><button id="btnResumeTask" class="text-action" type="button" hidden><span data-icon="play"></span>恢复任务</button><button id="btnRetryTask" class="text-action" type="button" hidden><span data-icon="refresh-cw"></span>重试任务</button><button id="btnReconnect" class="text-action" type="button" hidden><span data-icon="refresh-cw"></span>重新连接</button></div>
+      <button id="btnImportNotice" class="text-action import-notice" type="button" hidden><span data-icon="paperclip"></span><span id="importNoticeText"></span></button>
+      <div class="composer">
+        <div id="attachmentList" aria-live="polite"></div>
+        <input type="file" id="filePickerInput" hidden multiple>
+        <textarea id="promptInput" rows="1" placeholder="给 Agent 布置任务…" aria-label="任务指令"></textarea>
+        <div class="composer-toolbar">
+          <button id="btnAttach" class="icon-button" type="button" title="附加文件" aria-label="附加文件"><span data-icon="paperclip"></span></button>
+          <button id="modelBar" class="composer-chip" type="button" aria-label="模型与思考" title="模型与思考"><span data-icon="cpu"></span><span id="modelSummary">正在读取模型...</span></button>
+          <button id="btnModeChip" class="composer-chip mode-chip" type="button" aria-label="执行权限" title="执行权限"><span data-icon="shield"></span><span id="executionSummary"></span></button>
+          <span class="composer-spacer"></span>
+          <button id="btnVoiceInput" class="icon-button" type="button" title="语音输入" aria-label="语音输入" hidden><span data-icon="mic"></span></button>
+          <button id="btnSend" class="send-button" type="button" title="发送" aria-label="发送" disabled><span data-icon="arrow-up"></span></button>
+          <button id="btnStop" class="stop-button" type="button" title="停止任务" aria-label="停止任务" hidden><span data-icon="square"></span></button>
+        </div>
+      </div>
+    </footer>
+    </div>
+  </div>
+  <div id="sessionDrawer" hidden>
+    <button id="sessionDrawerBackdrop" type="button" aria-label="关闭会话列表" tabindex="-1"></button>
+    <aside id="sessionDrawerPanel" role="dialog" aria-modal="true" aria-labelledby="sessionDrawerTitle">
+      <div class="drawer-header">
+        <span class="brand-mark" aria-hidden="true">A</span>
+        <h2 id="sessionDrawerTitle">Agent Workspace</h2>
+        <button id="btnDrawerSearch" class="icon-button" type="button" title="搜索所有会话" aria-label="搜索所有会话"><span data-icon="search"></span></button>
+        <button id="btnDrawerClose" class="icon-button" type="button" title="关闭" aria-label="关闭"><span data-icon="x"></span></button>
+      </div>
+      <div class="drawer-body">
+        <div class="drawer-section-title"><span>工作区</span><button id="btnDrawerWorkspaces" class="text-action" type="button">管理</button></div>
+        <div id="drawerWorkspaces" class="drawer-workspaces" role="radiogroup" aria-label="工作区"></div>
+        <button id="btnDrawerNewSession" class="drawer-new" type="button"><span data-icon="square-pen"></span>新建会话</button>
+        <div class="drawer-section-title"><span>最近会话</span></div>
+        <div id="drawerSessionList" class="drawer-sessions"></div>
+      </div>
+    </aside>
+  </div>
+  <div id="settingsOverlay" hidden>
+    <button id="settingsBackdrop" type="button" aria-label="关闭菜单" tabindex="-1"></button>
+    <aside id="settingsSheet" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <div class="sheet-header"><button id="settingsBackButton" class="icon-button" type="button" title="返回" aria-label="返回" hidden><span data-icon="chevron-left"></span></button><h2 id="settingsTitle">菜单</h2><div id="settingsHeaderActions" class="sheet-actions"></div><button id="settingsCloseButton" class="icon-button" type="button" title="关闭" aria-label="关闭"><span data-icon="x"></span></button></div>
+      <div id="settingsScrollBody">
+      <div id="settingsHome" class="settings-page">
+        <section class="menu-section" aria-labelledby="menuSectionConversation">
+          <h3 id="menuSectionConversation" class="menu-section-title">会话</h3>
+          <div class="menu-group">
+            <button id="btnSearchPage" class="menu-row" type="button"><span data-icon="search"></span><span>搜索所有会话</span><span data-icon="chevron-right"></span></button>
+            <button id="btnTasksPage" class="menu-row" type="button"><span data-icon="list-checks"></span><span>任务中心</span><span data-icon="chevron-right"></span></button>
+            <button id="btnSessionPage" class="menu-row" type="button"><span data-icon="pencil"></span><span>会话名称</span><span data-icon="chevron-right"></span></button>
+            <button id="btnExport" class="menu-row" type="button"><span data-icon="share-2"></span><span>导出当前会话</span></button>
+          </div>
+        </section>
+        <section class="menu-section" aria-labelledby="menuSectionWorkspace">
+          <h3 id="menuSectionWorkspace" class="menu-section-title">工作区</h3>
+          <div class="menu-group">
+            <button id="btnWorkspacesPage" class="menu-row" type="button"><span data-icon="layers"></span><span>工作区<small id="menuWorkspaceSummary"></small></span><span data-icon="chevron-right"></span></button>
+            <button id="btnFilesPage" class="menu-row" type="button"><span data-icon="folder"></span><span>工作区文件</span><span data-icon="chevron-right"></span></button>
+            <button id="btnAttachmentsPage" class="menu-row" type="button"><span data-icon="paperclip"></span><span>附件收件箱<small id="menuImportSummary"></small></span><span data-icon="chevron-right"></span></button>
+          </div>
+        </section>
+        <section class="menu-section" aria-labelledby="menuSectionModel">
+          <h3 id="menuSectionModel" class="menu-section-title">模型与执行</h3>
+          <div class="menu-group">
+            <button id="btnModelPage" class="menu-row" type="button"><span data-icon="cpu"></span><span>模型与思考<small id="menuModelSummary"></small></span><span data-icon="chevron-right"></span></button>
+            <button id="btnPermissionPage" class="menu-row" type="button"><span data-icon="shield"></span><span>执行权限<small id="menuPermissionSummary"></small></span><span data-icon="chevron-right"></span></button>
+            <button id="btnLocalModelsPage" class="menu-row" type="button"><span data-icon="hard-drive"></span><span>本地模型</span><span data-icon="chevron-right"></span></button>
+            <button id="btnUsagePage" class="menu-row" type="button"><span data-icon="chart-no-axes-column"></span><span>Token 与费用</span><span data-icon="chevron-right"></span></button>
+          </div>
+        </section>
+        <section class="menu-section" aria-labelledby="menuSectionAutomation">
+          <h3 id="menuSectionAutomation" class="menu-section-title">自动化</h3>
+          <div class="menu-group">
+            <button id="btnSchedulesPage" class="menu-row" type="button"><span data-icon="clock"></span><span>定时任务</span><span data-icon="chevron-right"></span></button>
+            <button id="btnWorkflowsPage" class="menu-row" type="button"><span data-icon="workflow"></span><span>可复用流程</span><span data-icon="chevron-right"></span></button>
+            <button id="btnEvaluationsPage" class="menu-row" type="button"><span data-icon="clipboard-check"></span><span>任务评测</span><span data-icon="chevron-right"></span></button>
+          </div>
+        </section>
+        <section class="menu-section" aria-labelledby="menuSectionDevice">
+          <h3 id="menuSectionDevice" class="menu-section-title">设备与连接</h3>
+          <div class="menu-group">
+            <button id="btnDoctorPage" class="menu-row" type="button"><span data-icon="activity"></span><span>设备与工具</span><span data-icon="chevron-right"></span></button>
+            <button id="btnExtensionsPage" class="menu-row" type="button"><span data-icon="puzzle"></span><span>MCP 与扩展</span><span data-icon="chevron-right"></span></button>
+            <button id="btnConnectionsPage" class="menu-row" type="button"><span data-icon="monitor-smartphone"></span><span>设备连接</span><span data-icon="chevron-right"></span></button>
+            <button id="btnOutboxPage" class="menu-row" type="button"><span data-icon="send"></span><span>待发送与接力</span><span data-icon="chevron-right"></span></button>
+            <button id="btnNotificationsPage" class="menu-row" type="button"><span data-icon="bell"></span><span>通知</span><span data-icon="chevron-right"></span></button>
+          </div>
+        </section>
+        <section class="menu-section" aria-labelledby="menuSectionApp">
+          <h3 id="menuSectionApp" class="menu-section-title">应用</h3>
+          <div class="menu-group">
+            <button id="btnAppearancePage" class="menu-row" type="button"><span data-icon="palette"></span><span>界面偏好</span><span data-icon="chevron-right"></span></button>
+            <button id="btnProviderSettings" class="menu-row" type="button" hidden><span data-icon="settings"></span><span>服务商与 API 设置</span><span data-icon="chevron-right"></span></button>
+            <button id="btnRefresh" class="menu-row" type="button"><span data-icon="refresh-cw"></span><span>刷新与重连</span></button>
+          </div>
+        </section>
+      </div>
+      <div id="settingsModel" class="settings-page" hidden>
+        <label for="modelInput">模型</label><input id="modelInput" type="text" list="modelOptions" autocomplete="off" spellcheck="false" aria-label="模型"><datalist id="modelOptions"></datalist>
+        <label for="effortSelector">思考强度</label><select id="effortSelector" aria-label="思考强度"></select><p id="effortHint" class="setting-hint"></p>
+        <label class="toggle-row" for="contextSummaryToggle"><span id="contextSummaryLabel">自动摘要压缩上下文</span><input id="contextSummaryToggle" type="checkbox"></label>
+        <p id="contextSummaryHint" class="setting-hint">临近容量时由当前模型总结较早记录。会额外调用模型，可能产生 Token 费用；摘要可能遗漏细节，原始会话仍保留。</p>
+      </div>
+      <div id="settingsAttachments" class="settings-page" hidden>
+        <div class="page-toolbar"><button id="btnPickImportFiles" class="icon-button" type="button" title="选择多个文件" aria-label="选择多个文件"><span data-icon="paperclip"></span></button><strong>附件收件箱</strong><button id="btnRefreshImports" class="icon-button" type="button" title="刷新收件箱" aria-label="刷新收件箱"><span data-icon="refresh-cw"></span></button></div>
+        <div id="shareTargetControls" hidden><label for="shareTargetSession">目标会话</label><select id="shareTargetSession" aria-label="附件目标会话"></select></div>
+        <p id="shareInboxStatus" class="page-status" role="status"></p>
+        <div id="shareInboxList" class="import-list"></div>
+        <div id="shareImportActions" class="page-toolbar" hidden><button id="btnImportShares" class="button-primary" type="button" aria-label="添加到草稿"><span data-icon="plus"></span>添加到草稿</button><button id="btnDiscardShares" class="icon-button" type="button" title="丢弃所选附件" aria-label="丢弃所选附件"><span data-icon="trash-2"></span></button></div>
+        <div id="browserUploadList" class="import-list"></div>
+      </div>
+      <div id="settingsPermission" class="settings-page" hidden>
+        <label for="autonomySelector">执行模式</label><select id="autonomySelector" aria-label="执行模式"><option value="workspace">工作区</option><option value="yolo">YOLO</option><option value="full_access">完全访问</option></select><p id="autonomyHint" class="setting-hint"></p>
+      </div>
+      <div id="settingsAppearance" class="settings-page" hidden>
+        <label id="styleLabel">视觉风格</label>
+        <div id="stylePicker" class="style-options" role="radiogroup" aria-labelledby="styleLabel">
+          <button class="style-option" type="button" role="radio" data-style-option="solid" aria-checked="true"><span class="style-preview" aria-hidden="true"></span>标准</button>
+          <button class="style-option" type="button" role="radio" data-style-option="glass" aria-checked="false"><span class="style-preview glass" aria-hidden="true"></span>液态玻璃</button>
+        </div>
+        <p class="setting-hint">液态玻璃让顶栏、输入区和菜单变成会折射光线的玻璃，内容从下方经过时会在边缘弯曲。在较旧的手机上更耗电。</p>
+        <div class="glass-only">
+          <label id="backdropLabel">背景</label>
+          <div id="backdropPicker" class="backdrop-picker" role="radiogroup" aria-labelledby="backdropLabel">
+            <button class="backdrop-option" type="button" role="radio" data-backdrop-option="aurora" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="aurora" aria-hidden="true"></span>极光</button>
+            <button class="backdrop-option" type="button" role="radio" data-backdrop-option="sunset" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="sunset" aria-hidden="true"></span>晚霞</button>
+            <button class="backdrop-option" type="button" role="radio" data-backdrop-option="ocean" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="ocean" aria-hidden="true"></span>深海</button>
+            <button class="backdrop-option" type="button" role="radio" data-backdrop-option="meadow" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="meadow" aria-hidden="true"></span>青柠</button>
+            <button class="backdrop-option" type="button" role="radio" data-backdrop-option="iris" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="iris" aria-hidden="true"></span>流光</button>
+            <button class="backdrop-option" type="button" role="radio" data-backdrop-option="bokeh" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="bokeh" aria-hidden="true"></span>光斑</button>
+            <button class="backdrop-option" type="button" role="radio" data-backdrop-option="grid" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="grid" aria-hidden="true"></span>网格</button>
+            <button class="backdrop-option" type="button" role="radio" data-backdrop-option="ribbon" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="ribbon" aria-hidden="true"></span>彩带</button>
+            <button class="backdrop-option" type="button" role="radio" data-backdrop-option="dusk" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="dusk" aria-hidden="true"></span>暮光</button>
+            <button class="backdrop-option" type="button" role="radio" data-backdrop-option="graphite" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="graphite" aria-hidden="true"></span>石墨</button>
+            <button class="backdrop-option" type="button" role="radio" data-backdrop-option="plain" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="plain" aria-hidden="true"></span>纯色</button>
+            <button class="backdrop-option" type="button" role="radio" data-backdrop-option="custom" aria-checked="false"><span id="customWallpaperSwatch" class="backdrop-swatch custom" aria-hidden="true"><span data-icon="image-plus"></span></span>自定义</button>
+          </div>
+          <div id="customWallpaperActions" class="wallpaper-actions" hidden>
+            <button id="btnChangeWallpaper" class="button-secondary" type="button">更换图片</button>
+            <button id="btnRemoveWallpaper" class="button-secondary" type="button">移除壁纸</button>
+          </div>
+          <input id="wallpaperInput" type="file" accept="image/*" hidden>
+          <p class="setting-hint">玻璃要在下方有颜色或内容时才看得出来。自定义壁纸只保存在这台手机上。</p>
+        </div>
+        <label id="accentLabel">主题色</label>
+        <div id="accentPicker" class="accent-picker" role="radiogroup" aria-labelledby="accentLabel">
+          <button class="accent-swatch" type="button" role="radio" data-accent-option="teal" aria-label="青绿" title="青绿" style="--swatch: #0f766e"></button>
+          <button class="accent-swatch" type="button" role="radio" data-accent-option="blue" aria-label="海蓝" title="海蓝" style="--swatch: #2563eb"></button>
+          <button class="accent-swatch" type="button" role="radio" data-accent-option="violet" aria-label="紫罗兰" title="紫罗兰" style="--swatch: #7c3aed"></button>
+          <button class="accent-swatch" type="button" role="radio" data-accent-option="amber" aria-label="琥珀" title="琥珀" style="--swatch: #b45309"></button>
+          <button class="accent-swatch" type="button" role="radio" data-accent-option="rose" aria-label="玫瑰" title="玫瑰" style="--swatch: #e11d48"></button>
+        </div>
+        <label for="languageSelector">语言</label><select id="languageSelector" aria-label="语言"><option value="auto">跟随系统</option><option value="zh">中文</option><option value="en">English</option></select>
+        <p class="setting-hint">切换语言后界面会重新载入；对话内容与模型回复不会被翻译。</p>
+        <label for="themeSelector">外观</label><select id="themeSelector" aria-label="外观"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select>
+        <label for="motionSelector">动画</label><select id="motionSelector" aria-label="动画"><option value="auto">跟随系统</option><option value="full">完整</option><option value="reduced">精简</option><option value="off">关闭</option></select>
+        <label for="textSizeSelector">文字大小</label><select id="textSizeSelector" aria-label="文字大小"><option value="small">紧凑</option><option value="normal">标准</option><option value="large">较大</option></select>
+        <label class="toggle-row" for="quickActionsToggle"><span>快捷任务</span><input id="quickActionsToggle" type="checkbox" checked></label>
+        <label class="toggle-row" for="hapticsToggle"><span>触觉反馈</span><input id="hapticsToggle" type="checkbox" checked></label>
+      </div>
+      <div id="settingsSearch" class="settings-page" hidden>
+        <label for="sessionSearchInput">搜索关键词</label><input id="sessionSearchInput" type="search" autocomplete="off" aria-label="搜索所有会话">
+        <p id="searchStatus" class="setting-hint" role="status">输入关键词搜索</p>
+        <div id="searchResults" class="search-results"></div>
+      </div>
+      <div id="settingsTasks" class="settings-page" hidden>
+        <button id="btnTasksRefresh" data-header-action class="icon-button" type="button" title="刷新任务" aria-label="刷新任务"><span data-icon="refresh-cw"></span></button>
+        <p id="taskCenterStatus" class="page-status" role="status"></p>
+        <div id="taskCenterList" class="task-center-list"></div>
+      </div>
+      <div id="settingsWorkspaces" class="settings-page" hidden>
+        <button id="btnWorkspacesRefresh" data-header-action class="icon-button" type="button" title="刷新工作区" aria-label="刷新工作区"><span data-icon="refresh-cw"></span></button>
+        <p id="workspacesStatus" class="page-status" role="status"></p>
+        <button id="btnBrowseWorkspaceSystem" class="menu-row" type="button" hidden><span data-icon="folder-open"></span><span>在系统文件浏览器中查看当前工作区</span><span data-icon="chevron-right"></span></button>
+        <p id="workspaceDocumentsHint" class="setting-hint" hidden>系统文件浏览器的「Agent Workspace」入口可浏览工作区和附件，按文件名搜索并读取。编辑请使用应用内文件页或公共文件夹。引擎停止后，请打开 Agent 启动引擎再重试。</p>
+        <div id="workspacesList" class="management-list"></div>
+        <form id="workspaceCreateForm" class="management-form">
+          <strong class="form-title">新建工作区</strong>
+          <label for="workspaceNameInput">名称</label><input id="workspaceNameInput" type="text" maxlength="100" autocomplete="off" required>
+          <label for="workspaceFolderInput">文件夹</label><div class="workspace-folder-row"><input id="workspaceFolderInput" type="text" maxlength="4096" autocomplete="off" spellcheck="false" placeholder="/storage/emulated/0/Documents/AgentWorkspace/项目" required><button id="btnPickWorkspaceFolder" class="icon-button" type="button" title="选择文件夹" aria-label="选择文件夹" hidden><span data-icon="folder-open"></span></button></div>
+          <button id="btnSuggestWorkspaceFolder" class="text-action" type="button" hidden>使用公共文档目录</button>
+          <p id="workspacePublicFolderHint" class="setting-hint" hidden>推荐 Documents/AgentWorkspace 下的独立项目文件夹，便于用手机文件管理器查找、编辑和分享。此建议仅填写新建表单。</p>
+          <label class="toggle-row" for="workspaceCreateDirectory"><span>创建此文件夹</span><input id="workspaceCreateDirectory" type="checkbox"></label>
+          <p id="workspaceStorageStatus" class="page-status" role="status" hidden></p>
+          <button id="btnWorkspaceStorageSettings" class="menu-row" type="button" hidden><span data-icon="shield"></span><span>文件访问授权</span><span data-icon="chevron-right"></span></button>
+          <button id="btnCreateWorkspace" class="button-primary apply-button" type="submit" disabled><span data-icon="circle-plus"></span>创建工作区</button>
+        </form>
+      </div>
+      <div id="settingsFiles" class="settings-page" hidden>
+        <div class="page-toolbar"><button id="btnFileParent" class="icon-button" type="button" title="上级目录" aria-label="上级目录" disabled><span data-icon="chevron-left"></span></button><span id="workspaceFilePath">工作区</span><button id="btnFilesRefresh" class="icon-button" type="button" title="刷新文件" aria-label="刷新文件"><span data-icon="refresh-cw"></span></button></div>
+        <p id="workspaceFilesStatus" class="page-status" role="status"></p>
+        <div id="workspaceFilesList" class="workspace-files-list"></div>
+        <div id="fileEditorPanel" hidden>
+          <div class="page-toolbar file-editor-toolbar">
+            <span id="fileEditorMeta"></span>
+            <div class="file-view-toggle" role="group" aria-label="文件视图">
+              <button id="btnFileSource" class="icon-button" type="button" title="源文件" aria-label="源文件" aria-pressed="true" hidden><span data-icon="file-text"></span></button>
+              <button id="btnFilePreview" class="icon-button" type="button" title="预览文件" aria-label="预览文件" aria-pressed="false" hidden><span data-icon="eye"></span></button>
+              <button id="btnFileInteractive" class="icon-button" type="button" title="交互预览" aria-label="交互预览" hidden><span data-icon="play"></span></button>
+            </div>
+            <button id="btnReloadFile" class="icon-button" type="button" title="重新读取文件" aria-label="重新读取文件"><span data-icon="refresh-cw"></span></button>
+            <button id="btnDiscardFileDraft" class="icon-button" type="button" title="放弃文件草稿" aria-label="放弃文件草稿" hidden><span data-icon="trash-2"></span></button>
+            <button id="btnSaveFile" class="icon-button" type="button" title="保存文件" aria-label="保存文件" disabled><span data-icon="save"></span></button>
+          </div>
+          <p id="fileEditorStatus" class="page-status" role="status"></p>
+          <textarea id="fileContentInput" class="file-content-input" aria-label="文件内容" spellcheck="false" readonly></textarea>
+          <div id="filePreviewPanel" class="file-preview-panel" aria-label="文件预览" hidden></div>
+        </div>
+      </div>
+      <div id="settingsSession" class="settings-page" hidden>
+        <label for="sessionTitleInput">会话名称</label><input id="sessionTitleInput" type="text" maxlength="200" autocomplete="off" aria-label="会话名称">
+        <button id="btnRenameSession" class="button-primary apply-button" type="button" disabled><span data-icon="check"></span>保存名称</button>
+        <p id="sessionRenameStatus" class="page-status" role="status"></p>
+        <button id="btnArchiveSession" class="button-secondary apply-button" type="button"><span data-icon="archive"></span>归档会话</button>
+      </div>
+      <div id="settingsNotifications" class="settings-page" hidden>
+        <label class="toggle-row" for="taskNotificationsToggle"><span>任务完成通知</span><input id="taskNotificationsToggle" type="checkbox" disabled></label>
+        <p id="notificationPermissionStatus" class="page-status" role="status"></p>
+        <button id="btnNotificationSettings" class="menu-row" type="button" disabled><span data-icon="settings"></span><span>系统通知设置</span><span data-icon="chevron-right"></span></button>
+      </div>
+      <div id="settingsUsage" class="settings-page" hidden>
+        <div class="usage-filters"><label for="usageScopeSelector">范围<select id="usageScopeSelector" aria-label="用量范围"><option value="session">当前会话</option><option value="workspace">整个工作区</option></select></label><label for="usageDaysSelector">时间<select id="usageDaysSelector" aria-label="用量时间"><option value="">全部</option><option value="7">最近 7 天</option><option value="30">最近 30 天</option></select></label><button id="btnUsageRefresh" class="icon-button" type="button" title="刷新用量" aria-label="刷新用量"><span data-icon="refresh-cw"></span></button></div>
+        <p id="usageStatus" class="page-status" role="status"></p>
+        <dl id="usageSummary" class="usage-summary"></dl>
+        <div id="usageModelsList" class="usage-models-list"></div>
+        <button id="btnPricingPage" class="menu-row" type="button"><span data-icon="settings"></span><span>模型费率</span><span data-icon="chevron-right"></span></button>
+      </div>
+      <div id="settingsPricing" class="settings-page" hidden>
+        <label for="pricingModelInput">模型</label><input id="pricingModelInput" type="text" list="pricingModelOptions" autocomplete="off" spellcheck="false" maxlength="200" aria-label="费率模型"><datalist id="pricingModelOptions"></datalist>
+        <label for="pricingInputRate">输入费率（USD / 百万 Token）</label><input id="pricingInputRate" type="number" min="0" step="any" inputmode="decimal" aria-label="输入费率">
+        <label for="pricingOutputRate">输出费率（USD / 百万 Token）</label><input id="pricingOutputRate" type="number" min="0" step="any" inputmode="decimal" aria-label="输出费率">
+        <label for="pricingCachedRate">缓存输入费率（USD / 百万 Token）</label><input id="pricingCachedRate" type="number" min="0" step="any" inputmode="decimal" aria-label="缓存输入费率">
+        <p id="pricingSource" class="setting-hint"></p>
+        <button id="btnSavePricing" class="button-primary apply-button" type="button" disabled>保存费率</button>
+        <p id="pricingStatus" class="page-status" role="status"></p>
+      </div>
+      <div id="settingsDoctor" class="settings-page" hidden>
+        <button id="btnDoctorRefresh" data-header-action class="icon-button" type="button" aria-label="刷新诊断" title="刷新诊断"><span data-icon="refresh-cw"></span></button>
+        <p id="doctorStatus" class="page-status" role="status"></p><dl id="doctorSummary" class="usage-summary"></dl>
+        <button id="btnAccessibilitySettings" class="menu-row" type="button"><span data-icon="shield"></span><span>系统无障碍设置</span><span data-icon="chevron-right"></span></button>
+        <label class="toggle-row" for="systemPaused"><span>暂停手机操作</span><input id="systemPaused" type="checkbox"></label>
+        <div class="page-toolbar"><button id="btnTakeover" class="button-secondary" type="button"><span data-icon="hand"></span>接管手机</button><button id="btnObserveScreen" class="icon-button" type="button" aria-label="读取当前屏幕" title="读取当前屏幕"><span data-icon="eye"></span></button></div>
+        <pre id="systemObservation" class="management-output" hidden></pre><div id="doctorTools" class="management-list"></div>
+        <div class="management-section">
+          <strong>诊断日志</strong>
+          <p class="setting-hint">引擎出错、卡住或连不上时，把日志发给开发者排查。访问令牌和 API 密钥会自动隐藏；日志里可能有任务内容片段，请只发给信任的人。</p>
+          <button id="btnShareDiagnostics" class="menu-row" type="button"><span data-icon="share-2"></span><span>分享诊断日志</span><span data-icon="chevron-right"></span></button>
+          <p id="diagnosticsStatus" class="page-status" role="status"></p>
+        </div>
+        <div class="management-section">
+          <strong>可选开发工具链</strong><p id="toolchainStatus" class="page-status" role="status"></p><dl id="toolchainSummary" class="usage-summary"></dl>
+          <p class="setting-hint">安装 Git、Python、Node 和 Python 语言服务。下载约 70 MB，安装后需重启引擎。</p>
+          <div class="page-toolbar"><button id="btnToolchainInstall" class="button-secondary" type="button">安装工具链</button><button id="btnToolchainProbe" class="button-secondary" type="button">验证工具</button><button id="btnToolchainCancel" class="button-secondary" type="button" hidden>取消下载</button><button id="btnToolchainRemove" class="button-secondary" type="button" hidden>移除工具链</button></div>
+          <button id="btnToolchainRestart" class="button-primary apply-button" type="button">重启引擎并应用</button>
+        </div>
+        <div class="management-section">
+          <strong>后台运行</strong><dl id="backgroundSummary" class="usage-summary"></dl>
+          <p class="setting-hint">系统仍可能暂停后台进程。中断的操作需要检查状态后恢复。</p>
+          <button id="btnBatterySettings" class="menu-row" type="button"><span data-icon="activity"></span><span>电池优化设置</span><span data-icon="chevron-right"></span></button>
+          <button id="btnBackgroundSettings" class="menu-row" type="button"><span data-icon="settings"></span><span>应用后台设置</span><span data-icon="chevron-right"></span></button>
+        </div>
+      </div>
+      <div id="settingsExtensions" class="settings-page" hidden>
+        <button id="btnExtensionsRefresh" data-header-action class="icon-button" type="button" aria-label="刷新扩展" title="刷新扩展"><span data-icon="refresh-cw"></span></button>
+        <p id="extensionsStatus" class="page-status" role="status"></p><div id="extensionsList" class="management-list"></div>
+        <button id="btnExtensionsRestart" class="button-primary apply-button" type="button" hidden><span data-icon="refresh-cw"></span>应用并重启引擎</button>
+      </div>
+      <div id="settingsSchedules" class="settings-page" hidden>
+        <p id="schedulesStatus" class="page-status" role="status"></p><div id="schedulesList" class="management-list"></div>
+        <form id="scheduleForm" class="management-form">
+          <strong class="form-title">新建定时任务</strong>
+          <label for="scheduleTitle">任务名称</label><input id="scheduleTitle" maxlength="100" required>
+          <label for="schedulePrompt">任务指令</label><textarea id="schedulePrompt" rows="3" maxlength="16384" required></textarea>
+          <label for="scheduleDue">执行时间</label><input id="scheduleDue" type="datetime-local" required>
+          <label for="scheduleRepeat">重复</label><select id="scheduleRepeat"><option value="">仅一次</option><option value="3600">每小时</option><option value="86400">每天</option><option value="604800">每周</option></select>
+          <button id="btnSaveSchedule" class="button-primary apply-button" type="submit"><span data-icon="plus"></span>创建定时任务</button>
+        </form>
+      </div>
+      <div id="settingsConnections" class="settings-page" hidden>
+        <p id="connectionsStatus" class="page-status" role="status"></p><div id="connectionsList" class="management-list"></div>
+        <form id="connectionForm" class="management-form">
+          <strong class="form-title">配对新设备</strong>
+          <label for="connectionName">设备名称</label><input id="connectionName" maxlength="100" required autocomplete="off">
+          <label for="connectionUrl">Serve API 地址</label><input id="connectionUrl" type="url" placeholder="https://" required autocomplete="off" spellcheck="false">
+          <label for="connectionToken">设备令牌</label><input id="connectionToken" type="password" required autocomplete="off">
+          <label class="toggle-row" for="connectionAllowLan"><span>允许私有局域网 HTTP</span><input id="connectionAllowLan" type="checkbox"></label>
+          <button id="btnPairHost" class="button-primary apply-button" type="submit"><span data-icon="link"></span>配对设备</button>
+        </form>
+        <div id="remoteSessionPanel" class="management-form" hidden>
+          <strong class="form-title">远程会话</strong>
+          <label for="remoteSessionSelector">远程会话</label><select id="remoteSessionSelector"></select><p id="remoteWorkspace" class="page-status"></p>
+          <label for="handoffPrompt">接力指令</label><textarea id="handoffPrompt" rows="3" maxlength="65536"></textarea>
+          <label class="toggle-row" for="handoffContext"><span>附带当前会话最近对话</span><input id="handoffContext" type="checkbox"></label>
+          <div class="page-toolbar"><button id="btnUseDraft" class="button-secondary" type="button">使用当前草稿</button><button id="btnQueueHandoff" class="button-primary" type="button"><span data-icon="send"></span>发送到此设备</button></div>
+          <button id="btnReadRemote" class="menu-row" type="button"><span data-icon="file-text"></span><span>查看远程对话</span><span data-icon="chevron-right"></span></button><pre id="remoteHistory" class="management-output" hidden></pre>
+        </div>
+      </div>
+      <div id="settingsOutbox" class="settings-page" hidden>
+        <button id="btnOutboxRefresh" data-header-action class="icon-button" type="button" aria-label="刷新待发送" title="刷新待发送"><span data-icon="refresh-cw"></span></button>
+        <p id="outboxStatus" class="page-status" role="status"></p><div id="outboxList" class="management-list"></div>
+      </div>
+      <div id="settingsWorkflows" class="settings-page" hidden>
+        <p id="workflowsStatus" class="page-status" role="status"></p><div id="workflowsList" class="management-list"></div>
+        <form id="workflowForm" class="management-form">
+          <strong class="form-title">保存流程</strong>
+          <label for="workflowName">流程名称</label><input id="workflowName" maxlength="100" required>
+          <label for="workflowMode">执行方式</label><select id="workflowMode"><option value="goal">模型执行指令</option><option value="replay">按已审核步骤回放</option></select>
+          <label for="workflowPrompt">流程指令</label><textarea id="workflowPrompt" rows="3" maxlength="16384" required></textarea>
+          <div id="workflowReplayEditor" hidden><p class="setting-hint">每步检查当前界面和执行结果；找不到目标或结果不明时会停止。</p><div id="workflowStepEditor"></div><button id="btnAddWorkflowStep" class="button-secondary" type="button"><span data-icon="plus"></span>添加步骤</button></div>
+          <label for="workflowPackage">前置应用包名</label><input id="workflowPackage" autocomplete="off" spellcheck="false" placeholder="com.android.settings">
+          <label for="workflowExpectedPackage">目标应用包名</label><input id="workflowExpectedPackage" autocomplete="off" spellcheck="false">
+          <label for="workflowExpectedText">目标页面文字</label><input id="workflowExpectedText" maxlength="500">
+          <button id="btnSaveWorkflow" class="button-primary apply-button" type="submit"><span data-icon="save"></span>保存流程</button>
+        </form>
+        <details class="management-section"><summary>导入流程或已审核操作记录</summary><form id="workflowImportForm" class="management-form"><label for="workflowImportMode">导入内容</label><select id="workflowImportMode"><option value="workflow">已导出的流程</option><option value="record">已确认执行的操作记录</option></select><label for="workflowImportData">粘贴 JSON 内容</label><textarea id="workflowImportData" rows="5" maxlength="262144" required spellcheck="false"></textarea><label class="toggle-row" for="workflowReviewed"><span>我已核对操作内容</span><input id="workflowReviewed" type="checkbox" required></label><button class="button-secondary" type="submit">导入并保存</button></form></details>
+        <div id="workflowRuns" class="management-list"></div>
+      </div>
+      <div id="settingsEvaluations" class="settings-page" hidden>
+        <div class="page-toolbar"><button id="btnEvaluationExport" class="button-secondary" type="button">导出实测结果</button><button id="btnEvaluationPlan" class="button-secondary" type="button">导出固定评测计划</button></div>
+        <p id="evaluationsStatus" class="page-status" role="status"></p><dl id="evaluationSummary" class="usage-summary"></dl><div id="evaluationCases" class="management-list"></div><div id="evaluationRuns" class="management-list"></div>
+      </div>
+      <div id="settingsLocalModels" class="settings-page" hidden>
+        <p id="localModelsStatus" class="page-status" role="status"></p><dl id="localModelSummary" class="usage-summary"></dl>
+        <label for="localDeviceModelSelector">本机性能设置模型</label><select id="localDeviceModelSelector" aria-label="本机性能设置模型" disabled></select>
+        <label for="localContextSelector">本机上下文大小</label><select id="localContextSelector" aria-label="本机上下文大小"><option value="0">自动（按本机与模型决定）</option><option value="4096">4,096 Token</option><option value="8192">8,192 Token</option><option value="16384">16,384 Token</option><option value="32768">32,768 Token</option><option value="65536">65,536 Token</option><option value="131072">131,072 Token</option><option value="262144">262,144 Token</option><option value="custom">自定义 Token 数</option></select>
+        <div id="localContextCustomRow" hidden><label for="localContextCustomInput">自定义上下文 Token 数</label><input id="localContextCustomInput" type="number" min="512" max="262144" step="1" inputmode="numeric" value="8192" aria-label="自定义上下文 Token 数"></div>
+        <label for="localMemorySelector">本机内存模式</label><select id="localMemorySelector" aria-label="本机内存模式"><option value="balanced">平衡</option><option value="extended">扩展（使用系统可用交换内存）</option></select>
+        <label for="localThreadsInput">CPU 线程数（0 为自动）</label><input id="localThreadsInput" type="number" min="0" max="64" step="1" inputmode="numeric" value="0">
+        <label for="localTimeoutInput">单次生成超时秒数（0 为自动）</label><input id="localTimeoutInput" type="number" min="0" max="7200" step="1" inputmode="numeric" value="0">
+        <p class="setting-hint">自动值按可用物理内存、模型上限和已测速度推荐。手动上下文保留所选容量，内存估算作为建议；实际分配失败会明确提示。扩展模式可使用系统剩余交换内存。</p>
+        <p id="localContextHint" class="setting-hint">上下文按本机可用内存与模型上限决定。更改后会重启引擎。</p>
+        <dl id="localDeviceRecommendation" class="usage-summary"></dl><button id="btnUseLocalRecommendation" class="button-secondary" type="button" aria-describedby="localDeviceStatus" disabled>填入推荐值</button>
+        <details class="management-section"><summary>设备性能测试</summary>
+          <p class="setting-hint">使用所选容量分配上下文，以一段固定任务文本测试输入处理与最多 64 个输出 Token，最长 90 秒。结果只供参考，不会修改设置；分配容量与实际测试输入长度会分别显示。</p>
+          <div class="page-toolbar"><button id="btnStartLocalBenchmark" class="button-secondary" type="button" aria-describedby="localDeviceStatus" disabled>开始设备测试</button><button id="btnCancelLocalBenchmark" class="button-secondary" type="button" disabled>取消测试</button></div>
+          <dl id="localDeviceBenchmark" class="usage-summary"></dl>
+        </details>
+        <p id="localDeviceStatus" class="page-status" role="status"></p>
+        <p class="setting-hint">推荐先下载 Qwen3.5 0.8B Q4。本机 CPU 推理支持文字与工具调用；Qwen3.5 图片理解需配套视觉组件。模型按需下载，校验完成后才能使用。</p>
+        <div class="page-toolbar"><button id="btnProbeLocalModel" class="button-secondary" type="button"><span data-icon="activity"></span>检查本地引擎</button><button id="btnUnloadLocalModel" class="button-secondary" type="button">释放模型内存</button><button id="btnRestoreCloudModel" class="button-secondary" type="button">恢复原模型配置</button></div><p id="localModelControlStatus" class="page-status" role="status"></p><div id="localModelList" class="management-list"></div>
+      </div>
+      <p id="settingsError" class="settings-error" role="alert" hidden></p>
+      <div id="settingsActions" hidden><button id="btnApplySettings" class="button-primary apply-button" type="button">应用设置</button></div>
+      </div>
+    </aside>
+  </div>
+  <script src="/static/mobile-vendor.js"></script>
+  <script src="/static/i18n.js"></script>
+  <script src="/static/app.js"></script>
+  <script src="/static/management.js"></script>
+  <script src="/static/liquid-glass.js"></script>
+</body>
+</html>

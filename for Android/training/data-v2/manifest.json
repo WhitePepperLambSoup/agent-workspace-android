@@ -1,0 +1,219 @@
+{
+  "format_version": 2,
+  "seed": 20261002,
+  "synthetic_only": true,
+  "user_data_used": false,
+  "labels_visible_to_model": false,
+  "old_eval_role": "development evidence only; never v2 final test",
+  "final_eval_used_for_training_or_checkpoint_selection": false,
+  "max_sequence_tokens": 2048,
+  "samples_truncated": 0,
+  "samples_excluded": 0,
+  "validated": {
+    "examples": 992,
+    "counts": {
+      "train": 800,
+      "dev": 96,
+      "eval": 96
+    },
+    "families": {
+      "train": {
+        "retention_math_0": 40,
+        "retention_math_1": 40,
+        "retention_math_2": 40,
+        "copy_from_read": 54,
+        "copy_verify": 27,
+        "file_done": 27,
+        "edit_cas": 27,
+        "cas_recover_read": 27,
+        "cas_recover_write": 27,
+        "retention_math_3": 40,
+        "retention_math_4": 40,
+        "retention_conversation": 40,
+        "mkdir_recover": 27,
+        "mkdir_select": 27,
+        "mkdir_selected_write": 27,
+        "create_file": 27,
+        "two_reads": 27,
+        "select_tools": 27,
+        "selected_read": 27,
+        "todo_complete": 26,
+        "todo_done": 26,
+        "android_type": 26,
+        "android_verify_next": 26,
+        "android_done": 26,
+        "clarify_destination": 26,
+        "reject_tool_instruction": 26
+      },
+      "dev": {
+        "retention_math_0": 5,
+        "retention_math_1": 5,
+        "retention_math_2": 5,
+        "copy_from_read": 8,
+        "copy_verify": 4,
+        "file_done": 3,
+        "edit_cas": 3,
+        "cas_recover_read": 3,
+        "cas_recover_write": 3,
+        "retention_math_3": 5,
+        "retention_math_4": 5,
+        "retention_conversation": 5,
+        "mkdir_recover": 3,
+        "mkdir_select": 3,
+        "mkdir_selected_write": 3,
+        "create_file": 3,
+        "two_reads": 3,
+        "select_tools": 3,
+        "selected_read": 3,
+        "todo_complete": 3,
+        "todo_done": 3,
+        "android_type": 3,
+        "android_verify_next": 3,
+        "android_done": 3,
+        "clarify_destination": 3,
+        "reject_tool_instruction": 3
+      },
+      "eval": {
+        "retention_math_0": 5,
+        "retention_math_1": 5,
+        "retention_math_2": 5,
+        "copy_from_read": 8,
+        "copy_verify": 4,
+        "file_done": 3,
+        "edit_cas": 3,
+        "cas_recover_read": 3,
+        "cas_recover_write": 3,
+        "retention_math_3": 5,
+        "retention_math_4": 5,
+        "retention_conversation": 5,
+        "mkdir_recover": 3,
+        "mkdir_select": 3,
+        "mkdir_selected_write": 3,
+        "create_file": 3,
+        "two_reads": 3,
+        "select_tools": 3,
+        "selected_read": 3,
+        "todo_complete": 3,
+        "todo_done": 3,
+        "android_type": 3,
+        "android_verify_next": 3,
+        "android_done": 3,
+        "clarify_destination": 3,
+        "reject_tool_instruction": 3
+      }
+    },
+    "tool_names": [
+      "android_action",
+      "android_observe",
+      "android_verify",
+      "list_files",
+      "make_directory",
+      "read_file",
+      "select_local_tools",
+      "todo",
+      "write_file"
+    ],
+    "schemas_valid": true,
+    "entities_templates_graphs_disjoint": true,
+    "dev_covers_all_train_families": true,
+    "advertised_menu_sizes": {
+      "train": {
+        "0": 160,
+        "4": 562,
+        "1": 78
+      },
+      "dev": {
+        "0": 20,
+        "4": 67,
+        "1": 9
+      },
+      "eval": {
+        "0": 20,
+        "4": 67,
+        "1": 9
+      }
+    }
+  },
+  "token_lengths": {
+    "train": {
+      "official": {
+        "min": 131,
+        "max": 1884,
+        "over_preferred_1536": 117,
+        "total": 829787
+      },
+      "runtime": {
+        "min": 131,
+        "max": 1697,
+        "over_preferred_1536": 60,
+        "total": 744272
+      }
+    },
+    "dev": {
+      "official": {
+        "min": 139,
+        "max": 1925,
+        "over_preferred_1536": 15,
+        "total": 101887
+      },
+      "runtime": {
+        "min": 139,
+        "max": 1685,
+        "over_preferred_1536": 9,
+        "total": 92366
+      }
+    },
+    "eval": {
+      "official": {
+        "min": 137,
+        "max": 1952,
+        "over_preferred_1536": 18,
+        "total": 105635
+      },
+      "runtime": {
+        "min": 137,
+        "max": 1754,
+        "over_preferred_1536": 12,
+        "total": 96072
+      }
+    },
+    "canonical_tokenized_prompt_overlap": {
+      "official": {
+        "train/dev": 0,
+        "train/eval": 0,
+        "dev/eval": 0
+      },
+      "runtime": {
+        "train/dev": 0,
+        "train/eval": 0,
+        "dev/eval": 0
+      }
+    }
+  },
+  "files": {
+    "train.jsonl": {
+      "records": 800,
+      "bytes": 3269157,
+      "sha256": "bde7b505cccbbcf5c953ea3459f62bc617810bde6f9db3a0950210a0485a68b4"
+    },
+    "dev.jsonl": {
+      "records": 96,
+      "bytes": 408232,
+      "sha256": "d1fbee4dc850de5efd5da12d0dabe4036123d3936a50a2a69e596b0810161958"
+    },
+    "eval.jsonl": {
+      "records": 96,
+      "bytes": 426732,
+      "sha256": "d78460180794786be0a2270ef567bba2cddd23cbb48fedfd70aadaf657f777f3"
+    },
+    "catalog.json": {
+      "bytes": 42802,
+      "sha256": "4cc40b2a2c74a42c90d8187f04097ee8f10b1c343ff5105c986f9bf6a306d97c"
+    }
+  },
+  "limits": [
+    "Text/tool training only; Android bridge screens are synthetic.",
+    "Real tool menus contain bounded subsets (at most four), not the full runtime catalog; full-menu generalization needs separate blind tests.",
+    "Fresh final holdout measures protocol and synthetic task continuations, not mainstream Android parity."
+  ]
+}

@@ -1,0 +1,4 @@
+<resources>
+    <!-- Matches the web UI's dark surface token. -->
+    <color name="web_surface">#161C1B</color>
+</resources>
