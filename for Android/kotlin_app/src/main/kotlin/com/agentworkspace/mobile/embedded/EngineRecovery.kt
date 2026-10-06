@@ -100,7 +100,7 @@ object EngineRecovery {
         val settings = TaskNotificationSettings(context)
         if (!settings.isEnabled() || !settings.permissionGranted(context)) return
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.createNotificationChannel(NotificationChannel(CHANNEL, "Engine recovery", NotificationManager.IMPORTANCE_DEFAULT))
+        manager.createNotificationChannel(NotificationChannel(CHANNEL, com.agentworkspace.mobile.UiText.of(context, "引擎恢复", "Engine recovery"), NotificationManager.IMPORTANCE_DEFAULT))
         val launch = Intent(context, WebUiActivity::class.java).setAction("com.agentworkspace.mobile.OPEN_ENGINE_RECOVERY")
             .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         manager.notify("agent-engine-recovery", 3004, NotificationCompat.Builder(context, CHANNEL)

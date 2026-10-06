@@ -292,11 +292,22 @@
     } finally { URL.revokeObjectURL(url); }
   }
 
+  // Glass rules use :is() (Chromium 88) and backdrop-filter (76). An older WebView would apply only
+  // some of them and leave unreadable see-through panels, so it keeps the standard style instead.
+  const glassSupported = (() => {
+    try {
+      document.querySelector(":is(html)");
+      return !window.CSS?.supports || CSS.supports("backdrop-filter", "blur(1px)") || CSS.supports("-webkit-backdrop-filter", "blur(1px)");
+    } catch { return false; }
+  })();
+
   function applyAppearance() {
     const root = document.documentElement;
     root.dataset.theme = preferences.theme;
     root.dataset.textSize = preferences.textSize;
-    root.dataset.style = preferences.style;
+    root.dataset.style = preferences.style === "glass" && !glassSupported ? "solid" : preferences.style;
+    const glassOption = document.querySelector('[data-style-option="glass"]');
+    if (glassOption) glassOption.disabled = !glassSupported;
     root.dataset.accent = preferences.accent;
     root.dataset.motion = preferences.motion;
     // A custom backdrop without a stored picture falls back to the first preset.

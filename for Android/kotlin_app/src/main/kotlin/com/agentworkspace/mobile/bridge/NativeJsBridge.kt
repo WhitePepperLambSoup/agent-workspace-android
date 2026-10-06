@@ -147,6 +147,12 @@ class NativeJsBridge(
         return "{\"ok\":true}"
     }
 
+    /** compat.js: the page found this WebView too old for the console. */
+    @JavascriptInterface
+    fun openWebViewUpdate() {
+        Handler(Looper.getMainLooper()).post { com.agentworkspace.mobile.WebViewSupport.openUpdate(context) }
+    }
+
     @JavascriptInterface
     fun getUpdateSettings(): String = com.agentworkspace.mobile.update.UpdateChecker.statusJson(context)
 

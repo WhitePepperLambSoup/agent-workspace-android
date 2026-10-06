@@ -147,7 +147,7 @@ select { cursor: pointer; }
 button:disabled, input:disabled, select:disabled, textarea:disabled { cursor: default; opacity: .45; }
 :focus { outline: none; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.touch-input :is(button, summary, select, a):focus-visible { outline: none; }
+.touch-input button:focus-visible, .touch-input summary:focus-visible, .touch-input select:focus-visible, .touch-input a:focus-visible { outline: none; }
 ::selection { background: var(--accent-soft); color: var(--text); }
 /* Touch WebViews keep their auto-hiding overlay scrollbars; styling them forces a permanent classic bar. */
 @media (pointer: fine) {
@@ -604,14 +604,14 @@ strong { font-weight: 600; }
   display: block; margin: 16px 0 7px; color: var(--text-2); font-size: 12.5px; font-weight: 600; line-height: 1.4;
 }
 .settings-page > label:first-child:not(.toggle-row), .settings-page > div:first-child > label:first-child { margin-top: 4px; }
-.settings-page :is(input:not([type="checkbox"]):not([type="file"]), select, textarea) {
+/* Plain selector lists rather than :is() (Chromium 88+), with equal :not() weights on each branch. */
   display: block; width: 100%; min-width: 0; min-height: var(--touch); padding: 10px 12px; border: 1px solid var(--border-strong);
   border-radius: 12px; background: var(--field); color: var(--text); font-size: 15px; line-height: 1.4;
   transition: border-color .15s, box-shadow .15s;
 }
 .settings-page textarea { min-height: 96px; resize: vertical; }
-.settings-page :is(input:not([type="checkbox"]), select, textarea):focus { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
-.settings-page :is(input, textarea)::placeholder { color: var(--text-3); }
+.settings-page input:not([type="checkbox"]):focus, .settings-page select:not([type="checkbox"]):focus, .settings-page textarea:not([type="checkbox"]):focus { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
+.settings-page input::placeholder, .settings-page textarea::placeholder { color: var(--text-3); }
 .setting-hint { margin: 8px 2px 0; color: var(--text-3); font-size: 12.5px; line-height: 1.65; overflow-wrap: anywhere; }
 .setting-hint:empty { display: none; }
 

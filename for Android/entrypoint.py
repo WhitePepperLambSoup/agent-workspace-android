@@ -63,6 +63,9 @@ def _load_mobile_assets(token: str) -> tuple[str, dict[str, tuple[str, bytes]]]:
         'src="/static/app.js"', f'src="/static/app.js?token={encoded_token}"'
     )
     console_html = console_html.replace(
+        'src="/static/compat.js"', f'src="/static/compat.js?token={encoded_token}"'
+    )
+    console_html = console_html.replace(
         'src="/static/mobile-vendor.js"',
         f'src="/static/mobile-vendor.js?token={encoded_token}"',
     )
@@ -88,6 +91,10 @@ def _load_mobile_assets(token: str) -> tuple[str, dict[str, tuple[str, bytes]]]:
         "/static/app.js": (
             "application/javascript; charset=utf-8",
             (web_root / "static" / "app.js").read_bytes(),
+        ),
+        "/static/compat.js": (
+            "application/javascript; charset=utf-8",
+            (web_root / "static" / "compat.js").read_bytes(),
         ),
         "/static/mobile-vendor.js": (
             "application/javascript; charset=utf-8",

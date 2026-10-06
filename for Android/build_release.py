@@ -128,6 +128,38 @@ def prepare_license_assets():
     )
 
 
+PAGE_16K = 16 * 1024
+
+
+def native_libraries_below_16k(apk: Path) -> list[str]:
+    """64-bit native libraries whose loadable segments are not 16 KB aligned.
+
+    Android 15+ phones with 16 KB memory pages refuse to load them; a dependency shipping such a
+    library (as sqlite-android 3.45 did) stops the embedded engine before it can start.
+    """
+    import struct
+    import zipfile
+
+    offenders = []
+    with zipfile.ZipFile(apk) as archive:
+        for name in archive.namelist():
+            if not (name.startswith("lib/") and name.endswith(".so")):
+                continue
+            data = archive.read(name)
+            if data[:4] != b"\x7fELF" or data[4] != 2:  # only 64-bit ABIs are shipped
+                continue
+            (table,) = struct.unpack_from("<Q", data, 0x20)
+            entry_size, count = struct.unpack_from("<HH", data, 0x36)
+            aligns = [
+                struct.unpack_from("<Q", data, table + index * entry_size + 48)[0]
+                for index in range(count)
+                if struct.unpack_from("<I", data, table + index * entry_size)[0] == 1  # PT_LOAD
+            ]
+            if aligns and min(aligns) < PAGE_16K:
+                offenders.append(f"{name} (aligned to {min(aligns)} bytes)")
+    return offenders
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--signed", action="store_true")
@@ -173,6 +205,13 @@ def main():
         env=environment,
         check=True,
     )
+    for apk in sorted((KOTLIN_ROOT / "build/outputs/apk/release").glob("*.apk")):
+        offenders = native_libraries_below_16k(apk)
+        if offenders:
+            raise SystemExit(
+                f"{apk.name}: native libraries are not 16 KB page aligned and will not load on "
+                "Android 15+ devices with 16 KB pages:\n  " + "\n  ".join(offenders)
+            )
     print(
         "Release APK generated in kotlin_app/build/outputs/apk/release; "
         "validate signatures and install identity before distribution"

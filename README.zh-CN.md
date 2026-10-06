@@ -14,7 +14,9 @@
 
 在 [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) 下载 `AgentWorkspace_1.0.1_android.apk` 安装即可，SHA-256 写在发布说明里。之后的版本可在应用内更新（「设备与工具 → 版本与更新」，或加载页的「检查更新」）。
 
-- 需要 Android 8.0（API 26）及以上，64 位 ARM（`arm64-v8a`）或 `x86_64`。
+- 需要 Android 8.0（API 26）及以上，64 位 ARM（`arm64-v8a`）或 `x86_64`；纯 32 位系统的手机无法安装。
+- 界面由系统的 Android System WebView 显示，需要 Chrome 80 及以上的内核。WebView 被停用、缺失或过旧时，应用会说明原因并引导到应用商店更新。
+- 支持 Android 15+ 的 16 KB 内存页机型、折叠屏、分屏和外接键盘；在系统或厂商的「强制深色」下也保持应用自己的配色。
 - 安装包约 56 MB；本地模型是应用内的可选下载。
 
 ## 亮点

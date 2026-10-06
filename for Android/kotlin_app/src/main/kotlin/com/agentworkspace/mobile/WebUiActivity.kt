@@ -419,7 +419,18 @@ class WebUiActivity : ComponentActivity() {
         if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
             WebView.setWebContentsDebuggingEnabled(true)
         }
-        webView = WebView(this).apply {
+        // Some ROMs ship WebView disabled, and it is briefly missing while the store updates it.
+        // Creating one then throws; explain what to do instead of crashing on every launch.
+        val createdWebView = try {
+            WebView(this)
+        } catch (failure: Exception) {
+            showWebViewUnavailable(failure, startupDark, startupColor)
+            return
+        } catch (failure: UnsatisfiedLinkError) {
+            showWebViewUnavailable(failure, startupDark, startupColor)
+            return
+        }
+        webView = createdWebView.apply {
             layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             visibility = View.INVISIBLE
             setBackgroundColor(startupColor)
@@ -661,6 +672,61 @@ class WebUiActivity : ComponentActivity() {
         voicePending = intent?.getBooleanExtra("voice_input", false) == true || intent?.action in listOf(Intent.ACTION_ASSIST, Intent.ACTION_VOICE_COMMAND)
         initAndLaunchEngine()
         appSupport.autoCheckIfDue()
+        warnIfWebViewTooOld()
+    }
+
+    /** The console's scripts do not run on a WebView older than Chromium 80; say so before a blank page. */
+    private fun warnIfWebViewTooOld() {
+        val major = WebViewSupport.chromiumMajor(runCatching { webView.settings.userAgentString }.getOrNull()) ?: return
+        if (major >= WebViewSupport.MIN_CHROMIUM) return
+        Log.w("AgentWebUI", "WebView Chromium $major is older than ${WebViewSupport.MIN_CHROMIUM}")
+        AlertDialog.Builder(this, pageDialogTheme())
+            .setTitle(UiText.of(this, "系统 WebView 版本过旧", "System WebView is too old"))
+            .setMessage(UiText.of(this,
+                "这台手机的 WebView 内核是 Chrome $major，Agent Workspace 需要 ${WebViewSupport.MIN_CHROMIUM} 或更新版本，否则界面可能空白或无法操作。\n\n请在应用商店更新“Android System WebView”（部分手机叫“WebView 组件”或“系统浏览器内核”），然后重新打开本应用。",
+                "This phone's WebView is Chrome $major. Agent Workspace needs ${WebViewSupport.MIN_CHROMIUM} or newer; otherwise the interface may stay blank or unresponsive.\n\nUpdate \"Android System WebView\" from your app store, then reopen the app."))
+            .setPositiveButton(UiText.of(this, "去更新", "Update")) { _, _ -> WebViewSupport.openUpdate(this) }
+            .setNegativeButton(UiText.of(this, "仍然继续", "Continue anyway"), null)
+            .show()
+    }
+
+    /** Shown instead of the console when this phone cannot create a WebView at all. */
+    private fun showWebViewUnavailable(failure: Throwable, dark: Boolean, background: Int) {
+        Log.e("AgentWebUI", "WebView is unavailable", failure)
+        val foreground = if (dark) Color.WHITE else Color.parseColor("#18201E")
+        val density = resources.displayMetrics.density
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val padding = (24 * density).toInt()
+            setPadding(padding, padding * 2, padding, padding)
+            addView(TextView(this@WebUiActivity).apply {
+                text = UiText.of(this@WebUiActivity, "无法加载系统 WebView", "System WebView is unavailable")
+                textSize = 20f
+                setTextColor(foreground)
+            })
+            addView(TextView(this@WebUiActivity).apply {
+                text = UiText.of(this@WebUiActivity,
+                    "Agent Workspace 的界面由系统组件“Android System WebView”显示。它可能被停用、没有安装，或正在更新。\n\n请在应用商店更新它，或在系统设置的应用列表里（可能需要显示系统应用）启用它，然后重新打开本应用。",
+                    "Agent Workspace shows its interface with the system component \"Android System WebView\". It may be disabled, missing, or in the middle of an update.\n\nUpdate it from your app store, or enable it in the system app list (you may need to show system apps), then reopen this app.") +
+                    "\n\n${failure.javaClass.simpleName}: ${failure.message.orEmpty().take(300)}"
+                textSize = 15f
+                setTextColor(foreground)
+                setPadding(0, (16 * density).toInt(), 0, (16 * density).toInt())
+            })
+            fun action(label: String, onClick: () -> Unit) = addView(Button(this@WebUiActivity).apply {
+                text = label
+                isAllCaps = false
+                setOnClickListener { onClick() }
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            action(UiText.of(this@WebUiActivity, "更新或启用 WebView", "Update or enable WebView")) { WebViewSupport.openUpdate(this@WebUiActivity) }
+            action(UiText.of(this@WebUiActivity, "导出日志", "Export logs")) { appSupport.showLogExport() }
+            action(UiText.of(this@WebUiActivity, "重新打开", "Reopen")) { recreate() }
+        }
+        rootLayout.addView(ScrollView(this).apply { addView(content) },
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        setContentView(rootLayout)
+        ViewCompat.requestApplyInsets(rootLayout)
+        rootLayout.setBackgroundColor(background)
     }
 
     private fun pageDialogTheme(): Int =
@@ -684,7 +750,7 @@ class WebUiActivity : ComponentActivity() {
         if (isDestroyed || isFinishing) return
         pageDark = dark
         rootLayout.setBackgroundColor(color)
-        webView.setBackgroundColor(color)
+        if (::webView.isInitialized) webView.setBackgroundColor(color)
         // Android 15 ignores these and shows the root background through transparent bars.
         window.statusBarColor = color
         window.navigationBarColor = color
@@ -697,6 +763,7 @@ class WebUiActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (!::webView.isInitialized) return // WebView unavailable: only the help screen is shown
         queueSessionNavigation(intent)
         incomingShareBatchId = UUID.randomUUID().toString()
         shareInbox.captureIntent(intent, incomingShareBatchId)

@@ -7,6 +7,9 @@
         <item name="android:windowLightStatusBar">true</item>
         <!-- WebView (targetSdk 33+) derives prefers-color-scheme from this flag, so the web UI's
              "follow system" option tracks the device setting. Native dialogs keep the Material theme. -->
+        <!-- The web UI draws its own light and dark themes; vendor "force dark" modes (MIUI/HyperOS,
+             ColorOS, MagicOS...) would otherwise invert it a second time. -->
+        <item name="android:forceDarkAllowed" tools:targetApi="q">false</item>
         <item name="android:isLightTheme" tools:targetApi="q">true</item>
     </style>
 </resources>

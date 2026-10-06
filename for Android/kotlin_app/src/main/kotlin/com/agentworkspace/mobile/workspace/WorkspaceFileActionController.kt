@@ -77,7 +77,11 @@ class WorkspaceFileActionController(
                 }
                 when (request.action) {
                     "open" -> {
-                        launchOpen(WorkspaceFileIntents.open(context, cached))
+                        try {
+                            launchOpen(WorkspaceFileIntents.open(context, cached))
+                        } catch (_: ActivityNotFoundException) {
+                            launchOpen(WorkspaceFileIntents.openWithAnyViewer(context, cached))
+                        }
                         action.handedToExternalApp = true
                         finish(action, request.result(true))
                     }

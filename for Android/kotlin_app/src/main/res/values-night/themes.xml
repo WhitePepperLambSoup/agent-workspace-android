@@ -4,6 +4,9 @@
         <item name="android:statusBarColor">@color/web_surface</item>
         <item name="android:navigationBarColor">@color/web_surface</item>
         <item name="android:windowLightStatusBar">false</item>
+        <!-- The web UI draws its own light and dark themes; vendor "force dark" modes (MIUI/HyperOS,
+             ColorOS, MagicOS...) would otherwise invert it a second time. -->
+        <item name="android:forceDarkAllowed" tools:targetApi="q">false</item>
         <item name="android:isLightTheme" tools:targetApi="q">false</item>
     </style>
 </resources>

@@ -14,12 +14,23 @@
 - 修复诊断日志分享后接收方可能无法打开文件的问题。
 - 界面：任务失败时不再同时出现提示条和错误卡片两份相同的错误；玻璃输入框、顶栏和任务状态条加强了磨砂与底色，背后滚动的文字不再与按钮文字混在一起；过长的错误提示可滚动，不会挡住输入框。
 
+**兼容性**
+- 修复 Android 15+ 使用 16 KB 内存页的新机型上引擎无法启动（卡在「等待本地服务凭据」）：内置 SQLite 库升级到 3.50.4，所有原生库均为 16 KB 对齐，构建时自动检查。
+- 系统 WebView 被停用、缺失或正在更新时不再闪退，改为显示说明页，可一键去更新或启用 WebView、导出日志。
+- WebView 内核低于 Chrome 80 时，启动时提示更新，不再白屏；最低要求从 Chrome 86 降到 80。
+- 旧版 WebView 不支持液态玻璃所需样式时自动使用标准风格，避免面板透明到看不清；设置页输入框在旧内核上也有正常样式。
+- 退出小米 / 澎湃、ColorOS、MagicOS 等的「强制深色模式」，界面不会被二次反色。
+- 折叠屏展开 / 折叠、分屏调整大小、接入外接键盘时不再重新加载界面。
+- 打开没有对应应用的文件类型（如 .md、.py）时，改为让你选择文本查看器或任意应用。
+- 定时任务、引擎恢复的通知和通知类别名称改为中英文。
+
 **新增**
 - 加载页右上角新增「导出日志」与「检查更新」（与「模型设置」并排），进不去应用也能用。导出日志可分享文件、保存到手机，或一键打开 GitHub 新建 Issue 页面并预填脱敏后的启动日志摘要（需登录 GitHub，由你确认后提交）。
 - 应用内更新（OTA）：每天自动检查 GitHub 是否有新版本（可在「设备与工具 → 版本与更新」关闭），也可手动检查；下载后校验 SHA-256、包名与签名，再交给系统安装器由你确认安装。首次安装更新时需按提示允许「安装未知应用」。
 
 **升级说明**
 - 从 1.0.0 直接覆盖安装即可，数据保留。从 1.0.1 起，之后的版本可在应用内更新。
+- 1.0.1 的安装包在 2026-10-06 当天更新过一次（加入上面的兼容性修复）。如果当天已经装过较早的 1.0.1，应用内更新不会再提示同版本号，请从发布页重新下载覆盖安装，数据保留。
 
 ### English
 
@@ -31,12 +42,23 @@
 - Fixed shared diagnostics files that the receiving app could not open.
 - Interface: a failed task no longer shows the same error twice (notice bar and error card); the glass composer, header and task status pill have more frost and tint so text scrolling behind them no longer mixes with their labels; long error notices scroll instead of covering the composer.
 
+**Compatibility**
+- Fixed the engine failing to start (stuck at "Waiting for the local service credentials") on Android 15+ devices with 16 KB memory pages: the bundled SQLite library is now 3.50.4, every native library is 16 KB aligned, and the build checks this.
+- A disabled, missing or updating system WebView no longer crashes the app; a help screen offers to update or enable WebView and to export logs.
+- A WebView older than Chromium 80 gets an update prompt at start-up instead of a blank page; the minimum dropped from Chromium 86 to 80.
+- Where an older WebView lacks the styles liquid glass needs, the standard style is used instead of unreadable see-through panels; settings fields keep their styling on older engines.
+- Opted out of vendor "force dark" modes (MIUI/HyperOS, ColorOS, MagicOS …) so the interface is not inverted a second time.
+- Folding or unfolding, resizing in split screen and connecting a keyboard no longer reload the interface.
+- Files whose type no installed app claims (such as .md or .py) now open through a chooser of text viewers or any app.
+- Scheduled-task and engine-recovery notifications and their channel names are now in Chinese and English.
+
 **New**
 - "Export logs" and "Updates" on the loading screen next to "Model settings", usable even when the app cannot get past start-up. Export can share the file, save it to the phone, or open a new GitHub issue prefilled with a masked start-up log summary (you sign in to GitHub and submit it yourself).
 - In-app updates (OTA): a daily check for a new GitHub release (can be turned off under Device & tools → Version and updates) and a manual check; the download is verified (SHA-256, package name and signature) before Android's installer asks you to confirm. The first update asks you to allow installing unknown apps.
 
 **Upgrading**
 - Install over 1.0.0; data is kept. From 1.0.1 on, later versions can be installed from inside the app.
+- The 1.0.1 package was replaced once on 2026-10-06 to add the compatibility fixes above. If you installed the earlier 1.0.1 that day, the in-app updater will not offer the same version number again; download it from the release page and install over it (data is kept).
 
 ## 1.0.0 — 2026-10-05
 

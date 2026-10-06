@@ -30,6 +30,22 @@ object WorkspaceFileIntents {
         }
     }
 
+    /**
+     * Second try when no app claims the exact type (text/markdown, text/x-python ... have no viewer
+     * on many phones): offer every app that opens plain text, or any file, and let the user choose.
+     */
+    fun openWithAnyViewer(context: Context, file: CachedWorkspaceFile): Intent {
+        val content = uri(context, file)
+        val textual = file.mimeType.startsWith("text/") ||
+            file.mimeType in setOf("application/json", "application/xml", "application/javascript", "application/x-yaml", "application/toml")
+        val view = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(content, if (textual) "text/plain" else "*/*")
+            clipData = ClipData.newRawUri(file.file.name, content)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        return Intent.createChooser(view, file.file.name).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+
     fun share(context: Context, file: CachedWorkspaceFile): Intent {
         val content = uri(context, file)
         return Intent(Intent.ACTION_SEND).apply {

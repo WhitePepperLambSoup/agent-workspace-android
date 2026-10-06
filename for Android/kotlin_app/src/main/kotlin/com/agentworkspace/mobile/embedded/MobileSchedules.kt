@@ -140,7 +140,7 @@ class MobileScheduleCoordinator @JvmOverloads constructor(private val context: C
             return
         }
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Scheduled tasks", NotificationManager.IMPORTANCE_DEFAULT))
+        manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, com.agentworkspace.mobile.UiText.of(context, "定时任务", "Scheduled tasks"), NotificationManager.IMPORTANCE_DEFAULT))
         val id = item.getString("schedule_id")
         val launch = Intent(context, WebUiActivity::class.java)
             .setAction("com.agentworkspace.mobile.OPEN_SCHEDULE")
@@ -148,8 +148,8 @@ class MobileScheduleCoordinator @JvmOverloads constructor(private val context: C
             .putExtra("session_id", item.optString("session_id"))
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         manager.notify("agent-schedule:$id", 3002, NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_popup_reminder).setContentTitle(item.optString("title", "Scheduled task"))
-            .setContentText("Open Agent Workspace to run the due task")
+            .setSmallIcon(android.R.drawable.ic_popup_reminder).setContentTitle(item.optString("title").ifBlank { com.agentworkspace.mobile.UiText.of(context, "定时任务", "Scheduled task") })
+            .setContentText(com.agentworkspace.mobile.UiText.of(context, "打开 Agent Workspace 以运行到期的任务", "Open Agent Workspace to run the due task"))
             .setContentIntent(PendingIntent.getActivity(context, 0, launch, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
             .setAutoCancel(true).setVisibility(NotificationCompat.VISIBILITY_PRIVATE).build())
         markWake(id, "launch_required", alerted = true)
@@ -205,9 +205,9 @@ class ScheduleWakeWorker(context: Context, parameters: WorkerParameters) : Corou
     override suspend fun getForegroundInfo(): ForegroundInfo {
         val manager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.createNotificationChannel(NotificationChannel(MobileScheduleCoordinator.CHANNEL_ID,
-            "Scheduled tasks", NotificationManager.IMPORTANCE_LOW))
+            com.agentworkspace.mobile.UiText.of(applicationContext, "定时任务", "Scheduled tasks"), NotificationManager.IMPORTANCE_LOW))
         return ForegroundInfo(3003, NotificationCompat.Builder(applicationContext, MobileScheduleCoordinator.CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_popup_reminder).setContentTitle("Checking scheduled tasks")
+            .setSmallIcon(android.R.drawable.ic_popup_reminder).setContentTitle(com.agentworkspace.mobile.UiText.of(applicationContext, "正在检查定时任务", "Checking scheduled tasks"))
             .setOngoing(true).build())
     }
 
