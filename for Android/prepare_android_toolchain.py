@@ -15,6 +15,8 @@ import json
 import os
 import struct
 import tarfile
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -157,14 +159,18 @@ def _fetch(url: str, digest: str, target: Path, size: int | None = None) -> byte
         if not ref.startswith("refs/"):
             ref = "refs/tags/" + ref
         urls.append(f"https://codeload.github.com/{project}/{extension}/{ref}")
-    for index, candidate in enumerate(urls):
+    # Upstream hosts (samba.org, gnu.org, GitHub) are occasionally slow; one stalled read used to
+    # fail the whole build. Each mirror gets three tries with a longer timeout and a short backoff.
+    attempts = [(candidate, attempt) for candidate in urls for attempt in range(3)]
+    for index, (candidate, attempt) in enumerate(attempts):
         try:
-            with urllib.request.urlopen(candidate, timeout=20) as response:
+            with urllib.request.urlopen(candidate, timeout=60) as response:
                 value = response.read(16 * 1024 * 1024 + 1)
             break
         except (OSError, urllib.error.URLError):
-            if index == len(urls) - 1:
+            if index == len(attempts) - 1:
                 raise
+            time.sleep(2 * (attempt + 1))
     if (
         len(value) > 16 * 1024 * 1024
         or hashlib.sha256(value).hexdigest() != digest
