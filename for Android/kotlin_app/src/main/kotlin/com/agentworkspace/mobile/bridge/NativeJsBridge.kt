@@ -40,6 +40,8 @@ class NativeJsBridge(
     private val requestVoiceInputAction: () -> Unit = {},
     private val restartEngineAction: () -> Unit = {},
     private val reconnectEngineAction: () -> Unit = {},
+    private val exportLogsAction: (() -> Unit)? = null,
+    private val checkUpdatesAction: () -> Unit = {},
     private val stopEngineAction: () -> Unit = {},
     private val openNotificationSettingsAction: () -> Unit = {
         context.startActivity(TaskNotificationSettings.systemSettingsIntent(context))
@@ -136,6 +138,23 @@ class NativeJsBridge(
         }.apply { name = "agent-diagnostics"; isDaemon = true }.start()
         return "{\"ok\":true}"
     }
+
+    /** Share, save, or report the diagnostics on GitHub (native chooser); falls back to sharing. */
+    @JavascriptInterface
+    fun exportDiagnostics(): String {
+        val action = exportLogsAction ?: return shareDiagnostics()
+        Handler(Looper.getMainLooper()).post { action() }
+        return "{\"ok\":true}"
+    }
+
+    @JavascriptInterface
+    fun getUpdateSettings(): String = com.agentworkspace.mobile.update.UpdateChecker.statusJson(context)
+
+    @JavascriptInterface
+    fun setAutoUpdateCheck(enabled: Boolean) = com.agentworkspace.mobile.update.UpdateChecker.setAutoCheck(context, enabled)
+
+    @JavascriptInterface
+    fun checkForUpdates() { Handler(Looper.getMainLooper()).post { checkUpdatesAction() } }
 
     @JavascriptInterface
     fun openBatteryOptimizationSettings() {

@@ -12,7 +12,7 @@
 
 ## 下载
 
-在 [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) 下载 `AgentWorkspace_1.0.0_android.apk` 安装即可，SHA-256 写在发布说明里。
+在 [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) 下载 `AgentWorkspace_1.0.1_android.apk` 安装即可，SHA-256 写在发布说明里。之后的版本可在应用内更新（「设备与工具 → 版本与更新」，或加载页的「检查更新」）。
 
 - 需要 Android 8.0（API 26）及以上，64 位 ARM（`arm64-v8a`）或 `x86_64`。
 - 安装包约 56 MB；本地模型是应用内的可选下载。
@@ -30,7 +30,7 @@
 9. **自动化**：定时任务、可回放步骤的工作流、任务评测、跨设备接力。
 10. **可选开发工具链**：按需安装固定版本的 Alpine 工具链（Git、Python、Node、Pyright），在隔离的 PRoot 进程中运行。
 11. **操作手机（需手动开启）**：开启无障碍服务后，Agent 可在你的审批下点击、输入、切换应用；密码框和锁屏一律不碰。
-12. **自动恢复**：安卓停掉引擎后，应用会自动重启引擎并重新连接；诊断页可一键分享日志，密钥会被隐藏。
+12. **自动恢复**：安卓停掉引擎后，应用会自动重启引擎并重新连接；日志可导出（分享、保存或提交为 GitHub Issue），密钥会被隐藏；进不去应用时也能在加载页导出。
 
 <p align="center">
   <img src="docs/screenshots/chat-dark-en.png" width="250" alt="深色主题（英文界面）">

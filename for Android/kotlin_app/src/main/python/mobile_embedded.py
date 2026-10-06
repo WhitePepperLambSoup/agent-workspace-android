@@ -141,9 +141,43 @@ def _disarm_stall_dump(handle) -> None:
         handle.close()
 
 
+_STARTUP_LOG_BYTES = 128 * 1024
+_startup_dump = None
+
+
+def _startup_log(files_dir: str, message: str) -> None:
+    """One line per start-up step in agent-data/logs/engine-startup.log, so a hang shows where."""
+    import time
+
+    with contextlib.suppress(OSError):
+        log = Path(files_dir) / "agent-data" / "logs" / "engine-startup.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        if log.exists() and log.stat().st_size > _STARTUP_LOG_BYTES:
+            log.replace(log.with_suffix(".log.1"))
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{os.getpid()}] {message}\n")
+
+
+def _arm_startup_dump(files_dir: str) -> None:
+    """If start-up has not reached a listening server in 45 s, record every thread's stack once.
+
+    The engine's own watchdog re-arms the same timer once the server runs, which cancels this one.
+    """
+    import faulthandler
+
+    global _startup_dump
+    with contextlib.suppress(OSError):
+        log = Path(files_dir) / "agent-data" / "logs" / "engine-stalls.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        _startup_dump = log.open("a", encoding="utf-8")
+        _startup_dump.write(f"--- [{os.getpid()}] engine start-up began\n")
+        _startup_dump.flush()
+        faulthandler.dump_traceback_later(45.0, repeat=False, file=_startup_dump)
+
+
 def run(files_dir: str, provider_json: str = "{}") -> None:
     """Run until stopped; the caller must use a background Java thread."""
-    global _running, _stop_requested, _loop, _server_task
+    global _running, _stop_requested, _loop, _server_task, _startup_dump
     with _state_lock:
         if _running:
             raise RuntimeError("the embedded Python service is already running")
@@ -151,14 +185,18 @@ def run(files_dir: str, provider_json: str = "{}") -> None:
         _stop_requested = False
 
     loop: asyncio.AbstractEventLoop | None = None
+    _startup_log(files_dir, "engine starting")
+    _arm_startup_dump(files_dir)
     try:
         workspace, database = configure_environment(files_dir, provider_json)
+        _startup_log(files_dir, "environment configured")
         root = Path(files_dir).resolve() / "agent"
         for path in (root / "src", root / "for Android"):
             if str(path) not in sys.path:
                 sys.path.insert(0, str(path))
         (Path(files_dir) / "serve.token").unlink(missing_ok=True)
         entrypoint = importlib.import_module("entrypoint")
+        _startup_log(files_dir, "engine modules loaded")
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -174,6 +212,10 @@ def run(files_dir: str, provider_json: str = "{}") -> None:
             loop.call_soon(task.cancel)
         with contextlib.suppress(asyncio.CancelledError):
             loop.run_until_complete(task)
+        _startup_log(files_dir, "engine stopped")
+    except BaseException as exc:
+        _startup_log(files_dir, f"engine failed: {type(exc).__name__}: {str(exc)[:500]}")
+        raise
     finally:
         stall_log = _arm_stall_dump(files_dir)
         try:
@@ -189,6 +231,10 @@ def run(files_dir: str, provider_json: str = "{}") -> None:
                 loop.close()
         finally:
             _disarm_stall_dump(stall_log)
+            if _startup_dump is not None:
+                with contextlib.suppress(OSError):
+                    _startup_dump.close()
+                _startup_dump = None
         with _state_lock:
             _loop = _server_task = None
             _running = False

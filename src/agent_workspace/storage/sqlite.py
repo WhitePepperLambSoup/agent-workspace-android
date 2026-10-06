@@ -92,6 +92,8 @@ _CONTEXT_EVENT_TYPES = (
     "tool.rejected",
     "tool.cancelled",
     "tool.unknown",
+    # A provider refused this image; later requests must leave it out (see AgentRunner).
+    "image.rejected",
 )
 _SCHEMA_MIGRATIONS_DEFINITION = """
 CREATE TABLE schema_migrations (

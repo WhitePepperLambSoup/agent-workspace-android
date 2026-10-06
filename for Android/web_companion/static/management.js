@@ -127,7 +127,18 @@
     $("btnBatterySettings").disabled = typeof native?.openBatteryOptimizationSettings !== "function";
     $("btnBackgroundSettings").disabled = typeof native?.openAppBackgroundSettings !== "function";
     $("btnShareDiagnostics").disabled = typeof native?.shareDiagnostics !== "function";
+    updates();
     await toolchain(isCurrent);
+  }
+  function updates() {
+    let value = {};
+    try { value = JSON.parse(native?.getUpdateSettings?.() || "{}"); } catch {}
+    const supported = typeof native?.checkForUpdates === "function";
+    $("btnCheckUpdates").disabled = !supported;
+    $("autoUpdateToggle").disabled = typeof native?.setAutoUpdateCheck !== "function";
+    $("autoUpdateToggle").checked = value.autoCheck !== false;
+    const checked = value.lastCheckedMs ? new Date(value.lastCheckedMs).toLocaleString() : t("尚未检查");
+    status("updateStatus", supported ? t("当前版本 {0} · 上次检查 {1}", value.version || "?", checked) : t("当前版本不支持应用内更新"));
   }
   async function toolchain(isCurrent = () => true) {
     let value;
@@ -465,7 +476,13 @@
   on("btnObserveScreen", "click", async () => { const response = await post("/mobile/android-system", { action: "observe" }); $("systemObservation").hidden = false; $("systemObservation").textContent = JSON.stringify(response.observation || response, null, 2); }, "doctorStatus");
   on("btnBatterySettings", "click", () => native?.openBatteryOptimizationSettings?.(), "doctorStatus");
   on("btnBackgroundSettings", "click", () => native?.openAppBackgroundSettings?.(), "doctorStatus");
-  on("btnShareDiagnostics", "click", () => { if (typeof native?.shareDiagnostics !== "function") throw new Error(t("当前版本不支持分享诊断日志")); native.shareDiagnostics(); status("diagnosticsStatus", t("正在生成诊断日志，稍后会打开分享面板")); }, "diagnosticsStatus");
+  on("btnShareDiagnostics", "click", () => {
+    if (typeof native?.exportDiagnostics === "function") { native.exportDiagnostics(); status("diagnosticsStatus", t("请选择分享、保存到手机或提交到 GitHub")); return; }
+    if (typeof native?.shareDiagnostics !== "function") throw new Error(t("当前版本不支持分享诊断日志"));
+    native.shareDiagnostics(); status("diagnosticsStatus", t("正在生成诊断日志，稍后会打开分享面板"));
+  }, "diagnosticsStatus");
+  on("btnCheckUpdates", "click", () => { if (typeof native?.checkForUpdates !== "function") throw new Error(t("当前版本不支持应用内更新")); native.checkForUpdates(); status("updateStatus", t("正在检查 GitHub 上的新版本...")); setTimeout(updates, 15000); }, "updateStatus");
+  on("autoUpdateToggle", "change", () => { native?.setAutoUpdateCheck?.($("autoUpdateToggle").checked); updates(); }, "updateStatus");
   for (const [name, operation] of [["Install", "install"], ["Probe", "probe"], ["Cancel", "cancel"], ["Remove", "remove"]]) on(`btnToolchain${name}`, "click", async () => { if (operation === "remove" && !window.confirm(t("移除下载的工具链？工作区文件会保留。"))) return; await post(`/mobile/toolchain/${operation}`, {}); await toolchain(); }, "toolchainStatus");
   on("btnToolchainRestart", "click", () => { if (ui.context().activeTask) throw new Error(t("请等待任务结束")); native?.restartEngine?.(); }, "toolchainStatus");
   on("btnExtensionsRestart", "click", () => { if (ui.context().activeTask) throw new Error(t("请等待当前任务结束")); native?.restartEngine?.(); status("extensionsStatus", t("引擎正在重启")); }, "extensionsStatus");

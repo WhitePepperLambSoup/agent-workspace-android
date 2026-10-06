@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -356,6 +357,7 @@ class AgentRunner:
         final_text = ""
         invalid_tool_rounds = 0
         context_halvings = 0
+        image_rejections = 0
         output_limit_continuations = 0
         empty_output_continuations = 0
         stream_recoveries = 0
@@ -945,6 +947,46 @@ class AgentRunner:
                                 call_usage.cached_tokens,
                             )
                         )
+                    # A provider that refuses an image would refuse every later request too, since
+                    # the image stays in the history. Drop the newest image still being sent,
+                    # record the rejection durably and retry; the last attempt drops them all.
+                    rejected_digest = (
+                        _newest_image_digest(list(request.messages))
+                        if _is_image_rejection(exc) and image_rejections <= _MAX_IMAGE_REJECTIONS
+                        else None
+                    )
+                    if rejected_digest is not None:
+                        image_rejections += 1
+                        digests = (
+                            {rejected_digest}
+                            if image_rejections < _MAX_IMAGE_REJECTIONS
+                            else {
+                                hashlib.sha256(image.data).hexdigest()
+                                for message in messages
+                                for image in message.images
+                            }
+                        )
+                        for digest in sorted(digests):
+                            await self._record(
+                                Event(
+                                    session_id=session.id,
+                                    type="image.rejected",
+                                    data={
+                                        "sha256": digest,
+                                        "provider": self._provider.id,
+                                        "model": model,
+                                        "status_code": exc.status_code,
+                                        "reason": str(exc)[:500],
+                                        "model_request_id": model_requested.id,
+                                    },
+                                    causation_id=model_requested.id,
+                                    correlation_id=correlation_id,
+                                )
+                            )
+                        messages[:] = _exclude_image_digests(
+                            messages, frozenset(digests), reason="rejected_by_provider"
+                        )
+                        continue
                     if (
                         exc.context_exceeded
                         and task_budget.max_context_bytes > 16 * 1024
@@ -2732,7 +2774,13 @@ class AgentRunner:
             pending_calls.clear()
             pending_results.clear()
 
+        rejected_images: set[str] = set()
         for event in events:
+            if event.type == "image.rejected":
+                digest = event.data.get("sha256")
+                if isinstance(digest, str) and len(digest) == 64:
+                    rejected_images.add(digest.lower())
+                continue
             call_id = event.data.get("tool_call_id")
             terminal_result = _terminal_tool_result(event)
             if (
@@ -2843,6 +2891,11 @@ class AgentRunner:
                     )
                 pending_calls.update((call.id, call) for call in message.tool_calls)
         close_interrupted_calls()
+        if rejected_images:
+            # An image the provider refused would make every later request fail the same way.
+            messages = _exclude_image_digests(
+                messages, frozenset(rejected_images), reason="rejected_by_provider"
+            )
         return messages
 
     @staticmethod
@@ -2911,8 +2964,37 @@ class AgentRunner:
         return ChatMessage(role=Role.SYSTEM, content="\n\n".join(sections))
 
 
+_IMAGE_REJECTION = re.compile(
+    r"(?i)(?:unsupported|invalid|corrupt\w*|could not (?:process|decode|read)|unable to "
+    r"(?:process|decode|read)|failed to (?:process|decode|read)|cannot (?:process|decode))"
+    r"[^.\n]{0,60}\bimage|\bimage[^.\n]{0,80}(?:unsupported|not supported|invalid|corrupt|"
+    r"could not be (?:processed|decoded)|cannot be (?:processed|decoded))"
+)
+_MAX_IMAGE_REJECTIONS = 3
+_REJECTED_IMAGE_NOTE = (
+    "[An attached image was removed from this conversation because the model provider "
+    "rejected it as invalid or unsupported.]"
+)
+
+
+def _is_image_rejection(exc: ProviderError) -> bool:
+    """A provider refusing the request because one of its images is unusable (not transient)."""
+    status = exc.status_code
+    return (status is None or status in {400, 415, 422}) and bool(_IMAGE_REJECTION.search(str(exc)))
+
+
+def _newest_image_digest(messages: list[ChatMessage]) -> str | None:
+    for message in reversed(messages):
+        for image in reversed(message.images):
+            return hashlib.sha256(image.data).hexdigest()
+    return None
+
+
 def _exclude_image_digests(
-    messages: list[ChatMessage], excluded: frozenset[str]
+    messages: list[ChatMessage],
+    excluded: frozenset[str],
+    *,
+    reason: str = "excluded_by_user",
 ) -> list[ChatMessage]:
     """Remove selected historical images while preserving content-free decisions."""
     filtered: list[ChatMessage] = []
@@ -2934,7 +3016,7 @@ def _exclude_image_digests(
                         "media_type": image.media_type,
                         "bytes": len(image.data),
                         "status": "excluded",
-                        "reason": "excluded_by_user",
+                        "reason": reason,
                     }
                 )
             else:
@@ -2947,7 +3029,13 @@ def _exclude_image_digests(
         merged = list(previous) if isinstance(previous, list) else []
         merged.extend(decisions)
         metadata["agent_workspace.context_images"] = merged
-        filtered.append(replace(message, images=tuple(kept), provider_metadata=metadata))
+        content = message.content
+        if reason == "rejected_by_provider" and _REJECTED_IMAGE_NOTE not in content:
+            # Tell the model the image is gone, so it does not keep reasoning about it.
+            content = f"{content}\n{_REJECTED_IMAGE_NOTE}" if content else _REJECTED_IMAGE_NOTE
+        filtered.append(
+            replace(message, content=content, images=tuple(kept), provider_metadata=metadata)
+        )
     return filtered
 
 

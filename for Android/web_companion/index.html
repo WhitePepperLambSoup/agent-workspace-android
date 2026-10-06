@@ -294,8 +294,15 @@
         <div class="management-section">
           <strong>诊断日志</strong>
           <p class="setting-hint">引擎出错、卡住或连不上时，把日志发给开发者排查。访问令牌和 API 密钥会自动隐藏；日志里可能有任务内容片段，请只发给信任的人。</p>
-          <button id="btnShareDiagnostics" class="menu-row" type="button"><span data-icon="share-2"></span><span>分享诊断日志</span><span data-icon="chevron-right"></span></button>
+          <button id="btnShareDiagnostics" class="menu-row" type="button"><span data-icon="share-2"></span><span>导出诊断日志</span><span data-icon="chevron-right"></span></button>
           <p id="diagnosticsStatus" class="page-status" role="status"></p>
+        </div>
+        <div class="management-section">
+          <strong>版本与更新</strong>
+          <p id="updateStatus" class="page-status" role="status"></p>
+          <button id="btnCheckUpdates" class="menu-row" type="button"><span data-icon="download"></span><span>检查更新</span><span data-icon="chevron-right"></span></button>
+          <label class="toggle-row" for="autoUpdateToggle"><span>每天自动检查新版本</span><input id="autoUpdateToggle" type="checkbox"></label>
+          <p class="setting-hint">从 GitHub 发布页下载，安装前会校验 SHA-256 和签名；安装需要你在系统安装界面确认。</p>
         </div>
         <div class="management-section">
           <strong>可选开发工具链</strong><p id="toolchainStatus" class="page-status" role="status"></p><dl id="toolchainSummary" class="usage-summary"></dl>

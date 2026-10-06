@@ -1,5 +1,43 @@
 # Changelog
 
+## 1.0.1 — 2026-10-06
+
+修复与改进版。Fixes and improvements.
+
+### 中文
+
+**修复**
+- 模型拒收图片（如 DeepSeek 返回「unsupported image」400）后，对话不再每次重试、继续都报同样的错：被拒的图片会自动从后续请求中移除并告知模型，任务继续执行。
+- `attach_image` 在附加前检查图片结构（PNG 校验和、JPEG 帧、GIF/WebP 完整性），截断或伪造的图片不会再被发给模型。
+- 启动卡在「正在等待本地服务凭据」：应用改为按引擎的启动进度判断是否卡死，正常的慢启动（更新后首次解压、任务较多）不会再被误杀重启；真正卡住时才重启引擎，并在加载页显示当前进行到哪一步。
+- 引擎启动的每一步与启动卡住时的线程堆栈都会写入日志，便于定位。
+- 修复诊断日志分享后接收方可能无法打开文件的问题。
+- 界面：任务失败时不再同时出现提示条和错误卡片两份相同的错误；玻璃输入框、顶栏和任务状态条加强了磨砂与底色，背后滚动的文字不再与按钮文字混在一起；过长的错误提示可滚动，不会挡住输入框。
+
+**新增**
+- 加载页右上角新增「导出日志」与「检查更新」（与「模型设置」并排），进不去应用也能用。导出日志可分享文件、保存到手机，或一键打开 GitHub 新建 Issue 页面并预填脱敏后的启动日志摘要（需登录 GitHub，由你确认后提交）。
+- 应用内更新（OTA）：每天自动检查 GitHub 是否有新版本（可在「设备与工具 → 版本与更新」关闭），也可手动检查；下载后校验 SHA-256、包名与签名，再交给系统安装器由你确认安装。首次安装更新时需按提示允许「安装未知应用」。
+
+**升级说明**
+- 从 1.0.0 直接覆盖安装即可，数据保留。从 1.0.1 起，之后的版本可在应用内更新。
+
+### English
+
+**Fixes**
+- After a provider rejects an image (for example DeepSeek's "unsupported image" 400), the conversation no longer fails the same way on every retry or continue: the rejected image is dropped from later requests, the model is told, and the task goes on.
+- `attach_image` checks the image structure first (PNG checksums, JPEG frames, GIF/WebP integrity), so truncated or fake images are never sent to the model.
+- Stuck at "Waiting for the local service credentials": the app now judges a stuck engine by its start-up progress, so a slow but healthy start (first start after an update, a long task history) is no longer killed and restarted; only a start with no progress is restarted, and the loading screen shows the current step.
+- Every engine start-up step, and the thread stacks of a stalled start, are written to the logs.
+- Fixed shared diagnostics files that the receiving app could not open.
+- Interface: a failed task no longer shows the same error twice (notice bar and error card); the glass composer, header and task status pill have more frost and tint so text scrolling behind them no longer mixes with their labels; long error notices scroll instead of covering the composer.
+
+**New**
+- "Export logs" and "Updates" on the loading screen next to "Model settings", usable even when the app cannot get past start-up. Export can share the file, save it to the phone, or open a new GitHub issue prefilled with a masked start-up log summary (you sign in to GitHub and submit it yourself).
+- In-app updates (OTA): a daily check for a new GitHub release (can be turned off under Device & tools → Version and updates) and a manual check; the download is verified (SHA-256, package name and signature) before Android's installer asks you to confirm. The first update asks you to allow installing unknown apps.
+
+**Upgrading**
+- Install over 1.0.0; data is kept. From 1.0.1 on, later versions can be installed from inside the app.
+
 ## 1.0.0 — 2026-10-05
 
 首个正式版。First stable release.

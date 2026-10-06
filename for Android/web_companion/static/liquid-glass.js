@@ -14,11 +14,11 @@
   // Surfaces that float over the conversation. Larger panels get a wider bezel. Large panels skip the
   // dispersive filter: on a big surface it is barely visible, and switching filters is itself costly.
   const SURFACES = [
-    { selector: "#mobileHeader", bezel: 24, scale: 64, frost: 1.2 },
+    { selector: "#mobileHeader", bezel: 24, scale: 64, frost: 4 },
 
-    { selector: ".composer", bezel: 26, scale: 64, frost: 1.5 },
+    { selector: ".composer", bezel: 26, scale: 64, frost: 7 },
     { selector: "#btnJumpLatest", bezel: 18, scale: 40, frost: 0.4 },
-    { selector: "#taskStatusBar", bezel: 14, scale: 30, frost: 0.8 },
+    { selector: "#taskStatusBar", bezel: 14, scale: 30, frost: 8 },
     { selector: ".chip", bezel: 20, scale: 44, frost: 0.8 },
     { selector: "#approvalShelf", bezel: 22, scale: 44, frost: 12, dispersion: false },
     { selector: ".empty-state", bezel: 24, scale: 50, frost: 8, dispersion: false },

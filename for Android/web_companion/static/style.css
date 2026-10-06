@@ -408,6 +408,20 @@ strong { font-weight: 600; }
   font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere;
 }
 #noticeText[data-tone="info"] { background: var(--accent-soft); color: var(--accent-soft-text); }
+/* A long provider error must not cover the composer; the full text stays scrollable. */
+#noticeText { max-height: 6.2em; overflow-y: auto; overscroll-behavior: contain; }
+/* Over a wallpaper the soft tints are translucent: frost what is behind so the notice stays legible. */
+:root[data-style="glass"] #noticeText {
+  -webkit-backdrop-filter: blur(14px) saturate(160%); backdrop-filter: blur(14px) saturate(160%);
+  background: rgba(255, 238, 236, .86);
+}
+:root[data-style="glass"] #noticeText[data-tone="info"] { background: rgba(236, 246, 244, .86); }
+:root[data-style="glass"][data-theme="dark"] #noticeText { background: rgba(58, 24, 24, .82); }
+:root[data-style="glass"][data-theme="dark"] #noticeText[data-tone="info"] { background: rgba(20, 44, 42, .82); }
+@media (prefers-color-scheme: dark) {
+  :root[data-style="glass"][data-theme="system"] #noticeText { background: rgba(58, 24, 24, .82); }
+  :root[data-style="glass"][data-theme="system"] #noticeText[data-tone="info"] { background: rgba(20, 44, 42, .82); }
+}
 #taskStatusBar {
   display: flex; align-items: center; flex-wrap: wrap; gap: 2px 8px; width: fit-content; max-width: 100%; margin-bottom: 8px !important;
   padding: 3px 4px 3px 12px; border-radius: var(--radius-pill); background: var(--surface-2); color: var(--text-2); font-size: 12.5px;
@@ -1256,6 +1270,15 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
 :root.liquid-refraction :is(#sessionDrawerPanel, #settingsSheet, #approvalShelf) { background-color: var(--glass-panel, rgba(255, 255, 255, .3)); }
 :root.liquid-refraction[data-theme="dark"] { --glass-panel: rgba(20, 25, 26, .38); }
 @media (prefers-color-scheme: dark) { :root.liquid-refraction[data-theme="system"] { --glass-panel: rgba(20, 25, 26, .38); } }
+/* Controls that carry their own text over the scrolling conversation (header title, composer, task
+   status) keep enough tint, with the frost set in liquid-glass.js, that the text passing behind them
+   never reads through and mixes with their labels. The rims still bend what is underneath. */
+:root.liquid-refraction :is(.composer, #taskStatusBar) { background-color: var(--glass-control, rgba(255, 255, 255, .36)); }
+:root.liquid-refraction #mobileHeader { background-color: var(--glass-header, rgba(255, 255, 255, .2)); }
+:root.liquid-refraction[data-theme="dark"] { --glass-control: rgba(20, 25, 26, .46); --glass-header: rgba(20, 25, 26, .28); }
+@media (prefers-color-scheme: dark) {
+  :root.liquid-refraction[data-theme="system"] { --glass-control: rgba(20, 25, 26, .46); --glass-header: rgba(20, 25, 26, .28); }
+}
 /* Everything inside the sidebar and the settings sheet (groups, rows, fields, lists on every page) is
    a lighter pane of the same glass rather than an opaque card. */
 :root[data-style="glass"] :is(#sessionDrawerPanel, #settingsSheet) {

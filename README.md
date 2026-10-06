@@ -12,7 +12,7 @@ An AI agent that runs on your Android phone. It plans and carries out multi-step
 
 ## Download
 
-Get `AgentWorkspace_1.0.0_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256.
+Get `AgentWorkspace_1.0.1_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app (Device & tools → Version and updates, or "Updates" on the loading screen).
 
 - Android 8.0 (API 26) or newer, 64-bit ARM (`arm64-v8a`) or `x86_64`.
 - About 56 MB to install. Local models are optional downloads inside the app.
@@ -30,7 +30,7 @@ Get `AgentWorkspace_1.0.0_android.apk` from [Releases](https://github.com/WhiteP
 9. **Automation.** Scheduled tasks, reusable workflows with step replay, task evaluations and hand-off between devices.
 10. **Optional developer toolchain.** A pinned Alpine toolchain (Git, Python, Node, Pyright) installs on demand and runs in an isolated PRoot process.
 11. **Phone control (opt-in).** With the accessibility service enabled, the agent can tap, type and navigate apps under your approval; password fields and the lock screen are off limits.
-12. **Recovers on its own.** If Android stops the engine, the app restarts it and reconnects; a diagnostics page can share a log file with secrets removed.
+12. **Recovers on its own.** If Android stops the engine, the app restarts it and reconnects; logs can be exported with secrets removed — shared, saved, or sent as a GitHub issue — even from the loading screen when the app cannot start.
 
 <p align="center">
   <img src="docs/screenshots/backgrounds-en.png" width="250" alt="Background picker with twelve backgrounds and a custom wallpaper">

@@ -2644,7 +2644,6 @@
   function finishTask(task) {
     if (activeTask !== task || !task.done || disposed) return;
     if (task.error) {
-      notice(t("请求失败: {0}", task.error));
       showTaskError(t("任务失败: {0}", task.error));
       retryTask = task.prompt ? task : null;
       updateTaskStatus(t("任务失败"), { retry: !!task.prompt, idle: true });
@@ -2885,7 +2884,6 @@
       if (disposed) return;
       // A transport failure after an acknowledgement still needs the same task identity.
       if (task.id) { try { retainPendingRequest(sessionId, payload, plainText, imports, requestId); } catch {} }
-      notice(t("请求失败: {0}", error.message));
       showTaskError(t("任务提交失败: {0}", error.message));
       retryTask = task;
       if (!elements.promptInput.value.trim() && customText === null) {

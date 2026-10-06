@@ -91,6 +91,7 @@ class TermuxDaemonService : Service() {
         }
         val userInitiated = intent != null && intent.action != EngineRecovery.ACTION_RECOVER
         if (!lifecycleState.beginStart(userInitiated)) {
+            EngineStartupLog.append(this, "service: automatic start skipped (stopped by the user or waiting for the app)")
             serviceClosing = true
             releaseWakeLock()
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -122,6 +123,7 @@ class TermuxDaemonService : Service() {
                     engineRestarting = true
                     val previous = currentEngineJob
                     if (previous != null && !previous.isCompleted) {
+                        EngineStartupLog.append(this@TermuxDaemonService, "service: stopping the previous engine")
                         stopPython()
                         val stopped = withTimeoutOrNull(10000) {
                             previous.join()
@@ -140,7 +142,12 @@ class TermuxDaemonService : Service() {
                         ?: activeProviderConfiguration
                         ?: MobileProviderSettings.load(this@TermuxDaemonService).toJson()
                     LocalModelBridge.configureRuntime(configuration)
-                    if (!Python.isStarted()) Python.start(AndroidPlatform(this@TermuxDaemonService))
+                    if (!Python.isStarted()) {
+                        // The first start after an install or update unpacks the Python runtime and can take a while.
+                        EngineStartupLog.append(this@TermuxDaemonService, "service: starting the Python runtime")
+                        Python.start(AndroidPlatform(this@TermuxDaemonService))
+                        EngineStartupLog.append(this@TermuxDaemonService, "service: Python runtime started")
+                    }
                     File(filesDir, "serve.token").delete()
                     activeProviderConfiguration = configuration
                     engineJob = serviceScope.launch {
@@ -151,6 +158,7 @@ class TermuxDaemonService : Service() {
                             throw e
                         } catch (e: Exception) {
                             android.util.Log.e("AgentEmbedded", "Embedded Python failed", e)
+                            EngineStartupLog.append(this@TermuxDaemonService, "service: engine ended with ${e.javaClass.simpleName}: ${e.message.orEmpty().lineSequence().firstOrNull().orEmpty().take(300)}")
                             runCatching { File(filesDir, STARTUP_FAILURE_FILE).writeText(e.javaClass.simpleName) }
                             lifecycleState.mark("failed", "The embedded engine failed to start")
                             releaseWakeLock()
@@ -172,6 +180,7 @@ class TermuxDaemonService : Service() {
             } catch (e: Exception) {
                 engineRestarting = false
                 android.util.Log.e("AgentEmbedded", "Failed to initialize embedded Python", e)
+                EngineStartupLog.append(this@TermuxDaemonService, "service: Python failed to initialize: ${e.javaClass.simpleName}: ${e.message.orEmpty().take(300)}")
                 runCatching { File(filesDir, STARTUP_FAILURE_FILE).writeText(e.javaClass.simpleName) }
                 lifecycleState.mark("failed", "The embedded engine failed to initialize")
                 releaseWakeLock()

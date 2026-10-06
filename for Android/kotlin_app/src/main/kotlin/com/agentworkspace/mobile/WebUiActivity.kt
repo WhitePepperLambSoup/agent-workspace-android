@@ -48,6 +48,8 @@ import com.agentworkspace.mobile.localmodels.TrainedLocalModel
 import com.agentworkspace.mobile.workspace.WorkspaceFileActionController
 import com.agentworkspace.mobile.workspace.WorkspaceStorageAccess
 import com.agentworkspace.mobile.sharing.ShareInboxController
+import com.agentworkspace.mobile.embedded.EngineStartupLog
+import com.agentworkspace.mobile.update.AppSupportController
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -78,6 +80,11 @@ class WebUiActivity : ComponentActivity() {
         private const val ENGINE_UNRESPONSIVE_ATTEMPTS = 16
         /** Waits (0.5 s each) for a start-up to publish its token before the engine process is replaced. */
         private const val ENGINE_MISSING_TOKEN_ATTEMPTS = 100
+        /** Unpacking the Python runtime after an install or update logs nothing for a while. */
+        private const val ENGINE_UNPACK_ATTEMPTS = 240
+        /** Give up after ~60 s without a start-up step, or ~6 min in total even while steps keep coming. */
+        private const val ENGINE_START_IDLE_ATTEMPTS = 120
+        private const val ENGINE_START_MAX_ATTEMPTS = 720
     }
 
     /** The token the loaded console page uses; a different serve.token means the engine was restarted. */
@@ -93,6 +100,7 @@ class WebUiActivity : ComponentActivity() {
     private lateinit var settingsButton: Button
     private var fileUploadCallback: ValueCallback<Array<Uri>>? = null
     private val activityScope = CoroutineScope(Dispatchers.Main + Job())
+    private val appSupport = AppSupportController(this, activityScope) { pageDialogTheme() }
     private var initializationJob: Job? = null
     private val sharedTexts = ArrayDeque<String>()
     private val shareHandler = Handler(Looper.getMainLooper())
@@ -439,6 +447,8 @@ class WebUiActivity : ComponentActivity() {
                 requestVoiceInputAction = { launchVoiceInput() },
                 restartEngineAction = { initAndLaunchEngine(restart = true) },
                 reconnectEngineAction = { reconnectEngine() },
+                exportLogsAction = { appSupport.showLogExport() },
+                checkUpdatesAction = { appSupport.checkNow() },
                 stopEngineAction = {
                     startService(Intent(this@WebUiActivity, TermuxDaemonService::class.java).setAction(TermuxDaemonService.ACTION_STOP))
                     statusText.text = UiText.of(this@WebUiActivity, "引擎已停止", "Engine stopped")
@@ -576,15 +586,19 @@ class WebUiActivity : ComponentActivity() {
                 text = UiText.of(this@WebUiActivity, "正在初始化运行环境...", "Initializing the runtime...")
                 setTextColor(if (startupDark) Color.WHITE else Color.parseColor("#18201E"))
                 textSize = 14f
-                layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, android.view.Gravity.CENTER).apply {
+                gravity = android.view.Gravity.CENTER
+                maxLines = 4
+                layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, android.view.Gravity.CENTER).apply {
                     topMargin = 140
+                    leftMargin = 48
+                    rightMargin = 48
                 }
             }
             retryButton = Button(this@WebUiActivity).apply {
                 text = UiText.of(this@WebUiActivity, "重试连接", "Retry")
                 visibility = View.GONE
                 layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, android.view.Gravity.CENTER).apply {
-                    topMargin = 260
+                    topMargin = 400
                 }
                 setOnClickListener {
                     visibility = View.GONE
@@ -592,8 +606,18 @@ class WebUiActivity : ComponentActivity() {
                     initAndLaunchEngine()
                 }
             }
-            settingsButton = Button(this@WebUiActivity).apply {
-                text = UiText.of(this@WebUiActivity, "模型设置", "Model settings")
+            // Help that must work even when the engine never comes up: logs, updates, model settings.
+            fun toolButton(label: String, action: () -> Unit) = Button(this@WebUiActivity).apply {
+                text = label
+                isAllCaps = false
+                minWidth = 0
+                minimumWidth = 0
+                setOnClickListener { action() }
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = 12 }
+            }
+            settingsButton = toolButton(UiText.of(this@WebUiActivity, "模型设置", "Model settings")) { showProviderSettings() }
+            val toolRow = LinearLayout(this@WebUiActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                     android.view.Gravity.TOP or android.view.Gravity.END
@@ -601,12 +625,14 @@ class WebUiActivity : ComponentActivity() {
                     topMargin = 20
                     rightMargin = 20
                 }
-                setOnClickListener { showProviderSettings() }
+                addView(toolButton(UiText.of(this@WebUiActivity, "导出日志", "Export logs")) { appSupport.showLogExport() })
+                addView(toolButton(UiText.of(this@WebUiActivity, "检查更新", "Updates")) { appSupport.checkNow() })
+                addView(settingsButton)
             }
             addView(pb)
             addView(statusText)
             addView(retryButton)
-            addView(settingsButton)
+            addView(toolRow)
         }
 
         rootLayout.addView(webView)
@@ -634,6 +660,7 @@ class WebUiActivity : ComponentActivity() {
         shareInbox.captureIntent(intent, incomingShareBatchId)
         voicePending = intent?.getBooleanExtra("voice_input", false) == true || intent?.action in listOf(Intent.ACTION_ASSIST, Intent.ACTION_VOICE_COMMAND)
         initAndLaunchEngine()
+        appSupport.autoCheckIfDue()
     }
 
     private fun pageDialogTheme(): Int =
@@ -705,6 +732,7 @@ class WebUiActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        appSupport.onResume()
         if (::webView.isInitialized) {
             webView.onResume()
             dispatchNotificationSettingsChanged()
@@ -998,33 +1026,54 @@ class WebUiActivity : ComponentActivity() {
                     var unanswered = 0
                     var tokenless = 0
                     var revived = false
-                    while (!ready && attempts < 120) {
+                    // A slow start that keeps logging steps (first start after an update, a large task
+                    // history) is not stuck; only time without any progress counts towards giving up.
+                    var idle = 0
+                    var progress = EngineStartupLog.progressMark(this@WebUiActivity)
+                    var lastStep = EngineStartupLog.lastStep(this@WebUiActivity)
+                    while (!ready && attempts < ENGINE_START_MAX_ATTEMPTS && idle < ENGINE_START_IDLE_ATTEMPTS) {
                         attempts++
+                        idle++
+                        val mark = EngineStartupLog.progressMark(this@WebUiActivity)
+                        if (mark != progress) {
+                            progress = mark
+                            lastStep = EngineStartupLog.lastStep(this@WebUiActivity)
+                            idle = 0
+                            tokenless = 0
+                        }
+                        // Unpacking the Python runtime logs nothing until it is done; its own limit applies.
+                        val unpacking = lastStep == "service: starting the Python runtime"
+                        if (unpacking && tokenless < ENGINE_UNPACK_ATTEMPTS) idle = 0
                         if (File(filesDir, TermuxDaemonService.STARTUP_FAILURE_FILE).isFile) {
                             if (!revived) {
                                 revived = true
                                 withContext(Dispatchers.Main) { statusText.text = UiText.of(this@WebUiActivity, "正在重新启动本地引擎...", "Restarting the local engine...") }
                                 replaceEngineProcess(daemonIntent, "startup failed")
                                 attempts = 0
+                                idle = 0
                                 unanswered = 0
                                 continue
                             }
-                            throw IllegalStateException(UiText.of(this@WebUiActivity, "本地 Python 服务启动失败", "The local Python service failed to start"))
+                            val step = EngineStartupLog.lastStep(this@WebUiActivity)?.let { "\n$it" }.orEmpty()
+                            throw IllegalStateException(UiText.of(this@WebUiActivity, "本地 Python 服务启动失败，可点右上角“导出日志”$step", "The local Python service failed to start; use Export logs$step"))
                         }
                         token = readServeToken()
                         if (token.isNullOrEmpty() || token == previousEngineToken) {
+                            val step = startupStepText(lastStep)
                             withContext(Dispatchers.Main) {
                                 statusText.text = if (token == previousEngineToken && token != null)
-                                    UiText.of(this@WebUiActivity, "正在等待引擎重新启动...", "Waiting for the engine to restart...") else UiText.of(this@WebUiActivity, "正在等待本地服务凭据...", "Waiting for the local service credentials...")
+                                    UiText.of(this@WebUiActivity, "正在等待引擎重新启动...", "Waiting for the engine to restart...") else UiText.of(this@WebUiActivity, "正在等待本地服务凭据...", "Waiting for the local service credentials...") + step.orEmpty().let { if (it.isEmpty()) "" else "\n$it" }
                             }
-                            // A normal start publishes its token within seconds; none after ~50 s means
-                            // the engine process is gone or stuck before binding.
+                            // A normal start publishes its token within seconds; a long stretch with neither a
+                            // token nor a new start-up step means the engine process is gone or stuck.
+                            // Unpacking the Python runtime logs nothing until it finishes, so allow it longer.
                             unanswered = 0
-                            if (++tokenless >= ENGINE_MISSING_TOKEN_ATTEMPTS && !revived) {
+                            if (++tokenless >= (if (unpacking) ENGINE_UNPACK_ATTEMPTS else ENGINE_MISSING_TOKEN_ATTEMPTS) && !revived) {
                                 revived = true
                                 withContext(Dispatchers.Main) { statusText.text = UiText.of(this@WebUiActivity, "正在重新启动本地引擎...", "Restarting the local engine...") }
                                 replaceEngineProcess(daemonIntent, "no engine token")
                                 attempts = 0
+                                idle = 0
                                 tokenless = 0
                                 continue
                             }
@@ -1038,6 +1087,7 @@ class WebUiActivity : ComponentActivity() {
                                 withContext(Dispatchers.Main) { statusText.text = UiText.of(this@WebUiActivity, "本地引擎没有响应，正在重新启动...", "The local engine is not responding; restarting it...") }
                                 replaceEngineProcess(daemonIntent, "identity unanswered")
                                 attempts = 0
+                                idle = 0
                                 unanswered = 0
                                 continue
                             }
@@ -1070,7 +1120,8 @@ class WebUiActivity : ComponentActivity() {
                     loadedEngineToken = Uri.parse(consoleUrl).getQueryParameter("token")
                     webView.loadUrl(consoleUrl)
                 } else {
-                    statusText.text = UiText.of(this@WebUiActivity, "本地 Agent 服务启动超时，请点击重试", "The local Agent service timed out; tap Retry")
+                    val step = startupStepText(withContext(Dispatchers.IO) { EngineStartupLog.lastStep(this@WebUiActivity) })?.let { "\n$it" }.orEmpty()
+                    statusText.text = UiText.of(this@WebUiActivity, "本地 Agent 服务启动超时，请点击重试，或点右上角“导出日志”$step", "The local Agent service timed out; tap Retry or Export logs$step")
                     retryButton.visibility = View.VISIBLE
                 }
             } catch (e: CancellationException) {
@@ -1176,6 +1227,25 @@ class WebUiActivity : ComponentActivity() {
         } finally {
             conn.disconnect()
         }
+    }
+
+    /** The latest engine start-up step (from engine-startup.log) in words for the loading screen. */
+    private fun startupStepText(step: String?): String? {
+        step ?: return null
+        val (zh, en) = when {
+            step == "service: starting the Python runtime" -> "正在解压并启动 Python 运行时（更新后首次启动较慢）" to "Unpacking the Python runtime (slower right after an update)"
+            step.startsWith("service: stopping") -> "正在停止上一个引擎" to "Stopping the previous engine"
+            step in setOf("service: Python runtime started", "engine starting", "environment configured") -> "正在加载引擎" to "Loading the engine"
+            step == "engine modules loaded" || step.startsWith("building the agent runtime") || step.startsWith("opening workspace") ->
+                "正在打开工作区" to "Opening the workspace"
+            step.startsWith("building the base runtime") -> "正在打开数据库与工具" to "Opening the database and tools"
+            step.startsWith("base runtime ready") || step.startsWith("recovering") -> "正在恢复中断的任务" to "Recovering interrupted tasks"
+            step.startsWith("recovered") || step.startsWith("agent runtime ready") -> "正在启动本地服务" to "Starting the local service"
+            step.startsWith("engine failed") || step.startsWith("service: engine ended") || step.startsWith("service: Python failed") ->
+                "引擎启动出错：${step.substringAfter(": ").take(120)}" to "Engine start-up error: ${step.substringAfter(": ").take(120)}"
+            else -> return null
+        }
+        return UiText.of(this, zh, en)
     }
 
     private fun readServeToken(): String? {

@@ -135,6 +135,7 @@ async def _build_mobile_workspace_runtime(
     from agent_workspace.storage.lock import ProcessWriteLockGroup
 
     database = database.expanduser().resolve()
+    _startup_phase("opening workspace catalog")
     catalog = MobileWorkspaceCatalog(database, workspace)
     writer_locks = ProcessWriteLockGroup()
 
@@ -190,10 +191,12 @@ async def _build_mobile_workspace_runtime(
             await runtime.aclose()
             raise
 
+    _startup_phase("building the base runtime (database, tools, extensions)")
     base_controller, runtime = await build_controller(
         workspace,
         database.parent / "mobile-extensions.json",
     )
+    _startup_phase("base runtime ready")
 
     async def child_controller(
         session: Session,
@@ -213,11 +216,25 @@ async def _build_mobile_workspace_runtime(
     )
     try:
         # Recover all visible durable tasks before lazily starting session controllers.
-        await router.start()
+        _startup_phase("recovering interrupted tasks")
+        recovered = await router.start()
+        _startup_phase(f"recovered {len(recovered)} interrupted task(s)")
     except BaseException:
         await runtime.aclose()
         raise
     return runtime, router, catalog
+
+
+def _startup_phase(message: str) -> None:
+    """Append a start-up step to <data>/logs/engine-startup.log (the Android host shares this file)."""
+    data_dir = os.getenv("AGENT_WORKSPACE_DATA_DIR")
+    if not data_dir:
+        return
+    with suppress(OSError):
+        log = Path(data_dir) / "logs" / "engine-startup.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{os.getpid()}] {message}\n")
 
 
 def _publish_serve_token(token: str) -> None:
@@ -302,6 +319,7 @@ async def _run_mobile_web_server(
 
     config = ProviderConfig.from_environment()
     autonomy = configured_mobile_autonomy()
+    _startup_phase("building the agent runtime")
     runtime, controller, workspace_catalog = await _build_mobile_workspace_runtime(
         workspace, database, config, autonomy=autonomy
     )
@@ -348,11 +366,13 @@ async def _run_mobile_web_server(
         static_assets=assets,
         workspace_catalog=workspace_catalog,
     )
+    _startup_phase("agent runtime ready")
     api.start()
     # Publish the token only once this engine owns the port. Writing it earlier let a new engine
     # that failed to bind (a stalled predecessor still listening) advertise a token that nothing
     # on the port could prove, and the app waited on the identity check forever.
     _publish_serve_token(token)
+    _startup_phase("gateway listening; token published")
     console_url = f"{api.address}/console"
     if os.getenv("AGENT_WORKSPACE_EMBEDDED_PYTHON") != "chaquopy":
         console_url += f"?token={token}"
