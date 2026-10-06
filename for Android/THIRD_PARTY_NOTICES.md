@@ -10,8 +10,9 @@
 | Gradle Wrapper 8.11.1 | Gradle 官方 `v8.11.1` 标准脚本/JAR及发布校验文件 | Apache-2.0；脚本保留原版权，摘要清单在 `gradle/wrapper/gradle-wrapper-verification.json` |
 | Chaquopy 17.0.0 | 官方 `chaquo/chaquopy/17.0.0/LICENSE.txt` | MIT，Copyright 2017–2025 Chaquo Ltd and contributors；完整文本及 SHA256 保存于 `licenses/Chaquopy-17.0.0-LICENSE.txt`，准备时校验并复制到 APK。嵌入的 CPython 和 Python 依赖仍保留各自许可 |
 | AndroidX、Kotlin、WorkManager、Shizuku API | Gradle 固定依赖 | Apache-2.0；保留各组件上游 notices。可选 Shizuku 服务需要用户另行安装/授权 |
-| SQLite Android 3450200 | `mil.nga:sqlite-android:3450200` | 该 Maven artifact 的 POM 声明 Public Domain，来源为 SQLite Fossil；保留上游版权/公共领域说明 |
-| 移动离线 Web bundle | `web_companion/static/mobile-vendor.js` | 保留相邻 `mobile-vendor.LICENSE.txt` |
+| SQLite Android 3500400 | `mil.nga:sqlite-android:3500400` | 该 Maven artifact 的 POM 声明 Public Domain，来源为 SQLite Fossil；保留上游版权/公共领域说明 |
+| 移动离线 Web bundle（Markdown、KaTeX 公式、图标） | `web_companion/static/mobile-vendor.js` | 保留相邻 `mobile-vendor.LICENSE.txt`（含 unified/remark/rehype、KaTeX、lucide 等各包许可） |
+| Mermaid 流程图 bundle | `web_companion/static/mobile-mermaid.js`，按需加载 | Mermaid 11（MIT），许可文本在 `mobile-vendor.LICENSE.txt`；其打包依赖的许可注释保留在 bundle 内 |
 | Termux PRoot 5.1.107.95 | `prepare_android_toolchain.py` 中固定官方 .deb 和源码 ZIP | GPL-2.0-only；PRoot 作为独立进程执行，不与 Agent/llama.cpp JNI 链接；源代码/许可随 APK 提供 |
 | talloc 2.4.3 | 固定 Termux .deb 与 Samba 官方源码 archive | 上游 library 为 LGPL-3.0-or-later；Termux 包声明 GPL-3.0。保留完整来源许可及包声明 |
 | libandroid-shmem 0.7 | 固定 Termux 官方 .deb 和源码 archive | BSD-3-Clause；完整许可随对应源码 archive 提供 |

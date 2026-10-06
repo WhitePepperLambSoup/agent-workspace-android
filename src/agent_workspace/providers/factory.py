@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from agent_workspace.application.ports import ManagedModelProvider
-from agent_workspace.config import ProviderConfig, ProviderProtocol
+from agent_workspace.config import ProviderConfig, ProviderProtocol, is_loopback_endpoint
 from agent_workspace.providers.anthropic import AnthropicProvider
 from agent_workspace.providers.gemini import GeminiProvider
 from agent_workspace.providers.ollama import OllamaProvider
@@ -57,6 +57,16 @@ def create_provider(
     if config.protocol is ProviderProtocol.OLLAMA:
         return OllamaProvider(*arguments, timeout=resolved_timeout, client=client)
     raise AssertionError(f"unsupported provider protocol: {config.protocol}")
+
+
+def _is_local(config: ProviderConfig) -> bool:
+    return config.protocol is ProviderProtocol.OLLAMA or is_loopback_endpoint(config.base_url)
+
+
+def _local_server_hint(config: ProviderConfig) -> str:
+    if config.protocol is ProviderProtocol.OLLAMA:
+        return "Ensure Ollama is running and accessible."
+    return "Ensure the local model server (for example llama.cpp or LM Studio) is running."
 
 
 async def probe_provider_connection(
@@ -119,27 +129,23 @@ async def probe_provider_connection(
                 f"Provider service error (status {code}): Service temporarily unavailable.",
             )
         if "timed out" in msg_str:
-            if config.protocol is ProviderProtocol.OLLAMA or "127.0.0.1" in config.base_url:
+            if _is_local(config):
                 return (
                     False,
-                    f"Connection timed out at {config.base_url}. "
-                    "Ensure Ollama is running and accessible.",
+                    f"Connection timed out at {config.base_url}. {_local_server_hint(config)}",
                 )
             return False, f"Connection to {config.base_url} timed out after {timeout:g}s."
-        if ("failed" in msg_str or "refused" in msg_str) and (
-            config.protocol is ProviderProtocol.OLLAMA or "127.0.0.1" in config.base_url
-        ):
+        if ("failed" in msg_str or "refused" in msg_str) and _is_local(config):
             return (
                 False,
-                f"Connection failed at {config.base_url}. Ensure Ollama is running and accessible.",
+                f"Connection failed at {config.base_url}. {_local_server_hint(config)}",
             )
         return False, f"Provider error: {exc}"
     except httpx.ConnectError as exc:
-        if config.protocol is ProviderProtocol.OLLAMA or "127.0.0.1" in config.base_url:
+        if _is_local(config):
             return (
                 False,
-                f"Connection refused at {config.base_url}. "
-                "Ensure Ollama is running and accessible.",
+                f"Connection refused at {config.base_url}. {_local_server_hint(config)}",
             )
         return False, f"Network connection failed to {config.base_url}: {exc}"
     except (httpx.TimeoutException, TimeoutError):

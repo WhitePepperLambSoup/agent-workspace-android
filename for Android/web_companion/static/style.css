@@ -287,12 +287,25 @@ strong { font-weight: 600; }
 .code-toolbar .icon-button svg { width: 16px; height: 16px; }
 .code-wrap pre { margin: 0; padding: 12px 14px; overflow: auto; white-space: pre; font: 12.5px/1.6 var(--font-mono); }
 .code-wrap code { font: inherit; white-space: inherit; }
+/* Formulas: KaTeX emits MathML, which Chromium lays out natively (no web fonts needed). */
+.message-body .katex math { font-size: 1.08em; }
+.message-body .katex math[display="block"] { display: block; max-width: 100%; margin: 12px 0; padding: 2px 0; overflow-x: auto; overflow-y: hidden; }
+/* A drawn diagram replaces its source code; the toolbar still copies the source. */
+.code-wrap.has-diagram { background: var(--surface); color: var(--text); }
+.code-wrap.has-diagram pre { display: none; }
+.code-wrap .diagram { padding: 12px; overflow-x: auto; text-align: center; }
+.code-wrap .diagram svg { max-width: 100%; height: auto; }
 .table-scroll { max-width: 100%; margin: 12px 0; overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
 .message-body table { min-width: 100%; border-collapse: collapse; border-style: hidden; font-size: 13px; }
 .message-body th, .message-body td { min-width: 72px; padding: 8px 10px; border: 1px solid var(--border); vertical-align: top; }
 .message-body th { background: var(--surface-2); font-weight: 600; text-align: left; }
 
 .card-action-bar { display: flex; gap: 0; margin: 4px 0 0 -10px; }
+/* Copy / edit under your own messages: small and to the right so bubbles stay compact. */
+.message-card.user .card-action-bar { justify-content: flex-end; margin: 2px -8px -6px 0; }
+.message-card.user .btn-card-action { width: 32px; height: 32px; min-width: 32px; min-height: 32px; opacity: .75; }
+.message-card.user .btn-card-action svg { width: 15px; height: 15px; }
+.btn-card-action[hidden] { display: none; }
 .btn-card-action { color: var(--text-3); }
 .btn-card-action svg { width: 17px; height: 17px; }
 
@@ -339,6 +352,8 @@ strong { font-weight: 600; }
   max-height: 260px; margin: 0 10px 10px; padding: 10px; overflow: auto; border-radius: var(--radius-sm);
   background: var(--surface-2); color: var(--text); font: 12px/1.55 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere;
 }
+/* Live output of a running terminal command (last lines only). */
+.message-card.tool pre.tool-live { max-height: 200px; color: var(--text-2); }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .history-error, .task-error {
@@ -390,6 +405,13 @@ strong { font-weight: 600; }
   display: grid; grid-template-columns: 1fr 1fr; gap: 8px; width: 100%; max-width: calc(var(--content-width) + 24px);
   margin: 0 auto; padding: 4px 12px 6px;
 }
+/* More than four quick tasks: keep two rows and scroll sideways instead of pushing the composer up. */
+#quickChipsBar.many {
+  grid-template-columns: none; grid-template-rows: auto auto; grid-auto-flow: column; grid-auto-columns: calc(50% - 4px);
+  overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x proximity; scrollbar-width: none;
+}
+#quickChipsBar.many::-webkit-scrollbar { display: none; }
+#quickChipsBar.many .chip { scroll-snap-align: start; }
 .chip {
   display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 56px; padding: 9px 12px; border: 1px solid var(--border);
   border-radius: var(--radius); background: var(--surface); color: var(--text); font-size: 13.5px; font-weight: 600; text-align: left;
@@ -408,6 +430,15 @@ strong { font-weight: 600; }
   font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere;
 }
 #noticeText[data-tone="info"] { background: var(--accent-soft); color: var(--accent-soft-text); }
+/* Editing an earlier message: says what sending will replace, with a way out. */
+.edit-banner {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 8px; padding: 6px 6px 6px 12px; border-radius: var(--radius-sm);
+  background: var(--accent-soft); color: var(--accent-soft-text); font-size: 12.5px; line-height: 1.45;
+}
+.edit-banner[hidden] { display: none; }
+.edit-banner > [data-icon] svg { width: 16px; height: 16px; }
+.edit-banner > span:nth-child(2) { flex: 1; min-width: 0; }
+:root[data-style="glass"] .edit-banner { -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); background: var(--glass-control, var(--accent-soft)); }
 /* A long provider error must not cover the composer; the full text stays scrollable. */
 #noticeText { max-height: 6.2em; overflow-y: auto; overscroll-behavior: contain; }
 /* Over a wallpaper the soft tints are translucent: frost what is behind so the notice stays legible. */
@@ -454,7 +485,17 @@ strong { font-weight: 600; }
 }
 #promptInput:focus-visible { outline: none; }
 #promptInput::placeholder { color: var(--text-3); }
-.composer-toolbar { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.composer-toolbar { position: relative; display: flex; align-items: center; gap: 4px; min-width: 0; }
+/* Paperclip menu (take a photo / choose files), opening upwards from the composer. */
+.attach-menu {
+  position: absolute; bottom: calc(100% + 10px); left: 0; z-index: 20; display: grid; min-width: 168px; padding: 6px;
+  border: 1px solid var(--border-strong); border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-2, var(--shadow-1));
+}
+.attach-menu .menu-row { min-height: 44px; border-radius: 10px; }
+:root[data-style="glass"] .attach-menu {
+  -webkit-backdrop-filter: blur(18px) saturate(160%); backdrop-filter: blur(18px) saturate(160%);
+  background: var(--glass-control, var(--glass-fill-strong));
+}
 .composer-toolbar > .icon-button { width: 40px; height: 40px; border-radius: 50%; }
 .composer-spacer { flex: 1 1 auto; }
 .composer-chip {
@@ -605,6 +646,8 @@ strong { font-weight: 600; }
 }
 .settings-page > label:first-child:not(.toggle-row), .settings-page > div:first-child > label:first-child { margin-top: 4px; }
 /* Plain selector lists rather than :is() (Chromium 88+), with equal :not() weights on each branch. */
+.settings-page input:not([type="checkbox"]):not([type="file"]), .settings-page select:not([type="checkbox"]):not([type="file"]),
+.settings-page textarea:not([type="checkbox"]):not([type="file"]) {
   display: block; width: 100%; min-width: 0; min-height: var(--touch); padding: 10px 12px; border: 1px solid var(--border-strong);
   border-radius: 12px; background: var(--field); color: var(--text); font-size: 15px; line-height: 1.4;
   transition: border-color .15s, box-shadow .15s;
@@ -672,6 +715,32 @@ strong { font-weight: 600; }
 .management-list > :last-child, .task-center-list > :last-child, .search-results > :last-child, .workspace-files-list > :last-child,
 .import-list > :last-child, .usage-models-list > :last-child { border-bottom: 0; }
 .management-row-body { display: grid; flex: 1 1 160px; gap: 4px; min-width: 0; }
+/* Saved model profiles: name and model, then switch / delete. */
+.profile-row { flex-wrap: nowrap; }
+.profile-row .management-row-body { flex: 1 1 auto; }
+.profile-row .profile-use { flex: 0 0 auto; min-height: 36px; padding: 0 14px; }
+.profile-row[aria-current="true"] strong { color: var(--accent); }
+/* Quick task editor: icon, text, then move / edit / delete. */
+.quick-task-row { flex-wrap: nowrap; }
+.quick-task-row .management-row-body { flex: 1 1 auto; }
+.quick-task-row .icon-button { flex: 0 0 auto; width: 38px; height: 38px; }
+.quick-task-row .icon-button svg { width: 17px; height: 17px; }
+.quick-task-icon { display: grid; flex: 0 0 34px; height: 34px; place-items: center; border-radius: 10px; background: var(--accent-soft); color: var(--accent); }
+.quick-task-icon svg { width: 18px; height: 18px; }
+.icon-picker { display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); gap: 6px; margin: 6px 0 10px; }
+.icon-option {
+  display: grid; height: 44px; place-items: center; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface); color: var(--text-2); cursor: pointer;
+}
+.icon-option svg { width: 20px; height: 20px; }
+.icon-option[aria-checked="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+/* Background services: name and state, command, then open / output / stop actions. */
+.service-actions { display: flex; flex: 0 0 auto; gap: 2px; }
+.service-autostart { display: flex; flex: 1 1 100%; align-items: center; gap: 8px; color: var(--text-2); font-size: 12.5px; }
+.service-autostart input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+.service-row[data-state="running"] > .management-row-body > strong { color: var(--accent); }
+.service-row[data-state="failed"] > .management-row-body > strong { color: var(--danger); }
+.service-row .management-output { max-height: 280px; }
 .management-row strong { color: var(--text); font-size: 14px; overflow-wrap: anywhere; white-space: pre-wrap; }
 .management-row small { color: var(--text-2); font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
 .management-row details { flex: 1 1 100%; }

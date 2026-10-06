@@ -6,6 +6,7 @@ import asyncio
 import base64
 import binascii
 import concurrent.futures
+import contextlib
 import hashlib
 import hmac
 import json
@@ -80,6 +81,10 @@ _IDENTITY_CONTEXT = b"agent-workspace-mobile-identity-v1\n"
 
 class WorkspaceBusyError(RuntimeError):
     """A workspace cannot be removed while one of its conversations has an unfinished task."""
+
+
+class ProviderRestartRequired(RuntimeError):
+    """The requested provider change needs an engine restart (on-device model in or out)."""
 
 
 class SessionBusyError(RuntimeError):
@@ -613,7 +618,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._reply(
                 200,
-                {"tasks": [task.to_dict() for task in tasks]},
+                {"tasks": [task.to_dict() for task in tasks], "services": _services_summary()},
             )
             return
         if parts == ["mobile", "approvals"]:
@@ -815,9 +820,24 @@ class _Handler(BaseHTTPRequestHandler):
         if payload is None:
             return
         if path.startswith(
-            ("/mobile/extensions/", "/mobile/android-system")
+            (
+                "/mobile/extensions/",
+                "/mobile/android-system",
+                "/mobile/provider/",
+                "/mobile/services/",
+                "/mobile/browser/",
+                "/mobile/notification-rules",
+            )
         ) and not self._authorized("approval"):
             self._reply(401, {"error": "approval scope is required"})
+            return
+        if parts == ["mobile", "provider", "apply"]:
+            try:
+                self._reply(200, self._api.apply_provider(payload))
+            except ProviderRestartRequired as exc:
+                self._reply(409, {"error": str(exc), "code": "restart_required"})
+            except (TypeError, ValueError) as exc:
+                self._reply(400, {"error": " ".join(str(exc).split())[:1500]})
             return
         if self._api.management is not None:
             managed = self._api._run_coro(
@@ -1200,9 +1220,11 @@ class MobileGateway:
         console_html: str | None = None,
         static_assets: Mapping[str, tuple[str, bytes]] | None = None,
         workspace_catalog: MobileWorkspaceCatalog | None = None,
+        provider_models: Any = None,
     ) -> None:
         self.runtime = runtime
         self.controller = controller
+        self._provider_models = provider_models
         self.host = host
         self.port = port
         self.token = token or secrets.token_urlsafe(32)
@@ -1545,6 +1567,78 @@ class MobileGateway:
         if event_bus is not None:
             await event_bus.publish(event)
         return {"id": session_id, "archived": archived}
+
+    def apply_provider(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self._run_coro(self._apply_provider(payload), _MOBILE_OPERATION_TIMEOUT_SECONDS)
+
+    async def _apply_provider(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Switch model or cloud provider without restarting the engine.
+
+        Model and reasoning effort only change defaults (each task carries its own). Another cloud
+        provider is swapped into every conversation runtime. The on-device model loads native
+        weights at engine start, so switching to or from it still needs a restart.
+        """
+        from mobile_protocol import REASONING_EFFORTS
+
+        from agent_workspace.config import ProviderConfig, ProviderProtocol
+
+        if not isinstance(payload, Mapping):
+            raise ValueError("request body must be an object")
+        protocol = payload.get("protocol")
+        base_url = payload.get("base_url")
+        model = payload.get("model")
+        api_key = payload.get("api_key")
+        effort = payload.get("reasoning_effort", "auto")
+        summary = payload.get("context_summary_enabled")
+        if not all(isinstance(value, str) and value.strip() for value in (protocol, base_url, model)):
+            raise ValueError("protocol, base_url and model are required")
+        if api_key is not None and not isinstance(api_key, str):
+            raise ValueError("api_key must be text")
+        if effort not in REASONING_EFFORTS:
+            raise ValueError("reasoning_effort is invalid")
+        if summary is not None and not isinstance(summary, bool):
+            raise ValueError("context_summary_enabled must be true or false")
+        config = ProviderConfig(
+            id=protocol, protocol=ProviderProtocol(protocol), base_url=base_url.strip(),
+            model=model.strip(), api_key=api_key or None,
+        )
+        config.validate()
+        local = "/embedded-qwen/v1"
+        if config.base_url.rstrip("/").endswith(local) or str(
+            self._settings.get("base_url", "")
+        ).rstrip("/").endswith(local):
+            raise ProviderRestartRequired("switching to or from the on-device model restarts the engine")
+        previous = await self.controller.switch_provider(config, effort)
+        for provider in previous:
+            close = getattr(provider, "aclose", None)
+            if callable(close):
+                with contextlib.suppress(Exception):
+                    await close()
+        # Code that reads the provider from the environment (memory budget, context summary, the
+        # next engine start's defaults) sees the new choice too.
+        os.environ.update(
+            AGENT_WORKSPACE_PROVIDER=config.id,
+            AGENT_WORKSPACE_PROTOCOL=config.protocol.value,
+            AGENT_WORKSPACE_BASE_URL=config.base_url,
+            AGENT_WORKSPACE_MODEL=config.model,
+        )
+        if config.api_key:
+            os.environ["AGENT_WORKSPACE_API_KEY"] = config.api_key
+        else:
+            os.environ.pop("AGENT_WORKSPACE_API_KEY", None)
+        if effort == "auto":
+            os.environ.pop("AGENT_WORKSPACE_REASONING_EFFORT", None)
+        else:
+            os.environ["AGENT_WORKSPACE_REASONING_EFFORT"] = effort
+        if summary is not None:
+            os.environ["AGENT_WORKSPACE_CONTEXT_SUMMARY_ENABLED"] = "1" if summary else "0"
+        self.default_model = config.model
+        self._settings.update(
+            protocol=config.protocol.value,
+            base_url=config.base_url,
+            models=self._provider_models(config) if callable(self._provider_models) else [config.model],
+        )
+        return self.effective_settings()
 
     def effective_settings(self) -> dict[str, Any]:
         protocol = str(self._settings.get("protocol", "openai-compatible"))
@@ -2021,6 +2115,17 @@ class MobileGateway:
         except BaseException:
             future.cancel()
             raise
+
+
+def _services_summary() -> dict[str, Any]:
+    """Running services, for the engine notification and wake lock (polled with the tasks)."""
+    try:
+        from mobile_services import get_service_manager
+
+        manager = get_service_manager()
+    except Exception:
+        manager = None
+    return manager.summary() if manager is not None else {"running": 0, "keep_awake": False}
 
 
 def _query_int(

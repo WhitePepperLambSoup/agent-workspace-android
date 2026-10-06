@@ -138,6 +138,9 @@ class MobileTaskRequest:
     reasoning_effort: str | None = None
     state: TaskState = TaskState.QUEUED
     image_refs: tuple[MobileImageRef, ...] = ()
+    # Edit-and-resend / regenerate: the user message this task replaces, and why.
+    rewind_from_event_id: str | None = None
+    rewind_reason: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.image_refs, tuple) or any(
@@ -145,6 +148,10 @@ class MobileTaskRequest:
         ):
             raise ValueError("image_refs must contain validated image references")
         parse_mobile_image_refs([ref.to_dict() for ref in self.image_refs])
+        if (self.rewind_from_event_id is None) != (self.rewind_reason is None):
+            raise ValueError("rewind_from_event_id and rewind_reason go together")
+        if self.rewind_reason is not None and self.rewind_reason not in {"edit", "regenerate"}:
+            raise ValueError("rewind_reason must be edit or regenerate")
 
     @property
     def prompt_preview(self) -> str:
@@ -160,6 +167,11 @@ class MobileTaskRequest:
             **(
                 {"image_refs": [ref.to_dict() for ref in self.image_refs]}
                 if self.image_refs
+                else {}
+            ),
+            **(
+                {"rewind_from_event_id": self.rewind_from_event_id, "rewind_reason": self.rewind_reason}
+                if self.rewind_from_event_id
                 else {}
             ),
         }
@@ -179,12 +191,21 @@ def parse_mobile_task_request(payload: Mapping[str, Any]) -> MobileTaskRequest:
     effort = payload.get("reasoning_effort")
     if effort is not None and (not isinstance(effort, str) or effort not in REASONING_EFFORTS):
         raise ValueError("reasoning_effort is invalid")
+    rewind_from = payload.get("rewind_from_event_id")
+    rewind_reason = None
+    if rewind_from is not None:
+        rewind_from = _required_text(rewind_from, "rewind_from_event_id", max_length=_MAX_IDENTIFIER_LENGTH)
+        rewind_reason = payload.get("rewind_reason", "edit")
+        if rewind_reason not in {"edit", "regenerate"}:
+            raise ValueError("rewind_reason must be edit or regenerate")
     return MobileTaskRequest(
         session_id=session_id,
         prompt=prompt,
         model=model,
         reasoning_effort=effort,
         image_refs=parse_mobile_image_refs(payload.get("image_refs", [])),
+        rewind_from_event_id=rewind_from,
+        rewind_reason=rewind_reason,
     )
 
 

@@ -41,22 +41,23 @@
       <label class="approval-scope" for="approvalScopeSelector"><span>授权范围</span><select id="approvalScopeSelector"><option value="once">仅此次</option><option value="session">本会话</option></select></label>
       <div class="approval-actions"><button id="btnRejectAction" class="button-secondary" type="button">拒绝</button><button id="btnApproveAction" class="button-primary" type="button">批准执行</button></div>
     </section>
-    <div id="quickChipsBar" role="group" aria-label="快捷任务">
-      <button class="chip" type="button" data-fill="true" data-prompt="总结下面内容的要点，并列出需要我跟进的事项：&#10;"><span data-icon="file-text"></span><span>总结要点<small>文档、网页或聊天记录</small></span></button>
-      <button class="chip" type="button" data-fill="true" data-prompt="把下面的内容翻译成英文，语气自然：&#10;"><span data-icon="languages"></span><span>翻译润色<small>中英互译，语气自然</small></span></button>
-      <button class="chip" type="button" data-fill="true" data-prompt="做一个单页网页（HTML），主题是："><span data-icon="globe"></span><span>做个网页<small>生成可直接预览的页面</small></span></button>
-      <button class="chip" type="button" data-fill="true" data-prompt="分析附件里的数据，给出关键结论并画一张图表："><span data-icon="chart-no-axes-column"></span><span>分析数据<small>表格或 CSV 出结论与图表</small></span></button>
-    </div>
+    <!-- Filled by app.js from the user's quick tasks (Appearance → Edit quick tasks). -->
+    <div id="quickChipsBar" role="group" aria-label="快捷任务"></div>
     <footer id="inputFooter">
       <div id="noticeText" role="status" hidden></div>
       <div id="taskStatusBar" hidden><span id="taskStateLabel"></span><button id="btnResumeTask" class="text-action" type="button" hidden><span data-icon="play"></span>恢复任务</button><button id="btnRetryTask" class="text-action" type="button" hidden><span data-icon="refresh-cw"></span>重试任务</button><button id="btnReconnect" class="text-action" type="button" hidden><span data-icon="refresh-cw"></span>重新连接</button></div>
+      <div id="editBanner" class="edit-banner" role="status" hidden><span data-icon="pencil"></span><span>正在编辑之前的消息：发送后会替换它和之后的对话（已改动的文件不会撤销）</span><button id="btnCancelEdit" class="text-action" type="button">取消</button></div>
       <button id="btnImportNotice" class="text-action import-notice" type="button" hidden><span data-icon="paperclip"></span><span id="importNoticeText"></span></button>
       <div class="composer">
         <div id="attachmentList" aria-live="polite"></div>
         <input type="file" id="filePickerInput" hidden multiple>
         <textarea id="promptInput" rows="1" placeholder="给 Agent 布置任务…" aria-label="任务指令"></textarea>
         <div class="composer-toolbar">
-          <button id="btnAttach" class="icon-button" type="button" title="附加文件" aria-label="附加文件"><span data-icon="paperclip"></span></button>
+          <button id="btnAttach" class="icon-button" type="button" title="附加文件" aria-label="附加文件" aria-haspopup="menu" aria-expanded="false"><span data-icon="paperclip"></span></button>
+          <div id="attachMenu" class="attach-menu" role="menu" hidden>
+            <button id="btnAttachCamera" class="menu-row" type="button" role="menuitem"><span data-icon="camera"></span><span>拍照</span></button>
+            <button id="btnAttachFiles" class="menu-row" type="button" role="menuitem"><span data-icon="paperclip"></span><span>选择文件</span></button>
+          </div>
           <button id="modelBar" class="composer-chip" type="button" aria-label="模型与思考" title="模型与思考"><span data-icon="cpu"></span><span id="modelSummary">正在读取模型...</span></button>
           <button id="btnModeChip" class="composer-chip mode-chip" type="button" aria-label="执行权限" title="执行权限"><span data-icon="shield"></span><span id="executionSummary"></span></button>
           <span class="composer-spacer"></span>
@@ -116,6 +117,7 @@
             <button id="btnPermissionPage" class="menu-row" type="button"><span data-icon="shield"></span><span>执行权限<small id="menuPermissionSummary"></small></span><span data-icon="chevron-right"></span></button>
             <button id="btnLocalModelsPage" class="menu-row" type="button"><span data-icon="hard-drive"></span><span>本地模型</span><span data-icon="chevron-right"></span></button>
             <button id="btnUsagePage" class="menu-row" type="button"><span data-icon="chart-no-axes-column"></span><span>Token 与费用</span><span data-icon="chevron-right"></span></button>
+            <button id="btnMemoryPage" class="menu-row" type="button"><span data-icon="brain"></span><span>记忆<small>AI 记住的关于你的信息</small></span><span data-icon="chevron-right"></span></button>
           </div>
         </section>
         <section class="menu-section" aria-labelledby="menuSectionAutomation">
@@ -123,6 +125,7 @@
           <div class="menu-group">
             <button id="btnSchedulesPage" class="menu-row" type="button"><span data-icon="clock"></span><span>定时任务</span><span data-icon="chevron-right"></span></button>
             <button id="btnWorkflowsPage" class="menu-row" type="button"><span data-icon="workflow"></span><span>可复用流程</span><span data-icon="chevron-right"></span></button>
+            <button id="btnNotificationRulesPage" class="menu-row" type="button" hidden><span data-icon="bell-ring"></span><span>通知触发<small>收到特定通知时自动处理</small></span><span data-icon="chevron-right"></span></button>
             <button id="btnEvaluationsPage" class="menu-row" type="button"><span data-icon="clipboard-check"></span><span>任务评测</span><span data-icon="chevron-right"></span></button>
           </div>
         </section>
@@ -130,6 +133,7 @@
           <h3 id="menuSectionDevice" class="menu-section-title">设备与连接</h3>
           <div class="menu-group">
             <button id="btnDoctorPage" class="menu-row" type="button"><span data-icon="activity"></span><span>设备与工具</span><span data-icon="chevron-right"></span></button>
+            <button id="btnServicesPage" class="menu-row" type="button"><span data-icon="server"></span><span>后台服务<small id="menuServicesSummary">AI 启动的、一直运行的程序</small></span><span data-icon="chevron-right"></span></button>
             <button id="btnExtensionsPage" class="menu-row" type="button"><span data-icon="puzzle"></span><span>MCP 与扩展</span><span data-icon="chevron-right"></span></button>
             <button id="btnConnectionsPage" class="menu-row" type="button"><span data-icon="monitor-smartphone"></span><span>设备连接</span><span data-icon="chevron-right"></span></button>
             <button id="btnOutboxPage" class="menu-row" type="button"><span data-icon="send"></span><span>待发送与接力</span><span data-icon="chevron-right"></span></button>
@@ -140,12 +144,21 @@
           <h3 id="menuSectionApp" class="menu-section-title">应用</h3>
           <div class="menu-group">
             <button id="btnAppearancePage" class="menu-row" type="button"><span data-icon="palette"></span><span>界面偏好</span><span data-icon="chevron-right"></span></button>
+            <button id="btnGlobalEntryPage" class="menu-row" type="button" hidden><span data-icon="sparkles"></span><span>全局入口<small>悬浮球、快捷设置开关、桌面图标快捷方式</small></span><span data-icon="chevron-right"></span></button>
+            <button id="btnBackupPage" class="menu-row" type="button" hidden><span data-icon="database-backup"></span><span>备份与恢复<small>换手机或重装前保存会话和设置</small></span><span data-icon="chevron-right"></span></button>
             <button id="btnProviderSettings" class="menu-row" type="button" hidden><span data-icon="settings"></span><span>服务商与 API 设置</span><span data-icon="chevron-right"></span></button>
             <button id="btnRefresh" class="menu-row" type="button"><span data-icon="refresh-cw"></span><span>刷新与重连</span></button>
           </div>
         </section>
       </div>
       <div id="settingsModel" class="settings-page" hidden>
+        <div id="profileSection" class="management-section" hidden>
+          <strong>已保存的模型配置</strong>
+          <p class="setting-hint">在常用的服务商和模型之间一键切换。云端模型之间切换不用重启引擎；切换到或离开本机模型时会重启。API 密钥按服务商地址保存在系统密钥库，配置里不含密钥。</p>
+          <div id="profileList" class="management-list"></div>
+          <div class="page-toolbar"><button id="btnSaveProfile" class="button-secondary" type="button"><span data-icon="save"></span>把当前设置存为配置</button></div>
+          <p id="profileStatus" class="page-status" role="status"></p>
+        </div>
         <label for="modelInput">模型</label><input id="modelInput" type="text" list="modelOptions" autocomplete="off" spellcheck="false" aria-label="模型"><datalist id="modelOptions"></datalist>
         <label for="effortSelector">思考强度</label><select id="effortSelector" aria-label="思考强度"></select><p id="effortHint" class="setting-hint"></p>
         <label class="toggle-row" for="contextSummaryToggle"><span id="contextSummaryLabel">自动摘要压缩上下文</span><input id="contextSummaryToggle" type="checkbox"></label>
@@ -206,7 +219,79 @@
         <label for="motionSelector">动画</label><select id="motionSelector" aria-label="动画"><option value="auto">跟随系统</option><option value="full">完整</option><option value="reduced">精简</option><option value="off">关闭</option></select>
         <label for="textSizeSelector">文字大小</label><select id="textSizeSelector" aria-label="文字大小"><option value="small">紧凑</option><option value="normal">标准</option><option value="large">较大</option></select>
         <label class="toggle-row" for="quickActionsToggle"><span>快捷任务</span><input id="quickActionsToggle" type="checkbox" checked></label>
+        <button id="btnQuickTasksPage" class="menu-row" type="button"><span data-icon="zap"></span><span>编辑快捷任务<small>自定义输入框上方的快捷按钮</small></span><span data-icon="chevron-right"></span></button>
         <label class="toggle-row" for="hapticsToggle"><span>触觉反馈</span><input id="hapticsToggle" type="checkbox" checked></label>
+      </div>
+      <div id="settingsBackup" class="settings-page" hidden>
+        <p class="setting-hint">备份包含全部会话、记忆、定时任务与流程、内置工作区的文件，以及模型和界面设置。不包含 API 密钥、已下载的本机模型和开发工具链；放在手机公共文件夹里的工作区本来就在你的文件中，也不会重复打包。</p>
+        <button id="btnCreateBackup" class="menu-row" type="button"><span data-icon="download"></span><span>创建备份<small>保存为一个 zip 文件，位置由你选择</small></span><span data-icon="chevron-right"></span></button>
+        <button id="btnRestoreBackup" class="menu-row" type="button"><span data-icon="upload"></span><span>从备份恢复<small>用备份替换这台手机上的数据，引擎会重启</small></span><span data-icon="chevron-right"></span></button>
+        <p id="backupStatus" class="page-status" role="status"></p>
+        <p class="setting-hint">恢复前的数据会在手机里保留一份，直到下次恢复时被替换。恢复后请到模型设置里重新填写 API 密钥。</p>
+      </div>
+      <div id="settingsNotificationRules" class="settings-page" hidden>
+        <p class="setting-hint">收到指定应用的通知时，让 AI 按你写的要求处理，比如“快递短信来了就记下取件码”。只读取你选定应用的通知，其他通知不会被读取；通知内容只交给这次触发的任务，不会另外保存。</p>
+        <label class="toggle-row" for="notificationRulesToggle"><span>根据通知自动处理</span><input id="notificationRulesToggle" type="checkbox"></label>
+        <button id="btnNotificationAccess" class="menu-row" type="button"><span data-icon="shield"></span><span>通知使用权<small id="notificationAccessState"></small></span><span data-icon="chevron-right"></span></button>
+        <p id="notificationRulesStatus" class="page-status" role="status"></p>
+        <div id="notificationRuleList" class="management-list"></div>
+        <form id="notificationRuleForm" class="management-form">
+          <strong class="form-title">添加规则</strong>
+          <label for="notificationRuleApp">应用</label><select id="notificationRuleApp" required></select>
+          <label for="notificationRuleKeywords">关键词（可选，用逗号分隔，包含其中任意一个才触发）</label><input id="notificationRuleKeywords" maxlength="300" autocomplete="off">
+          <label for="notificationRulePrompt">要做什么</label><textarea id="notificationRulePrompt" rows="3" maxlength="2000" required placeholder="例如：把通知里的取件码和快递柜位置追加到工作区的 快递.md"></textarea>
+          <label class="toggle-row" for="notificationRuleConfirm"><span>每次运行前先问我</span><input id="notificationRuleConfirm" type="checkbox" checked></label>
+          <p class="setting-hint">任务在当前会话里运行，使用当前的模型。执行权限和平时一样，需要批准的操作仍会先问你。每条规则至少间隔 30 秒，每天最多运行 30 次。</p>
+          <div class="page-toolbar"><button class="button-primary" type="submit"><span data-icon="plus"></span>添加</button></div>
+        </form>
+        <div class="management-section"><strong>最近触发</strong><div id="notificationRuleLog" class="management-list"></div></div>
+      </div>
+      <div id="settingsGlobalEntry" class="settings-page" hidden>
+        <p class="setting-hint">在手机的任何地方都能快速开一个新对话。</p>
+        <label class="toggle-row" for="floatingBallToggle"><span>悬浮球</span><input id="floatingBallToggle" type="checkbox"></label>
+        <p class="setting-hint">在其他应用上方显示一个小圆球：点一下开新对话；长按可以截屏提问、语音提问或隐藏它；拖动可以移到屏幕两侧。需要允许“显示在其他应用上层”，截屏提问还需要在“设备与工具”里开启无障碍服务。</p>
+        <button id="btnAddQuickTile" class="menu-row" type="button" hidden><span data-icon="plus"></span><span>添加到快捷设置<small>下拉通知栏就能点“问 Agent”</small></span><span data-icon="chevron-right"></span></button>
+        <p class="setting-hint">也可以下拉通知栏，进入快捷开关的编辑页面，把“问 Agent”拖进去。</p>
+        <p class="setting-hint">长按桌面上的 Agent Workspace 图标，可以直接选“新对话”“语音提问”或“拍照提问”。</p>
+        <p id="globalEntryStatus" class="page-status" role="status"></p>
+      </div>
+      <div id="settingsServices" class="settings-page" hidden>
+        <p class="setting-hint">AI 可以启动需要一直运行的程序，比如本地网页服务或机器人。任务结束后它们继续运行，直到你在这里停止，或者引擎停止。勾选“随引擎启动”的服务会在引擎重启后自动重新运行。</p>
+        <label class="toggle-row" for="servicesKeepAwakeToggle"><span>息屏后继续运行</span><input id="servicesKeepAwakeToggle" type="checkbox"></label>
+        <p class="setting-hint">有服务运行时让手机在息屏后不休眠，更耗电。不开启时，息屏一段时间后服务会暂停，亮屏后继续。</p>
+        <p id="servicesStatus" class="page-status" role="status"></p>
+        <div id="servicesList" class="management-list"></div>
+      </div>
+      <div id="settingsMemory" class="settings-page" hidden>
+        <label class="toggle-row" for="memoryEnabledToggle"><span>在对话中使用记忆</span><input id="memoryEnabledToggle" type="checkbox"></label>
+        <label class="toggle-row" for="memoryAutoToggle"><span>允许 AI 自动记住有用的信息</span><input id="memoryAutoToggle" type="checkbox"></label>
+        <p id="memoryHint" class="setting-hint"></p>
+        <form id="memoryForm" class="management-form">
+          <label id="memoryFormLabel" for="memoryContent">添加一条记忆</label>
+          <textarea id="memoryContent" rows="2" maxlength="200" required placeholder="例如：我在杭州工作，回答请尽量简洁"></textarea>
+          <div class="page-toolbar"><span id="memoryCounter"></span><button id="btnCancelMemoryEdit" class="button-secondary" type="button" hidden>取消</button><button id="btnSaveMemory" class="button-primary" type="submit"><span data-icon="plus"></span><span id="memorySubmitLabel">添加</span></button></div>
+        </form>
+        <p id="memoryStatus" class="page-status" role="status"></p>
+        <div id="memoryList" class="management-list"></div>
+        <div class="page-toolbar"><button id="btnClearMemory" class="button-secondary" type="button"><span data-icon="trash-2"></span>清空全部记忆</button></div>
+      </div>
+      <div id="settingsQuickTasks" class="settings-page" hidden>
+        <p class="setting-hint">点一下快捷任务，会把提示词填进输入框，或直接发送。最多 8 个，可调整顺序。</p>
+        <div id="quickTaskList" class="management-list"></div>
+        <div class="page-toolbar">
+          <button id="btnAddQuickTask" class="button-secondary" type="button"><span data-icon="plus"></span>添加</button>
+          <button id="btnResetQuickTasks" class="button-secondary" type="button"><span data-icon="rotate-ccw"></span>恢复默认</button>
+        </div>
+        <form id="quickTaskForm" class="management-form" hidden>
+          <strong id="quickTaskFormTitle" class="form-title">添加快捷任务</strong>
+          <label for="quickTaskTitle">名称</label><input id="quickTaskTitle" maxlength="20" required autocomplete="off">
+          <label for="quickTaskDetail">说明（可选）</label><input id="quickTaskDetail" maxlength="40" autocomplete="off">
+          <label for="quickTaskPrompt">提示词</label><textarea id="quickTaskPrompt" rows="4" maxlength="4000" required></textarea>
+          <label id="quickTaskIconLabel">图标</label><div id="quickTaskIcons" class="icon-picker" role="radiogroup" aria-labelledby="quickTaskIconLabel"></div>
+          <label class="toggle-row" for="quickTaskSend"><span>点了直接发送（不填入输入框）</span><input id="quickTaskSend" type="checkbox"></label>
+          <div class="page-toolbar"><button class="button-primary" type="submit"><span data-icon="save"></span>保存</button><button id="btnCancelQuickTask" class="button-secondary" type="button">取消</button></div>
+        </form>
+        <p id="quickTaskStatus" class="page-status" role="status"></p>
       </div>
       <div id="settingsSearch" class="settings-page" hidden>
         <label for="sessionSearchInput">搜索关键词</label><input id="sessionSearchInput" type="search" autocomplete="off" aria-label="搜索所有会话">
@@ -303,6 +388,12 @@
           <button id="btnCheckUpdates" class="menu-row" type="button"><span data-icon="download"></span><span>检查更新</span><span data-icon="chevron-right"></span></button>
           <label class="toggle-row" for="autoUpdateToggle"><span>每天自动检查新版本</span><input id="autoUpdateToggle" type="checkbox"></label>
           <p class="setting-hint">从 GitHub 发布页下载，安装前会校验 SHA-256 和签名；安装需要你在系统安装界面确认。</p>
+        </div>
+        <div id="browserSection" class="management-section" hidden>
+          <strong>内置浏览器</strong>
+          <p class="setting-hint">AI 用它打开网页、点按钮、填表和截图。打开网页和点击需要你批准，只读取当前页面不用。它的登录状态与应用界面分开保存。</p>
+          <div class="page-toolbar"><button id="btnBrowserTest" class="button-secondary" type="button"><span data-icon="globe"></span>测试浏览器</button><button id="btnBrowserClear" class="button-secondary" type="button"><span data-icon="trash-2"></span>清除浏览数据</button></div>
+          <p id="browserStatus" class="page-status" role="status"></p>
         </div>
         <div class="management-section">
           <strong>可选开发工具链</strong><p id="toolchainStatus" class="page-status" role="status"></p><dl id="toolchainSummary" class="usage-summary"></dl>

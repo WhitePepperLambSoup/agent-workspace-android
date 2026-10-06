@@ -6,7 +6,7 @@ from agent_workspace.tools.paths import StrPath, WorkspacePathError, WorkspacePa
 
 # Files discovered at the workspace root and injected as project instructions,
 # in priority order. Content is bounded and treated as untrusted context.
-_INSTRUCTION_FILENAMES = ("AGENTS.md", "CLAUDE.md", ".cursorrules", ".agent/instructions.md")
+INSTRUCTION_FILENAMES = ("AGENTS.md", "CLAUDE.md", ".cursorrules", ".agent/instructions.md")
 
 MAX_INSTRUCTION_BYTES = 64 * 1024
 _SKIPPED_MARKERS = frozenset(
@@ -46,7 +46,7 @@ def discover_workspace_instructions(
         return ""
     sections: list[str] = []
     total = 0
-    for filename in _INSTRUCTION_FILENAMES:
+    for filename in INSTRUCTION_FILENAMES:
         try:
             candidate = paths.resolve(filename)
             if not candidate.is_file():

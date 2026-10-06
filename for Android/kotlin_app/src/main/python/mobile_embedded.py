@@ -195,6 +195,10 @@ def run(files_dir: str, provider_json: str = "{}") -> None:
             if str(path) not in sys.path:
                 sys.path.insert(0, str(path))
         (Path(files_dir) / "serve.token").unlink(missing_ok=True)
+        # A restore from backup is staged by the running engine and swapped in here, before any
+        # database is opened.
+        if importlib.import_module("mobile_backup").apply_staged_restore(Path(files_dir)):
+            _startup_log(files_dir, "restored data from a backup")
         entrypoint = importlib.import_module("entrypoint")
         _startup_log(files_dir, "engine modules loaded")
 

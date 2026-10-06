@@ -1,17 +1,37 @@
 import { unified } from "unified";
 import remarkParse from "remark-parse";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import remarkRehype from "remark-rehype";
 import rehypeSanitize from "rehype-sanitize";
+import rehypeKatex from "rehype-katex";
 import { toHtml } from "hast-util-to-html";
 
-const renderer = unified().use(remarkParse).use(remarkGfm).use(remarkRehype).use(rehypeSanitize);
+// Math runs after sanitizing: the sanitizer keeps the `language-math` class remark-math emits, and
+// KaTeX's own output is never stripped. MathML needs no fonts or stylesheet; Chromium draws it.
+const renderer = unified()
+  .use(remarkParse)
+  .use(remarkGfm)
+  .use(remarkMath)
+  .use(remarkRehype)
+  .use(rehypeSanitize)
+  .use(rehypeKatex, { output: "mathml", strict: "ignore" });
 const iconNodes = __MOBILE_ICON_NODES__;
 const escapeAttribute = (value) => String(value).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);
 
+// Models often write LaTeX as \( … \) and \[ … \], which Markdown math does not recognise, and put
+// display formulas on one line as $$ … $$ (which Markdown treats as inline). Rewrite both to the
+// forms remark-math expects, leaving fenced and inline code untouched.
+function normalizeMath(text) {
+  return String(text || "").split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/g).map((part, index) => index % 2 ? part : part
+    .replace(/\\\[([\s\S]+?)\\\]/g, (_, body) => `\n$$\n${body.trim()}\n$$\n`)
+    .replace(/\\\(([\s\S]+?)\\\)/g, (_, body) => `$${body.trim()}$`)
+    .replace(/^([ \t]*)\$\$([^\n]+?)\$\$[ \t]*$/gm, (_, indent, body) => `${indent}$$\n${indent}${body.trim()}\n${indent}$$`)).join("");
+}
+
 window.MobileUi = {
   renderMarkdown(text) {
-    return toHtml(renderer.runSync(renderer.parse(String(text || ""))));
+    return toHtml(renderer.runSync(renderer.parse(normalizeMath(text))));
   },
   iconMarkup(name) {
     const children = (iconNodes[name] || []).map(([tag, attributes]) => {

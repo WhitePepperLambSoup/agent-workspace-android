@@ -76,7 +76,7 @@
     else throw new Error(t("当前设备无法导出文本"));
     status(statusId, typeof native?.shareText === "function" ? t("已打开分享") : t("已复制到剪贴板"));
   }
-  function stopPolls() { window.clearTimeout(modelPoll); window.clearTimeout(toolchainPoll); modelPoll = toolchainPoll = null; }
+  function stopPolls() { window.clearTimeout(modelPoll); window.clearTimeout(toolchainPoll); window.clearTimeout(servicesPoll); modelPoll = toolchainPoll = servicesPoll = null; }
   async function post(path, body) { return ui.apiJson(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); }
   function followTask(result, statusId, message) {
     if (ui.adoptTask(result.task)) ui.closeMenu();
@@ -120,6 +120,7 @@
     $("btnTakeover").disabled = typeof native?.requestSystemTakeover !== "function";
     $("doctorTools").replaceChildren();
     for (const tool of value.tools || []) $("doctorTools").append(row(tool.name, tool.available ? t("可用") : tool.reason || t("不可用")));
+    $("browserSection").hidden = !(value.tools || []).some((tool) => tool.name === "browser_view" && tool.available);
     status("doctorStatus", android.reason || "");
     let background = {};
     try { background = JSON.parse(native?.getBackgroundStatus?.() || "{}"); } catch {}
@@ -183,6 +184,298 @@
     $("btnExtensionsRestart").disabled = ui.context().activeTask || typeof native?.restartEngine !== "function";
     status("extensionsStatus", value.restart_required ? t("配置已保存，等待重启引擎") : value.extensions?.length ? "" : t("没有配置扩展"));
   }
+  // ---- Memory: short notes about the user shared by every conversation ----
+  let memoryEditing = null;
+  let memoryLimits = { max_items: 30, max_chars: 200, prompt_budget_chars: 2000, auto_saves_per_task: 3 };
+  function memoryMessage(error) {
+    const text = String(error?.message || error || "");
+    if (/already remembered/i.test(text)) return t("已经有一条相似的记忆了");
+    if (/memory is full/i.test(text)) return t("记忆已满（{0} 条），请先删除不需要的", memoryLimits.max_items);
+    if (/passwords, keys/i.test(text)) return t("记忆里不能保存密码、密钥、验证码或证件、卡号");
+    if (/at most \d+ characters/i.test(text)) return t("每条记忆最多 {0} 字，请只写一件事", memoryLimits.max_chars);
+    return text || t("操作失败");
+  }
+  function stopMemoryEdit() {
+    memoryEditing = null;
+    $("memoryContent").value = "";
+    $("memoryFormLabel").textContent = t("添加一条记忆");
+    $("memorySubmitLabel").textContent = t("添加");
+    $("btnCancelMemoryEdit").hidden = true;
+  }
+  async function memory(isCurrent = () => true, value = null) {
+    value = value || await ui.apiJson("/mobile/memory");
+    if (!isCurrent()) return;
+    memoryLimits = { ...memoryLimits, ...(value.limits || {}) };
+    $("memoryEnabledToggle").checked = value.enabled !== false;
+    $("memoryAutoToggle").checked = value.auto !== false;
+    $("memoryAutoToggle").disabled = value.enabled === false;
+    $("memoryContent").maxLength = memoryLimits.max_chars;
+    $("memoryHint").textContent = t("最多 {0} 条，每条不超过 {1} 字。对话时只带上最新的记忆（约 {2} 字以内），控制 Token 用量；AI 每次任务最多自动记 {3} 条，相似的内容不会重复记。", memoryLimits.max_items, memoryLimits.max_chars, memoryLimits.prompt_budget_chars, memoryLimits.auto_saves_per_task);
+    const items = Array.isArray(value.items) ? value.items : [];
+    $("memoryCounter").textContent = `${items.length}/${memoryLimits.max_items}`;
+    $("memoryList").replaceChildren();
+    for (const item of items) {
+      const when = item.updated_at ? new Date(item.updated_at).toLocaleString() : "";
+      const element = row(item.content, `${item.source === "auto" ? t("AI 记的") : t("你添加的")}${when ? ` · ${when}` : ""}`);
+      element.classList.add("memory-row");
+      action(element, "pencil", t("编辑"), () => {
+        memoryEditing = item.id;
+        $("memoryContent").value = item.content;
+        $("memoryFormLabel").textContent = t("修改记忆");
+        $("memorySubmitLabel").textContent = t("保存修改");
+        $("btnCancelMemoryEdit").hidden = false;
+        $("memoryContent").focus();
+      });
+      action(element, "trash-2", t("删除"), async () => {
+        if (!window.confirm(t("删除这条记忆？"))) return;
+        try { await memory(undefined, await post("/mobile/memory/delete", { id: item.id })); }
+        catch (error) { throw new Error(memoryMessage(error)); }
+        if (memoryEditing === item.id) stopMemoryEdit();
+      });
+      $("memoryList").append(element);
+    }
+    if (!items.length) {
+      $("memoryList").append(row(t("还没有记忆"), value.enabled !== false && value.auto !== false
+        ? t("聊天时 AI 会记下对以后有用的信息，你也可以在上面自己添加。") : t("你可以在上面自己添加。")));
+    }
+    $("btnClearMemory").disabled = !items.length;
+    status("memoryStatus", value.enabled === false ? t("记忆已关闭：对话中不会使用，AI 也不会保存") : "");
+  }
+
+  // ---- Services: long-running programs the agent started (Android) ----
+  let servicesPoll = null;
+  const openServiceLogs = new Set();
+  const serviceStates = { running: t("运行中"), exited: t("已结束"), failed: t("出错退出"), stopped: t("已停止"), interrupted: t("已中断") };
+  const serviceReasons = { "engine stopped": t("引擎停止时一并停止"), "engine restarted": t("引擎重启时中断"), "stopped by the user": t("你停止了它"), "stopped by the agent": t("AI 停止了它"), restarting: t("正在重启") };
+  function elapsed(value) {
+    const start = Date.parse(value || "");
+    if (!Number.isFinite(start)) return "";
+    const minutes = Math.max(0, Math.floor((Date.now() - start) / 60000));
+    return minutes < 60 ? t("{0} 分钟", minutes) : t("{0} 小时 {1} 分钟", Math.floor(minutes / 60), minutes % 60);
+  }
+  function serviceDetails(service) {
+    const lines = [(service.argv || []).join(" ")];
+    if (service.state === "running") lines.push(t("已运行 {0}", elapsed(service.started_at)));
+    else {
+      const code = service.state === "failed" && service.exit_code !== null && service.exit_code !== undefined ? t("退出码 {0}", service.exit_code) : "";
+      const reason = String(service.reason || "").startsWith("autostart:") ? t("随引擎启动失败：{0}", service.reason.slice(10).trim()) : serviceReasons[service.reason] || "";
+      lines.push([code, reason].filter(Boolean).join(" · "));
+    }
+    return lines.filter(Boolean).join("\n");
+  }
+  async function serviceLog(id, output) {
+    const value = await ui.apiJson(`/mobile/services/logs?id=${encodeURIComponent(id)}&max_bytes=16384`);
+    if (!output.isConnected) return;
+    const following = output.scrollTop + output.clientHeight >= output.scrollHeight - 8;
+    output.textContent = value.text || t("还没有输出");
+    if (following) output.scrollTop = output.scrollHeight;
+  }
+  function openServiceUrl(url) {
+    if (typeof native?.openExternal === "function") native.openExternal(url);
+    else window.open(url, "_blank", "noopener");
+  }
+  async function services(isCurrent = () => true, value = null) {
+    window.clearTimeout(servicesPoll);
+    value = value || await ui.apiJson("/mobile/services");
+    if (!isCurrent()) return;
+    $("servicesKeepAwakeToggle").checked = value.keep_awake === true;
+    $("menuServicesSummary").textContent = value.running ? t("{0} 个正在运行", value.running) : t("AI 启动的、一直运行的程序");
+    const list = $("servicesList");
+    const items = Array.isArray(value.services) ? value.services : [];
+    const ids = new Set(items.map((service) => service.id));
+    for (const element of [...list.children]) if (!ids.has(element.dataset.serviceId)) element.remove();
+    for (const service of items) {
+      let element = [...list.children].find((item) => item.dataset.serviceId === service.id);
+      if (!element) {
+        element = row(service.name);
+        element.classList.add("service-row");
+        element.dataset.serviceId = service.id;
+        const actions = document.createElement("div");
+        actions.className = "service-actions";
+        element.append(actions);
+        list.append(element);
+      }
+      element.dataset.state = service.state;
+      element.querySelector("strong").textContent = `${service.name} · ${serviceStates[service.state] || service.state}`;
+      element.querySelector("small").textContent = serviceDetails(service);
+      const signature = JSON.stringify([service.state, service.urls, service.autostart]);
+      if (element.dataset.signature === signature) continue;
+      element.dataset.signature = signature;
+      const actions = element.querySelector(".service-actions");
+      actions.replaceChildren();
+      if (service.urls?.length) action(actions, "globe", t("在浏览器中打开 {0}", service.urls[0]), () => openServiceUrl(service.urls[0]));
+      action(actions, "file-text", t("查看输出"), async () => {
+        let output = element.querySelector(".management-output");
+        if (output) { output.remove(); openServiceLogs.delete(service.id); return; }
+        output = document.createElement("pre");
+        output.className = "management-output";
+        element.append(output);
+        openServiceLogs.add(service.id);
+        await serviceLog(service.id, output);
+        output.scrollTop = output.scrollHeight;
+      });
+      if (service.state === "running") {
+        action(actions, "square", t("停止"), async () => { await post("/mobile/services/stop", { id: service.id }); await services(); });
+      } else {
+        action(actions, "play", t("重新启动"), async () => { await post("/mobile/services/restart", { id: service.id }); await services(); });
+        action(actions, "trash-2", t("删除"), async () => {
+          if (!window.confirm(t("删除“{0}”和它的输出记录？", service.name))) return;
+          openServiceLogs.delete(service.id);
+          await services(undefined, await post("/mobile/services/remove", { id: service.id }));
+        });
+      }
+      let autostart = element.querySelector(".service-autostart");
+      if (!autostart) {
+        autostart = document.createElement("label");
+        autostart.className = "service-autostart";
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        const text = document.createElement("span");
+        text.textContent = t("随引擎启动");
+        autostart.append(box, text);
+        element.insertBefore(autostart, element.querySelector(".management-output"));
+        box.addEventListener("change", async () => {
+          box.disabled = true;
+          try { await post("/mobile/services/autostart", { id: service.id, enabled: box.checked }); }
+          catch (error) { box.checked = !box.checked; status("servicesStatus", error.message, true); }
+          finally { box.disabled = false; }
+        });
+      }
+      autostart.querySelector("input").checked = service.autostart === true;
+    }
+    if (!items.length && !list.querySelector(".services-empty")) {
+      const empty = row(t("还没有后台服务"), t("让 AI 运行一个网页服务、机器人或监听程序时，它会出现在这里。"));
+      empty.classList.add("services-empty");
+      list.append(empty);
+    }
+    for (const output of list.querySelectorAll(".management-output")) {
+      const id = output.closest(".service-row")?.dataset.serviceId;
+      if (id) serviceLog(id, output).catch(() => {});
+    }
+    status("servicesStatus", value.running ? t("{0} 个服务正在运行（最多 {1} 个）", value.running, value.max_running || 4) : "");
+    servicesPoll = window.setTimeout(() => {
+      if (!closed && !$("settingsServices").hidden && !$("settingsOverlay").hidden) services(isCurrent).catch((error) => status("servicesStatus", error.message, true));
+    }, 3000);
+  }
+
+  // ---- Notification rules: tasks triggered by notifications from chosen apps (Android) ----
+  $("btnNotificationRulesPage").hidden = typeof native?.getNotificationAccess !== "function";
+  let notificationApps = null;
+  const ruleLogStates = { started: t("已运行"), awaiting_confirmation: t("等你确认"), dismissed: t("已忽略"), cooldown: t("间隔太短，已跳过"), daily_limit: t("今天的次数已用完"), failed: t("启动失败") };
+  function fillNotificationApps() {
+    if (notificationApps) return;
+    try { notificationApps = nativeResult("listApps").apps || []; } catch { notificationApps = []; }
+    const select = $("notificationRuleApp");
+    select.replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = t("选择应用");
+    select.append(placeholder);
+    for (const app of notificationApps) {
+      const option = document.createElement("option");
+      option.value = app.package;
+      option.textContent = app.label;
+      select.append(option);
+    }
+  }
+  async function notificationRules(isCurrent = () => true, value = null) {
+    value = value || await ui.apiJson("/mobile/notification-rules");
+    if (!isCurrent()) return;
+    const access = nativeResult("getNotificationAccess");
+    fillNotificationApps();
+    $("notificationRulesToggle").checked = value.enabled === true;
+    $("notificationAccessState").textContent = access.granted ? t("已开启") : t("未开启，点此到系统设置里开启");
+    const list = $("notificationRuleList");
+    list.replaceChildren();
+    for (const rule of value.rules || []) {
+      const details = [
+        [t("来自 {0}", rule.app_label), rule.keywords?.length ? t("关键词：{0}", rule.keywords.join(t("、"))) : t("任何通知"), rule.confirm ? t("运行前先问我") : t("直接运行"), rule.enabled ? "" : t("已暂停")].filter(Boolean).join(" · "),
+        rule.prompt,
+      ].join("\n");
+      const element = row(rule.name, details);
+      element.classList.add("notification-rule-row");
+      element.dataset.ruleId = rule.id;
+      action(element, rule.enabled ? "pause" : "play", rule.enabled ? t("暂停这条规则") : t("启用这条规则"), async () => {
+        await notificationRules(undefined, await post("/mobile/notification-rules/update", { id: rule.id, enabled: !rule.enabled }));
+      });
+      action(element, "trash-2", t("删除"), async () => {
+        if (!window.confirm(t("删除规则“{0}”？", rule.name))) return;
+        await notificationRules(undefined, await post("/mobile/notification-rules/delete", { id: rule.id }));
+      });
+      list.append(element);
+    }
+    if (!(value.rules || []).length) list.append(row(t("还没有规则"), t("在下面选一个应用，写下收到它的通知时要做什么。")));
+    const log = $("notificationRuleLog");
+    log.replaceChildren();
+    for (const entry of (value.log || []).slice(0, 20)) {
+      log.append(row(entry.rule_name, `${new Date(entry.at).toLocaleString()} · ${ruleLogStates[entry.status] || entry.status}`));
+    }
+    if (!(value.log || []).length) log.append(row(t("还没有触发记录")));
+    status("notificationRulesStatus", value.enabled && !access.granted ? t("还没有通知使用权，规则不会触发") : "", value.enabled && !access.granted);
+  }
+  window.addEventListener("agent-global-entry-changed", () => {
+    if (!closed && !$("settingsNotificationRules").hidden) notificationRules().catch((error) => status("notificationRulesStatus", error.message, true));
+  });
+
+  // ---- Global entry: floating ball, quick settings tile, launcher shortcuts (Android) ----
+  $("btnGlobalEntryPage").hidden = typeof native?.getGlobalEntry !== "function";
+  let ballPermissionAsked = false;
+  async function globalEntry() {
+    const value = nativeResult("getGlobalEntry");
+    const on = value.floating_ball === true && value.overlay_permission === true;
+    $("floatingBallToggle").checked = on;
+    $("btnAddQuickTile").hidden = value.tile_request !== true;
+    const declined = ballPermissionAsked && !on;
+    ballPermissionAsked = false;
+    status("globalEntryStatus", declined ? t("没有获得“显示在其他应用上层”权限，悬浮球未开启") : "");
+  }
+  window.addEventListener("agent-global-entry-changed", () => {
+    if (!closed && !$("settingsGlobalEntry").hidden) globalEntry().catch((error) => status("globalEntryStatus", error.message, true));
+  });
+  window.addEventListener("agent-tile-request", (event) => {
+    const result = event.detail?.result;
+    if (result === 2) status("globalEntryStatus", t("已添加到快捷设置"));
+    else if (result === 1) status("globalEntryStatus", t("快捷设置里已经有“问 Agent”了"));
+    else if (result === 0) status("globalEntryStatus", t("已取消"));
+    else status("globalEntryStatus", t("无法自动添加，请从快捷开关的编辑页面手动拖入"), true);
+  });
+
+  // ---- Backup and restore (Android) ----
+  // Interface settings worth carrying to another phone; drafts and session state are not.
+  const backupStorageKeys = ["agent-mobile-preferences-v1", "agent-mobile-quick-tasks-v1", "agent-mobile-wallpaper-v1", "agent-mobile-runtime-v1"];
+  $("btnBackupPage").hidden = typeof native?.createBackup !== "function";
+  function backupSize(value) { return Number.isFinite(value) ? (value >= 1024 ** 2 ? `${(value / 1024 ** 2).toFixed(1)} MB` : `${Math.max(1, Math.round(value / 1024))} KB`) : ""; }
+  async function backup() { status("backupStatus", ""); }
+  window.addEventListener("agent-backup", (event) => {
+    const detail = event.detail || {};
+    const busy = ["creating", "saving", "restoring"].includes(detail.state);
+    $("btnCreateBackup").disabled = busy;
+    $("btnRestoreBackup").disabled = busy;
+    if (detail.state === "creating") status("backupStatus", t("正在创建备份..."));
+    else if (detail.state === "saving") status("backupStatus", t("备份已生成（{0}），请选择保存位置", backupSize(detail.summary?.size)));
+    else if (detail.state === "saved") status("backupStatus", t("备份已保存（{0}）", backupSize(detail.size)));
+    else if (detail.state === "cancelled") status("backupStatus", t("已取消"));
+    else if (detail.state === "restoring") status("backupStatus", t("正在检查并恢复备份..."));
+    else if (detail.state === "failed") status("backupStatus", t("操作失败：{0}", localizeError(detail.error || "")), true);
+    else if (detail.state === "restored") {
+      for (const [key, value] of Object.entries(detail.web || {})) {
+        if (backupStorageKeys.includes(key) && typeof value === "string") { try { window.localStorage.setItem(key, value); } catch {} }
+      }
+      status("backupStatus", t("已恢复，正在重启引擎以完成恢复..."));
+    }
+  });
+  on("btnCreateBackup", "click", () => {
+    const web = {};
+    for (const key of backupStorageKeys) { try { const value = window.localStorage.getItem(key); if (value !== null) web[key] = value; } catch {} }
+    const result = JSON.parse(native.createBackup(JSON.stringify(web)));
+    if (!result.ok) throw new Error(localizeError(result.error) || t("操作失败"));
+  }, "backupStatus");
+  on("btnRestoreBackup", "click", () => {
+    if (!window.confirm(t("恢复会用备份替换这台手机上的会话、记忆、工作区文件和设置（当前数据会保留一份），然后重启引擎。API 密钥不在备份里，恢复后需要重新填写。继续？"))) return;
+    const result = JSON.parse(native.restoreBackup());
+    if (!result.ok) throw new Error(localizeError(result.error) || t("操作失败"));
+  }, "backupStatus");
+
   async function schedules(isCurrent = () => true) {
     const value = await ui.apiJson("/mobile/schedules"); if (!isCurrent()) return;
     $("schedulesList").replaceChildren();
@@ -466,10 +759,86 @@
     if (downloading || busy) modelPoll = window.setTimeout(() => { if (!closed && !$("settingsLocalModels").hidden && !$("settingsOverlay").hidden) localModels(isCurrent).catch(error => status("localModelsStatus", error.message, true)); }, 2000);
   }
   const pages = {
-    Doctor: ["doctor", doctor, "doctorStatus"], Extensions: ["extensions", extensions, "extensionsStatus"], Schedules: ["schedules", schedules, "schedulesStatus"], Connections: ["connections", connections, "connectionsStatus"], Outbox: ["outbox", outbox, "outboxStatus"], Workflows: ["workflows", workflows, "workflowsStatus"], Evaluations: ["evaluations", evaluations, "evaluationsStatus"], LocalModels: ["localModels", localModels, "localModelsStatus"],
+    Memory: ["memory", memory, "memoryStatus"], Services: ["services", services, "servicesStatus"], GlobalEntry: ["globalEntry", globalEntry, "globalEntryStatus"], NotificationRules: ["notificationRules", notificationRules, "notificationRulesStatus"], Backup: ["backup", backup, "backupStatus"], Doctor: ["doctor", doctor, "doctorStatus"], Extensions: ["extensions", extensions, "extensionsStatus"], Schedules: ["schedules", schedules, "schedulesStatus"], Connections: ["connections", connections, "connectionsStatus"], Outbox: ["outbox", outbox, "outboxStatus"], Workflows: ["workflows", workflows, "workflowsStatus"], Evaluations: ["evaluations", evaluations, "evaluationsStatus"], LocalModels: ["localModels", localModels, "localModelsStatus"],
   };
   for (const [name, [route, loader, statusId]] of Object.entries(pages)) on(`btn${name}Page`, "click", () => page(route, loader, statusId), statusId);
   for (const [name, loader, statusId] of [["Doctor", doctor, "doctorStatus"], ["Extensions", extensions, "extensionsStatus"], ["Outbox", outbox, "outboxStatus"]]) on(`btn${name}Refresh`, "click", () => loader(), statusId);
+  on("memoryForm", "submit", async () => {
+    const content = $("memoryContent").value.trim();
+    if (!content) return;
+    let value;
+    try {
+      value = memoryEditing
+        ? await post("/mobile/memory/update", { id: memoryEditing, content })
+        : await post("/mobile/memory", { content });
+    } catch (error) { throw new Error(memoryMessage(error)); }
+    stopMemoryEdit();
+    await memory(undefined, value);
+  }, "memoryStatus");
+  on("btnCancelMemoryEdit", "click", () => stopMemoryEdit(), "memoryStatus");
+  for (const [id, key] of [["memoryEnabledToggle", "enabled"], ["memoryAutoToggle", "auto"]]) {
+    on(id, "change", async () => {
+      try { await memory(undefined, await post("/mobile/memory/settings", { [key]: $(id).checked })); }
+      catch (error) { $(id).checked = !$(id).checked; throw error; }
+    }, "memoryStatus");
+  }
+  on("notificationRulesToggle", "change", async () => {
+    const enabled = $("notificationRulesToggle").checked;
+    try { await notificationRules(undefined, await post("/mobile/notification-rules/settings", { enabled })); }
+    catch (error) { $("notificationRulesToggle").checked = !enabled; throw error; }
+    if (enabled && !nativeResult("getNotificationAccess").granted) {
+      native.openNotificationAccessSettings();
+      status("notificationRulesStatus", t("请在系统设置里允许 Agent Workspace 读取通知，返回后规则就会生效"));
+    }
+  }, "notificationRulesStatus");
+  on("btnNotificationAccess", "click", () => { native?.openNotificationAccessSettings?.(); }, "notificationRulesStatus");
+  on("notificationRuleForm", "submit", async () => {
+    const select = $("notificationRuleApp");
+    if (!select.value) throw new Error(t("请选择一个应用"));
+    const prompt = $("notificationRulePrompt").value.trim();
+    if (!prompt) throw new Error(t("请写下收到通知时要做什么"));
+    const context = ui.context();
+    const value = await post("/mobile/notification-rules", {
+      package: select.value, app_label: select.selectedOptions[0]?.textContent || select.value,
+      keywords: $("notificationRuleKeywords").value, prompt, confirm: $("notificationRuleConfirm").checked,
+      session_id: context.sessionId, model: context.settings.model, reasoning_effort: context.settings.reasoning_effort,
+    });
+    $("notificationRuleKeywords").value = "";
+    $("notificationRulePrompt").value = "";
+    $("notificationRuleConfirm").checked = true;
+    await notificationRules(undefined, value);
+    status("notificationRulesStatus", value.enabled ? t("规则已添加") : t("规则已添加；打开上面的开关后才会生效"));
+  }, "notificationRulesStatus");
+  on("btnBrowserTest", "click", async () => {
+    status("browserStatus", t("正在打开 example.com..."));
+    const result = await post("/mobile/browser/test", {});
+    const shot = result.screenshot || {};
+    status("browserStatus", shot.blank
+      ? t("网页已打开（{0}），但截图是空白的：这台手机不能给后台网页截图，AI 会改用读取文字", result.title || result.url)
+      : t("浏览器正常：已打开“{0}”，截图 {1}×{2}", result.title || result.url, shot.width, shot.height));
+  }, "browserStatus");
+  on("btnBrowserClear", "click", async () => {
+    if (!window.confirm(t("清除内置浏览器的登录状态、Cookie 和网站数据？"))) return;
+    await post("/mobile/browser/clear", {});
+    status("browserStatus", t("已清除浏览数据"));
+  }, "browserStatus");
+  on("floatingBallToggle", "change", async () => {
+    const result = nativeResult("setFloatingBall", $("floatingBallToggle").checked);
+    if (result.permission_required) {
+      ballPermissionAsked = true;
+      status("globalEntryStatus", t("请在打开的列表里找到 Agent Workspace，允许它“显示在其他应用上层”，返回后悬浮球就会出现"));
+    } else await globalEntry();
+  }, "globalEntryStatus");
+  on("btnAddQuickTile", "click", () => { nativeResult("requestQuickSettingsTile"); }, "globalEntryStatus");
+  on("servicesKeepAwakeToggle", "change", async () => {
+    try { await services(undefined, await post("/mobile/services/settings", { keep_awake: $("servicesKeepAwakeToggle").checked })); }
+    catch (error) { $("servicesKeepAwakeToggle").checked = !$("servicesKeepAwakeToggle").checked; throw error; }
+  }, "servicesStatus");
+  on("btnClearMemory", "click", async () => {
+    if (!window.confirm(t("清空全部记忆？这不能撤销。"))) return;
+    stopMemoryEdit();
+    await memory(undefined, await post("/mobile/memory/clear", {}));
+  }, "memoryStatus");
   on("btnAccessibilitySettings", "click", () => native?.openAccessibilitySettings?.(), "doctorStatus");
   on("systemPaused", "change", async () => { native?.setSystemPaused?.($("systemPaused").checked); await doctor(); }, "doctorStatus");
   on("btnTakeover", "click", async () => { native?.requestSystemTakeover?.(); await doctor(); }, "doctorStatus");

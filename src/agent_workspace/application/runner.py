@@ -133,6 +133,8 @@ _EMPTY_OUTPUT_CONTINUATION_PROMPT = (
 _MAX_OUTPUT_LIMIT_CONTINUATIONS = 32
 _MAX_EMPTY_OUTPUT_CONTINUATIONS = 3
 _MAX_STREAM_RECOVERIES = 3
+# Ceiling for a tool that asks for more than the task's per-tool time, e.g. a long install.
+_MAX_DECLARED_TOOL_SECONDS = 3600.0
 _TOKEN_ESTIMATE_BYTES = 3
 _CONTEXT_SUMMARY_CONTRACT_VERSION = 3
 
@@ -1947,7 +1949,7 @@ class AgentRunner:
         outcome = await _execute_to_settlement(
             tool,
             execution_arguments,
-            budget.max_tool_seconds,
+            _tool_timeout_seconds(tool, execution_arguments, budget.max_tool_seconds),
             budget.max_tool_settlement_seconds,
             ToolExecutionContext(
                 session_id=session_id,
@@ -3382,6 +3384,20 @@ def _terminal_tool_result(event: Event) -> str | None:
     if event.type == "tool.unknown":
         return "Tool execution outcome is unknown after interruption; it was not replayed."
     return None
+
+
+def _tool_timeout_seconds(tool: Tool, arguments: dict[str, Any], default: float) -> float:
+    """Let one call of a tool run longer than the task default when the tool asks for it."""
+    declared = getattr(tool, "execution_timeout_seconds", None)
+    if not callable(declared):
+        return default
+    try:
+        value = declared(arguments)
+    except Exception:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int | float) or not value > default:
+        return default
+    return min(float(value), _MAX_DECLARED_TOOL_SECONDS)
 
 
 async def _execute_to_settlement(

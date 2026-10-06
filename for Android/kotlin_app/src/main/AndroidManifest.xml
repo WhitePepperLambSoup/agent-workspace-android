@@ -10,6 +10,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Optional floating ball; the user grants "display over other apps" only if they turn it on. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- In-app updates from the project's GitHub releases (the user approves each install). -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
@@ -20,6 +22,7 @@
         <intent><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent>
         <intent><action android:name="android.speech.action.RECOGNIZE_SPEECH" /></intent>
         <intent><action android:name="android.intent.action.TTS_SERVICE" /></intent>
+        <intent><action android:name="android.media.action.IMAGE_CAPTURE" /></intent>
     </queries>
 
     <application
@@ -78,6 +81,15 @@
             <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/workspace_shared_paths" />
         </provider>
 
+        <!-- Writable target for photos taken with the camera app (share inbox "拍照"). -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.camera"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/camera_capture_paths" />
+        </provider>
+
         <provider
             android:name=".workspace.WorkspaceDocumentsProvider"
             android:authorities="${applicationId}.workspace-documents"
@@ -121,6 +133,27 @@
         <receiver android:name=".embedded.ScheduleWakeReceiver" android:exported="false">
             <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED" /><action android:name="android.intent.action.MY_PACKAGE_REPLACED" /></intent-filter>
         </receiver>
+        <!-- Global entries: the quick settings tile and the floating ball open a new conversation. -->
+        <service
+            android:name=".entry.AgentTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_quick_ask"
+            android:label="@string/quick_tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter><action android:name="android.service.quicksettings.action.QS_TILE" /></intent-filter>
+            <meta-data android:name="android.service.quicksettings.TOGGLEABLE_TILE" android:value="false" />
+        </service>
+        <service android:name=".entry.FloatingBallService" android:exported="false" />
+        <!-- Notification-triggered tasks; does nothing until the user grants notification access. -->
+        <service
+            android:name=".notifications.AgentNotificationListener"
+            android:exported="true"
+            android:process=":engine"
+            android:label="@string/notification_listener_label"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter><action android:name="android.service.notification.NotificationListenerService" /></intent-filter>
+        </service>
+        <receiver android:name=".notifications.NotificationRuleReceiver" android:exported="false" android:process=":engine" />
         <receiver android:name=".embedded.TaskActionReceiver" android:exported="false" />
         <receiver android:name=".embedded.EngineRecoveryReceiver" android:exported="false" />
         <receiver android:name=".embedded.AgentWidgetProvider" android:exported="true">

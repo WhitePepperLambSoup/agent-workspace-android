@@ -49,6 +49,8 @@ class TermuxDaemonService : Service() {
     @Volatile private var serviceClosing = false
     @Volatile private var engineRestarting = false
     @Volatile private var activeProviderConfiguration: String? = null
+    @Volatile private var runningServices = 0
+    @Volatile private var servicesKeepAwake = false
     private var lastReportedState: String? = null
     private var lastStateHeartbeat = 0L
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -63,6 +65,7 @@ class TermuxDaemonService : Service() {
         AndroidDocumentBridge.initialize(this)
         AndroidToolchainBridge.initialize(this)
         LocalModelBridge.initialize(this)
+        com.agentworkspace.mobile.browser.AgentBrowser.initialize(this)
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AgentWorkspace::TermuxDaemonLock").apply {
@@ -72,7 +75,14 @@ class TermuxDaemonService : Service() {
 
         startForeground(2001, buildNotification(com.agentworkspace.mobile.UiText.of(this@TermuxDaemonService, "Agent 内置引擎正在启动...", "Agent engine starting...")))
         notificationJob = serviceScope.launch {
-            TaskNotificationMonitor(this@TermuxDaemonService, taskStateListener = ::observeTasks).run()
+            TaskNotificationMonitor(
+                this@TermuxDaemonService,
+                taskStateListener = ::observeTasks,
+                servicesListener = { running, keepAwake ->
+                    runningServices = running
+                    servicesKeepAwake = keepAwake
+                },
+            ).run()
         }
     }
 
@@ -254,7 +264,9 @@ class TermuxDaemonService : Service() {
         if (serviceClosing || !engineReady) return
         val states = tasks?.map { it.state }
         val active = states?.any { it == "queued" || it == "running" } == true
-        if (active) wakeLock?.acquire(60000L) else releaseWakeLock()
+        // Services keep the CPU awake with the screen off only when the user turned that on.
+        val awake = active || (runningServices > 0 && servicesKeepAwake)
+        if (awake) wakeLock?.acquire(60000L) else releaseWakeLock()
         val state = when {
             states == null -> "recovering"
             active -> "running"
@@ -267,17 +279,22 @@ class TermuxDaemonService : Service() {
     @Synchronized
     private fun reportEngineState(state: String) {
         val now = System.currentTimeMillis()
-        if (state != lastReportedState || now - lastStateHeartbeat >= 15000) {
+        val services = runningServices
+        val key = "$state:$services"
+        if (key != lastReportedState || now - lastStateHeartbeat >= 15000) {
             lifecycleState.mark(state)
-            lastReportedState = state
+            lastReportedState = key
             lastStateHeartbeat = now
-            val text = when (state) {
+            val base = when (state) {
                 "running" -> com.agentworkspace.mobile.UiText.of(this@TermuxDaemonService, "Agent 正在执行任务", "Agent is running a task")
                 "waiting_approval" -> com.agentworkspace.mobile.UiText.of(this@TermuxDaemonService, "Agent 任务等待批准", "Agent task awaiting approval")
                 "recovering" -> com.agentworkspace.mobile.UiText.of(this@TermuxDaemonService, "Agent 正在恢复连接", "Agent is reconnecting")
                 "starting" -> com.agentworkspace.mobile.UiText.of(this@TermuxDaemonService, "Agent 内置引擎正在启动...", "Agent engine starting...")
                 else -> com.agentworkspace.mobile.UiText.of(this@TermuxDaemonService, "Agent 内置引擎已就绪", "Agent engine ready")
             }
+            val text = if (services > 0 && state != "starting") base + com.agentworkspace.mobile.UiText.of(
+                this@TermuxDaemonService, " · $services 个后台服务运行中", " · $services service(s) running"
+            ) else base
             updateNotification(text)
         }
     }

@@ -403,6 +403,17 @@ def validate_event_payload(event_type: str, data: dict[str, Any]) -> None:
     if event_type == "context.compacted":
         _validate_context_compacted(data)
         return
+    if event_type == "context.rewound":
+        # Edit-and-resend / regenerate: later context starts again before this user message.
+        if (
+            not isinstance(data.get("from_event_id"), str)
+            or not data["from_event_id"]
+            or type(data.get("from_sequence")) is not int
+            or data["from_sequence"] <= 0
+            or data.get("reason") not in {"edit", "regenerate"}
+        ):
+            raise ValueError("context.rewound contains invalid rewind metadata")
+        return
     if event_type.startswith("task.phase."):
         if (
             not isinstance(data.get("run_id"), str)

@@ -235,6 +235,8 @@ class TaskNotificationMonitor(
     private val tokenFile: File = File(context.filesDir, "serve.token"),
     private val endpoint: URL = URL("http://127.0.0.1:8080/mobile/tasks"),
     private val taskStateListener: (List<TaskNotificationSnapshot>?) -> Unit = {},
+    /** Running long-lived services and whether they should keep the CPU awake. */
+    private val servicesListener: (Int, Boolean) -> Unit = { _, _ -> },
 ) {
     private val settings = TaskNotificationSettings(context)
     private val tracker = TaskNotificationTracker(storageFile, System.currentTimeMillis())
@@ -265,6 +267,9 @@ class TaskNotificationMonitor(
             val tasks = snapshot.optJSONArray("tasks") ?: run {
                 taskStateListener(null)
                 return 10000
+            }
+            snapshot.optJSONObject("services")?.let {
+                servicesListener(it.optInt("running").coerceAtLeast(0), it.optBoolean("keep_awake"))
             }
             taskStateListener((0 until tasks.length()).mapNotNull {
                 tasks.optJSONObject(it)?.let(TaskNotificationSnapshot::fromJson)

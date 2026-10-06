@@ -58,7 +58,7 @@ class ShareInboxController private constructor(private val context: Context) {
         capture(sources.uris, sources.text, sources.mediaType, batchId, sources.warning)
     }
 
-    fun captureFiles(uris: List<Uri>) = capture(uris, null, null, UUID.randomUUID().toString())
+    fun captureFiles(uris: List<Uri>, batchId: String = UUID.randomUUID().toString()) = capture(uris, null, null, batchId)
 
     private fun capture(uris: List<Uri>, text: String?, defaultType: String?, batchId: String, warning: String? = null) {
         scope.launch {

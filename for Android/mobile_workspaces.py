@@ -677,6 +677,37 @@ class MobileWorkspaceController:
         finally:
             self._maintenance = False
 
+    async def switch_provider(self, config: Any, reasoning_effort: str) -> list[Any]:
+        """Point every live conversation, and those opened later, at another cloud provider.
+
+        Runs under maintenance, so no task is running or queued and none can start meanwhile.
+        Returns the previous provider objects for the caller to close.
+        """
+        previous: list[Any] = []
+        async with self.maintenance():
+            async with self._lock:
+                controllers = list(
+                    dict.fromkeys(
+                        controller
+                        for controller in (self.base_controller, *self._controllers.values())
+                        if controller is not None
+                    )
+                )
+            switched: set[int] = set()
+            for controller in controllers:
+                runtime = getattr(controller, "runtime", None)
+                if runtime is not None and id(runtime) not in switched:
+                    switched.add(id(runtime))
+                    previous.append(runtime.switch_provider(config))
+                controller.default_model = config.model
+                controller.default_reasoning_effort = reasoning_effort
+                controller.protocol = config.protocol.value
+                controller.base_url = config.base_url
+            update = getattr(self, "provider_config_updater", None)
+            if callable(update):
+                update(config)
+        return previous
+
     def prepare_provider_restart(self) -> None:
         if self.base_controller is None:
             raise RuntimeError("workspace controller has no maintenance anchor")

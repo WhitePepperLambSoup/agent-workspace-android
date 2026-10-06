@@ -412,6 +412,12 @@ data class MobileProviderSettings(
             load(context)
         }
 
+        /** The API key stored for this provider address, if any (keys are kept per address). */
+        fun apiKeyFor(context: Context, protocol: String, baseUrl: String): String? {
+            EmbeddedSecrets.initialize(context)
+            return EmbeddedSecrets.getCredential(credentialTarget(protocol, baseUrl))
+        }
+
         private fun credentialTarget(protocol: String, baseUrl: String): String {
             val uri = URI(baseUrl)
             val port = if (uri.port >= 0) uri.port else if (uri.scheme == "https") 443 else 80

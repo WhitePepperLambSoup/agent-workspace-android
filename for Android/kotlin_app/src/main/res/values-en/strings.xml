@@ -1,0 +1,5 @@
+<!-- Only strings the system shows before the app runs (other native text uses UiText). -->
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+    <string name="quick_tile_label">Ask Agent</string>
+    <string name="notification_listener_label">Agent Workspace notification rules</string>
+</resources>

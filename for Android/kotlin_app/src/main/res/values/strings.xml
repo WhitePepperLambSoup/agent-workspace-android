@@ -6,4 +6,6 @@
     <string name="notification_channel_name">Agent 守护服务</string>
     <string name="notification_running_title">Agent Workspace 运行中</string>
     <string name="notification_running_desc">本地服务正常监听在端口 8080</string>
+    <string name="quick_tile_label">问 Agent</string>
+    <string name="notification_listener_label">Agent Workspace 通知触发</string>
 </resources>

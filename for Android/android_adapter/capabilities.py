@@ -147,7 +147,7 @@ def browser_status() -> dict[str, Any]:
 
 
 def _tool_reason(name: str, executables: dict[str, dict[str, str]]) -> str | None:
-    if name in {"run_terminal"} and "shell" not in executables:
+    if name in {"run_terminal", "start_service"} and "shell" not in executables:
         return "Android shell /system/bin/sh is unavailable on this runtime"
     if name in {"run_process"} and not executables:
         return "No executable is available to the Android app"
@@ -181,7 +181,13 @@ def _tool_reason(name: str, executables: dict[str, dict[str, str]]) -> str | Non
         return "No language server executable is installed in the APK environment"
     if name == "transcribe_audio" and not os.getenv("AGENT_WORKSPACE_AUDIO_BASE_URL"):
         return "No audio transcription endpoint is configured"
-    if name == "browser":
+    if name in {"browser", "browser_view"}:
+        from .browser import browser_available
+
+        if browser_available():
+            return None
+        if name == "browser_view":
+            return "The in-app browser needs the Android app"
         return browser_status()["reason"]
     return None
 
@@ -235,6 +241,16 @@ def configure_android_registry(
     if workspace is not None:
         registry._android_workspace = str(workspace)
     factories: dict[str, Any] = {"speak_text": AndroidSpeakTool}
+    from .browser import AndroidBrowserTool, AndroidBrowserViewTool, browser_available
+
+    if browser_available():
+        # The phone's own WebView replaces the desktop Chrome DevTools browser.
+        factories["browser"] = AndroidBrowserTool
+        factories["browser_view"] = lambda: AndroidBrowserViewTool(workspace=workspace)
+    if os.getenv("AGENT_WORKSPACE_DATA_DIR"):
+        # Phone-wide memory (Memory page) replaces the per-workspace core memory tools.
+        factories["memory_search"] = lambda: _memory_tools()[0]
+        factories["memory_write"] = lambda: _memory_tools()[1]
     documents = document_status()
     native_pdf = bool(documents.get("available"))
     if workspace is not None:
@@ -254,6 +270,18 @@ def configure_android_registry(
                 unavailable[name] = str(documents.get("reason") or "Native PDF tool is unavailable")
         factories["run_terminal"] = lambda: AndroidRunTerminalTool(workspace)
         factories["run_diagnostics"] = lambda: AndroidLspDiagnosticsTool(workspace)
+        if os.getenv("AGENT_WORKSPACE_DATA_DIR"):
+            from .service_tools import (
+                ListServicesTool,
+                ServiceLogsTool,
+                StartServiceTool,
+                StopServiceTool,
+            )
+
+            factories["start_service"] = lambda: StartServiceTool(workspace)
+            factories["list_services"] = ListServicesTool
+            factories["service_logs"] = ServiceLogsTool
+            factories["stop_service"] = StopServiceTool
         if registry._android_host_process:
             factories["run_process"] = lambda: AndroidRunProcessTool(workspace)
     if "python" in executables and registry._android_host_process:
@@ -311,6 +339,19 @@ def configure_android_registry(
         "android": _android_status(),
         "documents": documents,
     }
+
+
+_MEMORY_TOOLS: tuple[Any, Any] | None = None
+
+
+def _memory_tools() -> tuple[Any, Any]:
+    """One shared pair, so the per-task save counter survives registry refreshes."""
+    global _MEMORY_TOOLS
+    if _MEMORY_TOOLS is None:
+        from .memory_tools import MobileMemorySearchTool, MobileMemoryWriteTool
+
+        _MEMORY_TOOLS = (MobileMemorySearchTool(), MobileMemoryWriteTool())
+    return _MEMORY_TOOLS
 
 
 def refresh_android_registry(registry: Any) -> dict[str, Any]:

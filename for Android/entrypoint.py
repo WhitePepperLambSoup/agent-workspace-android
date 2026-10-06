@@ -100,6 +100,11 @@ def _load_mobile_assets(token: str) -> tuple[str, dict[str, tuple[str, bytes]]]:
             "application/javascript; charset=utf-8",
             (web_root / "static" / "mobile-vendor.js").read_bytes(),
         ),
+        # Diagram renderer: not referenced by index.html; app.js loads it when a reply has a diagram.
+        "/static/mobile-mermaid.js": (
+            "application/javascript; charset=utf-8",
+            (web_root / "static" / "mobile-mermaid.js").read_bytes(),
+        ),
         "/static/management.js": (
             "application/javascript; charset=utf-8",
             (web_root / "static" / "management.js").read_bytes(),
@@ -221,6 +226,13 @@ async def _build_mobile_workspace_runtime(
         child_controller,
         base_controller=base_controller,
     )
+
+    def provider_config_updater(new_config: ProviderConfig) -> None:
+        # Conversations opened after a provider switch build their runtime with the new provider.
+        nonlocal config
+        config = new_config
+
+    router.provider_config_updater = provider_config_updater
     try:
         # Recover all visible durable tasks before lazily starting session controllers.
         _startup_phase("recovering interrupted tasks")
@@ -230,6 +242,38 @@ async def _build_mobile_workspace_runtime(
         await runtime.aclose()
         raise
     return runtime, router, catalog
+
+
+_MODEL_FAMILIES_BY_ENDPOINT = {
+    ("openai-compatible", "api.openai.com"): ("openai-gpt",),
+    ("openai-compatible", "api.deepseek.com"): ("deepseek-v4", "deepseek-v4.1"),
+    ("anthropic", "api.anthropic.com"): ("anthropic-claude",),
+    ("gemini", "generativelanguage.googleapis.com"): ("google-gemini",),
+    ("openai-compatible", "api.x.ai"): ("xai-grok",),
+    ("openai-compatible", "dashscope.aliyuncs.com"): ("alibaba-qwen",),
+    ("openai-compatible", "dashscope-intl.aliyuncs.com"): ("alibaba-qwen",),
+    ("openai-compatible", "api.moonshot.ai"): ("moonshot-kimi",),
+    ("openai-compatible", "api.moonshot.cn"): ("moonshot-kimi",),
+    ("openai-compatible", "api.z.ai"): ("zai-glm",),
+    ("openai-compatible", "open.bigmodel.cn"): ("zai-glm",),
+}
+
+
+def _provider_models(config: ProviderConfig) -> list[str]:
+    """The configured model plus the current models this provider is known to offer."""
+    from agent_workspace.config import provider_origin
+    from agent_workspace.core.model_registry import builtin_latest_models
+
+    families = _MODEL_FAMILIES_BY_ENDPOINT.get(
+        (config.protocol.value, provider_origin(config.base_url)[1]), ()
+    )
+    models = [config.model]
+    for snapshot in builtin_latest_models().snapshots():
+        if snapshot.family in families and snapshot.status in {"current", "preview"}:
+            models.append(
+                "deepseek-v4-pro" if snapshot.id.startswith("deepseek-v4-pro-") else snapshot.id
+            )
+    return list(dict.fromkeys(models))
 
 
 def _startup_phase(message: str) -> None:
@@ -311,6 +355,28 @@ def _disarm_stall_dump(handle: Any) -> None:
         handle.close()
 
 
+def _recover_services(data_dir: Path) -> None:
+    """End programs a crashed engine left behind, then start the services marked autostart."""
+    from mobile_services import get_service_manager
+
+    try:
+        manager = get_service_manager(data_dir)
+        failed = manager.recover() if manager is not None else []
+    except Exception as error:
+        _startup_phase(f"services: recovery failed: {type(error).__name__}")
+        return
+    if failed:
+        _startup_phase(f"services: {len(failed)} autostart service(s) could not start")
+
+
+def _stop_services(data_dir: Path) -> None:
+    from mobile_services import get_service_manager
+
+    manager = get_service_manager(data_dir)
+    if manager is not None:
+        manager.stop_all()
+
+
 async def _run_mobile_web_server(
     host: str,
     port: int,
@@ -321,8 +387,7 @@ async def _run_mobile_web_server(
     from mobile_gateway import MobileGateway
     from mobile_runtime_controller import configured_mobile_autonomy
 
-    from agent_workspace.config import ProviderConfig, provider_origin
-    from agent_workspace.core.model_registry import builtin_latest_models
+    from agent_workspace.config import ProviderConfig
 
     config = ProviderConfig.from_environment()
     autonomy = configured_mobile_autonomy()
@@ -332,28 +397,6 @@ async def _run_mobile_web_server(
     )
     token = os.getenv("AGENT_WORKSPACE_SERVE_TOKEN") or secrets.token_urlsafe(32)
     console_html, assets = _load_mobile_assets(token)
-    family_by_endpoint = {
-        ("openai-compatible", "api.openai.com"): ("openai-gpt",),
-        ("openai-compatible", "api.deepseek.com"): ("deepseek-v4", "deepseek-v4.1"),
-        ("anthropic", "api.anthropic.com"): ("anthropic-claude",),
-        ("gemini", "generativelanguage.googleapis.com"): ("google-gemini",),
-        ("openai-compatible", "api.x.ai"): ("xai-grok",),
-        ("openai-compatible", "dashscope.aliyuncs.com"): ("alibaba-qwen",),
-        ("openai-compatible", "dashscope-intl.aliyuncs.com"): ("alibaba-qwen",),
-        ("openai-compatible", "api.moonshot.ai"): ("moonshot-kimi",),
-        ("openai-compatible", "api.moonshot.cn"): ("moonshot-kimi",),
-        ("openai-compatible", "api.z.ai"): ("zai-glm",),
-        ("openai-compatible", "open.bigmodel.cn"): ("zai-glm",),
-    }
-    families = family_by_endpoint.get(
-        (config.protocol.value, provider_origin(config.base_url)[1]), ()
-    )
-    models = [config.model]
-    for snapshot in builtin_latest_models().snapshots():
-        if snapshot.family in families and snapshot.status in {"current", "preview"}:
-            models.append(
-                "deepseek-v4-pro" if snapshot.id.startswith("deepseek-v4-pro-") else snapshot.id
-            )
     api = MobileGateway(
         runtime,
         controller,
@@ -367,11 +410,12 @@ async def _run_mobile_web_server(
             "autonomy": autonomy.value,
             "local_context_tokens": int(os.getenv("AGENT_WORKSPACE_LOCAL_CONTEXT_TOKENS", "0")),
             "local_memory_mode": os.getenv("AGENT_WORKSPACE_LOCAL_MEMORY_MODE", "balanced"),
-            "models": models,
+            "models": _provider_models(config),
         },
         console_html=console_html,
         static_assets=assets,
         workspace_catalog=workspace_catalog,
+        provider_models=_provider_models,
     )
     _startup_phase("agent runtime ready")
     api.start()
@@ -393,6 +437,11 @@ async def _run_mobile_web_server(
         if data_dir
         else None
     )
+    services_recovery = (
+        asyncio.create_task(asyncio.to_thread(_recover_services, Path(data_dir)))
+        if data_dir
+        else None
+    )
     try:
         await asyncio.Event().wait()
     finally:
@@ -400,6 +449,11 @@ async def _run_mobile_web_server(
             watchdog.cancel()
             with suppress(asyncio.CancelledError):
                 await watchdog
+        if services_recovery is not None:
+            with suppress(Exception):
+                await asyncio.wait_for(asyncio.shield(services_recovery), 2.0)
+            with suppress(Exception):
+                await asyncio.to_thread(_stop_services, Path(data_dir))
         # The Android service gives a stopping engine 10 s before replacing its process. If shutdown
         # hangs, record where at 8 s so the cause survives the replacement.
         shutdown_log = _arm_stall_dump(Path(data_dir) / "logs" / "engine-stalls.log", 8.0) if data_dir else None

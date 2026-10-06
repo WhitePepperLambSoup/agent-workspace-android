@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import dataclasses
 import hashlib
 import json
 import os
@@ -51,6 +52,16 @@ _ANDROID_SYSTEM_SUFFIX = (
     "write_file to save text with a .pdf extension or keep inspecting raw PDF bytes in "
     "the shell when a document tool is available."
 )
+
+
+def _android_system_suffix() -> str:
+    """Android guidance plus the phone-wide memory section, rebuilt for every task."""
+    if not os.getenv("AGENT_WORKSPACE_DATA_DIR"):
+        return _ANDROID_SYSTEM_SUFFIX
+    from mobile_memory import memory_system_suffix
+
+    memory = memory_system_suffix()
+    return f"{_ANDROID_SYSTEM_SUFFIX}\n\n{memory}" if memory else _ANDROID_SYSTEM_SUFFIX
 
 
 class MobileRuntimeNotReady(ValueError):
@@ -321,6 +332,19 @@ class MobileRuntimeController:
             and effort not in supported_reasoning_efforts(self.protocol, self.base_url, model)
         ):
             raise ValueError(f"{model} does not support the selected reasoning_effort")
+        replaced = None
+        if request.rewind_from_event_id is not None:
+            replaced = self._rewind_target(request)
+            if request.rewind_reason == "regenerate":
+                # Ask the same question again: the stored text and pictures, not the client's copy.
+                refs = request.image_refs or self._original_image_refs(request.session_id, replaced)
+                request = dataclasses.replace(
+                    request, prompt=replaced.data.get("content") or request.prompt, image_refs=refs
+                )
+        images = resolve_mobile_images(self.runtime, request.session_id, request.image_refs)
+        if replaced is not None:
+            # Recorded only after every check passed, so a refused request changes nothing.
+            self._record_rewind(request, replaced)
         task = self.tasks.create(
             request.session_id,
             request.prompt,
@@ -329,7 +353,7 @@ class MobileRuntimeController:
             request_id=request_id,
             budget_steps=budget_steps,
             request=request,
-            images=resolve_mobile_images(self.runtime, request.session_id, request.image_refs),
+            images=images,
         )
         if task.state is TaskState.QUEUED and task.task_id not in self._jobs:
             self._execution_checks[task.task_id] = (before_run, after_run)
@@ -340,6 +364,68 @@ class MobileRuntimeController:
                 self._executions[task.task_id] = execution
             self._schedule(task.task_id)
         return task
+
+    async def switch_provider(self, config: Any, reasoning_effort: str) -> list[Any]:
+        """Single-runtime form of MobileWorkspaceController.switch_provider."""
+        async with self.maintenance():
+            if any(
+                task.state in {TaskState.QUEUED, TaskState.RUNNING, TaskState.WAITING_APPROVAL}
+                for task in self.tasks.list()
+            ):
+                raise ValueError("stop or finish active and queued tasks before changing models or tools")
+            previous = [self.runtime.switch_provider(config)]
+            self.default_model = config.model
+            self.default_reasoning_effort = reasoning_effort
+            self.protocol = config.protocol.value
+            self.base_url = config.base_url
+        return previous
+
+    def _rewind_target(self, request: MobileTaskRequest) -> Event:
+        """The user message an edit or regenerate replaces, after checking it may be replaced."""
+        if any(
+            task.state in {TaskState.QUEUED, TaskState.RUNNING, TaskState.WAITING_APPROVAL}
+            for task in self.tasks.list(request.session_id)
+        ):
+            raise ValueError("wait for the running task to finish before editing earlier messages")
+        event = self.runtime.store.get_event(request.rewind_from_event_id)
+        if (
+            event is None
+            or event.session_id != request.session_id
+            or event.type != "message.created"
+            or event.data.get("role") != "user"
+            or not event.sequence
+        ):
+            raise ValueError("only your own messages in this conversation can be edited or regenerated")
+        return event
+
+    def _original_image_refs(self, session_id: str, message: Event) -> tuple:
+        """The imported pictures of an earlier message, found by digest among this session's tasks."""
+        digests = [
+            image.get("sha256")
+            for image in message.data.get("images", []) or []
+            if isinstance(image, dict) and isinstance(image.get("sha256"), str)
+        ]
+        if not digests:
+            return ()
+        known = {ref.sha256: ref for task in self.tasks.list(session_id) for ref in task.image_refs}
+        if any(digest not in known for digest in digests):
+            raise ValueError("the original pictures are no longer available; attach them again")
+        return tuple(known[digest] for digest in digests)
+
+    def _record_rewind(self, request: MobileTaskRequest, event: Event) -> None:
+        """Edit-and-resend / regenerate: drop the chosen user message and everything after it
+        from the model's context. History keeps every event; files already changed stay changed."""
+        self.runtime.store.append(
+            Event(
+                session_id=request.session_id,
+                type="context.rewound",
+                data={
+                    "from_event_id": event.id,
+                    "from_sequence": event.sequence,
+                    "reason": request.rewind_reason,
+                },
+            )
+        )
 
     async def resume(self, task_id: str, *, execution: Any = None) -> MobileTask:
         self._ensure_task_admission()
@@ -688,7 +774,7 @@ class MobileRuntimeController:
                         session,
                         model,
                         reasoning_effort=task.reasoning_effort,
-                        system_suffix=_ANDROID_SYSTEM_SUFFIX,
+                        system_suffix=_android_system_suffix(),
                         continuation_prompt=(
                             "Resume the interrupted Android task from its durable history. "
                             "Reuse confirmed tool results and completed actions. "
@@ -704,7 +790,7 @@ class MobileRuntimeController:
                         task.prompt,
                         model,
                         reasoning_effort=task.reasoning_effort,
-                        system_suffix=_ANDROID_SYSTEM_SUFFIX,
+                        system_suffix=_android_system_suffix(),
                         **({"images": images} if task.image_refs else {}),
                         **options,
                     )

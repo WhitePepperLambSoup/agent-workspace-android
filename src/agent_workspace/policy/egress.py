@@ -41,6 +41,10 @@ class ProviderEgressPolicy:
     def endpoint(self) -> str:
         return self._endpoint
 
+    def retarget(self, endpoint: str) -> ProviderEgressPolicy:
+        """The same policy for another Provider endpoint; earlier session grants do not carry over."""
+        return ProviderEgressPolicy(endpoint, self._autonomy, self._approval_callback)
+
     async def authorize(self, request: ProviderEgressRequest) -> ApprovalDecision:
         if request.endpoint != self._endpoint:
             return ApprovalDecision(False, "Provider endpoint changed after policy creation")

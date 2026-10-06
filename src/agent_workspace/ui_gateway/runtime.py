@@ -37,10 +37,12 @@ from agent_workspace.config import (
     ProviderProtocol,
     default_database_path,
     default_workspace_catalog_path,
+    is_loopback_endpoint,
 )
 from agent_workspace.core.background_jobs import BackgroundJobStatus
+from agent_workspace.core.cost import UNKNOWN_PRICING, resolve_pricing, session_cost
 from agent_workspace.core.durable_run_queue import DurableRunQueue, RunQueueStatus
-from agent_workspace.core.events import Event
+from agent_workspace.core.events import Event, validate_event_payload
 from agent_workspace.core.git_diff_review import FileDiff, GitDiffReviewService
 from agent_workspace.core.git_ops import (
     GitOpsError,
@@ -49,6 +51,7 @@ from agent_workspace.core.git_ops import (
     git_worktree_is_clean,
     git_worktree_remove,
 )
+from agent_workspace.core.instructions import INSTRUCTION_FILENAMES, discover_skill_files
 from agent_workspace.core.models import (
     MAX_IMAGE_BYTES,
     MAX_IMAGES_PER_MESSAGE,
@@ -65,6 +68,7 @@ from agent_workspace.core.models import (
     DeliveryState,
     DeltaKind,
     ImagePart,
+    MemoryItem,
     Mode,
     PlanStep,
     PlanStepState,
@@ -77,6 +81,7 @@ from agent_workspace.core.models import (
     capabilities_for_mode,
 )
 from agent_workspace.core.session import Session
+from agent_workspace.core.skills import SkillError, load_skills
 from agent_workspace.core.task_graph import TaskGraph, classify_failure
 from agent_workspace.core.workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError
 from agent_workspace.credentials import credential_target
@@ -91,10 +96,19 @@ from agent_workspace.settings import (
     ProviderSettingsStore,
     default_provider_settings_store,
 )
-from agent_workspace.storage import SearchIndexUnavailableError, SQLiteEventStore
+from agent_workspace.storage import (
+    BackupValidationError,
+    SearchIndexUnavailableError,
+    SessionExportError,
+    SQLiteEventStore,
+    export_session,
+    import_session_archive,
+)
 from agent_workspace.storage.lock import ProcessWriteLockGroup
 from agent_workspace.tools.base import ConcurrentModificationError, ToolError
+from agent_workspace.tools.custom import CustomToolError, load_custom_tool_definitions
 from agent_workspace.tools.filesystem import _open_identity_checked, atomic_write, sha256_bytes
+from agent_workspace.tools.mcp_host import McpHostError, load_mcp_servers
 from agent_workspace.tools.paths import WorkspacePaths
 from agent_workspace.tools.terminal_sessions import TerminalSessionError
 from agent_workspace.ui_gateway.protocol import (
@@ -510,6 +524,25 @@ async def _test_provider(config: ProviderConfig) -> None:
         await provider.aclose()
     if not finish_seen or not text_seen:
         raise RuntimeError("provider test did not return a complete text response")
+
+
+def _workspace_error_text(error: Exception, workspace: Path) -> str:
+    """Bound a configuration error and show paths relative to the workspace."""
+    text = str(error).replace(str(workspace) + os.sep, "").replace(str(workspace), ".")
+    return text[:500]
+
+
+def _archive_path(value: object) -> Path:
+    """Validate an absolute ``.zip`` path chosen in a desktop file dialog."""
+    if not isinstance(value, str) or not value or len(value) > 4096 or "\x00" in value:
+        raise GatewayError("invalid_path")
+    path = Path(value)
+    if not path.is_absolute() or path.suffix.casefold() != ".zip":
+        raise GatewayError("invalid_path")
+    try:
+        return path.resolve()
+    except OSError:
+        raise GatewayError("invalid_path") from None
 
 
 def _bounded_text(value: object, limit: int = _MAX_BOOTSTRAP_STRING_CHARS) -> str | None:
@@ -1185,12 +1218,14 @@ class GatewayRuntime:
         ]
 
     def _session_queued_count(self, session_id: str) -> int:
-        if session_id == self._host_session_id or (
-            session_id == "desktop" and self._host_session_id is None
-        ):
-            return len(self._queued_turns)
         context = self._session_hosts.get(session_id)
-        return len(context.queued_turns) if context is not None else 0
+        if context is not None and session_id != self._host_session_id:
+            return len(context.queued_turns)
+        # Parked hosts are keyed by session; with no selected session, any
+        # other event comes from the active sessionless host.
+        if session_id == self._host_session_id or self._host_session_id is None:
+            return len(self._queued_turns)
+        return 0
 
     def _execute_session_command(self, command: CommandEnvelope) -> GatewayReply:
         handler = {
@@ -1323,6 +1358,18 @@ class GatewayRuntime:
             return self._run_continuity_command(command)
         if command.type == "system.doctor":
             return self._run_doctor(command)
+        if command.type == "session.export":
+            return self._export_session(command)
+        if command.type == "session.import":
+            return self._import_session(command)
+        if command.type == "session.usage":
+            return self._session_usage(command)
+        if command.type == "memory.list":
+            return self._list_memories(command)
+        if command.type == "workspace.agent.inspect":
+            return self._inspect_agent_setup(command)
+        if command.type in {"memory.update", "memory.delete"}:
+            return self._write_memory(command)
         if command.type == "workspace.review.create":
             return self._create_review_snapshot(command)
         if command.type == "workspace.review.pr.create":
@@ -2177,7 +2224,10 @@ class GatewayRuntime:
             )
         profile = self._saved_provider(settings, selected_id)
         has_credential = self._settings_store().has_credential(profile)
-        local_endpoint = profile.protocol is ProviderProtocol.OLLAMA
+        # Local servers (Ollama, llama.cpp, LM Studio, vLLM) on loopback need no key.
+        local_endpoint = profile.protocol is ProviderProtocol.OLLAMA or is_loopback_endpoint(
+            profile.base_url
+        )
         status = "ready" if has_credential or local_endpoint else "needs_credential"
         next_action = None if status == "ready" else "enter_api_key"
         return self._reply(
@@ -2700,10 +2750,17 @@ class GatewayRuntime:
                 session_id=session.id,
             )
 
+        # A busy sessionless host cannot be parked; wait for its turn to settle.
+        sessionless_busy = (
+            self._host is not None
+            and self._host_session_id is None
+            and (self._busy or bool(self._queued_turns))
+        )
         lifecycle_pending = (
             self._session_switch_in_progress
             or self._runtime_state != "ready"
             or self._host is None
+            or sessionless_busy
         )
         if lifecycle_pending:
             self._selected_session_id = session.id
@@ -2717,7 +2774,7 @@ class GatewayRuntime:
             )
             page = self._history_page(session.id)
             self._acknowledge_history_page(session.id, page)
-            if self._workspace_switch_thread is None:
+            if self._workspace_switch_thread is None and not sessionless_busy:
                 self._schedule_session_activation(session)
             return self._reply(
                 "session.open.result",
@@ -2890,10 +2947,19 @@ class GatewayRuntime:
             autonomy=self._autonomy,
             title=title,
         )
+        # Session hosts are parked by session id, so a busy sessionless host
+        # cannot be parked; switching now would cancel its turn. Its terminal
+        # turn event activates the new session instead.
+        sessionless_busy = (
+            self._host is not None
+            and self._host_session_id is None
+            and (self._busy or bool(self._queued_turns))
+        )
         if (
             self._session_switch_in_progress
             or self._runtime_state != "ready"
             or self._host is None
+            or sessionless_busy
         ):
             try:
                 with SQLiteEventStore(self._database) as store:
@@ -2915,7 +2981,7 @@ class GatewayRuntime:
                     },
                 )
             )
-            if self._workspace_switch_thread is None:
+            if self._workspace_switch_thread is None and not sessionless_busy:
                 self._schedule_session_activation(session)
             return self._reply(
                 "session.create.result",
@@ -3048,6 +3114,310 @@ class GatewayRuntime:
         return self._reply(
             "session.presentation.set.result",
             {"epoch": self.epoch, "presentation": record},
+            session_id=None,
+        )
+
+    def _workspace_session(self, session_id: object) -> Session:
+        if not isinstance(session_id, str) or not session_id:
+            raise GatewayError("invalid_session")
+        session = self._stored_session(session_id)
+        with self._lock:
+            workspace = self._workspace
+        if workspace is None:
+            raise GatewayError("runtime_unconfigured")
+        if session is None or Path(session.workspace).resolve() != workspace:
+            raise GatewayError("unknown_session")
+        return session
+
+    def _export_session(self, command: CommandEnvelope) -> GatewayReply:
+        """Write one session as a verified archive to a path the user chose."""
+        self._require_payload(command, {"sessionId", "path"})
+        if command.session_id is not None:
+            raise GatewayError("invalid_session")
+        session = self._workspace_session(command.payload.get("sessionId"))
+        destination = _archive_path(command.payload.get("path"))
+        if not destination.parent.is_dir():
+            raise GatewayError("invalid_path")
+        # The save dialog already confirmed replacing an existing file; the
+        # archive is staged beside it so a failed export leaves it untouched.
+        staging = destination.with_name(f".{destination.stem}.{uuid4().hex}.export.zip")
+        try:
+            export_session(self._database, session.id, staging)
+            os.replace(staging, destination)
+        except SessionExportError:
+            raise GatewayError("session_export_blocked") from None
+        except (OSError, KeyError, ValueError, sqlite3.DatabaseError, BackupValidationError):
+            raise GatewayError("storage_unavailable") from None
+        finally:
+            staging.unlink(missing_ok=True)
+        return self._reply(
+            "session.export.result",
+            {"epoch": self.epoch, "sessionId": session.id, "path": str(destination)},
+            session_id=None,
+        )
+
+    def _import_session(self, command: CommandEnvelope) -> GatewayReply:
+        """Import a session archive into the open workspace as a new session."""
+        self._require_payload(command, {"path"})
+        if command.session_id is not None:
+            raise GatewayError("invalid_session")
+        archive = _archive_path(command.payload.get("path"))
+        if not archive.is_file():
+            raise GatewayError("invalid_path")
+        with self._lock:
+            workspace = self._workspace
+        if workspace is None:
+            raise GatewayError("runtime_unconfigured")
+        try:
+            with SQLiteEventStore(self._database) as store:
+                session = import_session_archive(store, archive, workspace)
+        except BackupValidationError:
+            raise GatewayError("invalid_session_archive") from None
+        except (OSError, KeyError, ValueError, sqlite3.DatabaseError):
+            raise GatewayError("storage_unavailable") from None
+        with self._lock:
+            self._pending_host_events.append(
+                Event(
+                    session_id=session.id,
+                    type="session.created",
+                    data={
+                        "session_id": session.id,
+                        "title": session.title,
+                        "mode": session.mode.value,
+                        "autonomy": session.autonomy.value,
+                        "activated": False,
+                    },
+                )
+            )
+            document = self._session_document(session)
+        return self._reply(
+            "session.import.result",
+            {"epoch": self.epoch, "session": document},
+            session_id=None,
+        )
+
+    def _session_usage(self, command: CommandEnvelope) -> GatewayReply:
+        """Summarize recorded token usage and its estimated price for a session."""
+        self._require_payload(command, {"sessionId"})
+        if command.session_id is not None:
+            raise GatewayError("invalid_session")
+        session = self._workspace_session(command.payload.get("sessionId"))
+        try:
+            events = SQLiteEventStore.list_session_events_of_types_read_only(
+                self._database, session.id, frozenset({"model.requested", "usage.updated"})
+            )
+        except (OSError, ValueError, sqlite3.DatabaseError):
+            raise GatewayError("storage_unavailable") from None
+        cost = session_cost(events)
+        priced = any(resolve_pricing(model) is not UNKNOWN_PRICING for model in cost.models)
+        return self._reply(
+            "session.usage.result",
+            {
+                "epoch": self.epoch,
+                "sessionId": session.id,
+                "modelCalls": cost.model_calls,
+                "inputTokens": cost.input_tokens,
+                "outputTokens": cost.output_tokens,
+                "cachedTokens": cost.cached_tokens,
+                "estimated": cost.estimated,
+                "costUsd": round(cost.cost_usd, 6),
+                # Unpriced models count as free; the UI must not present $0 as a price.
+                "priced": priced,
+                "models": list(cost.models)[:16],
+            },
+            session_id=None,
+        )
+
+    def _memory_scope(self) -> tuple[str, str | None]:
+        """Return the workspace key memories use and a session to attribute edits to."""
+        with self._lock:
+            workspace = self._workspace
+            selected = self._selected_session_id
+        if workspace is None:
+            raise GatewayError("runtime_unconfigured")
+        if selected:
+            session = self._stored_session(selected)
+            if session is not None and Path(session.workspace).resolve() == workspace:
+                return session.workspace, session.id
+        if not self._database.is_file():
+            return str(workspace), None
+        try:
+            sessions = SQLiteEventStore.list_sessions_read_only(
+                self._database, 1, workspace=workspace, exclude_run_sessions=True
+            )
+        except (OSError, ValueError, sqlite3.DatabaseError):
+            raise GatewayError("storage_unavailable") from None
+        if sessions:
+            return sessions[0].workspace, sessions[0].id
+        return str(workspace), None
+
+    @staticmethod
+    def _memory_document(memory: MemoryItem) -> dict[str, object]:
+        return {
+            "id": memory.id,
+            "content": memory.content,
+            "tags": list(memory.tags),
+            "sourceSessionId": memory.source_session_id,
+            "createdAt": memory.created_at,
+            "updatedAt": memory.updated_at,
+            "expiresAt": memory.expires_at,
+        }
+
+    def _list_memories(self, command: CommandEnvelope) -> GatewayReply:
+        self._require_payload(command, set(), optional={"query", "limit"})
+        query = command.payload.get("query", "")
+        limit = command.payload.get("limit", 200)
+        if not isinstance(query, str) or len(query) > 500:
+            raise GatewayError("invalid_query")
+        if type(limit) is not int or not 1 <= limit <= 500:
+            raise GatewayError("invalid_limit")
+        workspace, _session_id = self._memory_scope()
+        try:
+            memories = (
+                SQLiteEventStore.list_memories_read_only(
+                    self._database, workspace, query=query.strip(), limit=limit
+                )
+                if self._database.is_file()
+                else []
+            )
+        except (OSError, ValueError, sqlite3.DatabaseError):
+            raise GatewayError("storage_unavailable") from None
+        return self._reply(
+            "memory.list.result",
+            {
+                "epoch": self.epoch,
+                "memories": [self._memory_document(memory) for memory in memories],
+                "truncated": len(memories) >= limit,
+            },
+            session_id=None,
+        )
+
+    def _write_memory(self, command: CommandEnvelope) -> GatewayReply:
+        """Edit or delete one memory through the same events the memory tool appends."""
+        deleting = command.type == "memory.delete"
+        if deleting:
+            self._require_payload(command, {"memoryId"})
+        else:
+            self._require_payload(command, {"memoryId", "content"}, optional={"tags"})
+        memory_id = command.payload.get("memoryId")
+        if not isinstance(memory_id, str) or not memory_id or len(memory_id) > 128:
+            raise GatewayError("invalid_memory")
+        workspace, session_id = self._memory_scope()
+        if session_id is None:
+            raise GatewayError("session_required")
+        data: dict[str, object] = {"memory_id": memory_id, "workspace": workspace}
+        try:
+            with SQLiteEventStore(self._database) as store:
+                existing = store.get_memory(workspace, memory_id)
+                if existing is None:
+                    raise GatewayError("unknown_memory")
+                if not deleting:
+                    content = command.payload.get("content")
+                    tags = command.payload.get("tags", list(existing.tags))
+                    if not isinstance(content, str) or not content.strip() or len(content) > 10_000:
+                        raise GatewayError("invalid_memory")
+                    if not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
+                        raise GatewayError("invalid_memory")
+                    cleaned: list[str] = []
+                    for tag in (tag.strip() for tag in tags):
+                        if tag and tag.casefold() not in {item.casefold() for item in cleaned}:
+                            cleaned.append(tag[:64])
+                    if len(cleaned) > 16:
+                        raise GatewayError("invalid_memory")
+                    data["content"] = content.strip()
+                    data["tags"] = cleaned
+                    data["expires_at"] = existing.expires_at
+                event_type = "memory.deleted" if deleting else "memory.upserted"
+                validate_event_payload(event_type, data)
+                store.append(Event(session_id=session_id, type=event_type, data=data))
+                updated = None if deleting else store.get_memory(workspace, memory_id)
+        except GatewayError:
+            raise
+        except ValueError:
+            raise GatewayError("invalid_memory") from None
+        except (OSError, sqlite3.DatabaseError):
+            raise GatewayError("storage_unavailable") from None
+        return self._reply(
+            f"{command.type}.result",
+            {
+                "epoch": self.epoch,
+                "memoryId": memory_id,
+                "deleted": deleting,
+                "memory": self._memory_document(updated) if updated is not None else None,
+            },
+            session_id=None,
+        )
+
+    def _inspect_agent_setup(self, command: CommandEnvelope) -> GatewayReply:
+        """Report the instruction, skill, MCP and custom-tool files the agent loads.
+
+        Editing goes through the ordinary workspace file commands; this read-only
+        view shows what parses and why a file is rejected.
+        """
+        self._require_payload(command, set())
+        with self._lock:
+            workspace = self._workspace
+        if workspace is None:
+            raise GatewayError("runtime_unconfigured")
+        paths = WorkspacePaths(workspace)
+
+        def file_fact(relative: str) -> dict[str, object]:
+            try:
+                target = paths.resolve(relative)
+                exists = target.is_file()
+                size = target.stat().st_size if exists else 0
+            except (OSError, ValueError, ToolError):
+                exists, size = False, 0
+            return {"path": relative, "exists": exists, "bytes": size}
+
+        instructions = [file_fact(name) for name in INSTRUCTION_FILENAMES]
+        skills: list[dict[str, object]] = []
+        skill_error: str | None = None
+        try:
+            for skill in load_skills(workspace):
+                skills.append(
+                    {
+                        "id": skill.id,
+                        "name": skill.name,
+                        "description": skill.description[:500],
+                        "path": paths.relative(Path(skill.path)),
+                    }
+                )
+        except SkillError as exc:
+            skill_error = _workspace_error_text(exc, workspace)
+        skill_files = [paths.relative(path) for path in discover_skill_files(workspace)]
+        servers: list[dict[str, object]] = []
+        mcp_error: str | None = None
+        try:
+            for server in load_mcp_servers(workspace):
+                servers.append({"id": server.id, "command": list(server.command)[:32]})
+        except McpHostError as exc:
+            mcp_error = _workspace_error_text(exc, workspace)
+        custom_tools: list[dict[str, object]] = []
+        custom_error: str | None = None
+        try:
+            for definition in load_custom_tool_definitions(workspace):
+                custom_tools.append(
+                    {
+                        "name": definition.name,
+                        "description": definition.description[:500],
+                        "path": paths.relative(Path(definition.path)),
+                    }
+                )
+        except CustomToolError as exc:
+            custom_error = _workspace_error_text(exc, workspace)
+        return self._reply(
+            "workspace.agent.inspect.result",
+            {
+                "epoch": self.epoch,
+                "instructions": instructions,
+                "skills": skills,
+                "skillFiles": skill_files[:200],
+                "skillError": skill_error,
+                "mcp": {**file_fact(".agent/mcp.toml"), "servers": servers, "error": mcp_error},
+                "customTools": custom_tools,
+                "customToolError": custom_error,
+            },
             session_id=None,
         )
 

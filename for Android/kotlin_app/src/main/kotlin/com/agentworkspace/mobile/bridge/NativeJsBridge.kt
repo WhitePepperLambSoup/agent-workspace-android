@@ -21,7 +21,11 @@ import com.agentworkspace.mobile.embedded.EngineLifecycleState
 import com.agentworkspace.mobile.embedded.EngineRecovery
 import com.agentworkspace.mobile.embedded.ProviderChangeCoordinator
 import com.agentworkspace.mobile.embedded.ProviderSettingsChange
+import com.agentworkspace.mobile.embedded.ProviderProfiles
 import com.agentworkspace.mobile.automation.AndroidSystemBridge
+import com.agentworkspace.mobile.entry.FloatingBallService
+import com.agentworkspace.mobile.entry.QuickEntry
+import com.agentworkspace.mobile.notifications.AgentNotificationListener
 import com.agentworkspace.mobile.localmodels.TrainedLocalModel
 import com.agentworkspace.mobile.workspace.WorkspaceStorageAccess
 import com.agentworkspace.mobile.workspace.WorkspaceDocumentsAccess
@@ -41,6 +45,8 @@ class NativeJsBridge(
     private val restartEngineAction: () -> Unit = {},
     private val reconnectEngineAction: () -> Unit = {},
     private val exportLogsAction: (() -> Unit)? = null,
+    private val backupCreateAction: ((String) -> Unit)? = null,
+    private val backupRestoreAction: (() -> Unit)? = null,
     private val checkUpdatesAction: () -> Unit = {},
     private val stopEngineAction: () -> Unit = {},
     private val openNotificationSettingsAction: () -> Unit = {
@@ -63,11 +69,75 @@ class NativeJsBridge(
     private val shareInboxDiscard: (String) -> String = { unavailableShareInbox() },
     private val shareInboxAcknowledgement: (String) -> String = { unavailableShareInbox() },
     private val shareInboxFilePicker: () -> String = { unavailableShareInbox() },
+    private val shareInboxCameraCapture: () -> String = { unavailableShareInbox() },
     private val systemBarsAction: (Boolean, Int) -> Unit = { _, _ -> },
+    private val requestTileAction: (() -> String)? = null,
 ) {
     /** The web UI's language choice ("auto", "zh" or "en") for native dialogs, notifications and toasts. */
     @JavascriptInterface
-    fun setUiLanguage(value: String) = com.agentworkspace.mobile.UiText.setPreference(context, value)
+    fun setUiLanguage(value: String) {
+        com.agentworkspace.mobile.UiText.setPreference(context, value)
+        QuickEntry.publishShortcuts(context)
+    }
+
+    /** Floating ball and quick settings tile state for Settings → Global entry. */
+    @JavascriptInterface
+    fun getGlobalEntry(): String = JSONObject()
+        .put("ok", true)
+        .put("floating_ball", FloatingBallService.isEnabled(context))
+        .put("overlay_permission", FloatingBallService.canDraw(context))
+        .put("tile_request", requestTileAction != null && Build.VERSION.SDK_INT >= 33)
+        .toString()
+
+    /** Turning the ball on without "display over other apps" opens that system setting first. */
+    @JavascriptInterface
+    fun setFloatingBall(enabled: Boolean): String {
+        val needsPermission = FloatingBallService.setEnabled(context, enabled)
+        if (needsPermission) Handler(Looper.getMainLooper()).post {
+            runCatching {
+                context.startActivity(Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:${context.packageName}")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }.onFailure {
+                showToast(com.agentworkspace.mobile.UiText.of(context, "无法打开悬浮窗权限设置", "Could not open the overlay permission setting"))
+            }
+        }
+        return JSONObject().put("ok", true).put("permission_required", needsPermission).toString()
+    }
+
+    /** Whether the user granted notification access (needed for notification rules). */
+    @JavascriptInterface
+    fun getNotificationAccess(): String = JSONObject().put("ok", true)
+        .put("granted", AgentNotificationListener.accessGranted(context)).toString()
+
+    @JavascriptInterface
+    fun openNotificationAccessSettings() {
+        Handler(Looper.getMainLooper()).post {
+            runCatching { context.startActivity(AgentNotificationListener.accessSettingsIntent(context)) }
+                .recoverCatching {
+                    context.startActivity(Intent(android.provider.Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }
+        }
+    }
+
+    /** Apps on the home screen, to pick which app's notifications a rule follows. */
+    @JavascriptInterface
+    fun listApps(): String {
+        val manager = context.packageManager
+        val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val apps = org.json.JSONArray()
+        runCatching { manager.queryIntentActivities(launcher, 0) }.getOrDefault(emptyList())
+            .map { it.activityInfo.packageName to it.loadLabel(manager).toString() }
+            .filter { (name, _) -> name != context.packageName }
+            .distinctBy { it.first }
+            .sortedWith(compareBy(java.text.Collator.getInstance()) { it.second })
+            .forEach { (name, label) -> apps.put(JSONObject().put("package", name).put("label", label.take(80))) }
+        return JSONObject().put("ok", true).put("apps", apps).toString()
+    }
+
+    /** Android 13+: ask the system to add the "Ask Agent" tile to quick settings. */
+    @JavascriptInterface
+    fun requestQuickSettingsTile(): String = requestTileAction?.invoke()
+        ?: JSONObject().put("ok", false).put("error", "unsupported").toString()
 
     /** Lets the page match the status and navigation bar areas to its light or dark surface color. */
     @JavascriptInterface
@@ -91,6 +161,10 @@ class NativeJsBridge(
 
     @JavascriptInterface
     fun pickShareInboxFiles(): String = shareInboxFilePicker()
+
+    /** Take a photo with the camera app and add it to the share inbox. */
+    @JavascriptInterface
+    fun captureShareInboxPhoto(): String = shareInboxCameraCapture()
 
     @JavascriptInterface
     fun workspaceFileAction(requestJson: String): String = workspaceFileActionHandler(requestJson)
@@ -145,6 +219,23 @@ class NativeJsBridge(
         val action = exportLogsAction ?: return shareDiagnostics()
         Handler(Looper.getMainLooper()).post { action() }
         return "{\"ok\":true}"
+    }
+
+    /** Back up conversations, workspace and settings; progress arrives as `agent-backup` events. */
+    @JavascriptInterface
+    fun createBackup(webSettings: String): String {
+        val action = backupCreateAction ?: return JSONObject().put("ok", false).put("error", "备份不可用").toString()
+        if (webSettings.length > 4 * 1024 * 1024) return JSONObject().put("ok", false).put("error", "界面设置太大").toString()
+        Handler(Looper.getMainLooper()).post { action(webSettings) }
+        return JSONObject().put("ok", true).toString()
+    }
+
+    /** Pick a backup file and restore it (the engine restarts to finish). */
+    @JavascriptInterface
+    fun restoreBackup(): String {
+        val action = backupRestoreAction ?: return JSONObject().put("ok", false).put("error", "恢复不可用").toString()
+        Handler(Looper.getMainLooper()).post { action() }
+        return JSONObject().put("ok", true).toString()
     }
 
     /** compat.js: the page found this WebView too old for the console. */
@@ -273,8 +364,63 @@ class NativeJsBridge(
     @JavascriptInterface fun cancelLocalModelBenchmark(): String = localModelControl("cancel")
 
     @JavascriptInterface
-    fun applyRuntimeSettings(settingsJson: String): String = changeProvider(false) {
-        MobileProviderSettings.applyRuntimeSettings(context, settingsJson)
+    fun applyRuntimeSettings(settingsJson: String): String {
+        // Model, reasoning effort and context summary apply to the running engine; other settings
+        // (execution mode, on-device model tuning) still restart it.
+        val hot = runCatching {
+            val update = JSONObject(settingsJson)
+            val current = MobileProviderSettings.load(context)
+            val keys = update.keys().asSequence().toSet()
+            if (keys.isEmpty() || !setOf("model", "reasoning_effort", "autonomy", "context_summary_enabled").containsAll(keys) ||
+                (update.has("autonomy") && update.optString("autonomy") != current.autonomy)) return@runCatching null
+            val model = update.optString("model", current.model).trim()
+            if (model.isEmpty() || model.length > 256) return@runCatching null
+            val summary = if (update.has("context_summary_enabled")) update.getBoolean("context_summary_enabled") else null
+            ProviderSettingsChange.applyWithoutRestart(context, current.protocol, current.baseUrl, model,
+                update.optString("reasoning_effort", current.reasoningEffort), summary)
+        }
+        hot.exceptionOrNull()?.let { error ->
+            return JSONObject().put("ok", false).put("error", error.message ?: "无法保存模型设置").toString()
+        }
+        if (hot.getOrNull() == true) return JSONObject().put("ok", true).put("restarting", false).toString()
+        return changeProvider(false) { MobileProviderSettings.applyRuntimeSettings(context, settingsJson) }
+    }
+
+    @JavascriptInterface
+    fun getProviderProfiles(): String = runCatching { ProviderProfiles.snapshot(context) }
+        .getOrElse { JSONObject().put("ok", false).put("error", it.message ?: "无法读取模型配置").toString() }
+
+    @JavascriptInterface
+    fun saveProviderProfile(name: String): String = runCatching { ProviderProfiles.saveCurrent(context, name) }
+        .getOrElse { JSONObject().put("ok", false).put("error", it.message ?: "无法保存模型配置").toString() }
+
+    @JavascriptInterface
+    fun deleteProviderProfile(id: String): String = runCatching { ProviderProfiles.delete(context, id) }
+        .getOrElse { JSONObject().put("ok", false).put("error", it.message ?: "无法删除模型配置").toString() }
+
+    /** Switch to a saved profile: in place for cloud providers, through a restart for the on-device model. */
+    @JavascriptInterface
+    fun switchProviderProfile(id: String): String {
+        val profile = runCatching { ProviderProfiles.get(context, id) }.getOrElse {
+            return JSONObject().put("ok", false).put("error", it.message ?: "未知模型配置").toString()
+        }
+        val protocol = profile.getString("protocol")
+        val baseUrl = profile.getString("base_url")
+        val model = profile.getString("model")
+        val effort = profile.optString("reasoning_effort", "auto")
+        val local = baseUrl.trimEnd('/') == MobileProviderSettings.EMBEDDED_QWEN_BASE_URL
+        if (!local) {
+            val hot = runCatching { ProviderSettingsChange.applyWithoutRestart(context, protocol, baseUrl, model, effort) }
+            hot.exceptionOrNull()?.let { error ->
+                return JSONObject().put("ok", false).put("error", error.message ?: "无法切换模型").toString()
+            }
+            if (hot.getOrNull() == true) return JSONObject().put("ok", true).put("restarting", false).toString()
+        }
+        return changeProvider(local) {
+            if (local) MobileProviderSettings.selectLocalModel(context, model)
+            else MobileProviderSettings.save(context, protocol, baseUrl, model, null, false,
+                effort.takeIf { it in MobileProviderSettings.reasoningEfforts(protocol, baseUrl, model) } ?: "auto")
+        }
     }
 
     @JavascriptInterface

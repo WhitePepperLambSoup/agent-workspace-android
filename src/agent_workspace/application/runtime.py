@@ -158,6 +158,25 @@ class ApplicationRuntime:
     _scheduler_claim_key: Hashable | None = None
     _scheduler_loop: asyncio.AbstractEventLoop | None = None
 
+    def switch_provider(self, provider_config: ProviderConfig) -> ManagedModelProvider:
+        """Point this runtime at another model provider without rebuilding it.
+
+        The caller must keep turns from running while it switches (a turn must not change
+        provider halfway). Egress approval starts over for the new endpoint. Returns the
+        previous provider, which the caller closes once nothing uses it.
+        """
+        provider = create_provider(provider_config)
+        runner = self.service.runner
+        previous = self.provider
+        policy = getattr(runner, "_egress_policy", None)
+        if policy is not None:
+            runner._egress_policy = policy.retarget(provider_config.base_url)
+        runner._provider = provider
+        runner._system_prompt_cache.clear()
+        self.service._provider = provider
+        self.provider = provider
+        return previous
+
     def _start_scheduler(self) -> None:
         if self._scheduler_factory is not None and self.scheduler is None:
             self.scheduler = self._scheduler_factory()

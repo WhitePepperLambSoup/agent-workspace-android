@@ -35,6 +35,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import com.agentworkspace.mobile.bridge.NativeJsBridge
+import com.agentworkspace.mobile.entry.FloatingBallService
+import com.agentworkspace.mobile.entry.QuickEntry
 import com.agentworkspace.mobile.embedded.TermuxBootstrap
 import com.agentworkspace.mobile.embedded.TermuxDaemonService
 import com.agentworkspace.mobile.embedded.MobileProviderSettings
@@ -101,12 +103,25 @@ class WebUiActivity : ComponentActivity() {
     private var fileUploadCallback: ValueCallback<Array<Uri>>? = null
     private val activityScope = CoroutineScope(Dispatchers.Main + Job())
     private val appSupport = AppSupportController(this, activityScope) { pageDialogTheme() }
+    private val backups = com.agentworkspace.mobile.update.BackupController(this, activityScope,
+        dispatch = { event -> dispatchPageEvent("agent-backup", event) },
+        restartEngine = { initAndLaunchEngine(restart = true) })
+
+    /** Deliver a CustomEvent with JSON detail to the trusted console page. */
+    private fun dispatchPageEvent(name: String, detail: JSONObject) {
+        if (!::webView.isInitialized || isDestroyed || !trustedWorkspacePage ||
+            !isTrustedConsoleUrl(webView.url ?: return)) return
+        webView.evaluateJavascript("window.dispatchEvent(new CustomEvent(${JSONObject.quote(name)}, { detail: $detail }));", null)
+    }
     private var initializationJob: Job? = null
     private val sharedTexts = ArrayDeque<String>()
     private val shareHandler = Handler(Looper.getMainLooper())
     private var deliveringShare = false
     private var pendingSessionId: String? = null
     private var deliveringSession = false
+    /** A quick ask from the tile, floating ball or a launcher shortcut, as JSON for the page. */
+    private var pendingQuickAsk: String? = null
+    private var deliveringQuickAsk = false
     private var notificationPermissionInFlight = false
     private var voicePending = false
     private var trainedModelImportPending = false
@@ -131,6 +146,51 @@ class WebUiActivity : ComponentActivity() {
         uris.forEach { uri -> runCatching { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) } }
         if (uris.isNotEmpty()) shareInbox.captureFiles(uris)
         else dispatchShareInboxChanged()
+    }
+
+    // Photo for the share inbox: the camera app writes into cache/camera through a private provider,
+    // then the picture is captured like any picked file. The path survives our process being killed
+    // while the camera is open (the result is delivered to the recreated activity).
+    private var pendingCameraPhoto: String? = null
+    private val cameraCapture = registerForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
+        synchronized(shareInboxPickerLock) { shareInboxPickerPending = false }
+        val photo = pendingCameraPhoto?.let(::File)
+        pendingCameraPhoto = null
+        if (saved && photo != null && photo.isFile && photo.length() > 0) {
+            shareInbox.captureFiles(listOf(androidx.core.content.FileProvider.getUriForFile(this, "$packageName.camera", photo)))
+        } else {
+            photo?.delete()
+            dispatchShareInboxChanged()
+        }
+    }
+
+    private fun queueCameraCapture(): String = shareInboxAccess {
+        synchronized(shareInboxPickerLock) {
+            if (shareInboxPickerPending) return@shareInboxAccess ShareInboxController.failure("请先完成当前文件选择")
+            shareInboxPickerPending = true
+        }
+        shareHandler.post {
+            if (!trustedWorkspacePage || isDestroyed || isFinishing) {
+                synchronized(shareInboxPickerLock) { shareInboxPickerPending = false }
+                return@post
+            }
+            try {
+                val folder = File(cacheDir, "camera").apply { mkdirs() }
+                // Photos already copied into the inbox are no longer needed after a day.
+                folder.listFiles()?.filter { System.currentTimeMillis() - it.lastModified() > 24 * 3600_000L }?.forEach { it.delete() }
+                val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(java.util.Date())
+                val photo = File(folder, "photo-$stamp.jpg")
+                pendingCameraPhoto = photo.absolutePath
+                cameraCapture.launch(androidx.core.content.FileProvider.getUriForFile(this, "$packageName.camera", photo))
+            } catch (failure: Exception) {
+                synchronized(shareInboxPickerLock) { shareInboxPickerPending = false }
+                pendingCameraPhoto = null
+                val message = if (failure is ActivityNotFoundException) UiText.of(this, "手机上没有可用的相机应用", "No camera app is available")
+                    else UiText.of(this, "无法打开相机", "Could not open the camera")
+                android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+        JSONObject().put("ok", true).put("queued", true).toString()
     }
 
     private fun shareInboxAccess(action: () -> String): String =
@@ -393,6 +453,7 @@ class WebUiActivity : ComponentActivity() {
             runCatching { JSONObject(it) }.getOrNull()?.let(workspaceFolderResults::addLast)
         }
         savedInstanceState?.getString("workspace-folder-uri")?.let { resolveWorkspaceFolder(Uri.parse(it)) }
+        pendingCameraPhoto = savedInstanceState?.getString("pending-camera-photo")
         WindowCompat.setDecorFitsSystemWindows(window, false)
         workspaceFileActions = WorkspaceFileActionController(this, activityScope,
             trustedPage = { trustedWorkspacePage && !isDestroyed && !isFinishing },
@@ -459,6 +520,8 @@ class WebUiActivity : ComponentActivity() {
                 restartEngineAction = { initAndLaunchEngine(restart = true) },
                 reconnectEngineAction = { reconnectEngine() },
                 exportLogsAction = { appSupport.showLogExport() },
+                backupCreateAction = { web -> backups.create(web) },
+                backupRestoreAction = { backups.restore() },
                 checkUpdatesAction = { appSupport.checkNow() },
                 stopEngineAction = {
                     startService(Intent(this@WebUiActivity, TermuxDaemonService::class.java).setAction(TermuxDaemonService.ACTION_STOP))
@@ -481,7 +544,9 @@ class WebUiActivity : ComponentActivity() {
                 shareInboxDiscard = { raw -> shareInboxAccess { shareInbox.discard(raw) } },
                 shareInboxAcknowledgement = { raw -> shareInboxAccess { shareInbox.acknowledge(raw) } },
                 shareInboxFilePicker = { queueShareInboxFilePicker() },
+                shareInboxCameraCapture = { queueCameraCapture() },
                 systemBarsAction = { dark, color -> applySystemBars(dark, color) },
+                requestTileAction = { requestQuickSettingsTile() },
             ), "AndroidBridge")
 
             webChromeClient = object : WebChromeClient() {
@@ -571,6 +636,7 @@ class WebUiActivity : ComponentActivity() {
                             dispatchShareInboxChanged()
                             deliverSessionNavigation()
                             deliverSharedText()
+                            deliverQuickAsk()
                             if (voicePending) { voicePending = false; launchVoiceInput() }
                             requestTaskNotificationPermissionOnce()
                         }
@@ -668,8 +734,11 @@ class WebUiActivity : ComponentActivity() {
         pendingSessionId = savedInstanceState?.getString("pending-session-id")
         savedInstanceState?.getStringArrayList("pending-shared-texts")?.forEach(sharedTexts::addLast)
         queueSessionNavigation(intent)
+        pendingQuickAsk = savedInstanceState?.getString("pending-quick-ask")
+        if (savedInstanceState == null) queueQuickAsk(intent)
         shareInbox.captureIntent(intent, incomingShareBatchId)
         voicePending = intent?.getBooleanExtra("voice_input", false) == true || intent?.action in listOf(Intent.ACTION_ASSIST, Intent.ACTION_VOICE_COMMAND)
+        QuickEntry.publishShortcuts(this)
         initAndLaunchEngine()
         appSupport.autoCheckIfDue()
         warnIfWebViewTooOld()
@@ -765,6 +834,7 @@ class WebUiActivity : ComponentActivity() {
         setIntent(intent)
         if (!::webView.isInitialized) return // WebView unavailable: only the help screen is shown
         queueSessionNavigation(intent)
+        queueQuickAsk(intent)
         incomingShareBatchId = UUID.randomUUID().toString()
         shareInbox.captureIntent(intent, incomingShareBatchId)
         if (intent.getBooleanExtra("voice_input", false) || intent.action in listOf(Intent.ACTION_ASSIST, Intent.ACTION_VOICE_COMMAND)) {
@@ -784,12 +854,14 @@ class WebUiActivity : ComponentActivity() {
         outState.putString("incoming-share-batch-id", incomingShareBatchId)
         outState.putBoolean("share-inbox-picker-pending", shareInboxPickerPending)
         outState.putString("pending-session-id", pendingSessionId)
+        outState.putString("pending-quick-ask", pendingQuickAsk)
         outState.putStringArrayList("pending-shared-texts", ArrayList(sharedTexts))
         outState.putBoolean("workspace-folder-picking", workspaceFolderPicking)
         outState.putBoolean("workspace-folder-awaiting-storage", workspaceFolderAwaitingStorage)
         outState.putBoolean("workspace-storage-permission-in-flight", workspaceStoragePermissionInFlight)
         outState.putStringArrayList("workspace-folder-results", ArrayList(workspaceFolderResults.map { it.toString() }))
         outState.putString("workspace-folder-uri", pendingWorkspaceFolderUri)
+        outState.putString("pending-camera-photo", pendingCameraPhoto)
         if (::workspaceFileActions.isInitialized) workspaceFileActions.saveState()?.let {
             outState.putBundle("workspace-file-save", it)
             savedWorkspaceFilePicker = true
@@ -808,7 +880,11 @@ class WebUiActivity : ComponentActivity() {
             deliverWorkspaceFolderResults()
             deliverSessionNavigation()
             deliverSharedText()
+            deliverQuickAsk()
             checkEngineOnResume()
+            // Back from the overlay permission screen: show the ball now that it may draw.
+            FloatingBallService.onAppResumed(this)
+            dispatchPageEvent("agent-global-entry-changed", JSONObject())
         }
     }
 
@@ -867,6 +943,47 @@ class WebUiActivity : ComponentActivity() {
                 shareHandler.postDelayed({ deliverSessionNavigation() }, 500)
             }
         }
+    }
+
+    private fun queueQuickAsk(incoming: Intent?) {
+        if (incoming?.action != QuickEntry.ACTION_QUICK_ASK) return
+        val mode = incoming.getStringExtra(QuickEntry.EXTRA_MODE)?.takeIf { it in QuickEntry.MODES } ?: "text"
+        val batch = incoming.getStringExtra(QuickEntry.EXTRA_SHARE_BATCH)?.takeIf { it.length in 1..64 }
+        // Handled once; a later recreation must not open yet another conversation.
+        incoming.action = Intent.ACTION_MAIN
+        pendingQuickAsk = JSONObject().put("mode", mode).apply { if (batch != null) put("share_batch", batch) }.toString()
+        deliverQuickAsk()
+    }
+
+    private fun deliverQuickAsk() {
+        val request = pendingQuickAsk ?: return
+        if (deliveringQuickAsk || pendingSessionId != null || isDestroyed || isFinishing ||
+            webView.visibility != View.VISIBLE || !isTrustedConsoleUrl(webView.url ?: return)) return
+        deliveringQuickAsk = true
+        webView.evaluateJavascript("(function(){return window.AgentMobileUi?.quickAsk?.($request) === true;})()") { accepted ->
+            deliveringQuickAsk = false
+            if (isDestroyed || isFinishing) return@evaluateJavascript
+            if (pendingQuickAsk != request) deliverQuickAsk()
+            else if (accepted == "true") pendingQuickAsk = null
+            else shareHandler.postDelayed({ deliverQuickAsk() }, 500)
+        }
+    }
+
+    /** Android 13+ shows a system prompt to add the tile; the page learns the answer by event. */
+    private fun requestQuickSettingsTile(): String {
+        if (Build.VERSION.SDK_INT < 33) return JSONObject().put("ok", false).put("error", "unsupported").toString()
+        shareHandler.post {
+            val manager = getSystemService(android.app.StatusBarManager::class.java)
+            runCatching {
+                manager.requestAddTileService(
+                    android.content.ComponentName(this, com.agentworkspace.mobile.entry.AgentTileService::class.java),
+                    UiText.of(this, "问 Agent", "Ask Agent"),
+                    android.graphics.drawable.Icon.createWithResource(this, R.drawable.ic_quick_ask),
+                    mainExecutor,
+                ) { result -> dispatchPageEvent("agent-tile-request", JSONObject().put("result", result)) }
+            }.onFailure { dispatchPageEvent("agent-tile-request", JSONObject().put("result", -1)) }
+        }
+        return JSONObject().put("ok", true).toString()
     }
 
     private fun isTrustedConsoleUrl(url: String): Boolean =
@@ -1061,6 +1178,7 @@ class WebUiActivity : ComponentActivity() {
         retryButton.visibility = View.GONE
         initializationJob = activityScope.launch {
             try {
+                var restartEngine = restart
                 if (!TermuxBootstrap.isInstalled(this@WebUiActivity)) {
                     statusText.text = UiText.of(this@WebUiActivity, "正在准备本地服务...", "Preparing the local service...")
                     withContext(Dispatchers.IO) {
@@ -1068,17 +1186,20 @@ class WebUiActivity : ComponentActivity() {
                             activityScope.launch { statusText.text = msg }
                         }
                     }
+                    // After an update the engine may already be running the previous sources (started
+                    // by the recovery worker before the app was opened); restart it on the new ones.
+                    restartEngine = true
                 }
 
                 statusText.text = UiText.of(this@WebUiActivity, "正在启动本地 Agent 守护引擎...", "Starting the local Agent engine...")
                 val provider = withContext(Dispatchers.IO) {
                     File(filesDir, TermuxDaemonService.STARTUP_FAILURE_FILE).delete()
-                    if (restart) File(filesDir, "serve.token").delete()
+                    if (restartEngine) File(filesDir, "serve.token").delete()
                     MobileProviderSettings.load(this@WebUiActivity).toJson()
                 }
                 val daemonIntent = Intent(this@WebUiActivity, TermuxDaemonService::class.java).apply {
                     putExtra(TermuxDaemonService.EXTRA_PROVIDER_CONFIGURATION, provider)
-                    if (restart) action = TermuxDaemonService.ACTION_RESTART
+                    if (restartEngine) action = TermuxDaemonService.ACTION_RESTART
                 }
                 startForegroundService(daemonIntent)
 

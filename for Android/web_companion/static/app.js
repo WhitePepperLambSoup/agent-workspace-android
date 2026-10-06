@@ -75,6 +75,36 @@
     catch { return false; }
   }
 
+  // Quick tasks: the editable shortcuts above the composer. Until the user edits them, the defaults
+  // follow the interface language; once edited, the user's own text is stored as written.
+  const quickTasksKey = "agent-mobile-quick-tasks-v1";
+  const maxQuickTasks = 8;
+  const quickTaskIcons = ["file-text", "languages", "globe", "chart-no-axes-column", "code", "mail", "lightbulb", "notebook-pen", "calendar", "book-open", "graduation-cap", "search", "shopping-cart", "plane", "utensils", "heart", "star", "sparkles", "zap", "camera"];
+  function defaultQuickTasks() {
+    return [
+      { title: t("总结要点"), detail: t("文档、网页或聊天记录"), prompt: t("总结下面内容的要点，并列出需要我跟进的事项：\n"), icon: "file-text", send: false },
+      { title: t("翻译润色"), detail: t("中英互译，语气自然"), prompt: t("把下面的内容翻译成英文，语气自然：\n"), icon: "languages", send: false },
+      { title: t("做个网页"), detail: t("生成可直接预览的页面"), prompt: t("做一个单页网页（HTML），主题是："), icon: "globe", send: false },
+      { title: t("分析数据"), detail: t("表格或 CSV 出结论与图表"), prompt: t("分析附件里的数据，给出关键结论并画一张图表："), icon: "chart-no-axes-column", send: false },
+    ];
+  }
+  function loadQuickTasks() {
+    const stored = readStorage(quickTasksKey, null);
+    if (!Array.isArray(stored)) return defaultQuickTasks();
+    return stored
+      .filter((task) => task && typeof task.title === "string" && task.title.trim() && typeof task.prompt === "string" && task.prompt.trim())
+      .slice(0, maxQuickTasks)
+      .map((task) => ({
+        title: task.title.trim().slice(0, 20),
+        detail: typeof task.detail === "string" ? task.detail.trim().slice(0, 40) : "",
+        prompt: task.prompt.slice(0, 4000),
+        icon: quickTaskIcons.includes(task.icon) ? task.icon : "sparkles",
+        send: task.send === true,
+      }));
+  }
+  let quickTasks = loadQuickTasks();
+  let editingQuickTask = -1; // index being edited; quickTasks.length while adding; -1 when the form is closed
+
   const appearanceChoices = {
     theme: ["system", "light", "dark"], textSize: ["small", "normal", "large"],
     style: ["solid", "glass"], accent: ["teal", "blue", "violet", "amber", "rose"], motion: ["auto", "full", "reduced", "off"], language: ["auto", "zh", "en"],
@@ -165,6 +195,7 @@
 
   function icon(name) { return window.MobileUi?.iconMarkup(name) || ""; }
   document.querySelectorAll("[data-icon]").forEach((node) => { node.innerHTML = icon(node.dataset.icon); });
+  renderQuickChips();
 
   function haptic(milliseconds = 24) {
     if (!preferences.haptics) return;
@@ -326,12 +357,152 @@
     document.querySelectorAll("[data-accent-option]").forEach((option) => option.setAttribute("aria-checked", String(option.dataset.accentOption === preferences.accent)));
     $("motionSelector").value = preferences.motion;
     $("languageSelector").value = preferences.language;
-    elements.quickChipsBar.hidden = !preferences.quickActions;
+    elements.quickChipsBar.hidden = !preferences.quickActions || !quickTasks.length;
     elements.themeSelector.value = preferences.theme;
     elements.textSizeSelector.value = preferences.textSize;
     elements.quickActionsToggle.checked = !!preferences.quickActions;
     elements.hapticsToggle.checked = !!preferences.haptics;
     syncSystemBars();
+  }
+
+  function renderQuickChips() {
+    elements.quickChipsBar.replaceChildren(...quickTasks.map((task) => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "chip";
+      chip.dataset.prompt = task.prompt;
+      chip.dataset.fill = String(!task.send);
+      const glyph = document.createElement("span");
+      glyph.dataset.icon = task.icon;
+      glyph.innerHTML = icon(task.icon);
+      const label = document.createElement("span");
+      label.textContent = task.title;
+      if (task.detail) {
+        const detail = document.createElement("small");
+        detail.textContent = task.detail;
+        label.append(detail);
+      }
+      chip.append(glyph, label);
+      return chip;
+    }));
+    elements.quickChipsBar.classList.toggle("many", quickTasks.length > 4);
+    elements.quickChipsBar.hidden = !preferences.quickActions || !quickTasks.length;
+  }
+
+  function saveQuickTasks(next, reset = false) {
+    quickTasks = next;
+    let saved = true;
+    if (reset) { try { window.localStorage.removeItem(quickTasksKey); } catch { saved = false; } }
+    else saved = writeStorage(quickTasksKey, next);
+    pageStatus($("quickTaskStatus"), saved ? "" : t("保存失败，手机存储空间可能不足"), !saved);
+    renderQuickChips();
+    renderQuickTaskEditor();
+    syncControls();
+  }
+
+  function renderQuickTaskEditor() {
+    const list = $("quickTaskList");
+    const button = (symbol, label, disabled, handler) => {
+      const element = document.createElement("button");
+      element.type = "button";
+      element.className = "icon-button";
+      element.title = label;
+      element.setAttribute("aria-label", label);
+      element.innerHTML = icon(symbol);
+      element.disabled = disabled;
+      element.addEventListener("click", handler);
+      return element;
+    };
+    list.replaceChildren(...quickTasks.map((task, index) => {
+      const row = document.createElement("div");
+      row.className = "management-row quick-task-row";
+      const glyph = document.createElement("span");
+      glyph.className = "quick-task-icon";
+      glyph.innerHTML = icon(task.icon);
+      const body = document.createElement("div");
+      body.className = "management-row-body";
+      const title = document.createElement("strong");
+      title.textContent = task.title;
+      const detail = document.createElement("small");
+      detail.textContent = (task.send ? t("直接发送") : t("填入输入框")) + " · " + (task.prompt.split("\n")[0].slice(0, 60) || task.detail);
+      body.append(title, detail);
+      const move = (offset) => {
+        const next = [...quickTasks];
+        [next[index], next[index + offset]] = [next[index + offset], next[index]];
+        saveQuickTasks(next);
+      };
+      row.append(glyph, body,
+        button("arrow-up", t("上移"), index === 0, () => move(-1)),
+        button("arrow-down", t("下移"), index === quickTasks.length - 1, () => move(1)),
+        button("pencil", t("编辑"), false, () => openQuickTaskForm(index)),
+        button("trash-2", t("删除"), false, () => {
+          if (!window.confirm(t("删除快捷任务“{0}”？", task.title))) return;
+          if (editingQuickTask === index) closeQuickTaskForm();
+          saveQuickTasks(quickTasks.filter((_, other) => other !== index));
+        }));
+      return row;
+    }));
+    if (!quickTasks.length) {
+      const empty = document.createElement("p");
+      empty.className = "setting-hint";
+      empty.textContent = t("还没有快捷任务，点“添加”新建一个。");
+      list.append(empty);
+    }
+    $("btnAddQuickTask").disabled = quickTasks.length >= maxQuickTasks;
+  }
+
+  function renderQuickTaskIcons(selected) {
+    $("quickTaskIcons").replaceChildren(...quickTaskIcons.map((name) => {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "icon-option";
+      option.setAttribute("role", "radio");
+      option.setAttribute("aria-checked", String(name === selected));
+      option.setAttribute("aria-label", name);
+      option.dataset.iconOption = name;
+      option.innerHTML = icon(name);
+      return option;
+    }));
+  }
+
+  function openQuickTaskForm(index) {
+    const adding = index >= quickTasks.length;
+    if (adding && quickTasks.length >= maxQuickTasks) return;
+    editingQuickTask = index;
+    const task = adding ? { title: "", detail: "", prompt: "", icon: "sparkles", send: false } : quickTasks[index];
+    $("quickTaskFormTitle").textContent = adding ? t("添加快捷任务") : t("编辑快捷任务");
+    $("quickTaskTitle").value = task.title;
+    $("quickTaskDetail").value = task.detail;
+    $("quickTaskPrompt").value = task.prompt;
+    $("quickTaskSend").checked = task.send;
+    renderQuickTaskIcons(task.icon);
+    $("quickTaskForm").hidden = false;
+    $("quickTaskTitle").focus();
+    $("quickTaskForm").scrollIntoView?.({ block: "nearest" });
+  }
+
+  function closeQuickTaskForm() {
+    editingQuickTask = -1;
+    $("quickTaskForm").hidden = true;
+  }
+
+  function submitQuickTaskForm(event) {
+    event.preventDefault();
+    if (editingQuickTask < 0) return;
+    const title = $("quickTaskTitle").value.trim();
+    const prompt = $("quickTaskPrompt").value;
+    if (!title || !prompt.trim()) { pageStatus($("quickTaskStatus"), t("名称和提示词都要填写"), true); return; }
+    const task = {
+      title: title.slice(0, 20),
+      detail: $("quickTaskDetail").value.trim().slice(0, 40),
+      prompt: prompt.slice(0, 4000),
+      icon: $("quickTaskIcons").querySelector('[aria-checked="true"]')?.dataset.iconOption || "sparkles",
+      send: $("quickTaskSend").checked,
+    };
+    const next = [...quickTasks];
+    if (editingQuickTask >= next.length) next.push(task); else next[editingQuickTask] = task;
+    closeQuickTaskForm();
+    saveQuickTasks(next.slice(0, maxQuickTasks));
   }
 
   function updateTaskStatus(text = "", { resume = false, retry = false, reconnect = false, idle = false } = {}) {
@@ -737,6 +908,12 @@
     elements.localTimeoutInput.disabled = elements.localContextSelector.disabled;
     if (localDeviceTesting) elements.btnSend.disabled = true;
     elements.btnExport.disabled = !historyReady || !currentSessionId;
+    // Edit and regenerate need an idle conversation; regenerate is offered on the latest reply only.
+    const replies = [...elements.timelineList.querySelectorAll(".message-card.assistant")].filter((card) => !card.hidden);
+    elements.timelineList.querySelectorAll(".btn-edit, .btn-regenerate").forEach((button) => {
+      button.disabled = busy || !historyReady || !currentSessionId;
+      if (button.classList.contains("btn-regenerate")) button.hidden = button.closest(".message-card") !== replies[replies.length - 1];
+    });
     elements.searchResults.querySelectorAll(".search-result").forEach((button) => {
       button.disabled = navigationBusy;
     });
@@ -951,17 +1128,20 @@
     renderSettings();
   }
 
+  // Sub-pages return to their parent page rather than to the menu.
+  const subPageParents = { pricing: "usage", quickTasks: "appearance" };
+
   function setSettingsPage(page, initial = false) {
     if (settingsPage === "files" && page !== "files" && !canLeaveFileEditor()) return false;
     const previousPage = settingsPage;
-    const movingBack = (page === "home" && previousPage !== "home") || (page === "usage" && previousPage === "pricing");
+    const movingBack = (page === "home" && previousPage !== "home") || subPageParents[previousPage] === page;
     if (!initial && page !== previousPage) settingsScrollPositions.set(previousPage, elements.settingsScrollBody.scrollTop);
     if (settingsPage === "search" && page !== "search") invalidateSearch();
     if (settingsPage === "tasks" && page !== "tasks") taskCenterGeneration += 1;
     if (settingsPage === "files" && page !== "files") { filesGeneration += 1; resetFilePreview(); }
     if (settingsPage === "usage" && page !== "usage") usageGeneration += 1;
     settingsPage = page;
-    const titles = { home: t("菜单"), model: t("模型与思考"), permission: t("执行权限"), appearance: t("界面偏好"), search: t("搜索会话"), tasks: t("任务中心"), files: t("工作区文件"), attachments: t("附件收件箱"), session: t("会话名称"), notifications: t("通知"), usage: t("Token 与费用"), pricing: t("模型费率"), doctor: t("设备与工具"), extensions: t("MCP 与扩展"), schedules: t("定时任务"), connections: t("设备连接"), outbox: t("待发送与接力"), workflows: t("可复用流程"), evaluations: t("任务评测"), localModels: t("本地模型"), workspaces: t("工作区") };
+    const titles = { home: t("菜单"), model: t("模型与思考"), permission: t("执行权限"), appearance: t("界面偏好"), search: t("搜索会话"), tasks: t("任务中心"), files: t("工作区文件"), attachments: t("附件收件箱"), session: t("会话名称"), notifications: t("通知"), usage: t("Token 与费用"), pricing: t("模型费率"), doctor: t("设备与工具"), extensions: t("MCP 与扩展"), schedules: t("定时任务"), connections: t("设备连接"), outbox: t("待发送与接力"), workflows: t("可复用流程"), evaluations: t("任务评测"), localModels: t("本地模型"), workspaces: t("工作区"), quickTasks: t("快捷任务"), memory: t("记忆"), services: t("后台服务"), globalEntry: t("全局入口"), notificationRules: t("通知触发"), backup: t("备份与恢复") };
     document.querySelectorAll(".settings-page").forEach((element) => { element.hidden = true; });
     const selectedPage = document.getElementById(`settings${page[0].toUpperCase()}${page.slice(1)}`);
     if (selectedPage) {
@@ -986,6 +1166,7 @@
     elements.btnApplySettings.textContent = page === "permission" ? t("应用执行模式") : page === "localModels" ? t("应用本机设置") : t("应用设置");
     elements.settingsError.hidden = true;
     if (page === "model") {
+      renderProfiles();
       elements.modelInput.value = settings.model;
       fillEffortOptions(settings.model, settings.reasoning_effort);
       elements.contextSummaryToggle.checked = settings.context_summary_enabled;
@@ -1015,6 +1196,7 @@
     }
     if (page === "notifications") refreshNotificationSettings();
     if (page === "usage") void loadUsage();
+    if (page === "quickTasks") { closeQuickTaskForm(); renderQuickTaskEditor(); }
     syncControls();
     if (initial || page !== previousPage) {
       elements.settingsScrollBody.scrollTop = movingBack ? (settingsScrollPositions.get(page) || 0) : 0;
@@ -1105,11 +1287,12 @@
   // Android back: leave the open file, then the sub page, then the sheet itself.
   function handleBack() {
     if (disposed) return false;
+    if (closeAttachMenu()) return true;
     if (closeDrawer()) return true;
     if (elements.settingsOverlay.hidden) return false;
     if (settingsPage === "files" && fileEditor && !fileSaving) { void loadWorkspaceFiles(workspacePath); return true; }
     if (settingsPage === "home") { closeMenu(); return true; }
-    setSettingsPage(settingsPage === "pricing" ? "usage" : "home");
+    setSettingsPage(subPageParents[settingsPage] || "home");
     return true;
   }
 
@@ -1154,6 +1337,47 @@
     return true;
   }
 
+  // Global entries (quick settings tile, floating ball, launcher shortcuts) open a fresh conversation.
+  // A floating-ball screenshot arrives in the attachment inbox and is attached to that conversation.
+  let quickShareBatch = null;
+  let quickShareDeadline = 0;
+  function quickAsk(options = {}) {
+    if (disposed || isLoadingSession || !historyReady || sessionOpening || isPreparingSubmission || !canLeaveFileEditor()) return false;
+    const mode = ["text", "voice", "camera", "screen"].includes(options?.mode) ? options.mode : "text";
+    if (typeof options?.share_batch === "string" && options.share_batch) {
+      quickShareBatch = options.share_batch;
+      quickShareDeadline = Date.now() + 60000;
+    }
+    closeMenu();
+    closeDrawer();
+    // Reuse the current conversation while it is still empty instead of piling up blank ones.
+    const empty = !activeTask && !historyEvents.some((event) => event.type === "message.created");
+    void (empty ? Promise.resolve(true) : createSession()).then(() => {
+      if (disposed) return;
+      if (mode === "voice" && typeof bridge?.requestVoiceInput === "function") bridge.requestVoiceInput();
+      else if (mode === "camera" && typeof bridge?.captureShareInboxPhoto === "function") $("btnAttachCamera").click();
+      else elements.promptInput.focus();
+      if (quickShareBatch) refreshShareInbox();
+    });
+    return true;
+  }
+
+  function attachQuickShare() {
+    if (!quickShareBatch || typeof bridge?.confirmShareInbox !== "function") return;
+    if (Date.now() > quickShareDeadline || !currentSessionId) { quickShareBatch = null; return; }
+    const items = shareInbox.items.filter((item) => item.batch_id === quickShareBatch);
+    if (!items.length || items.some((item) => item.state === "staging")) return; // wait for the next inbox change
+    const pending = items.filter((item) => item.state === "pending").map((item) => item.id);
+    quickShareBatch = null;
+    if (!pending.length) return;
+    try {
+      const result = JSON.parse(bridge.confirmShareInbox(JSON.stringify({ request_id: requestId("share"),
+        session_id: currentSessionId, workspace_id: workspaceOfSession(currentSessionId), item_ids: pending })));
+      if (!result.ok) throw new Error(localizeError(result.error) || t("无法导入附件"));
+      notice(t("截图已添加到这次对话，输入你的问题吧"));
+    } catch (error) { notice(error.message); }
+  }
+
   function openSession(sessionId) {
     if (disposed || typeof sessionId !== "string" || !sessionId || sessionId.length > 200) return false;
     if (unavailableSessions.has(sessionId) && !isLoadingSession && historyReady) {
@@ -1172,7 +1396,7 @@
     return false;
   }
 
-  window.AgentMobileUi = { closeMenu, handleBack, notice, reloadForLanguage: () => window.location.reload(), receiveSharedText, openSession, apiJson, setSettingsPage, adoptTask,
+  window.AgentMobileUi = { closeMenu, handleBack, notice, reloadForLanguage: () => window.location.reload(), receiveSharedText, openSession, quickAsk, apiJson, setSettingsPage, adoptTask,
     readLocalContextDraft, setLocalContextDraft,
     setLocalContextBusy: (busy) => { localContextBusy = !!busy; syncControls(); },
     setLocalDeviceTestBusy: (busy) => { localDeviceTesting = !!busy; syncControls(); },
@@ -1741,6 +1965,83 @@
     } finally { pricingSaving = false; if (!disposed) syncPricingControls(); }
   }
 
+  // ---- Saved model profiles (Android) ----
+  function bridgeResult(method, ...args) {
+    const result = JSON.parse(bridge[method](...args));
+    if (!result.ok) throw new Error(localizeError(result.error) || t("操作失败"));
+    return result;
+  }
+
+  function renderProfiles() {
+    const section = $("profileSection");
+    section.hidden = typeof bridge?.getProviderProfiles !== "function";
+    if (section.hidden) return;
+    let data;
+    try { data = bridgeResult("getProviderProfiles"); }
+    catch (error) { pageStatus($("profileStatus"), error.message, true); return; }
+    const list = $("profileList");
+    list.replaceChildren();
+    for (const profile of data.profiles || []) {
+      const row = document.createElement("div");
+      row.className = "management-row profile-row";
+      if (profile.active) row.setAttribute("aria-current", "true");
+      const body = document.createElement("div");
+      body.className = "management-row-body";
+      const title = document.createElement("strong");
+      title.textContent = profile.name;
+      const detail = document.createElement("small");
+      let host = profile.base_url;
+      try { host = new URL(profile.base_url).host; } catch {}
+      detail.textContent = [profile.model, profile.local ? t("本机") : host,
+        profile.active ? t("使用中") : "", !profile.local && !profile.has_api_key ? t("未设置密钥") : ""].filter(Boolean).join(" · ");
+      body.append(title, detail);
+      const use = document.createElement("button");
+      use.type = "button";
+      use.className = "button-secondary profile-use";
+      use.textContent = profile.active ? t("使用中") : t("切换");
+      use.disabled = !!profile.active || !!activeTask || restartPending;
+      use.addEventListener("click", () => switchProfile(profile));
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "icon-button";
+      remove.title = t("删除");
+      remove.setAttribute("aria-label", t("删除"));
+      remove.innerHTML = icon("trash-2");
+      remove.addEventListener("click", () => {
+        if (!window.confirm(t("删除模型配置“{0}”？密钥不会被删除。", profile.name))) return;
+        try { bridgeResult("deleteProviderProfile", profile.id); renderProfiles(); }
+        catch (error) { pageStatus($("profileStatus"), error.message, true); }
+      });
+      row.append(body, use, remove);
+      list.append(row);
+    }
+    if (!(data.profiles || []).length) {
+      const empty = document.createElement("p");
+      empty.className = "setting-hint";
+      empty.textContent = t("还没有保存的配置。设置好服务商和模型后，点下面的按钮保存。");
+      list.append(empty);
+    }
+    $("btnSaveProfile").disabled = (data.profiles || []).length >= (data.max_profiles || 20) && !(data.profiles || []).some((item) => item.active);
+  }
+
+  async function switchProfile(profile) {
+    if (activeTask || restartPending) return;
+    pageStatus($("profileStatus"), t("正在切换到 {0}...", profile.name));
+    let result;
+    try { result = bridgeResult("switchProviderProfile", profile.id); }
+    catch (error) { pageStatus($("profileStatus"), error.message, true); return; }
+    if (result.restarting === false) {
+      await loadSettings();
+      renderProfiles();
+      pageStatus($("profileStatus"), t("已切换到 {0}，无需重启", profile.name));
+      notice(t("已切换到 {0}", profile.name), "info");
+      return;
+    }
+    restartPending = true;
+    notice(t("正在切换到 {0}，引擎需要重启...", profile.name), "info");
+    closeMenu();
+  }
+
   async function applyRuntimeSettings() {
     if (activeTask || isLoadingSession || isUploading || isPreparingSubmission || restartPending || localDeviceTesting) return;
     const localSettings = settingsPage === "localModels";
@@ -1781,8 +2082,11 @@
           : { model, reasoning_effort: effort, autonomy,
               ...(summaryEnabled !== settings.context_summary_enabled || explicitSummaryChoice ? { context_summary_enabled: summaryEnabled } : {}) })));
         if (!result.ok) throw new Error(localizeError(result.error) || t("无法保存设置"));
-        restartPending = true;
-        notice(t("设置已保存，正在重新连接..."), "info");
+        if (result.restarting === false) notice(t("已切换到 {0}，无需重启", model), "info");
+        else {
+          restartPending = true;
+          notice(t("设置已保存，正在重新连接..."), "info");
+        }
       } catch (error) {
         elements.settingsError.textContent = error.message;
         elements.settingsError.hidden = false;
@@ -2004,7 +2308,42 @@
     if (!existing) container.insertBefore(panel, container.querySelector(".card-action-bar"));
   }
 
-  function decorateMarkdown(body) {
+  // ```mermaid blocks become diagrams once a reply is complete. The renderer is a large separate file,
+  // fetched the first time a diagram appears; results are cached so later re-renders cost nothing.
+  const diagramCache = new Map();
+  let diagramLoader = null;
+  function loadDiagramRenderer() {
+    if (window.MobileMermaid) return Promise.resolve(window.MobileMermaid);
+    if (!diagramLoader) diagramLoader = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = `/static/mobile-mermaid.js?token=${encodeURIComponent(token)}`;
+      script.onload = () => (window.MobileMermaid ? resolve(window.MobileMermaid) : reject(new Error("diagram renderer missing")));
+      script.onerror = () => { diagramLoader = null; reject(new Error("diagram renderer unavailable")); };
+      document.head.appendChild(script);
+    });
+    return diagramLoader;
+  }
+
+  function renderDiagram(wrapper, source) {
+    const dark = preferences.theme === "dark" || (preferences.theme === "system" && darkSchemeQuery?.matches === true);
+    const key = `${dark ? "dark" : "light"}\n${source}`;
+    const show = (svg) => {
+      if (!wrapper.isConnected || !svg) return;
+      const diagram = document.createElement("div");
+      diagram.className = "diagram";
+      diagram.innerHTML = svg;
+      wrapper.classList.add("has-diagram");
+      wrapper.insertBefore(diagram, wrapper.querySelector("pre"));
+    };
+    if (diagramCache.has(key)) { show(diagramCache.get(key)); return; }
+    loadDiagramRenderer()
+      .then((renderer) => renderer.render(source, dark))
+      .then((svg) => { diagramCache.set(key, svg); show(svg); })
+      // A diagram the renderer rejects stays visible as its source code.
+      .catch(() => diagramCache.set(key, ""));
+  }
+
+  function decorateMarkdown(body, final = true) {
     body.querySelectorAll("pre > code").forEach((code) => {
       const pre = code.parentElement;
       const wrapper = document.createElement("div");
@@ -2023,6 +2362,7 @@
       toolbar.append(language, copy);
       pre.replaceWith(wrapper);
       wrapper.append(toolbar, pre);
+      if (final && code.classList.contains("language-mermaid")) renderDiagram(wrapper, code.textContent);
     });
     body.querySelectorAll("table").forEach((table) => {
       const scroll = document.createElement("div");
@@ -2045,15 +2385,16 @@
     });
   }
 
-  function setMarkdown(body, value) {
+  function setMarkdown(body, value, final = true) {
     body.innerHTML = window.MobileUi?.renderMarkdown(value) || "";
-    decorateMarkdown(body);
+    decorateMarkdown(body, final);
   }
 
   function appendMessageCard(role, label, text, reasoning = "") {
     const card = document.createElement("article");
     card.className = `message-card ${role}`;
     card.dataset.messageText = text || "";
+    card.dataset.displayText = text || "";
     const badge = document.createElement("div");
     badge.className = "role-badge";
     if (role === "assistant") badge.innerHTML = icon("bot");
@@ -2064,13 +2405,18 @@
     body.className = "message-body";
     setMarkdown(body, text);
     card.appendChild(body);
-    if (role === "assistant") {
+    if (role === "assistant" || role === "user") {
       const actions = document.createElement("div");
       actions.className = "card-action-bar";
-      for (const [name, iconName, title, action] of [
+      const buttons = role === "assistant" ? [
         ["btn-copy", "copy", t("复制回复"), () => copyText(card.dataset.messageText)],
         ["btn-share", "share-2", t("分享回复"), () => shareText(t("Agent 回复"), card.dataset.messageText)],
-      ]) {
+        ["btn-regenerate", "rotate-ccw", t("重新生成"), () => regenerateReply(card)],
+      ] : [
+        ["btn-copy", "copy", t("复制"), () => copyText(card.dataset.displayText || card.dataset.messageText)],
+        ["btn-edit", "pencil", t("编辑后重新发送"), () => editMessage(card)],
+      ];
+      for (const [name, iconName, title, action] of buttons) {
         const button = document.createElement("button");
         button.type = "button";
         button.className = `icon-button btn-card-action ${name}`;
@@ -2110,8 +2456,54 @@
     card.querySelector(".tool-state").textContent = toolStates[state] || toolStates.done;
   }
 
+  const toolTitles = {
+    memory_write: t("更新记忆"), memory_search: t("查找记忆"), run_terminal: t("运行命令"),
+    start_service: t("启动后台服务"), stop_service: t("停止后台服务"), list_services: t("查看后台服务"), service_logs: t("查看服务输出"),
+    browser: t("浏览器"), browser_view: t("查看网页"),
+  };
+  // Tools whose output the engine streams while they run (long installs and builds).
+  const liveOutputTools = new Set(["run_terminal"]);
+
+  function endToolOutput(card) {
+    delete card.dataset.following;
+    card.querySelector(".tool-live")?.remove();
+    if (card.dataset.liveOpened) { delete card.dataset.liveOpened; card.open = false; }
+  }
+
+  function followToolOutput(card, attemptId) {
+    if (card.dataset.following) return;
+    card.dataset.following = "1";
+    let misses = 0;
+    const poll = async () => {
+      if (disposed || !card.isConnected || card.dataset.state !== "running") { endToolOutput(card); return; }
+      try {
+        const value = await apiJson(`/mobile/live-output?attempt_id=${encodeURIComponent(attemptId)}`);
+        if (card.dataset.state !== "running") { endToolOutput(card); return; }
+        const text = String(value.text || "").trimEnd();
+        if (text) {
+          let live = card.querySelector(".tool-live");
+          if (!live) {
+            live = document.createElement("pre");
+            live.className = "tool-live";
+            card.appendChild(live);
+            if (!card.open) { card.open = true; card.dataset.liveOpened = "1"; }
+          }
+          live.textContent = text.split("\n").slice(-12).join("\n");
+          live.scrollTop = live.scrollHeight;
+          scrollToBottom();
+        }
+        // A replayed start from history has no live output on the engine.
+        misses = !value.active && !value.bytes ? misses + 1 : 0;
+      } catch { misses += 1; }
+      if (misses > 5) { delete card.dataset.following; return; }
+      window.setTimeout(poll, 1000);
+    };
+    window.setTimeout(poll, 700);
+  }
+
   function renderTool(data, outcome = null) {
     const id = toolCardId(data);
+    const toolName = data.name || data.tool_name;
     let card = [...elements.timelineList.querySelectorAll(".message-card.tool")].find((item) => item.dataset.toolId === id);
     if (!card) {
       card = document.createElement("details");
@@ -2120,7 +2512,7 @@
       const title = document.createElement("summary");
       const name = document.createElement("span");
       name.className = "tool-name";
-      name.textContent = data.name || data.tool_name || t("工具");
+      name.textContent = toolTitles[toolName] || toolName || t("工具");
       const state = document.createElement("span");
       state.className = "tool-state";
       title.append(name, state);
@@ -2130,9 +2522,11 @@
     if (!outcome) {
       // A replayed start must not undo a result that already arrived.
       if (!card.dataset.state || card.dataset.state === "stale") setToolState(card, "running");
+      if (card.dataset.state === "running" && liveOutputTools.has(toolName) && data.attempt_id) followToolOutput(card, data.attempt_id);
       return;
     }
     setToolState(card, outcome);
+    endToolOutput(card);
     const detail = outcome === "done" ? data.result : (data.error ?? data.reason ?? data.result);
     if (detail === undefined || detail === null || detail === "") return;
     let result = card.querySelector("pre");
@@ -2151,7 +2545,7 @@
     } else if (event.type === "message.user" || (event.type === "message.created" && payload.role === "user")) {
       historyAssistantCard = null;
       const card = appendMessageCard("user", t("您"), payload.text || payload.content || "");
-      if (event.id) eventCards.set(event.id, card);
+      if (event.id) { eventCards.set(event.id, card); card.dataset.eventId = event.id; }
     } else if (event.type === "message.assistant" || (event.type === "message.created" && payload.role === "assistant")) {
       const card = appendMessageCard("assistant", "Agent", payload.text || payload.content || "", payload.reasoning);
       historyAssistantCard = card;
@@ -2198,6 +2592,21 @@
     elements.timelineList.appendChild(message);
   }
 
+  // Edit-and-resend and regenerate keep the replaced turns in the store (context.rewound marks
+  // where the conversation restarted); history shows the conversation as it now stands.
+  function visibleHistory(events) {
+    const shown = [];
+    for (const event of events) {
+      if (event.type === "context.rewound") {
+        const from = shown.findIndex((item) => item.id === (event.data || event.payload || {}).from_event_id);
+        if (from >= 0) shown.length = from;
+        continue;
+      }
+      shown.push(event);
+    }
+    return shown;
+  }
+
   async function loadTimeline(sessionId) {
     if (!sessionId) return;
     historyReady = false;
@@ -2209,7 +2618,8 @@
       const data = await apiJson(`/sessions/${encodeURIComponent(sessionId)}/events`);
       if (sessionId !== currentSessionId) return;
       unavailableSessions.delete(sessionId);
-      historyEvents = Array.isArray(data.events) ? data.events : [];
+      historyEvents = visibleHistory(Array.isArray(data.events) ? data.events : []);
+      if (pendingRewind) cancelRewind(); // its cards were just replaced
       reconcilePendingRequest(sessionId);
       for (const event of historyEvents) renderHistoryEvent(event);
       // History has no live stream; a started tool without an outcome did not finish.
@@ -2457,7 +2867,8 @@
     if (!task.card) task.card = appendMessageCard("assistant", "Agent", t("正在执行..."));
     const body = task.card.querySelector(".message-body");
     const text = task.text || (task.done ? t("执行完成") : t("正在执行..."));
-    setMarkdown(body, text);
+    // Diagrams are drawn once the reply is complete, not on every streamed chunk.
+    setMarkdown(body, text, task.done || !!task.messageFinal);
     task.card.dataset.messageText = task.text;
     task.card.classList.toggle("pending", !task.done && !task.text);
     task.card.classList.toggle("streaming", !task.done && !!task.text && !task.messageFinal);
@@ -2818,6 +3229,71 @@
     }
   }
 
+  // ---- Edit and resend / regenerate ----
+  // The next submission replaces a user message and everything after it (the server records the
+  // rewind; history keeps the old turns). Files the replaced turns changed stay changed.
+  let pendingRewind = null; // { sessionId, eventId, card, reason }
+
+  function isUserMessageEvent(event) {
+    const payload = event.data || event.payload || {};
+    return event.type === "message.user" || (event.type === "message.created" && payload.role === "user");
+  }
+
+  // Cards created live (this visit) do not know their stored event; match them from the end of history.
+  async function userEventIdFor(card) {
+    if (card.dataset.eventId) return card.dataset.eventId;
+    const data = await apiJson(`/sessions/${encodeURIComponent(currentSessionId)}/events`);
+    const users = visibleHistory(Array.isArray(data.events) ? data.events : []).filter(isUserMessageEvent);
+    const cards = [...elements.timelineList.querySelectorAll(".message-card.user")].filter((item) => !item.hidden);
+    const event = users[users.length - (cards.length - cards.indexOf(card))];
+    if (!event || cards.indexOf(card) < 0) throw new Error(t("找不到这条消息，请刷新后重试"));
+    card.dataset.eventId = event.id;
+    return event.id;
+  }
+
+  function cardsFrom(card) {
+    const cards = [];
+    for (let node = card; node; node = node.nextElementSibling) cards.push(node);
+    return cards;
+  }
+
+  function cancelRewind() {
+    pendingRewind = null;
+    $("editBanner").hidden = true;
+    syncControls();
+  }
+
+  async function editMessage(card) {
+    if (activeTask || !historyReady || !currentSessionId) return;
+    try {
+      const eventId = await userEventIdFor(card);
+      const text = card.dataset.displayText || card.dataset.messageText || "";
+      if (elements.promptInput.value.trim() && elements.promptInput.value.trim() !== text.trim()
+        && !window.confirm(t("用这条消息替换输入框里的草稿？"))) return;
+      pendingRewind = { sessionId: currentSessionId, eventId, card, reason: "edit" };
+      elements.promptInput.value = text;
+      elements.promptInput.dispatchEvent(new Event("input", { bubbles: true }));
+      $("editBanner").hidden = false;
+      elements.promptInput.focus();
+      syncControls();
+    } catch (error) { notice(error.message); }
+  }
+
+  async function regenerateReply(card) {
+    if (activeTask || !historyReady || !currentSessionId) return;
+    let userCard = card.previousElementSibling;
+    while (userCard && !(userCard.classList.contains("user") && !userCard.hidden)) userCard = userCard.previousElementSibling;
+    if (!userCard) return;
+    try {
+      const eventId = await userEventIdFor(userCard);
+      pendingRewind = { sessionId: currentSessionId, eventId, card: userCard, reason: "regenerate" };
+      // The server re-asks the stored question; sending the same text keeps retries idempotent.
+      await sendPrompt(userCard.dataset.messageText || userCard.dataset.displayText || t("请重新回答。"));
+    } catch (error) { notice(error.message); }
+    // A regenerate that did not go through must not turn the next ordinary message into one.
+    if (pendingRewind?.reason === "regenerate") cancelRewind();
+  }
+
   async function sendPrompt(customText = null, attachmentOverride = []) {
     if (customText === null && canSteer()) { await steerActiveTask(); return; }
     const requestedImports = customText === null ? [...attachments] : [...attachmentOverride];
@@ -2842,8 +3318,13 @@
     if (disposed || currentSessionId !== sessionId || activeTask || isLoadingSession || isUploading || restartPending || localDeviceTesting || !historyReady || !settingsAvailable) return;
     const imageRefs = imports.filter(item => item.media_type.startsWith("image/")).map(item => ({ path: item.path, sha256: item.sha256 }));
     const submittedPrompt = promptWithAttachments(plainText, imports.filter(item => !item.media_type.startsWith("image/")));
+    const rewind = pendingRewind?.sessionId === sessionId && pendingRewind.card.isConnected ? pendingRewind : null;
     const payload = { session_id: sessionId, prompt: submittedPrompt, model: settings.model,
-      reasoning_effort: settings.reasoning_effort, ...(imageRefs.length ? { image_refs: imageRefs } : {}) };
+      reasoning_effort: settings.reasoning_effort, ...(imageRefs.length ? { image_refs: imageRefs } : {}),
+      ...(rewind ? { rewind_from_event_id: rewind.eventId, rewind_reason: rewind.reason } : {}) };
+    // The replaced turns disappear while the new one is submitted, and come back if it fails.
+    const replacedCards = rewind ? cardsFrom(rewind.card) : [];
+    replacedCards.forEach((card) => { card.hidden = true; });
     let requestId;
     try { requestId = retainPendingRequest(sessionId, payload, plainText, imports); }
     catch { notice(t("无法保存任务提交记录，请检查存储空间后重试")); return; }
@@ -2876,6 +3357,7 @@
       });
       task.id = result.task?.task_id;
       if (!task.id) throw new Error(t("服务未返回有效任务 ID"));
+      if (rewind) { replacedCards.forEach((card) => card.remove()); if (pendingRewind === rewind) cancelRewind(); }
       backgroundTasks.set(sessionId, task);
       submissions[task.id] = {
         sessionId, prompt: submittedPrompt, inputText: plainText, attachments: imports,
@@ -2910,6 +3392,7 @@
       }
       task.card?.remove();
       userCard.remove();
+      replacedCards.forEach((card) => { if (card.isConnected) card.hidden = false; });
       activeTask = null;
       if (backgroundTasks.get(sessionId) === task) backgroundTasks.delete(sessionId);
       updateTaskStatus(t("任务提交失败"), { retry: true });
@@ -3241,6 +3724,7 @@
         if (!snapshot.ok || !Array.isArray(snapshot.items)) throw new Error(localizeError(snapshot.error) || t("无法读取收件箱"));
         shareInbox = { items: snapshot.items, batches: Array.isArray(snapshot.batches) ? snapshot.batches : [] };
         applyReadyShares();
+        attachQuickShare();
         if (snapshot.capture_error) pageStatus(elements.shareInboxStatus, localizeError(String(snapshot.capture_error)), true);
       }
       renderShareInbox(); renderImportUploads();
@@ -3313,7 +3797,39 @@
     updateTaskStatus(t("正在重新连接..."));
     await watchTask(activeTask);
   });
-  elements.btnAttach.addEventListener("click", chooseImportFiles);
+  // With a camera available the paperclip offers "take a photo" or "choose files"; otherwise it picks files.
+  function closeAttachMenu() {
+    if ($("attachMenu").hidden) return false;
+    $("attachMenu").hidden = true;
+    elements.btnAttach.setAttribute("aria-expanded", "false");
+    return true;
+  }
+  elements.btnAttach.addEventListener("click", () => {
+    if (typeof bridge?.captureShareInboxPhoto !== "function") { chooseImportFiles(); return; }
+    if (closeAttachMenu()) return;
+    haptic();
+    $("attachMenu").hidden = false;
+    elements.btnAttach.setAttribute("aria-expanded", "true");
+    $("btnAttachCamera").focus();
+  });
+  $("btnAttachFiles").addEventListener("click", () => { closeAttachMenu(); chooseImportFiles(); });
+  $("btnCancelEdit").addEventListener("click", () => {
+    cancelRewind();
+    elements.promptInput.value = "";
+    elements.promptInput.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  $("btnAttachCamera").addEventListener("click", () => {
+    closeAttachMenu();
+    haptic();
+    showImportPage();
+    try {
+      const result = JSON.parse(bridge.captureShareInboxPhoto());
+      if (!result.ok) throw new Error(localizeError(result.error) || t("无法打开相机"));
+    } catch (error) { pageStatus(elements.shareInboxStatus, error.message, true); }
+  });
+  document.addEventListener("click", (event) => {
+    if (!$("attachMenu").hidden && !event.target.closest("#attachMenu, #btnAttach")) closeAttachMenu();
+  });
   elements.filePickerInput.addEventListener("change", (event) => uploadFiles(Array.from(event.target.files || [])));
   elements.btnAttachmentsPage.addEventListener("click", () => setSettingsPage("attachments"));
   elements.btnImportNotice.addEventListener("click", showImportPage);
@@ -3418,7 +3934,27 @@
   elements.btnDrawerSearch.addEventListener("click", () => { closeDrawer(); openMenu(); setSettingsPage("search"); });
   elements.btnDrawerWorkspaces.addEventListener("click", () => { closeDrawer(); openMenu(); setSettingsPage("workspaces"); });
   elements.btnModeChip.addEventListener("click", () => { if (elements.settingsOverlay.hidden) openMenu(); setSettingsPage("permission"); });
-  elements.settingsBackButton.addEventListener("click", () => setSettingsPage(settingsPage === "pricing" ? "usage" : "home"));
+  elements.settingsBackButton.addEventListener("click", () => setSettingsPage(subPageParents[settingsPage] || "home"));
+  $("btnQuickTasksPage").addEventListener("click", () => setSettingsPage("quickTasks"));
+  $("btnSaveProfile").addEventListener("click", () => {
+    const name = window.prompt(t("给这个配置起个名字"), settings.model);
+    if (name === null || !name.trim()) return;
+    try { bridgeResult("saveProviderProfile", name.trim()); renderProfiles(); pageStatus($("profileStatus"), t("已保存")); }
+    catch (error) { pageStatus($("profileStatus"), error.message, true); }
+  });
+  $("btnAddQuickTask").addEventListener("click", () => openQuickTaskForm(quickTasks.length));
+  $("btnCancelQuickTask").addEventListener("click", closeQuickTaskForm);
+  $("quickTaskForm").addEventListener("submit", submitQuickTaskForm);
+  $("quickTaskIcons").addEventListener("click", (event) => {
+    const option = event.target.closest("[data-icon-option]");
+    if (!option) return;
+    $("quickTaskIcons").querySelectorAll("[data-icon-option]").forEach((item) => item.setAttribute("aria-checked", String(item === option)));
+  });
+  $("btnResetQuickTasks").addEventListener("click", () => {
+    if (!window.confirm(t("把快捷任务恢复成默认的 4 个？你添加和修改的内容会被清除。"))) return;
+    closeQuickTaskForm();
+    saveQuickTasks(defaultQuickTasks(), true);
+  });
   elements.btnModelPage.addEventListener("click", () => setSettingsPage("model"));
   elements.btnPermissionPage.addEventListener("click", () => setSettingsPage("permission"));
   elements.btnAppearancePage.addEventListener("click", () => setSettingsPage("appearance"));

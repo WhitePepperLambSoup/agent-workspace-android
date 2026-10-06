@@ -10,6 +10,7 @@ import signal
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
@@ -23,6 +24,11 @@ from agent_workspace.tools.command import (
 from agent_workspace.tools.paths import StrPath, WorkspacePaths
 
 MAX_OUTPUT_BYTES = 512 * 1024
+_LONG_HEAD_BYTES = 128 * 1024
+# Long commands may print this much before they are stopped as runaway output.
+_LONG_OUTPUT_LIMIT = 32 * 1024 * 1024
+# Commands longer than the core per-tool limit are installs and builds; allow up to 30 minutes.
+MAX_TERMINAL_SECONDS = 1800
 _MAX_INPUT_CHARS = 100_000
 _MAX_ARGUMENT_BYTES = 128 * 1024
 
@@ -82,7 +88,14 @@ def _run_sync(
     environment: dict[str, str] | None = None,
     *,
     separate_stderr: bool = False,
+    on_output: Callable[[bytes], None] | None = None,
+    output_limit: int = MAX_OUTPUT_BYTES,
 ) -> dict[str, Any]:
+    # With a raised output_limit (long installs and builds) the command is not stopped at
+    # MAX_OUTPUT_BYTES; the start and the end of its output are kept instead, since errors
+    # usually come last.
+    tail_keep = MAX_OUTPUT_BYTES - _LONG_HEAD_BYTES if output_limit > MAX_OUTPUT_BYTES else 0
+    head_keep = _LONG_HEAD_BYTES if tail_keep else MAX_OUTPUT_BYTES
     options: dict[str, Any] = {"start_new_session": os.name != "nt"}
     if os.name == "nt":
         options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -100,7 +113,7 @@ def _run_sync(
     except OSError as exc:
         raise ToolError(f"cannot start Android command: {argv[0]}") from exc
     streams: dict[str, dict[str, Any]] = {
-        name: {"retained": bytearray(), "bytes": 0, "digest": hashlib.sha256()}
+        name: {"retained": bytearray(), "tail": bytearray(), "bytes": 0, "digest": hashlib.sha256()}
         for name in ("stdout", "stderr")
     }
     output_exceeded = threading.Event()
@@ -108,15 +121,25 @@ def _run_sync(
 
     def read(pipe: Any, name: str) -> None:
         record = streams[name]
+        # read1 returns what is available now, so live output is not held back in 16 KB blocks.
+        read_chunk = getattr(pipe, "read1", pipe.read)
         try:
-            while chunk := pipe.read(16 * 1024):
+            while chunk := read_chunk(16 * 1024):
+                if on_output is not None:
+                    with contextlib.suppress(Exception):
+                        on_output(chunk)
                 record["bytes"] += len(chunk)
                 record["digest"].update(chunk)
                 retained = record["retained"]
-                remaining = MAX_OUTPUT_BYTES - len(retained)
+                remaining = head_keep - len(retained)
                 if remaining > 0:
                     retained.extend(chunk[:remaining])
-                if record["bytes"] > MAX_OUTPUT_BYTES:
+                if tail_keep and len(chunk) > remaining:
+                    tail = record["tail"]
+                    tail.extend(chunk[max(remaining, 0) :])
+                    if len(tail) > tail_keep:
+                        del tail[: len(tail) - tail_keep]
+                if record["bytes"] > output_limit:
                     output_exceeded.set()
         except (OSError, ValueError):
             return
@@ -186,7 +209,14 @@ def _run_sync(
         "terminal": "android-pipes",
     }
     for name, record in streams.items():
-        result[name] = bytes(record["retained"]).decode("utf-8", errors="replace")
+        retained = bytes(record["retained"])
+        tail = bytes(record["tail"])
+        omitted = record["bytes"] - len(retained) - len(tail)
+        if tail and omitted > 0:
+            retained += f"\n[... {omitted} bytes omitted ...]\n".encode() + tail
+        else:
+            retained += tail
+        result[name] = retained.decode("utf-8", errors="replace")
         result[name + "_bytes"] = record["bytes"]
         result[name + "_sha256"] = record["digest"].hexdigest()
         result[name + "_truncated"] = record["bytes"] > MAX_OUTPUT_BYTES
@@ -199,6 +229,8 @@ async def run_bounded_command(
     raw_cwd: str,
     timeout: int,
     startup_input: str = "",
+    on_output: Callable[[bytes], None] | None = None,
+    output_limit: int = MAX_OUTPUT_BYTES,
 ) -> dict[str, Any]:
     if (
         not argv
@@ -227,7 +259,17 @@ async def run_bounded_command(
     transported, environment, lease = command_transport(argv, cwd)
     argv = transported
     worker = asyncio.create_task(
-        asyncio.to_thread(_run_sync, argv, str(cwd), timeout, startup_input, cancelled, environment)
+        asyncio.to_thread(
+            _run_sync,
+            argv,
+            str(cwd),
+            timeout,
+            startup_input,
+            cancelled,
+            environment,
+            on_output=on_output,
+            output_limit=output_limit,
+        )
     )
     try:
         return await asyncio.shield(worker)
@@ -255,7 +297,10 @@ class AndroidRunTerminalTool:
             "Run bounded argv using Android app permissions and pipe-backed output. "
             "Use discovered executables. Verified optional Linux tools use the packaged "
             "PRoot launcher; /system/bin/sh remains available without that installation. "
-            "This does not provide an interactive PTY or an OS security sandbox."
+            "This does not provide an interactive PTY or an OS security sandbox. The default "
+            "timeout is 60 seconds; give installs and builds a longer timeout_seconds (up to "
+            "1800) and non-interactive flags such as -y. The user sees the output live. For "
+            "programs that must keep running, such as servers, use start_service instead."
         ),
         input_schema={
             "type": "object",
@@ -268,7 +313,11 @@ class AndroidRunTerminalTool:
                 },
                 "cwd": {"type": "string", "minLength": 1, "default": "."},
                 "input": {"type": "string", "maxLength": _MAX_INPUT_CHARS},
-                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 300},
+                "timeout_seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_TERMINAL_SECONDS,
+                },
             },
             "required": ["argv"],
             "additionalProperties": False,
@@ -286,16 +335,45 @@ class AndroidRunTerminalTool:
     def spec(self) -> ToolSpec:
         return self._SPEC
 
-    async def execute(self, arguments: dict[str, Any]) -> str:
+    def execution_timeout_seconds(self, arguments: dict[str, Any]) -> float:
+        """Room for the command's own timeout plus stopping it (read by the runner)."""
+        timeout = arguments.get("timeout_seconds", 60)
+        if type(timeout) is not int or not 1 <= timeout <= MAX_TERMINAL_SECONDS:
+            return 0.0
+        return timeout + 15.0
+
+    async def execute(self, arguments: dict[str, Any], on_output: Any = None) -> str:
         argv = arguments.get("argv")
         if not isinstance(argv, list):
             raise ToolArgumentError("'argv' must be an array")
-        timeout = optional_int(arguments, "timeout_seconds", 60, minimum=1, maximum=300)
+        timeout = optional_int(
+            arguments, "timeout_seconds", 60, minimum=1, maximum=MAX_TERMINAL_SECONDS
+        )
         return json_result(
             await run_bounded_command(
-                self.paths, argv, arguments.get("cwd", "."), timeout, arguments.get("input", "")
+                self.paths,
+                argv,
+                arguments.get("cwd", "."),
+                timeout,
+                arguments.get("input", ""),
+                on_output=on_output,
+                output_limit=_LONG_OUTPUT_LIMIT if timeout > 300 else MAX_OUTPUT_BYTES,
             )
         )
+
+    async def execute_with_context(self, arguments: dict[str, Any], context: Any) -> str:
+        key = getattr(context, "attempt_id", None)
+        try:
+            from mobile_services import live_output_close, live_output_open
+        except ImportError:
+            key = None
+        if not isinstance(key, str) or not key:
+            return await self.execute(arguments)
+        writer = live_output_open(key)
+        try:
+            return await self.execute(arguments, writer)
+        finally:
+            live_output_close(key)
 
 
 class AndroidRunProcessTool(RunProcessTool):

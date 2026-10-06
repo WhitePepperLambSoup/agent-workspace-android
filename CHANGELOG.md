@@ -1,5 +1,57 @@
 # Changelog
 
+## 1.1.0 — 2026-10-07
+
+功能版。Feature release.
+
+### 中文
+
+**新增**
+- 自定义快捷任务：在「界面偏好 → 编辑快捷任务」里添加、修改、排序或删除输入框上方的快捷按钮（最多 8 个），每个可选填入输入框或直接发送。
+- 拍照提问：点回形针可选「拍照」或「选择文件」，照片进入附件收件箱，添加到对话即可提问。
+- 公式与流程图：回复里的 LaTeX 公式（支持 `$…$`、`$$…$$`、`\(…\)`、`\[…\]`）显示为排好版的公式；`mermaid` 代码块在回复完成后画成流程图（复制按钮仍复制源码，画不出来的保留为源码）。
+- 记忆：新增「记忆」页，查看、添加、修改、删除 AI 记住的关于你的信息。AI 会自动记下以后用得上的内容，但有节制：最多 30 条、每条不超过 200 字、每次任务最多自动记 3 条，相似内容不重复记，密码、密钥、验证码和证件号不会被记住；对话时只带上最新的记忆（约 2000 字以内），控制 Token 用量。可以随时关闭自动记忆或全部记忆。
+- 编辑重发与重新生成：自己的消息可以复制或编辑后重新发送，最新一条回复可以重新生成，会替换之后的对话（已改动的文件不会撤销）。
+- 多套模型配置：把常用的服务商与模型存成配置，一键切换。云端模型之间切换、修改模型或思考强度不再重启引擎；切换到或离开本机模型时仍会重启。API 密钥按服务商地址保存在系统密钥库，配置里不含密钥。
+- 备份与恢复：把全部会话、记忆、定时任务与流程、内置工作区文件以及模型和界面设置导出为一个 zip，换手机或重装后恢复。不含 API 密钥、已下载的本机模型和开发工具链；恢复前的数据会保留一份。
+- 后台服务：AI 可以启动需要一直运行的程序（本地网页服务、机器人、监听程序等），任务结束后继续运行。在新的「后台服务」页可查看输出、在浏览器中打开、停止、重启或删除，可设置「随引擎启动」；可选「息屏后继续运行」。
+- 长时间命令：安装、编译等命令最长可运行 30 分钟，执行时在工具卡片里实时显示输出。此前每个工具最多运行 2 分钟。
+- 全局入口：通知栏快捷开关「问 Agent」；可拖动的悬浮球，点一下开新对话，长按可截屏提问、语音提问或隐藏；长按桌面图标可直接选「新对话」「语音提问」「拍照提问」。
+- 内置浏览器：AI 可以用手机自带的 WebView 打开网页，读取需要脚本渲染的页面，点击、填表、按回车和截图。打开网页、点击和填表需要你批准，读取和截取当前页面不需要；它的登录状态与应用界面分开保存，可在「设备与工具」里测试或清除。
+- 通知触发：选定应用的通知到达时（可按关键词过滤），让 AI 按你写的要求处理，例如「快递短信来了就记下取件码」。默认每次运行前先通过通知问你；只读取你选定应用的通知，内容只交给被触发的任务；每条规则至少间隔 30 秒、每天最多 30 次。需要你在系统设置里授予通知使用权。
+
+**修复**
+- 修复 1.0.1 中设置页的输入框和下拉框（如模型名、工作区路径）失去样式的问题。
+- 应用更新后，若引擎在你打开应用前已被后台恢复任务启动，会继续运行更新前的代码，界面停留在旧版本。现在打开应用时检测到更新会重启引擎。
+
+**升级说明**
+- 从 1.0.x 覆盖安装或在应用内更新即可，数据保留。
+- 悬浮球需要「显示在其他应用上层」权限，通知触发需要「通知使用权」，都只在你打开对应功能时才请求。
+
+### English
+
+**New**
+- Custom quick tasks: add, edit, reorder or delete the shortcut buttons above the input under Appearance → Edit quick tasks (up to 8); each one either fills the input or sends at once.
+- Ask about a photo: the paperclip offers "Take a photo" or "Choose files"; the photo lands in the attachment inbox, ready to add to the conversation.
+- Math and diagrams: LaTeX in replies (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`) is typeset; `mermaid` code blocks are drawn as diagrams once the reply is complete (the copy button still copies the source, and a diagram that can't be drawn stays as source).
+- Memory: a new Memory page shows what the AI remembers about you and lets you add, edit or delete it. The AI saves useful facts on its own, within limits: at most 30 memories of up to 200 characters, at most 3 automatic saves per task, no near-duplicates, and never passwords, keys, verification codes or ID numbers. Conversations include only the newest memories (about 2,000 characters) to keep token use down. Automatic memory, or memory altogether, can be turned off.
+- Edit and regenerate: copy your messages or edit and resend them, and regenerate the latest reply; this replaces the rest of the conversation (file changes are not undone).
+- Model profiles: save your usual providers and models and switch in one tap. Switching between cloud models, or changing the model or reasoning effort, no longer restarts the engine; switching to or from the on-device model still does. API keys stay in the system keystore per provider address; profiles never contain them.
+- Backup and restore: export every conversation, memories, schedules and workflows, the built-in workspace's files and your model and interface settings as one zip, and restore it on a new phone or after reinstalling. API keys, downloaded on-device models and the toolchain are left out; the data from before a restore is kept.
+- Background services: the AI can start programs that keep running after the task (a local web server, a bot, a watcher). The new Background services page shows their output and lets you open them in the browser, stop, restart or delete them, and start them with the engine; optionally they keep running with the screen off.
+- Long commands: installs and builds can now run for up to 30 minutes, with their output streaming into the tool card. Previously every tool stopped after 2 minutes.
+- Global entry: an "Ask Agent" quick settings tile; a floating bubble you can drag (tap for a new conversation, long-press to ask about the screen, ask by voice or hide it); and New chat, Ask by voice and Ask about a photo when you long-press the app icon.
+- Built-in browser: the AI can use the phone's WebView to open web pages, read pages that need JavaScript, click, fill in forms, press Enter and take screenshots. Opening pages, clicking and filling need your approval; reading or capturing the current page doesn't. Its sign-ins are kept apart from the app's interface, and Device & tools can test it or clear its data.
+- Notification rules: when a notification arrives from an app you chose (optionally only with certain keywords), the AI handles it the way you describe, for example "note the pickup code when a parcel text arrives". By default each run asks you first through a notification; only the chosen apps' notifications are read and their content goes only to the triggered task; each rule runs at most once every 30 seconds and 30 times a day. You grant notification access in system settings.
+
+**Fixes**
+- Settings fields and drop-downs (such as the model name and workspace path) lost their styling in 1.0.1; fixed.
+- After an update, an engine that the background recovery job had already started kept running the old code, so the interface stayed on the previous version. Opening the app after an update now restarts the engine.
+
+**Upgrading**
+- Install over 1.0.x or update from inside the app; data is kept.
+- The floating bubble needs permission to display over other apps and notification rules need notification access; both are requested only when you turn the feature on.
+
 ## 1.0.1 — 2026-10-06
 
 修复与改进版。Fixes and improvements.

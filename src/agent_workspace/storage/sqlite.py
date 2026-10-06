@@ -2369,6 +2369,24 @@ class SQLiteEventStore:
                 (session_id,),
             ).fetchone()
             boundary = cast(int, boundary_row["sequence"]) if boundary_row is not None else 0
+            # "Edit and resend" / "regenerate" record context.rewound: the events from
+            # from_sequence up to the rewind leave the model's context (history keeps them).
+            rewound: list[tuple[int, int]] = []
+            for row in connection.execute(
+                """
+                SELECT sequence, json_extract(data_json, '$.from_sequence') AS from_sequence
+                FROM events
+                WHERE session_id = ? AND type = 'context.rewound' AND sequence > ?
+                """,
+                (session_id, boundary),
+            ):
+                start = row["from_sequence"]
+                if isinstance(start, int) and 0 < start < cast(int, row["sequence"]):
+                    rewound.append((start, cast(int, row["sequence"])))
+
+            def kept(sequence: int) -> bool:
+                return not any(start <= sequence < end for start, end in rewound)
+
             metadata = connection.execute(
                 f"""
                 SELECT sequence, type, length(CAST(data_json AS BLOB)) AS data_bytes,
@@ -2384,6 +2402,8 @@ class SQLiteEventStore:
             cutoff: int | None = None
             fallback_cutoff: int | None = None
             for row in metadata[:_MAX_CONTEXT_EVENT_ROWS]:
+                if not kept(cast(int, row["sequence"])):
+                    continue
                 data_bytes = cast(int, row["data_bytes"])
                 if total_bytes + data_bytes > _MAX_CONTEXT_EVENT_DATA_BYTES:
                     break
@@ -2407,6 +2427,8 @@ class SQLiteEventStore:
                 """,
                 (session_id, selected_cutoff, boundary, *_CONTEXT_EVENT_TYPES),
             ).fetchall()
+            if rewound:
+                rows = [row for row in rows if kept(cast(int, row["sequence"]))]
         return self._events_from_rows(rows)
 
     @staticmethod
@@ -2430,6 +2452,40 @@ class SQLiteEventStore:
                 ORDER BY sequence ASC
                 """,
                 (session_id,),
+            ).fetchall()
+            return SQLiteEventStore._events_from_rows(rows)
+        finally:
+            connection.close()
+
+    @staticmethod
+    def list_session_events_of_types_read_only(
+        database: str | Path, session_id: str, event_types: frozenset[str]
+    ) -> list[Event]:
+        """Read one session's events of the given types in sequence order."""
+
+        if not session_id or not event_types or len(event_types) > 32:
+            raise ValueError("event type query is invalid")
+        database_path = Path(database)
+        if not database_path.is_file():
+            return []
+        types = sorted(event_types)
+        connection = SQLiteEventStore._open_read_only(database_path)
+        try:
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'events'"
+            ).fetchone()
+            if table is None:
+                return []
+            placeholders = ", ".join("?" for _ in types)
+            rows = connection.execute(
+                f"""
+                SELECT id, session_id, type, data_json, schema_version, sequence,
+                       causation_id, correlation_id, created_at
+                FROM events
+                WHERE session_id = ? AND type IN ({placeholders})
+                ORDER BY sequence ASC
+                """,
+                (session_id, *types),
             ).fetchall()
             return SQLiteEventStore._events_from_rows(rows)
         finally:
