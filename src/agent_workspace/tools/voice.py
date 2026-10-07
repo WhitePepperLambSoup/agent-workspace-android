@@ -151,8 +151,8 @@ class TranscribeTool:
         description=(
             "Transcribe a bounded audio file (mp3/m4a/wav/ogg/flac, ≤25 MiB) using an "
             "OpenAI-compatible /v1/audio/transcriptions endpoint "
-            "(AGENT_WORKSPACE_AUDIO_BASE_URL + AGENT_WORKSPACE_AUDIO_API_KEY, defaults to the "
-            "OpenAI endpoint)."
+            "(requires AGENT_WORKSPACE_AUDIO_BASE_URL; AGENT_WORKSPACE_AUDIO_API_KEY and "
+            "AGENT_WORKSPACE_AUDIO_MODEL are optional)."
         ),
         input_schema={
             "type": "object",

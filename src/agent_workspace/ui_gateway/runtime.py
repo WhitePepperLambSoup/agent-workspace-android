@@ -118,6 +118,7 @@ from agent_workspace.ui_gateway.protocol import (
     ProtocolError,
     encode_message,
 )
+from agent_workspace.ui_gateway.transcription import decode_recording, transcribe
 
 _MAX_SESSIONS = 100
 _MAX_PROMPT_CHARS = 100_000
@@ -666,6 +667,7 @@ class GatewayRuntime:
         provider_settings_store: ProviderSettingsStore | None = None,
         provider_tester: Callable[[ProviderConfig], None] = _default_provider_test,
         provider_health_checker: Callable[[ProviderConfig], ProviderHealthResult] | None = None,
+        audio_transcriber: Callable[[ProviderConfig, str, bytes, str, str], str] = transcribe,
         clock: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], None] = time.sleep,
         async_workspace_switch: bool | None = None,
@@ -678,6 +680,7 @@ class GatewayRuntime:
         self._provider_resolver = provider_resolver
         self._provider_tester = provider_tester
         self._provider_health_checker = provider_health_checker or provider_health_check
+        self._audio_transcriber = audio_transcriber
         self._clock = clock
         self._sleeper = sleeper
         # Optional multi-provider orchestration is deliberately injected. The
@@ -1368,6 +1371,8 @@ class GatewayRuntime:
             return self._list_memories(command)
         if command.type == "workspace.agent.inspect":
             return self._inspect_agent_setup(command)
+        if command.type == "audio.transcribe":
+            return self._transcribe_audio(command)
         if command.type in {"memory.update", "memory.delete"}:
             return self._write_memory(command)
         if command.type == "workspace.review.create":
@@ -1522,6 +1527,7 @@ class GatewayRuntime:
                 return self._run_doctor(command)
             if command.type == "app.shutdown":
                 self._require_payload(command, set())
+                self._remember_selected_session()
                 self._begin_close()
                 self._stop_run_hosts()
                 self._stop_session_hosts()
@@ -1769,8 +1775,48 @@ class GatewayRuntime:
             self._acknowledge_history_page(self._selected_session_id, reply.payload)
         return reply
 
+    def _selected_session_path(self) -> Path:
+        return self._database.with_name("last-selected-session.json")
+
+    def _remember_selected_session(self) -> None:
+        """Record the session the user was viewing so a relaunch reopens it.
+
+        Parallel sessions mean the most recently updated session is not
+        necessarily the one on screen; the recency order stays the fallback.
+        """
+        session_id = self._selected_session_id
+        if not session_id:
+            return
+        path = self._selected_session_path()
+        staging = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        try:
+            staging.write_text(json.dumps({"sessionId": session_id}), encoding="utf-8")
+            os.replace(staging, path)
+        except OSError:
+            staging.unlink(missing_ok=True)
+
+    def _remembered_session(self) -> Session | None:
+        try:
+            raw = json.loads(self._selected_session_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        session_id = raw.get("sessionId") if isinstance(raw, dict) else None
+        if not isinstance(session_id, str) or not session_id or len(session_id) > 256:
+            return None
+        try:
+            # Only an ordinary conversation in a folder that still exists qualifies.
+            matches = SQLiteEventStore.list_sessions_read_only(
+                self._database, limit=1, include_ids=[session_id], exclude_run_sessions=True
+            )
+        except (OSError, ValueError, sqlite3.DatabaseError):
+            return None
+        session = next((item for item in matches if item.id == session_id), None)
+        if session is None or not Path(session.workspace).is_dir():
+            return None
+        return session
+
     def _restore_last_session(self) -> None:
-        """Restore the most recently active workspace on process start."""
+        """Reopen the session viewed at the last shutdown, else the most recent one."""
         if (
             self._runtime_state != "unconfigured"
             or self._host is not None
@@ -1780,11 +1826,13 @@ class GatewayRuntime:
         session: Session | None = None
         try:
             if self._database.is_file():
-                sessions = SQLiteEventStore.list_sessions_read_only(
-                    self._database, limit=1, exclude_run_sessions=True
-                )
-                if sessions:
-                    session = sessions[0]
+                session = self._remembered_session()
+                if session is None:
+                    sessions = SQLiteEventStore.list_sessions_read_only(
+                        self._database, limit=1, exclude_run_sessions=True
+                    )
+                    if sessions:
+                        session = sessions[0]
             if session is not None:
                 workspace = Path(session.workspace).expanduser().resolve(strict=True)
             else:
@@ -2299,6 +2347,41 @@ class GatewayRuntime:
             return self._reply(
                 "provider.test.result",
                 {"epoch": self.epoch, "providerId": config.id, "ok": True},
+                session_id=None,
+            )
+
+    def _transcribe_audio(self, command: CommandEnvelope) -> GatewayReply:
+        """Turn a composer recording into text with a saved OpenAI-compatible profile."""
+        with self._lock:
+            self._require_payload(command, {"providerId", "model", "mediaType", "data"})
+            provider_id = self._provider_id(command.payload.get("providerId"))
+            model = command.payload.get("model")
+            if not isinstance(model, str) or not model.strip() or len(model) > 200:
+                raise GatewayError("invalid_model")
+            settings = self._load_provider_settings()
+            profile = self._saved_provider(settings, provider_id)
+            if profile.protocol is not ProviderProtocol.OPENAI_COMPATIBLE:
+                raise GatewayError("transcription_unsupported")
+            try:
+                config = self._settings_store().resolve_config(provider_id)
+            except KeyError:
+                raise GatewayError("unknown_provider") from None
+            except (OSError, ProviderSettingsError, ValueError):
+                raise GatewayError("provider_unconfigured") from None
+        try:
+            audio, filename, media_type = decode_recording(
+                command.payload.get("mediaType"), command.payload.get("data")
+            )
+        except ValueError:
+            raise GatewayError("invalid_recording") from None
+        try:
+            text = self._audio_transcriber(config, model.strip(), audio, filename, media_type)
+        except Exception:
+            raise GatewayError("transcription_failed") from None
+        with self._lock:
+            return self._reply(
+                "audio.transcribe.result",
+                {"epoch": self.epoch, "text": text},
                 session_id=None,
             )
 
