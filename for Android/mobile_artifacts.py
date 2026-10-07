@@ -92,6 +92,10 @@ def snapshot_task_workspace(
                     relative = Path(entry.path).relative_to(paths.root).as_posix()
                     if relative.split("/", 1)[0].casefold() == "uploads":
                         continue
+                    # Screen and browser captures the agent takes to check its work are shown in
+                    # the conversation; they are not files the task produced for the user.
+                    if relative.casefold() == "automation/screenshots":
+                        continue
                     if os.path.normcase(entry.path) in excluded:
                         continue
                     try:

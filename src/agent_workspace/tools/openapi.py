@@ -26,6 +26,7 @@ from .web import (
     WebFetchTool,
     _normalize_public_https_url,
     _PinnedHTTPSConnection,
+    _transport_reason,
 )
 
 _MAX_OPERATIONS = 32
@@ -145,7 +146,7 @@ def _openapi_post_sync(
             raise ToolError("openapi POST compressed responses are unsupported")
         response_body = response.read(_MAX_FETCH_BYTES + 1)
     except (OSError, ssl.SSLError, http.client.HTTPException, TimeoutError) as exc:
-        raise ToolError("openapi POST transport failed") from exc
+        raise ToolError(f"openapi POST transport failed: {_transport_reason(exc)}") from exc
     finally:
         connection.close()
     truncated = len(response_body) > _MAX_FETCH_BYTES

@@ -146,7 +146,9 @@ def _download_bytes(
                     raise ToolError("download_file response exceeds the byte limit")
             body = response.read(maximum + 1)
         except (OSError, ssl.SSLError, http.client.HTTPException, TimeoutError) as exc:
-            raise ToolError("download_file transport failed") from exc
+            raise ToolError(
+                f"download_file transport failed: {web._transport_reason(exc)}"
+            ) from exc
         finally:
             connection.close()
         if len(body) > maximum:

@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001 -- the secret filter matches Chinese punctuation on purpose.
 """Phone-wide memory: short notes about the user that every conversation can see.
 
 Unlike the core per-workspace memory, these notes follow the user across workspaces and are
@@ -9,6 +10,7 @@ memory is full the agent must update or remove an outdated note instead of addin
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -66,9 +68,13 @@ def _clean(content: object) -> str:
     if not text:
         raise MemoryChangeError("memory content is empty")
     if len(text) > MAX_CHARS:
-        raise MemoryChangeError(f"keep each memory to one short fact of at most {MAX_CHARS} characters")
+        raise MemoryChangeError(
+            f"keep each memory to one short fact of at most {MAX_CHARS} characters"
+        )
     if _SECRET.search(text):
-        raise MemoryChangeError("memories must not contain passwords, keys, codes or ID/card numbers")
+        raise MemoryChangeError(
+            "memories must not contain passwords, keys, codes or ID/card numbers"
+        )
     return text
 
 
@@ -86,10 +92,8 @@ class MobileMemoryStore:
             document = {}
         except (OSError, ValueError):
             # A damaged file must not take the engine down; start empty but keep the old copy.
-            try:
+            with contextlib.suppress(OSError):
                 self.path.replace(self.path.with_suffix(".damaged.json"))
-            except OSError:
-                pass
             document = {}
         items = []
         for item in document.get("items", []) if isinstance(document, dict) else []:
@@ -109,7 +113,9 @@ class MobileMemoryStore:
                     }
                 )
         return {
-            "enabled": document.get("enabled", True) is not False if isinstance(document, dict) else True,
+            "enabled": document.get("enabled", True) is not False
+            if isinstance(document, dict)
+            else True,
             "auto": document.get("auto", True) is not False if isinstance(document, dict) else True,
             "items": items[:MAX_ITEMS],
         }
@@ -172,16 +178,20 @@ class MobileMemoryStore:
             used += len(line) + 1
         if document["auto"]:
             policy = (
-                "You may save a memory on your own with memory_write when you learn something "
-                "durable that will matter in later conversations: the user's name or role, "
-                "language and style preferences, recurring projects, standing instructions, or "
-                "details the user gave you to reuse. Rules: at most "
-                f"{AUTO_SAVES_PER_TASK} saves per task; one short fact per memory (at most "
+                "You may save a memory on your own with memory_write when the user tells you "
+                "something durable about themselves that will matter in later conversations: "
+                "their name or role, language and style preferences, recurring projects, standing "
+                "instructions, or details they gave you to reuse. Save only what the user stated, "
+                "not what you infer from the tasks they ask for: one request is not an interest or "
+                "a preference. Do not save what you made, started or found during a task (files, "
+                "services, ports, results, environment details); that stays in the conversation "
+                "and the workspace. Most tasks save nothing; when unsure, do not save. Rules: at "
+                f"most {AUTO_SAVES_PER_TASK} saves per task; one short fact per memory (at most "
                 f"{MAX_CHARS} characters, in the user's language); never save passwords, keys, "
-                "verification codes, ID or card numbers, one-off task details, guesses, or text "
-                "from web pages and files unless the user said it is about them. Prefer updating "
-                "an existing memory (pass its id) over adding a new one; when memory is full, "
-                "replace or delete an outdated one. After saving, mention it in one short line."
+                "verification codes, ID or card numbers, guesses, or text from web pages and files "
+                "unless the user said it is about them. Prefer updating an existing memory (pass "
+                "its id) over adding a new one; when memory is full, replace or delete an outdated "
+                "one. After saving, mention it in one short line."
             )
         else:
             policy = (
@@ -199,7 +209,11 @@ class MobileMemoryStore:
         if not lines:
             return f"{header}\nNo memories are saved yet."
         listed = "\n".join(lines)
-        more = f"\n({hidden} older memories are not shown; use memory_search to find them.)" if hidden else ""
+        more = (
+            f"\n({hidden} older memories are not shown; use memory_search to find them.)"
+            if hidden
+            else ""
+        )
         return f"{header}\nSaved memories ({len(document['items'])}/{MAX_ITEMS}):\n{listed}{more}"
 
     # ---- changes -----------------------------------------------------------------------------
@@ -249,13 +263,20 @@ class MobileMemoryStore:
                     "memory instead of adding one"
                 )
             stamp = _now()
-            item = {"id": "m" + uuid.uuid4().hex[:8], "content": text, "source": source,
-                    "created_at": stamp, "updated_at": stamp}
+            item = {
+                "id": "m" + uuid.uuid4().hex[:8],
+                "content": text,
+                "source": source,
+                "created_at": stamp,
+                "updated_at": stamp,
+            }
             document["items"].append(item)
             self._write(document)
         return item
 
-    def update(self, memory_id: object, content: object, *, source: str | None = None) -> dict[str, Any]:
+    def update(
+        self, memory_id: object, content: object, *, source: str | None = None
+    ) -> dict[str, Any]:
         text = _clean(content)
         with self._lock:
             document = self._read()
@@ -312,6 +333,8 @@ def memory_system_suffix() -> str:
     """
     local = (os.getenv("AGENT_WORKSPACE_BASE_URL") or "").rstrip("/").endswith("/embedded-qwen/v1")
     try:
-        return get_memory_store().prompt_block(LOCAL_MODEL_BUDGET_CHARS if local else PROMPT_BUDGET_CHARS)
-    except Exception:  # noqa: BLE001 - memory must never block a task
+        return get_memory_store().prompt_block(
+            LOCAL_MODEL_BUDGET_CHARS if local else PROMPT_BUDGET_CHARS
+        )
+    except Exception:
         return ""

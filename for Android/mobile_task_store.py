@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import weakref
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -477,6 +479,56 @@ class MobileTaskStore:
         return recovered
 
     def _rebuild(self) -> dict[str, MobileTask]:
+        """The tasks visible to this store.
+
+        Status is polled every few seconds while a task runs, so tasks are projected once per
+        event store and advanced with only the events appended since the last call, instead of
+        re-reading every event of every session each time.
+        """
+        replay = getattr(self.event_store, "replay_events", None)
+        projection = _projection(self.event_store) if callable(replay) else None
+        if projection is None:
+            return self._rebuild_full()
+        with projection.lock:
+            sessions = {
+                session.id: session.workspace
+                for session in self.event_store.list_sessions(limit=2_147_483_647)
+            }
+            for gone in set(projection.cursors) - set(sessions):
+                projection.forget(gone)
+            visible = {
+                session_id
+                for session_id, workspace in sessions.items()
+                if (self.session_id is None or session_id == self.session_id)
+                and (
+                    self.workspace is None
+                    or projection.resolved(session_id, workspace) == self.workspace
+                )
+            }
+            for session_id in visible:
+                after = projection.cursors.get(session_id, 0)
+                while True:
+                    events, _oldest, newest, has_more = replay(
+                        session_id, after_sequence=after, limit=1000
+                    )
+                    if newest < after:
+                        # The session's history was replaced; project it again from the start.
+                        projection.forget(session_id)
+                        after = 0
+                        continue
+                    for event in events:
+                        _apply_task_event(projection.tasks, event)
+                        after = max(after, event.sequence or after)
+                    if not has_more:
+                        break
+                projection.cursors[session_id] = after
+            return {
+                task_id: task
+                for task_id, task in projection.tasks.items()
+                if task.session_id in visible
+            }
+
+    def _rebuild_full(self) -> dict[str, MobileTask]:
         tasks: dict[str, MobileTask] = {}
         session_ids = {
             session.id
@@ -486,74 +538,112 @@ class MobileTaskStore:
         }
         for session_id in session_ids:
             for event in self.event_store.list_events(session_id):
-                task_id = event.data.get("task_id")
-                if not isinstance(task_id, str):
-                    continue
-                if event.type == "mobile.task.created":
-                    prompt = event.data.get("prompt")
-                    if not isinstance(prompt, str):
-                        continue
-                    tasks[task_id] = MobileTask(
-                        task_id=task_id,
-                        session_id=event.session_id,
-                        prompt=prompt,
-                        model=event.data.get("model")
-                        if isinstance(event.data.get("model"), str)
-                        else None,
-                        reasoning_effort=event.data.get("reasoning_effort")
-                        if isinstance(event.data.get("reasoning_effort"), str)
-                        else None,
-                        last_sequence=event.sequence or 0,
-                        created_at=event.created_at,
-                        updated_at=event.created_at,
-                        budget_steps=event.data.get("budget_steps")
-                        if type(event.data.get("budget_steps")) is int
-                        else None,
-                        image_refs=parse_mobile_image_refs(event.data.get("image_refs", [])),
-                    )
-                    continue
-                current = tasks.get(task_id)
-                if current is None:
-                    continue
-                if event.type.startswith("mobile.task."):
-                    try:
-                        task_state = _state(event.data.get("state", event.type.rsplit(".", 1)[-1]))
-                    except ValueError:
-                        continue
-                    tasks[task_id] = replace(
-                        current,
-                        state=task_state,
-                        last_sequence=event.sequence or current.last_sequence,
-                        reason=event.data.get("reason")
-                        if isinstance(event.data.get("reason"), str)
-                        else None,
-                        approval_id=event.data.get("approval_id")
-                        if isinstance(event.data.get("approval_id"), str)
-                        else None,
-                        resume_available=bool(event.data.get("resume_available", False)),
-                        updated_at=event.created_at,
-                    )
-                elif event.type == "mobile.event":
-                    updates: dict[str, Any] = {}
-                    if event.data.get("event_type") == "task.completed":
-                        payload = event.data.get("payload", {})
-                        try:
-                            artifacts = parse_mobile_artifacts(payload.get("artifacts", []))
-                            artifact_error = payload.get("artifacts_error")
-                        except (TypeError, ValueError):
-                            artifacts = ()
-                            artifact_error = "Stored artifact metadata is invalid."
-                        updates = {
-                            "artifacts": artifacts,
-                            "artifacts_truncated": bool(payload.get("artifacts_truncated", False)),
-                            "artifacts_error": artifact_error
-                            if isinstance(artifact_error, str)
-                            else None,
-                        }
-                    tasks[task_id] = replace(
-                        current,
-                        last_sequence=event.sequence or current.last_sequence,
-                        updated_at=event.created_at,
-                        **updates,
-                    )
+                _apply_task_event(tasks, event)
         return tasks
+
+
+class _TaskProjection:
+    """Tasks projected from one event store, with the last sequence read per session."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.tasks: dict[str, MobileTask] = {}
+        self.cursors: dict[str, int] = {}
+        self._workspaces: dict[str, tuple[str, Path]] = {}
+
+    def resolved(self, session_id: str, workspace: str) -> Path:
+        cached = self._workspaces.get(session_id)
+        if cached is None or cached[0] != workspace:
+            cached = (workspace, Path(workspace).resolve())
+            self._workspaces[session_id] = cached
+        return cached[1]
+
+    def forget(self, session_id: str) -> None:
+        self.cursors.pop(session_id, None)
+        self._workspaces.pop(session_id, None)
+        self.tasks = {
+            key: task for key, task in self.tasks.items() if task.session_id != session_id
+        }
+
+
+_PROJECTIONS: weakref.WeakKeyDictionary[Any, _TaskProjection] = weakref.WeakKeyDictionary()
+_PROJECTIONS_LOCK = threading.Lock()
+
+
+def _projection(event_store: Any) -> _TaskProjection | None:
+    with _PROJECTIONS_LOCK:
+        try:
+            projection = _PROJECTIONS.get(event_store)
+            if projection is None:
+                projection = _PROJECTIONS[event_store] = _TaskProjection()
+            return projection
+        except TypeError:
+            return None
+
+
+def _apply_task_event(tasks: dict[str, MobileTask], event: Event) -> None:
+    """Fold one stored event into the task projection."""
+    task_id = event.data.get("task_id")
+    if not isinstance(task_id, str):
+        return
+    if event.type == "mobile.task.created":
+        prompt = event.data.get("prompt")
+        if not isinstance(prompt, str):
+            return
+        tasks[task_id] = MobileTask(
+            task_id=task_id,
+            session_id=event.session_id,
+            prompt=prompt,
+            model=event.data.get("model") if isinstance(event.data.get("model"), str) else None,
+            reasoning_effort=event.data.get("reasoning_effort")
+            if isinstance(event.data.get("reasoning_effort"), str)
+            else None,
+            last_sequence=event.sequence or 0,
+            created_at=event.created_at,
+            updated_at=event.created_at,
+            budget_steps=event.data.get("budget_steps")
+            if type(event.data.get("budget_steps")) is int
+            else None,
+            image_refs=parse_mobile_image_refs(event.data.get("image_refs", [])),
+        )
+        return
+    current = tasks.get(task_id)
+    if current is None:
+        return
+    if event.type.startswith("mobile.task."):
+        try:
+            task_state = _state(event.data.get("state", event.type.rsplit(".", 1)[-1]))
+        except ValueError:
+            return
+        tasks[task_id] = replace(
+            current,
+            state=task_state,
+            last_sequence=event.sequence or current.last_sequence,
+            reason=event.data.get("reason") if isinstance(event.data.get("reason"), str) else None,
+            approval_id=event.data.get("approval_id")
+            if isinstance(event.data.get("approval_id"), str)
+            else None,
+            resume_available=bool(event.data.get("resume_available", False)),
+            updated_at=event.created_at,
+        )
+    elif event.type == "mobile.event":
+        updates: dict[str, Any] = {}
+        if event.data.get("event_type") == "task.completed":
+            payload = event.data.get("payload", {})
+            try:
+                artifacts = parse_mobile_artifacts(payload.get("artifacts", []))
+                artifact_error = payload.get("artifacts_error")
+            except (TypeError, ValueError):
+                artifacts = ()
+                artifact_error = "Stored artifact metadata is invalid."
+            updates = {
+                "artifacts": artifacts,
+                "artifacts_truncated": bool(payload.get("artifacts_truncated", False)),
+                "artifacts_error": artifact_error if isinstance(artifact_error, str) else None,
+            }
+        tasks[task_id] = replace(
+            current,
+            last_sequence=event.sequence or current.last_sequence,
+            updated_at=event.created_at,
+            **updates,
+        )

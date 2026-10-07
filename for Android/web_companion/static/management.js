@@ -296,7 +296,10 @@
         list.append(element);
       }
       element.dataset.state = service.state;
-      element.querySelector("strong").textContent = `${service.name} · ${serviceStates[service.state] || service.state}`;
+      const state = document.createElement("span");
+      state.className = "service-state";
+      state.textContent = serviceStates[service.state] || service.state;
+      element.querySelector("strong").replaceChildren(`${service.name} · `, state);
       element.querySelector("small").textContent = serviceDetails(service);
       const signature = JSON.stringify([service.state, service.urls, service.autostart]);
       if (element.dataset.signature === signature) continue;
@@ -377,6 +380,11 @@
       option.textContent = app.label;
       select.append(option);
     }
+    // Apps without a home-screen icon (some system and carrier apps) are entered by package name.
+    const other = document.createElement("option");
+    other.value = "__other__";
+    other.textContent = t("其他应用（输入包名）");
+    select.append(other);
   }
   async function notificationRules(isCurrent = () => true, value = null) {
     value = value || await ui.apiJson("/mobile/notification-rules");
@@ -797,12 +805,21 @@
     if (!select.value) throw new Error(t("请选择一个应用"));
     const prompt = $("notificationRulePrompt").value.trim();
     if (!prompt) throw new Error(t("请写下收到通知时要做什么"));
+    let packageName = select.value;
+    let appLabel = select.selectedOptions[0]?.textContent || select.value;
+    if (packageName === "__other__") {
+      packageName = (window.prompt(t("输入应用的包名，例如 com.tencent.mm")) || "").trim();
+      if (!packageName) return;
+      if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$/.test(packageName)) throw new Error(t("包名格式不对，例如 com.tencent.mm"));
+      appLabel = packageName;
+    }
     const context = ui.context();
     const value = await post("/mobile/notification-rules", {
-      package: select.value, app_label: select.selectedOptions[0]?.textContent || select.value,
+      package: packageName, app_label: appLabel,
       keywords: $("notificationRuleKeywords").value, prompt, confirm: $("notificationRuleConfirm").checked,
       session_id: context.sessionId, model: context.settings.model, reasoning_effort: context.settings.reasoning_effort,
     });
+    select.value = "";
     $("notificationRuleKeywords").value = "";
     $("notificationRulePrompt").value = "";
     $("notificationRuleConfirm").checked = true;

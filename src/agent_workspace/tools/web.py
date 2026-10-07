@@ -69,6 +69,14 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         self.sock = self._ssl_context.wrap_socket(raw_socket, server_hostname=self.host)
 
 
+def _transport_reason(exc: BaseException) -> str:
+    """A short cause for a failed request, so the model can tell a timeout from a refusal."""
+    if isinstance(exc, TimeoutError):
+        return "timed out"
+    detail = " ".join(str(exc).split())[:160]
+    return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+
+
 def _normalize_public_https_url(raw_url: str) -> tuple[str, SplitResult, tuple[str, ...]]:
     if any(ord(character) < 33 or ord(character) == 127 for character in raw_url):
         raise ToolArgumentError("URL may not contain whitespace or control characters")
@@ -186,7 +194,7 @@ def _web_fetch_sync(raw_url: str, maximum: int, timeout_seconds: int) -> str:
             media_type, charset = _media_type_and_charset(response.getheader("Content-Type"))
             body = response.read(maximum + 1)
         except (OSError, ssl.SSLError, http.client.HTTPException, TimeoutError) as exc:
-            raise ToolError("web_fetch transport failed") from exc
+            raise ToolError(f"web_fetch transport failed: {_transport_reason(exc)}") from exc
         finally:
             connection.close()
 

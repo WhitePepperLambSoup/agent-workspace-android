@@ -13,7 +13,7 @@ from agent_workspace.core.usage_limits import SlidingWindowRateLimiter
 
 from .base import ToolArgumentError, ToolError, json_result, optional_int, require_string
 from .process_worker import run_in_process
-from .web import _normalize_public_https_url, _PinnedHTTPSConnection
+from .web import _normalize_public_https_url, _PinnedHTTPSConnection, _transport_reason
 
 if TYPE_CHECKING:
     from agent_workspace.application.ports import ToolExecutionContext
@@ -134,7 +134,7 @@ def _http_request_sync(
             raise ToolError("http_request response headers exceed the safety limit")
         payload = response.read(maximum + 1)
     except (OSError, ssl.SSLError, http.client.HTTPException, TimeoutError) as exc:
-        raise ToolError("http_request transport failed") from exc
+        raise ToolError(f"http_request transport failed: {_transport_reason(exc)}") from exc
     finally:
         connection.close()
     truncated = len(payload) > maximum

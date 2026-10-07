@@ -245,7 +245,7 @@ def configure_android_registry(
 
     if browser_available():
         # The phone's own WebView replaces the desktop Chrome DevTools browser.
-        factories["browser"] = AndroidBrowserTool
+        factories["browser"] = lambda: AndroidBrowserTool(workspace=workspace)
         factories["browser_view"] = lambda: AndroidBrowserViewTool(workspace=workspace)
     if os.getenv("AGENT_WORKSPACE_DATA_DIR"):
         # Phone-wide memory (Memory page) replaces the per-workspace core memory tools.

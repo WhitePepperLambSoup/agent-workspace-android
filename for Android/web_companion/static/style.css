@@ -741,6 +741,7 @@ strong { font-weight: 600; }
 .service-row[data-state="running"] > .management-row-body > strong { color: var(--accent); }
 .service-row[data-state="failed"] > .management-row-body > strong { color: var(--danger); }
 .service-row .management-output { max-height: 280px; }
+.service-row .service-state { white-space: nowrap; }
 .management-row strong { color: var(--text); font-size: 14px; overflow-wrap: anywhere; white-space: pre-wrap; }
 .management-row small { color: var(--text-2); font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
 .management-row details { flex: 1 1 100%; }

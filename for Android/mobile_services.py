@@ -2,7 +2,8 @@
 
 A service outlives the task that started it and runs until it is stopped or the engine stops.
 Its output goes to a capped log file, which the Services page and the agent read from the end.
-Services marked autostart are started again whenever the engine starts.
+Services marked autostart are started again whenever the engine starts, unless the user or the
+agent stopped them on purpose: that stop holds until the service is started again.
 """
 
 from __future__ import annotations
@@ -31,6 +32,8 @@ _URL_PORT = re.compile(
     rb"https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]|\[::\])(?::(\d{2,5}))", re.I
 )
 _SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
+# Stops someone asked for; an engine shutdown or a restart is not one of them.
+DELIBERATE_STOPS = frozenset({"stopped by the user", "stopped by the agent"})
 
 
 class ServiceError(ValueError):
@@ -334,9 +337,7 @@ class ServiceManager:
             item.stop_reason = reason
             _kill_group(item.process.pid, signal.SIGTERM)
         deadline = time.monotonic() + grace
-        while time.monotonic() < deadline and any(
-            item.process.poll() is None for item in running
-        ):
+        while time.monotonic() < deadline and any(item.process.poll() is None for item in running):
             time.sleep(0.05)
         for item in running:
             _kill_group(item.process.pid, _SIGKILL)
@@ -393,6 +394,8 @@ class ServiceManager:
                 )
             for record in list(self._records.values()):
                 if not record.get("autostart") or record["id"] in self._running:
+                    continue
+                if record.get("state") == "stopped" and record.get("reason") in DELIBERATE_STOPS:
                     continue
                 try:
                     if not Path(record["cwd"]).is_dir():

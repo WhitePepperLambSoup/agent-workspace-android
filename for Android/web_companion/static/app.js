@@ -1351,9 +1351,14 @@
     closeMenu();
     closeDrawer();
     // Reuse the current conversation while it is still empty instead of piling up blank ones.
-    const empty = !activeTask && !historyEvents.some((event) => event.type === "message.created");
+    const empty = !activeTask && !timelineMessages().length;
+    const text = typeof options?.text === "string" ? options.text.slice(0, 8000) : "";
     void (empty ? Promise.resolve(true) : createSession()).then(() => {
       if (disposed) return;
+      if (text && !elements.promptInput.value.trim()) {
+        elements.promptInput.value = text;
+        elements.promptInput.dispatchEvent(new Event("input", { bubbles: true }));
+      }
       if (mode === "voice" && typeof bridge?.requestVoiceInput === "function") bridge.requestVoiceInput();
       else if (mode === "camera" && typeof bridge?.captureShareInboxPhoto === "function") $("btnAttachCamera").click();
       else elements.promptInput.focus();
@@ -1374,7 +1379,7 @@
       const result = JSON.parse(bridge.confirmShareInbox(JSON.stringify({ request_id: requestId("share"),
         session_id: currentSessionId, workspace_id: workspaceOfSession(currentSessionId), item_ids: pending })));
       if (!result.ok) throw new Error(localizeError(result.error) || t("无法导入附件"));
-      notice(t("截图已添加到这次对话，输入你的问题吧"));
+      notice(t("截图已添加到这次对话，输入你的问题吧"), "info");
     } catch (error) { notice(error.message); }
   }
 
@@ -1401,8 +1406,18 @@
     setLocalContextBusy: (busy) => { localContextBusy = !!busy; syncControls(); },
     setLocalDeviceTestBusy: (busy) => { localDeviceTesting = !!busy; syncControls(); },
     context: () => ({ sessionId: currentSessionId, workspaceId: currentWorkspaceId, settings: { ...settings }, activeTask: !!activeTask || isPreparingSubmission || localDeviceTesting, draft: elements.promptInput.value,
-      recentText: historyEvents.filter((event) => event.type === "message.created" && ["user", "assistant"].includes(event.data?.role)).slice(-6).map((event) => `${event.data.role}: ${event.data.content || ""}`).join("\n").slice(-16384) }),
+      recentText: timelineMessages().filter((message) => message.content).slice(-6).map((message) => `${message.role}: ${message.content}`).join("\n").slice(-16384) }),
   };
+
+  // Read from the timeline: historyEvents only holds what was loaded, not turns sent since then.
+  function timelineMessages() {
+    return [...elements.timelineList.querySelectorAll(".message-card.user, .message-card.assistant")]
+      .filter((card) => !card.hidden)
+      .map((card) => card.classList.contains("user")
+        ? { role: "user", content: card.dataset.displayText || card.dataset.messageText || "" }
+        // A live reply keeps its text in messageText; displayText still holds the placeholder.
+        : { role: "assistant", content: card.dataset.messageText || "" });
+  }
   window.AgentMobile = window.AgentMobileUi;
 
   function pageStatus(element, text, error = false) {
@@ -3332,7 +3347,10 @@
     elements.timelineList.querySelector(".empty-state")?.remove();
     const userCard = appendMessageCard("user", t("您"), plainText);
     userCard.dataset.messageText = submittedPrompt;
-    if (customText === null) {
+    // A retry sends the prompt that the failure put back in the composer, so that copy goes too.
+    const composerHoldsPrompt = customText !== null && elements.promptInput.value.trim() === plainText.trim()
+      && JSON.stringify(attachments.map(attachmentReceipt)) === JSON.stringify(imports.map(attachmentReceipt));
+    if (customText === null || composerHoldsPrompt) {
       elements.promptInput.value = "";
       attachments = [];
       renderAttachments();

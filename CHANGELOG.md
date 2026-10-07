@@ -17,12 +17,21 @@
 - 后台服务：AI 可以启动需要一直运行的程序（本地网页服务、机器人、监听程序等），任务结束后继续运行。在新的「后台服务」页可查看输出、在浏览器中打开、停止、重启或删除，可设置「随引擎启动」；可选「息屏后继续运行」。
 - 长时间命令：安装、编译等命令最长可运行 30 分钟，执行时在工具卡片里实时显示输出。此前每个工具最多运行 2 分钟。
 - 全局入口：通知栏快捷开关「问 Agent」；可拖动的悬浮球，点一下开新对话，长按可截屏提问、语音提问或隐藏；长按桌面图标可直接选「新对话」「语音提问」「拍照提问」。
-- 内置浏览器：AI 可以用手机自带的 WebView 打开网页，读取需要脚本渲染的页面，点击、填表、按回车和截图。打开网页、点击和填表需要你批准，读取和截取当前页面不需要；它的登录状态与应用界面分开保存，可在「设备与工具」里测试或清除。
+- 内置浏览器：AI 可以用手机自带的 WebView 打开网页，读取需要脚本渲染的页面，点击、填表、按回车和截图；也能直接打开工作区里自己生成的网页检查效果，无需另起网页服务。打开网页、点击和填表需要你批准，读取和截取当前页面不需要；它的登录状态与应用界面分开保存，可在「设备与工具」里测试或清除。
 - 通知触发：选定应用的通知到达时（可按关键词过滤），让 AI 按你写的要求处理，例如「快递短信来了就记下取件码」。默认每次运行前先通过通知问你；只读取你选定应用的通知，内容只交给被触发的任务；每条规则至少间隔 30 秒、每天最多 30 次。需要你在系统设置里授予通知使用权。
 
 **修复**
 - 修复 1.0.1 中设置页的输入框和下拉框（如模型名、工作区路径）失去样式的问题。
 - 应用更新后，若引擎在你打开应用前已被后台恢复任务启动，会继续运行更新前的代码，界面停留在旧版本。现在打开应用时检测到更新会重启引擎。
+- 在对话界面按返回键有时会显示一段 `unauthorized` 文字而不是退出，现在会把应用退到后台。
+- 长任务执行中，通知栏会在「执行任务」与「恢复连接」之间来回跳；对话很长时状态查询也越来越慢。现在偶发的一次查询超时不再显示为断线，任务状态改为增量读取。
+- AI 用截图检查网页时，截图不再出现在任务的「生成的文件」里。
+- 任务失败后点「重试」，原来的问题会留在输入框里；现在重试时一并清掉。
+- 刚在新对话里聊过一轮，再从悬浮球或通知栏开新对话时，会沿用当前对话而不是新建。
+- 自动记忆更克制：只记你明确说过的关于自己的事，不再把单次任务的内容（如“关注某研究方向”）或任务中启动的服务、端口当成记忆。
+- 你或 AI 主动停止的后台服务，即使勾选了「随引擎启动」，也不会在引擎重启或应用更新后自己跑起来。
+- 下载文件、网页读取失败时，错误信息会说明原因（如超时、连接被重置），方便 AI 判断是否重试。
+- 应用内输入框弹窗（如给模型配置命名、输入包名）的文字在浅色模式下看不清；通知触发规则添加后，应用选择框会清空；截图提问的提示不再显示为错误样式；后台服务的状态文字不再被拆成两行。
 
 **升级说明**
 - 从 1.0.x 覆盖安装或在应用内更新即可，数据保留。
@@ -41,12 +50,21 @@
 - Background services: the AI can start programs that keep running after the task (a local web server, a bot, a watcher). The new Background services page shows their output and lets you open them in the browser, stop, restart or delete them, and start them with the engine; optionally they keep running with the screen off.
 - Long commands: installs and builds can now run for up to 30 minutes, with their output streaming into the tool card. Previously every tool stopped after 2 minutes.
 - Global entry: an "Ask Agent" quick settings tile; a floating bubble you can drag (tap for a new conversation, long-press to ask about the screen, ask by voice or hide it); and New chat, Ask by voice and Ask about a photo when you long-press the app icon.
-- Built-in browser: the AI can use the phone's WebView to open web pages, read pages that need JavaScript, click, fill in forms, press Enter and take screenshots. Opening pages, clicking and filling need your approval; reading or capturing the current page doesn't. Its sign-ins are kept apart from the app's interface, and Device & tools can test it or clear its data.
+- Built-in browser: the AI can use the phone's WebView to open web pages, read pages that need JavaScript, click, fill in forms, press Enter and take screenshots. It can also open a page it built in the workspace to check it, without starting a web server. Opening pages, clicking and filling need your approval; reading or capturing the current page doesn't. Its sign-ins are kept apart from the app's interface, and Device & tools can test it or clear its data.
 - Notification rules: when a notification arrives from an app you chose (optionally only with certain keywords), the AI handles it the way you describe, for example "note the pickup code when a parcel text arrives". By default each run asks you first through a notification; only the chosen apps' notifications are read and their content goes only to the triggered task; each rule runs at most once every 30 seconds and 30 times a day. You grant notification access in system settings.
 
 **Fixes**
 - Settings fields and drop-downs (such as the model name and workspace path) lost their styling in 1.0.1; fixed.
 - After an update, an engine that the background recovery job had already started kept running the old code, so the interface stayed on the previous version. Opening the app after an update now restarts the engine.
+- Pressing Back in the conversation sometimes showed an `unauthorized` message instead of leaving; it now sends the app to the background.
+- During long tasks the notification flipped between "running" and "reconnecting", and status checks slowed down as conversations grew. A single slow status check no longer counts as a disconnect, and task status is now read incrementally.
+- Screenshots the AI takes to check a web page no longer appear among the task's generated files.
+- Retrying a failed task left the original prompt in the input; retrying now clears it.
+- Right after a first exchange in a new conversation, the floating bubble or the quick settings tile reused that conversation instead of opening a new one.
+- Automatic memory is more restrained: it keeps only what you say about yourself, not the content of a single task (such as "interested in a research topic") or the services and ports a task started.
+- A background service that you or the AI stopped no longer starts again after an engine restart or app update, even when "Start with the engine" is checked.
+- Failed downloads and page fetches now say why (for example a timeout or a reset connection), so the AI can decide whether to retry.
+- Text in the app's input dialogs (such as naming a model profile or entering a package name) was hard to read in light mode; the app picker clears after a notification rule is added; the screenshot prompt no longer looks like an error; a background service's state no longer wraps onto two lines.
 
 **Upgrading**
 - Install over 1.0.x or update from inside the app; data is kept.

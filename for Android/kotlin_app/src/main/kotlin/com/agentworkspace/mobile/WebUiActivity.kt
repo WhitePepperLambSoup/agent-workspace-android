@@ -591,10 +591,17 @@ class WebUiActivity : ComponentActivity() {
                 ): Boolean {
                     if (result == null) return true
                     if (url == null || !isTrustedConsoleUrl(url) || isDestroyed || isFinishing) { result.cancel(); return true }
-                    val input = EditText(this@WebUiActivity).apply { setText(defaultValue.orEmpty()); setSingleLine() }
-                    AlertDialog.Builder(this@WebUiActivity, pageDialogTheme())
+                    val builder = AlertDialog.Builder(this@WebUiActivity, pageDialogTheme())
+                    // Built from the dialog's themed context: the activity's own text color is unreadable on it.
+                    val input = EditText(builder.context).apply { setText(defaultValue.orEmpty()); setSingleLine() }
+                    val margin = (20 * resources.displayMetrics.density).toInt()
+                    val frame = android.widget.FrameLayout(builder.context).apply {
+                        setPadding(margin, 0, margin, 0)
+                        addView(input)
+                    }
+                    builder
                         .setMessage(message.orEmpty())
-                        .setView(input)
+                        .setView(frame)
                         .setPositiveButton(UiText.of(this@WebUiActivity, "确定", "OK")) { _, _ -> result.confirm(input.text.toString()) }
                         .setNegativeButton(UiText.of(this@WebUiActivity, "取消", "Cancel")) { _, _ -> result.cancel() }
                         .setOnCancelListener { result.cancel() }
@@ -630,6 +637,8 @@ class WebUiActivity : ComponentActivity() {
                         loadingContainer.visibility = View.GONE
                         webView.visibility = View.VISIBLE
                         if (isTrustedConsoleUrl(url)) {
+                            // Earlier consoles (from before an engine restart) carry expired tokens.
+                            view?.clearHistory()
                             deliverWorkspaceFileResults()
                             deliverWorkspaceFolderResults()
                             dispatchWorkspaceStorageChanged()
@@ -725,7 +734,10 @@ class WebUiActivity : ComponentActivity() {
                     "(function(){try{const ui=window.AgentMobileUi;return (ui&&ui.handleBack?ui.handleBack():ui?.closeMenu?.())===true;}catch(e){return false;}})()"
                 ) { handled ->
                     if (handled != "true" && !isDestroyed && !isFinishing) {
-                        if (webView.canGoBack()) webView.goBack() else moveTaskToBack(true)
+                        // Never go back from the console into an earlier engine's console: its token
+                        // is no longer valid and the page would only show "unauthorized".
+                        val onConsole = isTrustedConsoleUrl(webView.url ?: "")
+                        if (!onConsole && webView.canGoBack()) webView.goBack() else moveTaskToBack(true)
                     }
                 }
             }
@@ -949,9 +961,15 @@ class WebUiActivity : ComponentActivity() {
         if (incoming?.action != QuickEntry.ACTION_QUICK_ASK) return
         val mode = incoming.getStringExtra(QuickEntry.EXTRA_MODE)?.takeIf { it in QuickEntry.MODES } ?: "text"
         val batch = incoming.getStringExtra(QuickEntry.EXTRA_SHARE_BATCH)?.takeIf { it.length in 1..64 }
+        // Other apps (Tasker, shortcuts) may prefill the input; the user still decides to send it.
+        val text = runCatching { incoming.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString() }.getOrNull()
+            ?.trim()?.take(8000)?.takeIf { it.isNotEmpty() }
         // Handled once; a later recreation must not open yet another conversation.
         incoming.action = Intent.ACTION_MAIN
-        pendingQuickAsk = JSONObject().put("mode", mode).apply { if (batch != null) put("share_batch", batch) }.toString()
+        pendingQuickAsk = JSONObject().put("mode", mode).apply {
+            if (batch != null) put("share_batch", batch)
+            if (text != null) put("text", text)
+        }.toString()
         deliverQuickAsk()
     }
 

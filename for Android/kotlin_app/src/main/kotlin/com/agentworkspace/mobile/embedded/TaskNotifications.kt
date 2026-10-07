@@ -241,14 +241,26 @@ class TaskNotificationMonitor(
     private val settings = TaskNotificationSettings(context)
     private val tracker = TaskNotificationTracker(storageFile, System.currentTimeMillis())
     private val publisher = TaskNotificationPublisher(context)
+    private var failures = 0
 
     suspend fun run() {
         while (currentCoroutineContext().isActive) delay(pollOnce())
     }
 
+    /** A busy engine can miss one poll; only report it unreachable after several in a row. */
+    private fun unreachable(retryMillis: Long): Long {
+        failures += 1
+        if (failures >= 3) {
+            taskStateListener(null)
+            return retryMillis
+        }
+        return 2000
+    }
+
     fun pollOnce(): Long {
         val token = runCatching { tokenFile.readText().trim() }.getOrNull()
         if (token.isNullOrEmpty()) {
+            failures = 0
             taskStateListener(null)
             return 2000
         }
@@ -258,16 +270,11 @@ class TaskNotificationMonitor(
                 connection.setRequestProperty("Authorization", "Bearer $token")
                 connection.connectTimeout = 1500
                 connection.readTimeout = 2000
-                if (connection.responseCode !in 200..299) {
-                    taskStateListener(null)
-                    return 10000
-                }
+                if (connection.responseCode !in 200..299) return unreachable(10000)
                 connection.inputStream.bufferedReader(Charsets.UTF_8).use { JSONObject(it.readText()) }
             } finally { connection.disconnect() }
-            val tasks = snapshot.optJSONArray("tasks") ?: run {
-                taskStateListener(null)
-                return 10000
-            }
+            val tasks = snapshot.optJSONArray("tasks") ?: return unreachable(10000)
+            failures = 0
             snapshot.optJSONObject("services")?.let {
                 servicesListener(it.optInt("running").coerceAtLeast(0), it.optBoolean("keep_awake"))
             }
@@ -284,9 +291,8 @@ class TaskNotificationMonitor(
                 else -> 10000
             }
         } catch (error: Exception) {
-            taskStateListener(null)
             android.util.Log.w("AgentNotifications", "Task status polling failed: ${error.javaClass.simpleName}")
-            return 10000
+            return unreachable(10000)
         }
     }
 }

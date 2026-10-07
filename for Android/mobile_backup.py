@@ -72,7 +72,10 @@ def _workspace_files(workspace: Path):
 
 
 def create_backup(
-    files_dir: Path, output: Path, *, app_settings: dict[str, Any] | None = None,
+    files_dir: Path,
+    output: Path,
+    *,
+    app_settings: dict[str, Any] | None = None,
     web_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write a backup zip to ``output``; returns what it contains."""
@@ -82,9 +85,10 @@ def create_backup(
     counts = {"data_files": 0, "workspace_files": 0, "bytes": 0}
     output.parent.mkdir(parents=True, exist_ok=True)
     partial = output.with_suffix(output.suffix + ".partial")
-    with tempfile.TemporaryDirectory(dir=output.parent) as scratch, zipfile.ZipFile(
-        partial, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True
-    ) as archive:
+    with (
+        tempfile.TemporaryDirectory(dir=output.parent) as scratch,
+        zipfile.ZipFile(partial, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive,
+    ):
         for path, relative in _data_files(data):
             name = PurePosixPath("agent-data", *relative.parts).as_posix()
             if _is_sqlite(path):
@@ -108,13 +112,19 @@ def create_backup(
             archive.write(path, PurePosixPath("workspace", *relative.parts).as_posix())
             counts["workspace_files"] += 1
             counts["bytes"] += path.stat().st_size
-        for name, value in (("settings/app.json", app_settings), ("settings/web.json", web_settings)):
+        for name, value in (
+            ("settings/app.json", app_settings),
+            ("settings/web.json", web_settings),
+        ):
             if value:
                 archive.writestr(name, json.dumps(value, ensure_ascii=False))
         manifest = {
-            "format": FORMAT, "version": VERSION, "created_at": _now(),
-            "app_version": (app_settings or {}).get("app_version"), **counts,
-            "excluded": sorted(EXCLUDED_DATA_DIRS) + ["api keys"],
+            "format": FORMAT,
+            "version": VERSION,
+            "created_at": _now(),
+            "app_version": (app_settings or {}).get("app_version"),
+            **counts,
+            "excluded": [*sorted(EXCLUDED_DATA_DIRS), "api keys"],
         }
         archive.writestr(MANIFEST, json.dumps(manifest, ensure_ascii=False, indent=1))
     os.replace(partial, output)
@@ -124,7 +134,10 @@ def create_backup(
 def _safe_member(name: str) -> PurePosixPath:
     path = PurePosixPath(name)
     if (
-        name.startswith(("/", "\\")) or "\\" in name or ":" in name or not path.parts
+        name.startswith(("/", "\\"))
+        or "\\" in name
+        or ":" in name
+        or not path.parts
         or any(part in {"", ".", ".."} for part in path.parts)
         or path.parts[0] not in {"agent-data", "workspace", "settings", MANIFEST}
     ):
@@ -233,7 +246,7 @@ class BackupJobs:
             try:
                 result = create_backup(files_dir, output, **settings)
                 update = {"state": "done", **result}
-            except Exception as exc:  # noqa: BLE001 - reported to the user
+            except Exception as exc:
                 output.with_suffix(output.suffix + ".partial").unlink(missing_ok=True)
                 update = {"state": "failed", "error": str(exc)[:500]}
             with self._lock:

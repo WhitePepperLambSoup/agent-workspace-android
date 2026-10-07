@@ -16,6 +16,7 @@ import android.webkit.JsResult
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebStorage
 import android.webkit.WebView
@@ -64,6 +65,7 @@ object AgentBrowser {
         val request = JSONObject(requestJson)
         when (val action = request.optString("action")) {
             "navigate" -> navigate(request.optString("url"), request.optLong("timeout_ms", PAGE_TIMEOUT_MS))
+            "open_file" -> openFile(request.optString("root"), request.optString("path"))
             "back" -> back()
             "evaluate" -> evaluate(request.optString("script"), request.optLong("timeout_ms", 10_000L))
             "settle" -> { settle(request.optLong("max_ms", 15_000L)); state() }
@@ -85,6 +87,56 @@ object AgentBrowser {
         main.post(task)
         return task.get(timeoutMs, TimeUnit.MILLISECONDS)
     }
+
+    /**
+     * Workspace files open on a private https origin served straight from the opened file's folder
+     * (never above it), so pages the agent wrote load with their images, scripts and styles.
+     */
+    private const val FILE_HOST = "workspace.agent-browser.invalid"
+    @Volatile private var fileRoot: File? = null
+
+    private fun openFile(root: String, path: String): JSONObject {
+        val folder = runCatching { File(root).canonicalFile }.getOrNull()
+            ?: return failure("bad_path", "The folder is unavailable")
+        val target = runCatching { File(folder, path).canonicalFile }.getOrNull()
+        if (target == null || !target.isFile || !target.path.startsWith(folder.path + File.separator)) {
+            return failure("bad_path", "The file is not inside the opened folder")
+        }
+        fileRoot = folder
+        val relative = target.path.substring(folder.path.length + 1).split(File.separatorChar)
+            .joinToString("/") { Uri.encode(it) }
+        return navigate("https://$FILE_HOST/$relative", PAGE_TIMEOUT_MS)
+    }
+
+    private fun serveFile(uri: Uri): WebResourceResponse? {
+        if (uri.host != FILE_HOST) return null
+        val root = fileRoot ?: return notFound()
+        val decoded = uri.pathSegments.joinToString(File.separator)
+        val file = runCatching { File(root, decoded).canonicalFile }.getOrNull()
+        if (file == null || !file.isFile || !file.path.startsWith(root.path + File.separator) || sensitive(file.name)) {
+            return notFound()
+        }
+        val type = android.webkit.MimeTypeMap.getSingleton()
+            .getMimeTypeFromExtension(file.extension.lowercase()) ?: when (file.extension.lowercase()) {
+                "js", "mjs" -> "text/javascript"
+                "json" -> "application/json"
+                "svg" -> "image/svg+xml"
+                "wasm" -> "application/wasm"
+                else -> "application/octet-stream"
+            }
+        val textual = type.startsWith("text/") || type in setOf("application/json", "image/svg+xml", "text/javascript")
+        return WebResourceResponse(type, if (textual) "UTF-8" else null, 200, "OK",
+            mapOf("Cache-Control" to "no-store"), file.inputStream())
+    }
+
+    private fun sensitive(name: String): Boolean {
+        val lower = name.lowercase()
+        return lower.startsWith(".env") || lower.endsWith(".key") || lower.endsWith(".pem") ||
+            lower.endsWith(".p12") || lower.endsWith(".jks") || lower == "id_rsa" || lower == "id_ed25519"
+    }
+
+    private fun notFound() = WebResourceResponse("text/plain", "UTF-8", 404, "Not Found",
+        mapOf("Cache-Control" to "no-store"), java.io.ByteArrayInputStream(ByteArray(0)))
 
     /** http(s) only, and never this app's own engine port. */
     private fun allowed(url: String): Boolean {
@@ -115,6 +167,9 @@ object AgentBrowser {
                 settings.useWideViewPort = true
                 setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                 webViewClient = object : WebViewClient() {
+                    override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
+                        serveFile(request.url)
+
                     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                         val target = request.url.toString()
                         if (allowed(target)) return false
