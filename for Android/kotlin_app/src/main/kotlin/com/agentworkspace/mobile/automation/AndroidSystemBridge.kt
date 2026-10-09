@@ -53,6 +53,10 @@ object AndroidSystemBridge {
             .put("abis", JSONArray(Build.SUPPORTED_ABIS.toList()))
             .put("memory_total_bytes", memory.totalMem)
             .put("memory_available_bytes", memory.availMem)
+            .put("memory_usable_bytes", try {
+                com.agentworkspace.mobile.localmodels.LocalModelContext.usableRamBytes(memory.availMem, memory.totalMem,
+                    java.io.File("/proc/meminfo").readText(Charsets.US_ASCII))
+            } catch (_: Exception) { memory.availMem })
             .put("settings_action", Settings.ACTION_ACCESSIBILITY_SETTINGS)
             .put("service_component", "${context?.packageName ?: "com.agentworkspace.mobile"}/com.agentworkspace.mobile.automation.AgentAccessibilityService")
             .put("reason", reason ?: JSONObject.NULL)

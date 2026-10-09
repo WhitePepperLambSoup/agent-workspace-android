@@ -24,8 +24,8 @@ android {
         applicationId = "com.agentworkspace.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10100
-        versionName = "1.1.0"
+        versionCode = 10101
+        versionName = "1.1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -34,7 +34,7 @@ android {
         }
         externalNativeBuild {
             cmake {
-                targets += "agent_qwen"
+                targets += listOf("agent_qwen", "agent_qwen_dotprod")
                 val archive = providers.environmentVariable("AGENT_LLAMA_ARCHIVE").orNull
                     ?: file("build/tooling/llama.cpp-7fe450e19305b828c199d602c23a8337aaa1f03b.tar.gz")
                         .absolutePath
@@ -86,6 +86,8 @@ android {
             keepDebugSymbols += setOf("**/libagent_proot.so", "**/libagent_proot_loader.so",
                 "**/libtalloc.so", "**/libandroid-shmem.so")
             pickFirsts += "**/libsqlite3_python.so"
+            // The dot-product engine build exists for arm64 only (src/main/cpp/CMakeLists.txt).
+            excludes += "lib/x86_64/libagent_qwen_dotprod.so"
         }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -204,6 +206,8 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation("androidx.work:work-runtime-ktx:2.10.1")
     implementation(libs.shizuku.api)
+    // Pure-logic tests (memory planning) run on the JVM without a device.
+    testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.2")
 }

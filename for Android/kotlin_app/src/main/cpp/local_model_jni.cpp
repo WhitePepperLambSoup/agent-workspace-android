@@ -5,6 +5,8 @@
 #include <mtmd-helper.h>
 #include <nlohmann/json.hpp>
 
+#include "prompt_cache.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -19,6 +21,7 @@
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <unistd.h>
 #include <vector>
 
@@ -36,6 +39,9 @@ std::mutex engine_mutex;
 std::mutex state_mutex;
 std::once_flag backend_once;
 std::atomic<bool> cancelled{false};
+// Lowered by LocalModelBridge while the phone is hot (0 = no limit); followed between
+// prompt batches and generated tokens so a long generation cools down instead of heating up.
+std::atomic<int> thread_limit{0};
 std::deque<std::string> pending_cancellations;
 std::string model_root;
 std::string loaded_id;
@@ -52,6 +58,18 @@ struct stat loaded_stat{};
 std::unique_ptr<llama_model, decltype(&llama_model_free)> vocabulary_model{nullptr, llama_model_free};
 std::string vocabulary_id;
 struct stat vocabulary_stat{};
+
+// The last text context stays allocated between requests (guarded by engine_mutex)
+// so the next agent step only evaluates its new tokens; see prompt_cache.h.
+constexpr int MIN_MEASURED_PROMPT_TOKENS = 256;
+struct KeptContext {
+    std::unique_ptr<llama_context, decltype(&llama_free)> context{nullptr, llama_free};
+    const llama_model * owner = nullptr;
+    int n_ctx = 0;
+    agent_prompt_cache::Cache prompt;
+};
+KeptContext kept;
+json prompt_cache_status = nullptr;  // guarded by state_mutex for nativeStatus
 
 struct RequestFailure : std::runtime_error {
     std::string code;
@@ -123,7 +141,80 @@ void set_generation_phase(const char * phase) {
     generation_phase = phase;
 }
 
+void publish_prompt_cache() {
+    json summary = nullptr;
+    if (kept.context)
+        summary = {{"model_id", loaded_id}, {"context_size", kept.n_ctx}, {"tokens", kept.prompt.tokens.size()},
+                   {"checkpoints", kept.prompt.checkpoints.size()},
+                   {"checkpoint_bytes", kept.prompt.checkpoint_bytes()}};
+    std::lock_guard<std::mutex> lock(state_mutex);
+    prompt_cache_status = summary;
+}
+
+/** Empties the kept sequence but keeps its allocation; used when its memory may be inconsistent. */
+void forget_prompt() {
+    if (kept.context) llama_memory_seq_rm(llama_get_memory(kept.context.get()), 0, -1, -1);
+    kept.prompt.clear();
+    publish_prompt_cache();
+}
+
+void drop_prompt_cache() {
+    kept.context.reset();
+    kept.owner = nullptr;
+    kept.n_ctx = 0;
+    kept.prompt.clear();
+    publish_prompt_cache();
+}
+
+// Saved system-message states (prompt_cache.h) live beside each model's weights, so removing
+// the model removes them. The newest few are kept; each is tens of MiB.
+constexpr size_t MAX_PREFIX_FILES = 3;
+
+std::string prefix_directory(const std::string & id) {
+    return model_root + "/" + id + "/prefix-cache";
+}
+
+/** Path of the saved state for this system message, creating the private directory; "" if unusable. */
+std::string prefix_file(const std::string & id, const struct stat & weights,
+                        const std::vector<llama_token> & tokens, size_t n_tokens) {
+    const std::string directory = prefix_directory(id);
+    struct stat existing{};
+    if (lstat(directory.c_str(), &existing) != 0) {
+        if (mkdir(directory.c_str(), 0700) != 0 || lstat(directory.c_str(), &existing) != 0) return "";
+    }
+    if (!S_ISDIR(existing.st_mode)) return "";
+    // Different weights or engine builds never read each other's states.
+    const std::string identity = id + ":" + std::to_string(weights.st_size) + ":" +
+        std::to_string(static_cast<long long>(weights.st_mtime)) + ":" + AGENT_LLAMA_REVISION;
+    return directory + "/" + agent_prompt_cache::prefix_file_name(identity, tokens, n_tokens);
+}
+
+void touch(const std::string & path) {
+    utimensat(AT_FDCWD, path.c_str(), nullptr, 0);  // the least recently used file goes first
+}
+
+void evict_prefix_files(const std::string & id) {
+    const std::string directory = prefix_directory(id);
+    DIR * listing = opendir(directory.c_str());
+    if (!listing) return;
+    std::vector<std::pair<time_t, std::string>> files;
+    while (const dirent * entry = readdir(listing)) {
+        const std::string name = entry->d_name;
+        if (name.rfind("prefix-", 0) != 0) continue;
+        const std::string path = directory + "/" + name;
+        struct stat file{};
+        if (lstat(path.c_str(), &file) != 0 || !S_ISREG(file.st_mode)) continue;
+        // An interrupted save leaves only its temporary file.
+        if (name.size() > 4 && name.compare(name.size() - 4, 4, ".tmp") == 0) unlink(path.c_str());
+        else files.emplace_back(file.st_mtime, path);
+    }
+    closedir(listing);
+    std::sort(files.begin(), files.end());
+    for (size_t i = 0; i + MAX_PREFIX_FILES < files.size(); ++i) unlink(files[i].second.c_str());
+}
+
 void free_model() {
+    drop_prompt_cache();
     vocabulary_model.reset();
     vocabulary_id.clear();
     vocabulary_stat = {};
@@ -204,6 +295,7 @@ json generation_result(json metadata, const std::string & text, int prompt_token
             {"image_count", metadata.value("image_count", size_t{0})},
             {"image_tokens", metadata.value("image_tokens", size_t{0})},
             {"finish_reason", finish}, {"cancelled", was_cancelled},
+            {"prompt_cached_tokens", metadata.value("prompt_cached_tokens", size_t{0})},
             {"first_token_ms", first_token_ms}, {"elapsed_ms", elapsed_ms}};
 }
 
@@ -263,6 +355,11 @@ json generate(const std::string & raw, const std::vector<std::string> & rgb_imag
         const float temperature = request["temperature"].get<float>();
         if (!std::isfinite(temperature) || temperature < 0 || temperature > 2)
             throw RequestFailure("invalid_request", "Native temperature exceeded its finite limit");
+        if (request.contains("reuse_prompt") && !request["reuse_prompt"].is_boolean())
+            throw RequestFailure("invalid_request", "Invalid native prompt reuse flag");
+        // Benchmarks measure full evaluation and images use their own context.
+        const bool reuse = request.value("reuse_prompt", false) && rgb_images.empty();
+        if (!reuse) drop_prompt_cache();
 
         const auto started = Clock::now();
         Budget budget{started + std::chrono::milliseconds(timeout)};
@@ -393,26 +490,59 @@ json generate(const std::string & raw, const std::vector<std::string> & rgb_imag
             if (n_prompt != needed) return failure("tokenization_failed", "Local Qwen prompt tokenization failed");
         }
 
-        llama_context_params params = llama_context_default_params();
-        params.n_ctx = n_context;
-        params.n_batch = 128;
-        params.n_ubatch = 64;
-        params.n_seq_max = 1;
-        params.n_threads = n_threads;
-        params.n_threads_batch = n_threads;
-        params.type_k = GGML_TYPE_F16;
-        params.type_v = GGML_TYPE_F16;
-        params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
-        params.offload_kqv = false;
-        params.op_offload = false;
-        params.abort_callback = abort_decode;
-        params.abort_callback_data = &budget;
-        set_generation_phase("allocating_context");
-        std::unique_ptr<llama_context, decltype(&llama_free)> context(
-            llama_init_from_model(model.get(), params), llama_free);
-        if (!context) return budget.stopped() ? interrupt() :
-            failure("insufficient_memory", "Not enough free memory to allocate local Qwen context");
-        generation_metadata["actual_context_size"] = llama_n_ctx(context.get());
+        if (kept.context && (kept.owner != model.get() || kept.n_ctx != n_context))
+            drop_prompt_cache();
+        std::unique_ptr<llama_context, decltype(&llama_free)> temporary(nullptr, llama_free);
+        if (!reuse || !kept.context) {
+            llama_context_params params = llama_context_default_params();
+            params.n_ctx = n_context;
+            params.n_batch = 128;
+            params.n_ubatch = 64;
+            params.n_seq_max = 1;
+            params.n_threads = n_threads;
+            params.n_threads_batch = n_threads;
+            params.type_k = GGML_TYPE_F16;
+            params.type_v = GGML_TYPE_F16;
+            params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+            params.offload_kqv = false;
+            params.op_offload = false;
+            params.abort_callback = abort_decode;
+            params.abort_callback_data = &budget;
+            set_generation_phase("allocating_context");
+            temporary.reset(llama_init_from_model(model.get(), params));
+            if (!temporary) return budget.stopped() ? interrupt() :
+                failure("insufficient_memory", "Not enough free memory to allocate local Qwen context");
+            if (reuse) {
+                kept.context = std::move(temporary);
+                kept.owner = model.get();
+                kept.n_ctx = n_context;
+            }
+        }
+        llama_context * const context = reuse ? kept.context.get() : temporary.get();
+        // A reused context keeps the previous request's settings; apply this request's.
+        int active_threads = 0;
+        const auto follow_thread_limit = [&] {
+            const int limit = thread_limit.load();
+            const int wanted = limit > 0 ? std::min(n_threads, limit) : n_threads;
+            if (wanted == active_threads) return;
+            llama_set_n_threads(context, wanted, wanted);
+            active_threads = wanted;
+            if (wanted < generation_metadata.value("threads_lowest", n_threads))
+                generation_metadata["threads_lowest"] = wanted;
+        };
+        follow_thread_limit();
+        llama_set_abort_callback(context, abort_decode, &budget);
+        struct CacheGuard {
+            llama_context * context;
+            bool consistent = false;
+            ~CacheGuard() {
+                if (kept.context.get() != context) return;
+                llama_set_abort_callback(context, nullptr, nullptr);
+                // An interrupted decode can leave recurrent and attention memory out of step.
+                if (!consistent) forget_prompt();
+            }
+        } cache_guard{context};
+        generation_metadata["actual_context_size"] = llama_n_ctx(context);
         auto sampling = llama_sampler_chain_default_params();
         std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)> sampler(
             llama_sampler_chain_init(sampling), llama_sampler_free);
@@ -425,6 +555,7 @@ json generate(const std::string & raw, const std::vector<std::string> & rgb_imag
             llama_sampler_chain_add(sampler.get(), llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
         }
         const auto prompt_started = Clock::now();
+        size_t cached_tokens = 0;
         if (vision) {
             llama_pos n_past = 0;
             for (size_t i = 0; i < mtmd_input_chunks_size(chunks.get()); ++i) {
@@ -440,10 +571,10 @@ json generate(const std::string & raw, const std::vector<std::string> & rgb_imag
                     // reading or decoding its incomplete image embeddings.
                     if (budget.stopped()) return interrupt();
                     if (evaluated == 0) evaluated = mtmd_helper_decode_image_chunk(vision.get(),
-                        context.get(), chunk, mtmd_get_output_embd(vision.get()), n_past, 0, 128,
+                        context, chunk, mtmd_get_output_embd(vision.get()), n_past, 0, 128,
                         &n_past, nullptr, nullptr);
                 } else {
-                    evaluated = mtmd_helper_eval_chunk_single(vision.get(), context.get(), chunk,
+                    evaluated = mtmd_helper_eval_chunk_single(vision.get(), context, chunk,
                         n_past, 0, 128, i + 1 == mtmd_input_chunks_size(chunks.get()), &n_past);
                 }
                 if (evaluated != 0)
@@ -453,22 +584,56 @@ json generate(const std::string & raw, const std::vector<std::string> & rgb_imag
                 set_generation_phase(image ? "image_evaluation" : "prompt_evaluation");
             }
         } else {
-            for (int offset = 0; offset < n_prompt; offset += 128) {
-                if (budget.stopped()) return interrupt();
-                auto batch = llama_batch_get_one(tokens.data() + offset, std::min(128, n_prompt - offset));
-                if (llama_decode(context.get(), batch) != 0) return budget.stopped() ? interrupt() :
-                    failure("decode_failed", "Local Qwen prompt evaluation failed");
-                // This phase proves at least one real CPU prompt batch completed.
-                if (offset == 0) set_generation_phase("prompt_evaluation");
+            const bool partial = agent_prompt_cache::partial_state(model.get());
+            size_t prefix_end = 0;
+            std::string prefix_path;
+            if (reuse && partial) {
+                prefix_end = agent_prompt_cache::system_prefix_length(tokens,
+                    agent_prompt_cache::special_token(vocabulary, "<|im_start|>"));
+                if (prefix_end > 0) prefix_path = prefix_file(id, info, tokens, prefix_end);
             }
+            if (reuse) {
+                const size_t in_memory = agent_prompt_cache::reuse_prefix(kept.prompt, context, tokens, partial);
+                cached_tokens = in_memory;
+                if (prefix_end > in_memory && !prefix_path.empty()) {
+                    set_generation_phase("restoring_prompt");
+                    agent_prompt_cache::load_prefix(kept.prompt, context, prefix_path, tokens, prefix_end);
+                    cached_tokens = kept.prompt.tokens.size();
+                    if (cached_tokens == prefix_end) touch(prefix_path);
+                }
+                generation_metadata["prompt_restored_tokens"] = cached_tokens > in_memory ? cached_tokens : 0;
+            }
+            bool prefix_saved = false;
+            const auto evaluation = agent_prompt_cache::evaluate_prompt(reuse ? &kept.prompt : nullptr,
+                context, tokens, cached_tokens, partial, [&] { follow_thread_limit(); return budget.stopped(); },
+                // This phase proves at least one real CPU prompt batch completed.
+                [](bool first) { if (first) set_generation_phase("prompt_evaluation"); },
+                prefix_end, prefix_path, &prefix_saved);
+            if (prefix_saved) evict_prefix_files(id);
+            if (evaluation == agent_prompt_cache::Evaluation::stopped) return interrupt();
+            if (evaluation == agent_prompt_cache::Evaluation::failed) return budget.stopped() ? interrupt() :
+                failure("decode_failed", "Local Qwen prompt evaluation failed");
         }
         const int64_t prompt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - prompt_started).count();
+        const int evaluated_tokens = n_prompt - static_cast<int>(cached_tokens);
+        generation_metadata["prompt_cached_tokens"] = cached_tokens;
+        generation_metadata["prompt_evaluated_tokens"] = evaluated_tokens;
         generation_metadata["prompt_evaluation_ms"] = prompt_ms;
-        generation_metadata["prompt_tokens_per_second"] = prompt_ms > 0 ? json(n_prompt * 1000.0 / prompt_ms) : json(nullptr);
+        if (evaluated_tokens >= MIN_MEASURED_PROMPT_TOKENS || cached_tokens == 0) {
+            generation_metadata["prompt_tokens_per_second"] =
+                prompt_ms > 0 ? json(evaluated_tokens * 1000.0 / prompt_ms) : json(nullptr);
+        } else {
+            // A short evaluation measures overhead, not speed. Timeouts for a later full
+            // evaluation are derived from this rate, so keep the last real measurement.
+            std::lock_guard<std::mutex> lock(state_mutex);
+            generation_metadata["prompt_tokens_per_second"] = last_generation.is_object()
+                ? last_generation.value("prompt_tokens_per_second", json(nullptr)) : json(nullptr);
+        }
         std::string finish = "length";
         while (generated < n_predict) {
             if (budget.stopped()) return interrupt();
-            llama_token token = llama_sampler_sample(sampler.get(), context.get(), -1);
+            follow_thread_limit();
+            llama_token token = llama_sampler_sample(sampler.get(), context, -1);
             if (llama_vocab_is_eog(vocabulary, token)) { finish = "stop"; break; }
             char piece[256];
             int length = llama_token_to_piece(vocabulary, token, piece, sizeof(piece), 0, true);
@@ -487,12 +652,15 @@ json generate(const std::string & raw, const std::vector<std::string> & rgb_imag
             if (text.size() >= MAX_OUTPUT_BYTES) { finish = "length"; break; }
             if (generated < n_predict) {
                 auto batch = llama_batch_get_one(&token, 1);
-                if (llama_decode(context.get(), batch) != 0) return budget.stopped() ?
+                if (llama_decode(context, batch) != 0) return budget.stopped() ?
                     interrupt() : failure("decode_failed", "Local Qwen token evaluation failed");
+                if (reuse) kept.prompt.tokens.push_back(token);
                 if (generated == 1) set_generation_phase("token_generation");
             }
         }
         const int64_t elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started).count();
+        cache_guard.consistent = true;
+        if (reuse) publish_prompt_cache();
         return generation_result(generation_metadata, text, n_prompt, generated,
             finish.c_str(), false, first_token_ms, elapsed);
     } catch (const RequestFailure & error) {
@@ -557,7 +725,7 @@ Java_com_agentworkspace_mobile_localmodels_LocalModelBridge_nativeStatus(JNIEnv 
         {"generating", generating}, {"context_size", context_size},
         {"supports_vision", true}, {"max_images", MAX_IMAGES}, {"image_max_tokens", 256},
         {"generation_phase", generation_phase.empty() ? json(nullptr) : json(generation_phase)},
-        {"last_generation", last_generation},
+        {"last_generation", last_generation}, {"prompt_cache", prompt_cache_status},
         {"last_error", last_error.empty() ? json(nullptr) : json(last_error)}});
 }
 
@@ -640,6 +808,20 @@ Java_com_agentworkspace_mobile_localmodels_LocalModelBridge_nativeCancel(
             if (pending_cancellations.size() > 64) pending_cancellations.pop_front();
         }
     } catch (const std::exception &) { /* Invalid cancellation IDs cannot enter the queue. */ }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_agentworkspace_mobile_localmodels_LocalModelBridge_nativeLimitThreads(JNIEnv *, jobject, jint threads) {
+    thread_limit.store(threads > 0 ? threads : 0);
+}
+
+/** Frees the kept text context unless a generation is using it; returns whether it was freed. */
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_agentworkspace_mobile_localmodels_LocalModelBridge_nativeReleasePromptCache(JNIEnv *, jobject) {
+    std::unique_lock<std::mutex> lock(engine_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) return JNI_FALSE;
+    drop_prompt_cache();
+    return JNI_TRUE;
 }
 
 extern "C" JNIEXPORT void JNICALL

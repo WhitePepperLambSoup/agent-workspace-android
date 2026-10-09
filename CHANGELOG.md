@@ -1,5 +1,59 @@
 # Changelog
 
+## 1.1.1 — 2026-10-09
+
+本机模型改进版。On-device model release.
+
+### 中文
+
+**本机模型：更快**
+- 新对话不再从头计算系统提示（指令与工具说明，约 1,600 Token）：算过一次后保存在手机上，之后的新对话直接复用，引擎释放内存后也能恢复。在骁龙 888 上用 Qwen3.5 2B，新对话的首 Token 从约 60 秒降到 1–2 秒，一句话问答从约 80 秒降到约 20 秒。每个模型最多保留 3 份，删除模型时一起删除。
+- 同一任务的后续步骤只计算新增的内容，不再每一步把整段对话重算一遍。
+- 支持 ARMv8.2 点积与 FP16 指令的芯片（如骁龙 8 系、天玑 9000 系）自动使用加速版推理库：输入处理快约 58%，生成快约 29%。不支持的芯片自动使用通用版。
+- 「本地模型」页新增 CPU 指令、输入处理速度、复用输入和推理线程。
+
+**本机模型：更稳、更凉**
+- 修复明明内存够用却提示「内存不足」：可用内存现在包含系统可立即回收的部分；模型加载后推荐的上下文不再虚高。页面分别显示「可用于模型的内存」和「系统空闲内存」。
+- 发热控制：生成过程中每 5 秒检查一次温度，按系统的热余量把推理线程从 4 降到 2、再降到 1。长任务时机身稳定在约 47–48°C，不再触发系统的高温保护。
+- 使用本机模型执行任务时保持亮屏，避免部分机型在息屏后强制结束占用内存较大的引擎进程。
+- 小模型调用工具更可靠：调用不存在的工具或格式写错时，会说明原因让模型重试，不再让整个任务失败；按你的请求预先提供需要的工具（运行命令、修改文件、上网、操作手机等），不必等小模型自己挑选。
+- 小模型写文件时编造或抄错的文件校验值，会按对话中实际读到的值修正；文件在此期间被改动过仍会拒绝写入。新建文件时编造的校验值按新建处理。
+- 对话历史不再把工具参数里 HTML 的 `<` 写成 `<`，避免模型照抄转义写法导致修改对不上原文。
+- 报错更明确：`python3` 等命令未安装时，说明需要可选的开发工具链并提示不要重试；修改文件时原文找不到，会指出最接近的那段原文及行号；文件校验不符时，说明是该新建还是需要重新读取。
+
+**其他修复**
+- 运行 AI 生成的网页时，用 localStorage 保存数据的页面（如待办清单）不再报错，添加和勾选都能用；数据只在本次预览中有效。
+- 消息中的 HTML 标签（如 `</style>`、`<b>`）按原文显示，不再消失；表格中的 `<br>` 显示为换行。
+
+**升级说明**
+- 覆盖安装或在应用内更新即可，数据保留。
+- 换用本机模型后的第一个对话仍需约 1 分钟计算系统提示，之后的新对话就很快了。
+
+### English
+
+**On-device models: faster**
+- New conversations no longer evaluate the system prompt (instructions and tool schemas, about 1,600 tokens) from scratch: it is evaluated once, saved on the phone, and reused by later conversations, even after the engine frees its memory. With Qwen3.5 2B on a Snapdragon 888, the first token of a new conversation went from about 60 seconds to 1–2 seconds, and a one-sentence answer from about 80 seconds to about 20. At most three are kept per model, and removing a model removes them.
+- Later steps of a task evaluate only what is new instead of the whole conversation again.
+- Chips with ARMv8.2 dot-product and FP16 instructions (such as Snapdragon 8 series and Dimensity 9000 series) use an accelerated inference library: prompt processing about 58% faster and generation about 29% faster. Other chips keep the baseline library.
+- The Local models page shows the CPU instructions in use, prompt processing speed, reused input and inference threads.
+
+**On-device models: steadier and cooler**
+- Fixed "not enough memory" on phones with plenty to spare: usable memory now includes what the system can reclaim at once, and the recommended context no longer inflates once a model is loaded. The page lists "Memory for the model" and "System free memory" separately.
+- Heat control: during generation the temperature is checked every 5 seconds and inference threads drop from 4 to 2 to 1 by the system's thermal headroom. Long tasks hold the phone at about 47–48 °C instead of tripping the system's overheat protection.
+- The screen stays on while a task runs on the on-device model, so phones that kill a large engine process once the screen turns off no longer end the task.
+- More reliable tool use by small models: an invented tool or a malformed call is explained and retried instead of failing the task, and each request starts with the tools it asks for (commands, file edits, the web, phone control) rather than waiting for a small model to select them.
+- A made-up or mis-copied file checksum from a small model is corrected to the value the conversation actually read; if the file changed in the meantime the write is still refused. A made-up checksum for a new file is treated as creating it.
+- Conversation history no longer writes `<` in HTML tool arguments as `<`, which models copied into edits that then failed to match the file.
+- Clearer errors: a missing command such as `python3` says that it comes with the optional developer toolchain and not to retry; an edit whose original text is not found points to the closest text and its line numbers; a checksum mismatch says whether to create the file or read it again.
+
+**Other fixes**
+- Running a generated web page that keeps data in localStorage (such as a to-do list) no longer fails; adding and checking items works, and the data lasts for that preview.
+- HTML tags in messages (such as `</style>` or `<b>`) are shown as typed instead of disappearing; `<br>` in a table cell becomes a line break.
+
+**Upgrading**
+- Install over 1.1.0 or update from inside the app; data is kept.
+- After switching to an on-device model, the first conversation still needs about a minute for the system prompt; new conversations after that are quick.
+
 ## 1.1.0 — 2026-10-07
 
 功能版。Feature release.

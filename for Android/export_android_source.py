@@ -42,6 +42,7 @@ _SOURCE_SUFFIXES = {
     ".cpp",
     ".h",
     ".hpp",
+    ".cmake",
     ".html",
     ".css",
     ".js",

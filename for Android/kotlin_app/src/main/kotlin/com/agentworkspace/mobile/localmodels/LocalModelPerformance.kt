@@ -28,6 +28,23 @@ object LocalModelPerformance {
         return if (configured == 0) minOf(4, available) else minOf(configured, available)
     }
 
+    /** PowerManager.THERMAL_STATUS_* values, kept here so the rule runs without Android. */
+    const val THERMAL_STATUS_MODERATE = 2
+    const val THERMAL_STATUS_SEVERE = 3
+
+    // On a Snapdragon 888 one long 2B task at 4 threads held the big cores at 95 °C until
+    // Android raised its overheat warning. That phone's thermal HAL defines no MODERATE
+    // level (status jumps from NONE to SEVERE), so also follow the thermal headroom,
+    // where 1.0 is SEVERE (skin 55 °C there, 0.6 ≈ 43 °C, 0.75 ≈ 47.5 °C). Back off
+    // early so work continues while the phone cools: half the threads first, then a
+    // single thread. With half the threads a long write still climbed to 50 °C on the
+    // charger, so one thread takes over below that. Headroom is NaN when unknown.
+    fun thermalThreads(threads: Int, thermalStatus: Int, headroom: Float = Float.NaN): Int = when {
+        thermalStatus >= THERMAL_STATUS_SEVERE || headroom >= 0.75f -> 1
+        thermalStatus >= THERMAL_STATUS_MODERATE || headroom >= 0.6f -> maxOf(1, threads / 2)
+        else -> threads
+    }
+
     fun timeoutSeconds(configured: Int, contextTokens: Int, measured: JSONObject? = null): Int {
         require(configured in 0..MAX_TIMEOUT_SECONDS)
         if (configured > 0) return configured

@@ -1376,7 +1376,9 @@ class MobileGateway:
     def stop(self) -> None:
         if self.management is not None:
             self._loop.call_soon_threadsafe(self.management.stop)
-        self._server.shutdown()
+        # shutdown() waits for serve_forever, so it would block forever before start().
+        if self._thread is not None:
+            self._server.shutdown()
         self._server.server_close()
 
     async def aclose_management(self) -> None:

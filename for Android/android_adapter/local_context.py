@@ -8,6 +8,7 @@ registry, approval policy, argument validation, and durable tool attempts.
 from __future__ import annotations
 
 import os
+import re
 from collections import OrderedDict
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -15,7 +16,15 @@ from typing import Any
 
 from agent_workspace.application.ports import ToolExecutionContext
 from agent_workspace.core.budgets import TaskBudget
-from agent_workspace.core.models import Autonomy, Capability, ChatMessage, Mode, Role, ToolSpec
+from agent_workspace.core.models import (
+    Autonomy,
+    Capability,
+    ChatMessage,
+    ContentTrust,
+    Mode,
+    Role,
+    ToolSpec,
+)
 from agent_workspace.optimizations import PreparedTurn
 from agent_workspace.tools.base import ToolArgumentError, ToolError, json_result
 
@@ -23,15 +32,70 @@ from .local_provider import EmbeddedQwenProvider, context_units_per_token
 
 SELECTION_TOOL = "select_local_tools"
 LOCAL_OUTPUT_TOKENS = 4096
-DEFAULT_TOOLS = (
-    "list_files",
-    "read_file",
-    "write_file",
-    "android_observe",
-    "android_action",
-    "android_verify",
+FILE_TOOLS = ("list_files", "read_file", "write_file")
+PHONE_TOOLS = ("android_observe", "android_action", "android_verify")
+DEFAULT_TOOLS = (*FILE_TOOLS, *PHONE_TOOLS)
+# Small on-device models rarely make the extra select_local_tools call on their own: asked to
+# run a script they kept rewriting it with write_file. Each new request therefore starts with the
+# tools it plainly asks for; the selector still covers everything else.
+_INTENTS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
+    (
+        re.compile(
+            r"运行|执行|跑一下|跑一遍|脚本|命令|终端|编译|安装|python|pip\b|"
+            r"\brun\b|execute|script|command|terminal|shell|npm\b|node\b",
+            re.IGNORECASE,
+        ),
+        ("run_terminal",),
+    ),
+    (
+        re.compile(
+            r"修改|编辑|改成|改为|替换|插入|追加|增加|添加|加一个|加个|加上|"
+            r"\bedit\b|modify|replace|insert|append|\badd\b",
+            re.IGNORECASE,
+        ),
+        ("apply_patch",),
+    ),
+    (
+        re.compile(
+            r"上网|网上|搜索|搜一下|查一下|查查|最新|新闻|网站|网址|https?://|浏览器|"
+            r"search|browse|website|online|latest|news",
+            re.IGNORECASE,
+        ),
+        ("web_search", "web_fetch", "browser"),
+    ),
+    (
+        re.compile(r"pdf|\.docx?|\.xlsx|\.pptx|文档|报告", re.IGNORECASE),
+        ("read_document", "create_pdf"),
+    ),
+    (
+        re.compile(
+            r"手机上|屏幕|点击|点一下|打开.{0,8}(应用|app)|微信|系统设置|android|\btap\b|screen",
+            re.IGNORECASE,
+        ),
+        PHONE_TOOLS,
+    ),
+    (re.compile(r"后台服务|一直运行|服务器|server", re.IGNORECASE), ("start_service",)),
 )
 _MAX_SESSION_STATES = 128
+
+
+def tools_for_request(request: str, available: dict[str, ToolSpec]) -> tuple[str, ...]:
+    """The tools a request plainly needs; the file tools plus each matched intent's tools."""
+    wanted: list[str] = []
+    for pattern, names in _INTENTS:
+        if pattern.search(request):
+            wanted.extend(name for name in names if name in available and name not in wanted)
+    if not wanted:
+        return tuple(name for name in DEFAULT_TOOLS if name in available)
+    return (*(name for name in FILE_TOOLS if name in available), *wanted)
+
+
+def _request_text(history: tuple[ChatMessage, ...]) -> str:
+    """The user's own latest request; derived retry and recovery notes do not count."""
+    for message in reversed(history):
+        if message.role is Role.USER and message.trust is ContentTrust.TRUSTED:
+            return message.content if isinstance(message.content, str) else ""
+    return ""
 
 
 @dataclass
@@ -39,6 +103,7 @@ class _TurnTools:
     available: dict[str, ToolSpec]
     selected: tuple[str, ...]
     selector_available: bool
+    request: str = ""
 
 
 @dataclass
@@ -46,18 +111,22 @@ class _ContextState:
     turns: OrderedDict[str, _TurnTools] = field(default_factory=OrderedDict)
     last_session: str | None = None
 
-    def prepare(self, session_id: str, tools: tuple[ToolSpec, ...]) -> _TurnTools:
+    def prepare(
+        self, session_id: str, tools: tuple[ToolSpec, ...], request: str = ""
+    ) -> _TurnTools:
         available = {spec.name: spec for spec in tools if spec.name != SELECTION_TOOL}
         selector_available = any(spec.name == SELECTION_TOOL for spec in tools)
         previous = self.turns.get(session_id)
+        # Within one request the model's own selection stands; a new request starts from
+        # the tools it asks for.
         selected = (
             tuple(name for name in previous.selected if name in available)
-            if previous is not None
-            else tuple(name for name in DEFAULT_TOOLS if name in available)
+            if previous is not None and previous.request == request
+            else tools_for_request(request, available)
         )
         if not selector_available:
             selected = tuple(available)
-        turn = _TurnTools(available, selected, selector_available)
+        turn = _TurnTools(available, selected, selector_available, request)
         self.turns[session_id] = turn
         self.turns.move_to_end(session_id)
         self.last_session = session_id
@@ -259,14 +328,15 @@ def install_local_context_profile() -> None:
         output_limit = local_output_budget(runner._provider)
         # Explicit task tool restrictions and workspace optimization profiles
         # remain authoritative. Without our selector, retain their full list.
+        request = _request_text(tuple(options.get("history", ())))
         if not any(spec.name == SELECTION_TOOL for spec in prepared.tools):
-            runner._android_local_context.prepare(options["session_id"], prepared.tools)
+            runner._android_local_context.prepare(options["session_id"], prepared.tools, request)
             return replace(
                 prepared,
                 max_output_tokens=min(prepared.max_output_tokens or output_limit, output_limit),
             )
         state = runner._android_local_context
-        turn = state.prepare(options["session_id"], prepared.tools)
+        turn = state.prepare(options["session_id"], prepared.tools, request)
         selected_names = {*turn.selected, SELECTION_TOOL}
         selected = tuple(spec for spec in prepared.tools if spec.name in selected_names)
         instruction = (

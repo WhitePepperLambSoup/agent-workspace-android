@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import os
+import posixpath
 import re
 import sys
 import uuid
@@ -58,7 +59,19 @@ _MAX_RESPONSE_BYTES = 512 * 1024
 _MAX_TOOL_CALLS = 8
 _MAX_TOOL_CALL_BYTES = 64 * 1024
 _CANCEL_SETTLE_SECONDS = 5
+# Native measurements recorded with usage; prompt_cached_tokens is how much of the
+# prompt the engine reused from the previous step instead of evaluating again.
+_TIMING_KEYS = ("first_token_ms", "elapsed_ms", "prompt_cached_tokens")
 _MEDIA_MARKER = "<__media__>"
+_SHA256 = re.compile(r"[0-9a-fA-F]{64}")
+_TEMPLATE_TAGS = (
+    "<tool_call>",
+    "</tool_call>",
+    "<function=",
+    "</function>",
+    "<parameter=",
+    "</parameter>",
+)
 _MAX_IMAGES = 4
 _MAX_IMAGES_BYTES = 20 * 1024 * 1024
 _IMAGE_TOKEN_RESERVE = 256
@@ -96,6 +109,36 @@ def _error(message: str, *, context_exceeded: bool = False) -> ProviderError:
     # JNI has no HTTP status. Keep the error metadata used by the runner,
     # without labelling local parsing or memory failures as engine outages.
     error.args = (message,)
+    return error
+
+
+_CALLED_NAME = re.compile(r'<function=([^>\s]{1,64})>|"name"\s*:\s*"([^"]{1,64})"')
+
+
+def _call_error(message: str, raw: str, allowed: dict[str, Any], qwen35: bool) -> ProviderError:
+    """A rejected tool proposal. Nothing runs; the runner asks the model once more with the reason.
+
+    Small local models sometimes invent a tool or slip out of the call format. Failing the whole
+    task for that is needlessly harsh, so the error carries a short hint for a bounded retry.
+    """
+    called = _CALLED_NAME.search(raw)
+    name = next((part for part in called.groups() if part), "") if called else ""
+    name = re.sub(r"[^A-Za-z0-9_.-]", "", name)[:64]
+    if name and name not in allowed:
+        message = f'{message}: "{name}" is not an available tool'
+    error = _error(message)
+    tools = ", ".join(sorted(allowed)) or "none"
+    form = (
+        "<tool_call>\n<function=NAME>\n<parameter=KEY>\nVALUE\n</parameter>\n</function>\n</tool_call>"
+        if qwen35
+        else '<tool_call>\n{"name": "NAME", "arguments": {...}}\n</tool_call>'
+    )
+    error.tool_call_rejected = True
+    error.repair_hint = (
+        f"{message}. Tools available right now: {tools}. A call must use exactly this form: "
+        f"{form}. If the request does not need a tool, answer directly in plain text "
+        "without any tool call."
+    )
     return error
 
 
@@ -217,9 +260,15 @@ def _qwen35_tool_history(call: ToolCall) -> str:
         if isinstance(value, (dict, list)):
             rendered = _json(value)
         elif isinstance(value, str):
-            # Preserve the official raw-string format in ordinary histories.
-            # Delimiter-like strings need JSON escapes to keep the history well formed.
-            rendered = _json(value).replace("<", "\\u003c") if "<" in value else value
+            # Preserve the official raw-string format in ordinary histories. Only a
+            # string holding the template's own tags needs JSON escapes to keep the
+            # history well formed. Escaping every "<" taught a 2B model to write
+            # "<" escapes into later HTML edits, so its patches never matched.
+            rendered = (
+                _json(value).replace("<", "\\u003c")
+                if any(tag in value for tag in _TEMPLATE_TAGS)
+                else value
+            )
         elif value is None:
             rendered = "None"  # Qwen's Jinja string filter uses Python scalar spelling.
         elif type(value) is bool:
@@ -356,6 +405,15 @@ def _qwen35_parameter(raw: str, schema: dict[str, Any], property_schema: Any) ->
         # while a string-only content/path parameter keeps the same text.
         if value.strip() in {"None", "null"} and validator.is_valid(None):
             return None
+        # A quoted string with JSON escapes is how the history spells a string that
+        # holds template tags, and small models copy that spelling for HTML. Decode it;
+        # a plain quoted string without escapes keeps its quotes.
+        literal = value.strip()
+        if len(literal) >= 2 and literal[0] == literal[-1] == '"' and "\\" in literal:
+            with contextlib.suppress(ValueError):
+                decoded_text = json.loads(literal)
+                if isinstance(decoded_text, str) and validator.is_valid(decoded_text):
+                    return decoded_text
         if validator.is_valid(value):
             return value
         # Jinja renders Python bool/null scalars in prior calls; accept their
@@ -396,6 +454,74 @@ def _parse_qwen35_call(raw: str, allowed: dict[str, Any]) -> dict[str, Any]:
     return {"name": name, "arguments": arguments}
 
 
+def _observed_digest(path: str, request: ProviderRequest) -> str | None:
+    """The sha256 of `path` that the latest tool result in this conversation reported."""
+    wanted = posixpath.normpath(path.replace("\\", "/"))
+    for message in reversed(request.messages):
+        if message.role is not Role.TOOL:
+            continue
+        try:
+            result = json.loads(message.content)
+        except ValueError:
+            continue
+        if not isinstance(result, dict):
+            continue
+        reported, digest = result.get("path"), result.get("sha256")
+        if (
+            isinstance(reported, str)
+            and isinstance(digest, str)
+            and _SHA256.fullmatch(digest)
+            and posixpath.normpath(reported.replace("\\", "/")) == wanted
+        ):
+            return digest.lower()
+    return None
+
+
+def _repair_digest(
+    arguments: dict[str, Any], schema: dict[str, Any], request: ProviderRequest
+) -> dict[str, Any]:
+    """Fix the preimage digest of a file write that small models get wrong.
+
+    A 2B model loses whole generated files here: it invents a digest for a new file,
+    or after reading a file it passes null or mis-copies the 64 hex digits. When this
+    conversation read or wrote the same path, use the digest it observed then; the
+    tool still rejects the write if the file changed since, so nothing is overwritten
+    blind. Otherwise an invented digest for a nullable field means a new file, which
+    the tool accepts only while no such file exists.
+    """
+    digest_schema = schema.get("properties", {}).get("expected_sha256")
+    path = arguments.get("path")
+    digest = arguments.get("expected_sha256")
+    if (
+        digest_schema is None
+        or not isinstance(path, str)
+        or not isinstance(digest, (str, type(None)))
+    ):
+        return arguments
+    observed = _observed_digest(path, request)
+    if observed is not None:
+        return {**arguments, "expected_sha256": observed}
+    if not isinstance(digest, str) or not Draft202012Validator(digest_schema).is_valid(None):
+        return arguments
+    # A digest some successful tool result reported (not an error message quoting it) is real.
+    if any(digest.lower() in message.content.lower() for message in _json_results(request)):
+        return arguments
+    return {**arguments, "expected_sha256": None}
+
+
+def _json_results(request: ProviderRequest) -> list[Any]:
+    results = []
+    for message in request.messages:
+        if message.role is not Role.TOOL:
+            continue
+        try:
+            json.loads(message.content)
+        except ValueError:
+            continue
+        results.append(message)
+    return results
+
+
 def parse_qwen_output(
     text: str,
     request: ProviderRequest,
@@ -422,27 +548,37 @@ def parse_qwen_output(
     allowed = {tool.name: tool for tool in request.tools}
     qwen35 = request.model.startswith("qwen3.5-")
     if qwen35 and matches and text[matches[-1].end() :].strip():
-        raise _error("Local Qwen3.5 tool call must not contain a trailing suffix")
+        raise _call_error(
+            "Local Qwen3.5 tool call must not contain a trailing suffix",
+            matches[-1][1],
+            allowed,
+            qwen35,
+        )
     calls: list[ToolCall] = []
     for index, match in enumerate(matches):
         raw = match[1]
         if len(raw.encode("utf-8")) > _MAX_TOOL_CALL_BYTES:
             raise _error("Local Qwen tool call arguments exceeded the phone limit")
-        call = _parse_qwen35_call(raw, allowed) if qwen35 else _decode(raw, "tool call")
-        if not isinstance(call, dict) or set(call) != {"name", "arguments"}:
-            raise _error("Local Qwen returned an invalid tool call object")
-        name, arguments = call["name"], call["arguments"]
-        if not isinstance(name, str) or name not in allowed or not isinstance(arguments, dict):
-            raise _error("Local Qwen returned an unadvertised or invalid tool call")
-        schema = allowed[name].advertised_input_schema
         try:
-            _check_schema_refs(schema)
-            Draft202012Validator.check_schema(schema)
-            Draft202012Validator(schema).validate(arguments)
-        except (SchemaError, ValidationError, RecursionError):
-            raise _error(
-                "Local Qwen tool call arguments do not match the advertised schema"
-            ) from None
+            call = _parse_qwen35_call(raw, allowed) if qwen35 else _decode(raw, "tool call")
+            if not isinstance(call, dict) or set(call) != {"name", "arguments"}:
+                raise _error("Local Qwen returned an invalid tool call object")
+            name, arguments = call["name"], call["arguments"]
+            if not isinstance(name, str) or name not in allowed or not isinstance(arguments, dict):
+                raise _error("Local Qwen returned an unadvertised or invalid tool call")
+            schema = allowed[name].advertised_input_schema
+            try:
+                _check_schema_refs(schema)
+                Draft202012Validator.check_schema(schema)
+                Draft202012Validator(schema).validate(arguments)
+            except (SchemaError, ValidationError, RecursionError):
+                raise _error(
+                    "Local Qwen tool call arguments do not match the advertised schema"
+                ) from None
+        except ProviderError as error:
+            # Still never executed; the error now says what to fix for a bounded retry.
+            raise _call_error(str(error), raw, allowed, qwen35) from None
+        arguments = _repair_digest(arguments, schema, request)
         digest = hashlib.sha256((request_id + str(index) + _json(call)).encode()).hexdigest()[:24]
         calls.append(ToolCall("local_" + digest, name, arguments))
     deltas: list[ProviderDelta] = []
@@ -949,7 +1085,7 @@ class EmbeddedQwenProvider:
                     usage=Usage(*counts),
                     provider_metadata={
                         key: response[key]
-                        for key in ("first_token_ms", "elapsed_ms")
+                        for key in _TIMING_KEYS
                         if type(response.get(key)) in {int, float} and math.isfinite(response[key])
                     },
                 )
@@ -972,7 +1108,7 @@ class EmbeddedQwenProvider:
             raise _error("Local Qwen returned invalid token counts")
         metadata = {
             key: response[key]
-            for key in ("first_token_ms", "elapsed_ms")
+            for key in _TIMING_KEYS
             if type(response.get(key)) in {int, float} and math.isfinite(response[key])
         }
         try:
@@ -981,6 +1117,11 @@ class EmbeddedQwenProvider:
             # Parsing is atomic: no partial text or executable proposal escapes.
             # The actual CPU generation still consumed tokens, including failures.
             yield ProviderDelta(DeltaKind.USAGE, usage=Usage(*counts), provider_metadata=metadata)
+            if getattr(error, "tool_call_rejected", False):
+                # An invented tool or a broken call format: ask the model again (bounded).
+                error.retryable = True
+                error.incomplete_tool_call = True
+                raise error from None
             if "incomplete tool call" in str(error):
                 if finish == "length":
                     error = _error(

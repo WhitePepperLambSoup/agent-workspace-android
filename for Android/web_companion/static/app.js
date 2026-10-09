@@ -868,10 +868,21 @@
     finally { workspaceSaving = false; if (!disposed) syncControls(); }
   }
 
+  // A long task on the phone's own model must not lose its engine when the screen times out:
+  // some phones kill a large background engine once the app is off a lit screen.
+  let keepingScreenOn = false;
+  function syncKeepScreenOn() {
+    const wanted = !!activeTask?.id && experimentalLocalSummary(settings.base_url);
+    if (wanted === keepingScreenOn || typeof bridge?.setKeepScreenOn !== "function") return;
+    keepingScreenOn = wanted;
+    try { bridge.setKeepScreenOn(wanted); } catch { keepingScreenOn = !wanted; }
+  }
+
   function syncControls() {
     if (disposed) return;
     const busy = !!activeTask || isLoadingSession || restartPending || isPreparingSubmission || localDeviceTesting;
     elements.appShell.dataset.busy = String(!!activeTask);
+    syncKeepScreenOn();
     const hasInput = !!elements.promptInput.value.trim() || attachments.length > 0;
     // While a task runs, typing adds to it ("steering"): Send sits next to Stop once there is text.
     const steerable = canSteer();

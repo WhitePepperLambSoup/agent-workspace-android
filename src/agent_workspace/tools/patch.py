@@ -22,6 +22,53 @@ from .filesystem import (
 from .paths import StrPath, WorkspacePaths
 from .process_worker import run_in_process
 
+_HINT_LINES = 12
+_HINT_SCAN_CHARS = 4_000_000  # bounds the similarity search on large files
+
+
+def _match_hint(original: str, old_text: str, matches: int) -> str:
+    """Say where to look, so a model can copy old_text exactly on its next try.
+
+    A bare "found 0 matches" left small local models guessing again and again.
+    """
+    if matches > 1:
+        lines: list[int] = []
+        start = original.find(old_text)
+        while start != -1 and len(lines) < 5:
+            lines.append(original.count("\n", 0, start) + 1)
+            start = original.find(old_text, start + 1)
+        where = ", ".join(str(line) for line in lines)
+        return f" (at lines {where}); include more surrounding lines so old_text is unique"
+    file_lines = original.splitlines()
+    wanted = old_text.strip("\n").splitlines()
+    if not file_lines or not wanted:
+        return "; read the file and copy old_text exactly"
+    size = min(len(wanted), len(file_lines))
+    target = "\n".join(line.strip() for line in wanted)
+    matcher = difflib.SequenceMatcher(autojunk=False)
+    matcher.set_seq2(target)
+    best_ratio, best_start, scanned = 0.0, 0, 0
+    for start in range(len(file_lines) - size + 1):
+        window = "\n".join(line.strip() for line in file_lines[start : start + size])
+        scanned += len(window)
+        if scanned > _HINT_SCAN_CHARS:
+            break
+        matcher.set_seq1(window)
+        if matcher.real_quick_ratio() <= best_ratio or matcher.quick_ratio() <= best_ratio:
+            continue
+        ratio = matcher.ratio()
+        if ratio > best_ratio:
+            best_ratio, best_start = ratio, start
+    if best_ratio < 0.5:
+        return "; read the file and copy old_text exactly, including indentation"
+    shown = file_lines[best_start : best_start + min(size, _HINT_LINES)]
+    excerpt = "\n".join(shown)[:1500]
+    first = best_start + 1
+    return (
+        f"; the closest text is at lines {first}-{first + len(shown) - 1}:\n{excerpt}\n"
+        "copy old_text exactly from the file, including indentation and line breaks"
+    )
+
 
 class ApplyPatchTool:
     hard_cancellable = True
@@ -121,7 +168,10 @@ class ApplyPatchTool:
             raise ToolError(f"file is not valid UTF-8: {path}") from exc
         matches = original.count(old_text)
         if matches != 1:
-            raise ToolArgumentError(f"old_text must match exactly once; found {matches} matches")
+            raise ToolArgumentError(
+                f"old_text must match exactly once; found {matches} matches"
+                + _match_hint(original, old_text, matches)
+            )
 
         updated = original.replace(old_text, new_text, 1)
         updated_bytes = _encode_edit_text(updated, "patched content")

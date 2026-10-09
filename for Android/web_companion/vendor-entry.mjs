@@ -7,12 +7,30 @@ import rehypeSanitize from "rehype-sanitize";
 import rehypeKatex from "rehype-katex";
 import { toHtml } from "hast-util-to-html";
 
+// Raw HTML in a message ("add rules before </style>") is shown as the text it is. remark-rehype
+// drops raw HTML nodes, which made tags vanish from both user and assistant messages.
+function rawHtmlAsText() {
+  const blocks = new Set(["root", "blockquote", "listItem"]);
+  const visit = (node) => {
+    node.children = (node.children || []).map((child) => {
+      if (child.type !== "html") return visit(child);
+      // Models write <br> for line breaks inside table cells; keep that one as a break.
+      if (!blocks.has(node.type) && /^<br\s*\/?>$/i.test(child.value)) return { type: "break", position: child.position };
+      const text = { type: "text", value: child.value, position: child.position };
+      return blocks.has(node.type) ? { type: "paragraph", children: [text], position: child.position } : text;
+    });
+    return node;
+  };
+  return visit;
+}
+
 // Math runs after sanitizing: the sanitizer keeps the `language-math` class remark-math emits, and
 // KaTeX's own output is never stripped. MathML needs no fonts or stylesheet; Chromium draws it.
 const renderer = unified()
   .use(remarkParse)
   .use(remarkGfm)
   .use(remarkMath)
+  .use(rawHtmlAsText)
   .use(remarkRehype)
   .use(rehypeSanitize)
   .use(rehypeKatex, { output: "mathml", strict: "ignore" });

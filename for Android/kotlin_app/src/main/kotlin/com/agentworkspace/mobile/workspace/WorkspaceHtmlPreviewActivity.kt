@@ -58,6 +58,48 @@ class WorkspaceHtmlPreviewActivity : ComponentActivity() {
               });
             })();
         """
+
+        // Generated pages often keep their state in localStorage, which the sandbox's opaque
+        // origin rejects with a SecurityError, so a to-do page could not even add an item.
+        // Each preview gets in-memory storage that lasts while it is open; nothing reaches the app.
+        // tests/html_preview_storage.test.cjs runs this script (between the markers).
+        internal const val STORAGE_SHIM = /* storage-shim-start */ """
+            (() => {
+              const storage = () => {
+                const items = new Map();
+                const api = {
+                  get length() { return items.size; },
+                  key(index) { const keys = Array.from(items.keys()); return index >= 0 && index < keys.length ? keys[index] : null; },
+                  getItem(key) { key = String(key); return items.has(key) ? items.get(key) : null; },
+                  setItem(key, value) { items.set(String(key), String(value)); },
+                  removeItem(key) { items.delete(String(key)); },
+                  clear() { items.clear(); }
+                };
+                return new Proxy(api, {
+                  get(target, name, receiver) {
+                    if (typeof name === 'symbol' || name in target) return Reflect.get(target, name, receiver);
+                    return items.has(name) ? items.get(name) : undefined;
+                  },
+                  set(target, name, value) {
+                    if (typeof name === 'symbol' || name in target) return false;
+                    target.setItem(name, value);
+                    return true;
+                  },
+                  deleteProperty(target, name) { if (typeof name !== 'symbol') target.removeItem(name); return true; },
+                  has(target, name) { return name in target || items.has(String(name)); },
+                  ownKeys() { return Array.from(items.keys()); },
+                  getOwnPropertyDescriptor(target, name) {
+                    return typeof name !== 'symbol' && items.has(name)
+                      ? { value: items.get(name), writable: true, enumerable: true, configurable: true }
+                      : undefined;
+                  }
+                });
+              };
+              for (const name of ['localStorage', 'sessionStorage']) {
+                try { Object.defineProperty(window, name, { value: storage(), configurable: true }); } catch (e) {}
+              }
+            })();
+        """ /* storage-shim-end */
     }
 
     private lateinit var webView: WebView
@@ -212,7 +254,7 @@ class WorkspaceHtmlPreviewActivity : ComponentActivity() {
         val isolation = "<meta http-equiv=\"Content-Security-Policy\" content=\"$policy; frame-src 'none'\">" +
             "<script>for(const name of ['RTCPeerConnection','webkitRTCPeerConnection']){" +
             "try{Object.defineProperty(window,name,{value:undefined,writable:false,configurable:false});}catch(e){}}" +
-            "</script>"
+            "</script><script>$STORAGE_SHIM</script>"
         val document = TextUtils.htmlEncode("<!doctype html>$isolation$html")
         return "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +
             "<meta http-equiv=\"Content-Security-Policy\" content=\"$policy; frame-src 'self' about:\">" +

@@ -2,11 +2,16 @@ package com.agentworkspace.mobile.localmodels
 
 import android.app.ActivityManager
 import android.content.Context
+import android.os.Build
+import android.os.PowerManager
 import com.agentworkspace.mobile.embedded.MobileProviderSettings
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.nio.file.Files
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
 
 /** A single private CPU inference engine. This bridge never starts an HTTP server. */
 object LocalModelBridge {
@@ -17,6 +22,7 @@ object LocalModelBridge {
     @Volatile private var applicationContext: Context? = null
     @Volatile private var modelRoot: File? = null
     @Volatile private var libraryLoaded = false
+    @Volatile private var loadedLibrary: String? = null
     @Volatile private var initializationError: String? = null
     @Volatile private var runtimeSettings = LocalModelPerformance.Settings()
 
@@ -40,7 +46,16 @@ object LocalModelBridge {
             check(root.canonicalPath == root.absolutePath && root.canonicalPath.startsWith(files.path + File.separator))
                 { "Private model directory is outside app storage" }
             if (!libraryLoaded) {
-                System.loadLibrary("agent_qwen")
+                val cpuinfo = try { File("/proc/cpuinfo").readText(Charsets.US_ASCII) } catch (_: Exception) { null }
+                val preferred = LocalModelCpu.library(Build.SUPPORTED_ABIS.firstOrNull(), cpuinfo)
+                loadedLibrary = try {
+                    System.loadLibrary(preferred)
+                    preferred
+                } catch (_: LinkageError) {
+                    if (preferred == LocalModelCpu.BASELINE_LIBRARY) throw UnsatisfiedLinkError(preferred)
+                    System.loadLibrary(LocalModelCpu.BASELINE_LIBRARY)
+                    LocalModelCpu.BASELINE_LIBRARY
+                }
                 libraryLoaded = true
             }
             val result = JSONObject(nativeInitialize(root.path.toByteArray(Charsets.UTF_8))
@@ -69,7 +84,9 @@ object LocalModelBridge {
                 .put("last_error", initializationError ?: "Native inference has not been initialized")
                 .toString()
         }
-        return nativeStatus().toString(Charsets.UTF_8)
+        return JSONObject(nativeStatus().toString(Charsets.UTF_8))
+            .put("cpu_build", if (loadedLibrary == LocalModelCpu.DOTPROD_LIBRARY) "armv8.2-dotprod" else "baseline")
+            .toString()
     }
 
     private class RequestError(val code: String, message: String) : RuntimeException(message)
@@ -114,6 +131,22 @@ object LocalModelBridge {
         LocalModelContext.freeSwapBytes(File("/proc/meminfo").readText(Charsets.US_ASCII))
     } catch (_: Exception) { 0L }
 
+    /** What the engine can actually get: availMem plus swap-cached pages (see LocalModelContext). */
+    private fun usableRamBytes(memory: ActivityManager.MemoryInfo): Long = try {
+        LocalModelContext.usableRamBytes(memory.availMem, memory.totalMem,
+            File("/proc/meminfo").readText(Charsets.US_ASCII))
+    } catch (_: Exception) { memory.availMem }
+
+    /** Inference threads for the phone's current heat (see LocalModelPerformance.thermalThreads). */
+    private fun coolThreads(threads: Int): Int = try {
+        val power = applicationContext?.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val status = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && power != null)
+            power.currentThermalStatus else 0
+        val headroom = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && power != null)
+            power.getThermalHeadroom(10) else Float.NaN
+        LocalModelPerformance.thermalThreads(threads, status, headroom)
+    } catch (_: Exception) { threads }
+
     private fun installedVisionProjectionBytes(context: Context, root: File, modelId: String): Long = try {
         val projection = when {
             modelId.startsWith("qwen3.5-0.8b-") -> smallVision
@@ -144,6 +177,8 @@ object LocalModelBridge {
                 throw RequestError("invalid_request", "Configured context is outside the model limits")
             val weights = privateModelPath(context, root, modelId,
                 File(root, "$modelId/model.gguf").absolutePath)
+            // An idle kept context would otherwise count as used memory and shrink the plan.
+            nativeReleasePromptCache()
             if (!weights.isFile || weights.length() !in 16L..(3L * 1024 * 1024 * 1024))
                 throw RequestError("model_not_installed", "The selected local Qwen model is not installed")
             val memory = ActivityManager.MemoryInfo()
@@ -166,8 +201,9 @@ object LocalModelBridge {
             val tokenMetadata = JSONObject(countPromptTokens(modelId, " "))
             val installedMaximum = tokenMetadata.optInt("model_max_context_tokens", 0)
                 .takeIf { it >= LocalModelContext.MIN_CONTEXT_TOKENS } ?: 0
+            val usable = usableRamBytes(memory)
             val plan = LocalModelContext.plan(modelId, weights.length(), installedDigest(weights, modelId),
-                loaded, requestedTokens, memory.availMem, availableSwapBytes(), memory.lowMemory, memoryMode,
+                loaded, requestedTokens, usable, availableSwapBytes(), memory.lowMemory, memoryMode,
                 projectionBytes, installedMaximum, needsVision)
             val measured = JSONObject(status()).optJSONObject("last_generation")
             val result = JSONObject()
@@ -176,6 +212,9 @@ object LocalModelBridge {
                 .put("model_max_context_tokens", plan.modelMaximumTokens)
                 .put("recommended_context_tokens", plan.recommendedTokens)
                 .put("available_ram_bytes", plan.availableRamBytes)
+                .put("system_available_ram_bytes", memory.availMem)
+                .put("reclaimable_ram_bytes", (usable - memory.availMem).coerceAtLeast(0L))
+                .put("total_ram_bytes", memory.totalMem)
                 .put("available_swap_bytes", plan.availableSwapBytes)
                 .put("required_ram_bytes", plan.requiredBytes)
                 .put("ram_headroom_bytes", LocalModelMemory.RAM_HEADROOM_BYTES)
@@ -189,7 +228,7 @@ object LocalModelBridge {
                 .put("memory_estimate_advisory", requestedTokens > 0)
                 .put("recommended_threads", LocalModelPerformance.threads(0, Runtime.getRuntime().availableProcessors()))
                 .put("recommended_timeout_seconds", LocalModelPerformance.timeoutSeconds(0, plan.contextTokens, measured))
-                .put("recommendation_basis", "available_physical_ram_and_model_limit; timeout projects measured rates when available")
+                .put("recommendation_basis", "available_and_swap_cached_ram_and_model_limit; timeout projects measured rates when available")
                 .put("automatic_recommendation_memory_mode", "balanced")
                 .put("automatic_recommendation_uses_swap", false)
                 .put("model_context_limit_source", if (installedMaximum > 0) "installed_gguf_metadata" else "declared_model_family")
@@ -207,7 +246,48 @@ object LocalModelBridge {
     }
 
     @JvmStatic
-    fun generate(requestJson: String): String = generateInternal(requestJson, benchmark = false)
+    fun generate(requestJson: String): String {
+        cancelPromptCacheRelease()
+        return try { generateInternal(requestJson, benchmark = false) } finally { schedulePromptCacheRelease() }
+    }
+
+    // The engine keeps the last text context so the next agent step only evaluates new
+    // tokens. Steps follow within seconds (or an approval); an idle context is freed.
+    private const val PROMPT_CACHE_IDLE_SECONDS = 120L
+    private const val THERMAL_POLL_SECONDS = 5L
+    private val engineScheduler = Executors.newSingleThreadScheduledExecutor { task ->
+        Thread(task, "local-model-engine").apply { isDaemon = true }
+    }
+
+    /**
+     * A long generation can run for minutes; checking the heat only at its start let one
+     * write_file call take a Snapdragon 888 from 37 to 51 °C. Re-check while it runs.
+     */
+    private fun <T> followThermalLimit(threads: Int, generation: () -> T): T {
+        nativeLimitThreads(coolThreads(threads))
+        val poll = engineScheduler.scheduleWithFixedDelay({ nativeLimitThreads(coolThreads(threads)) },
+            THERMAL_POLL_SECONDS, THERMAL_POLL_SECONDS, TimeUnit.SECONDS)
+        try {
+            return generation()
+        } finally {
+            poll.cancel(false)
+            nativeLimitThreads(0)
+        }
+    }
+    private var pendingPromptCacheRelease: ScheduledFuture<*>? = null
+
+    @Synchronized private fun cancelPromptCacheRelease() {
+        pendingPromptCacheRelease?.cancel(false)
+        pendingPromptCacheRelease = null
+    }
+
+    @Synchronized private fun schedulePromptCacheRelease() {
+        pendingPromptCacheRelease?.cancel(false)
+        pendingPromptCacheRelease = engineScheduler.schedule({
+            // A generation that started meanwhile keeps the context; it schedules again when done.
+            if (libraryLoaded) nativeReleasePromptCache()
+        }, PROMPT_CACHE_IDLE_SECONDS, TimeUnit.SECONDS)
+    }
 
     internal fun generateBenchmark(requestJson: String): String = generateInternal(requestJson, benchmark = true)
 
@@ -260,6 +340,7 @@ object LocalModelBridge {
             if (nPredict >= nContext)
                 throw RequestError("context_exceeded", "Local output allowance leaves no room for the prompt")
             if (!benchmark) {
+                // Heat lowers the threads while the generation runs (followThermalLimit).
                 request.put("threads", LocalModelPerformance.threads(runtimeSettings.threads,
                     Runtime.getRuntime().availableProcessors()))
                 request.put("generation_timeout_ms", LocalModelPerformance.timeoutSeconds(
@@ -289,8 +370,6 @@ object LocalModelBridge {
             val state = JSONObject(status())
             if (state.optBoolean("generating"))
                 throw RequestError("engine_busy", "Another local Qwen generation is running")
-            val memory = ActivityManager.MemoryInfo()
-            (context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).getMemoryInfo(memory)
             // Python verifies the actual file against this pinned SHA before
             // calling JNI. Only its matching install marker and file size may
             // use the measured hybrid shape; all other files retain the broad
@@ -318,11 +397,20 @@ object LocalModelBridge {
                 request.put("projection_path", projectionFile.absolutePath)
                 required = LocalModelMemory.visionRequiredBytes(required, projection.bytes)
             }
+            // A kept context of this model and size is reused without allocating; any other
+            // kept context is freed first so the memory reading below includes its memory.
+            val cache = state.optJSONObject("prompt_cache")
+            val reusable = !benchmark && imageCount == 0 && cache != null &&
+                cache.optString("model_id") == id && cache.optInt("context_size") == nContext
+            if (cache != null && !reusable) nativeReleasePromptCache()
+            request.put("reuse_prompt", !benchmark)
+            val memory = ActivityManager.MemoryInfo()
+            (context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).getMemoryInfo(memory)
             val swap = if (memoryMode == "extended") availableSwapBytes() else 0L
             val physicalCompute = LocalModelMemory.TEXT_COMPUTE_RESERVE_BYTES +
                 if (imageCount > 0) LocalModelMemory.VISION_COMPUTE_RESERVE_BYTES else 0L
-            val estimateFeasible = LocalModelMemory.canLoad(memory.lowMemory, memory.availMem, required, swap, memoryMode,
-                physicalComputeReserveBytes = physicalCompute)
+            val estimateFeasible = reusable || LocalModelMemory.canLoad(memory.lowMemory, usableRamBytes(memory),
+                required, swap, memoryMode, physicalComputeReserveBytes = physicalCompute)
             if (!LocalModelPerformance.mayAttemptAllocation(benchmark || runtimeSettings.contextTokens > 0, estimateFeasible))
                 throw RequestError("insufficient_memory", "Not enough available memory for this model and context; choose a smaller context or model")
             val images = try { LocalModelImages.prepare(request) }
@@ -332,8 +420,10 @@ object LocalModelBridge {
             val nativeRequest = request.toString().toByteArray(Charsets.UTF_8)
             if (nativeRequest.size > LocalModelContext.MAX_REQUEST_BYTES)
                 throw RequestError("invalid_request", "Native inference request is too large")
-            return nativeGenerate(nativeRequest, images)
-                .toString(Charsets.UTF_8)
+            if (benchmark) return nativeGenerate(nativeRequest, images).toString(Charsets.UTF_8)
+            return followThermalLimit(request.getInt("threads")) {
+                nativeGenerate(nativeRequest, images).toString(Charsets.UTF_8)
+            }
         } catch (failure: RequestError) {
             return error(failure.code, failure.message ?: "Invalid local inference request")
         } catch (_: OutOfMemoryError) {
@@ -368,4 +458,6 @@ object LocalModelBridge {
     private external fun nativeCountPromptTokens(request: ByteArray): ByteArray
     private external fun nativeCancel(requestId: ByteArray)
     private external fun nativeUnload()
+    private external fun nativeReleasePromptCache(): Boolean
+    private external fun nativeLimitThreads(threads: Int)
 }

@@ -96,10 +96,18 @@ def _open_identity_checked(path: Path, mode: str) -> Any:
 
 
 def _check_expected_digest(actual: str | None, expected: str | None) -> None:
-    if actual != expected:
-        raise ConcurrentModificationError(
-            f"file changed: expected {expected or '<missing>'}, found {actual or '<missing>'}"
-        )
+    if actual == expected:
+        return
+    # Say how to recover: small local models otherwise retry with another invented digest.
+    if actual is None:
+        hint = "the file does not exist; use expected_sha256=null to create it"
+    elif expected is None:
+        hint = "the file already exists; read it and use its sha256 to replace it"
+    else:
+        hint = "read the file again and use its current sha256"
+    raise ConcurrentModificationError(
+        f"file changed: expected {expected or '<missing>'}, found {actual or '<missing>'}; {hint}"
+    )
 
 
 def _check_preimage(

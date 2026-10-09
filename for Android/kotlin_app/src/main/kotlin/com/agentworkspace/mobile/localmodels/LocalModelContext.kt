@@ -81,9 +81,29 @@ object LocalModelContext {
     }
 
     /** SwapTotal is not available RAM; only the current SwapFree field is counted. */
-    fun freeSwapBytes(meminfo: String): Long {
-        val line = meminfo.lineSequence().firstOrNull { it.startsWith("SwapFree:") } ?: return 0
-        val match = Regex("SwapFree:\\s+(\\d+)\\s+kB\\s*").matchEntire(line) ?: return 0
+    fun freeSwapBytes(meminfo: String): Long = meminfoBytes(meminfo, "SwapFree")
+
+    /**
+     * Memory the system can hand to the engine right away. Android's availMem counts free memory
+     * and file cache only. On phones with zram it leaves out SwapCached: anonymous pages that
+     * already have a copy in swap, which the kernel drops without compressing or killing anything.
+     * Measured on a ZTE A2022P (7.4 GB, 8 GB zram): availMem 1.58 GB, SwapCached 2.02 GB, and a
+     * probe at the engine's priority (oom_score_adj 200) kept 3.5 GB resident with no app killed.
+     * The sum never exceeds the device's total memory.
+     */
+    fun usableRamBytes(availableRamBytes: Long, totalRamBytes: Long, meminfo: String): Long {
+        require(availableRamBytes >= 0 && totalRamBytes >= 0) { "Invalid memory figures" }
+        val swapCached = meminfoBytes(meminfo, "SwapCached")
+        // Swap-cached pages are a subset of what is actually in swap.
+        val inSwap = meminfoBytes(meminfo, "SwapTotal") - meminfoBytes(meminfo, "SwapFree")
+        val reclaimable = minOf(swapCached, maxOf(inSwap, 0L))
+        val sum = if (availableRamBytes > Long.MAX_VALUE - reclaimable) Long.MAX_VALUE else availableRamBytes + reclaimable
+        return if (totalRamBytes > 0) minOf(sum, totalRamBytes) else sum
+    }
+
+    private fun meminfoBytes(meminfo: String, field: String): Long {
+        val line = meminfo.lineSequence().firstOrNull { it.startsWith("$field:") } ?: return 0
+        val match = Regex("$field:\\s+(\\d+)\\s+kB\\s*").matchEntire(line) ?: return 0
         val kib = match.groupValues[1].toLongOrNull() ?: return 0
         return if (kib <= Long.MAX_VALUE / 1024) kib * 1024 else 0
     }

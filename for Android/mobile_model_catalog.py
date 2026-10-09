@@ -17,7 +17,8 @@ def _model(model_id, title, repository, revision, filename, size, digest, quanti
     # Pinned Qwen3.5 has six full-attention layers (48 MiB F16 KV@4096)
     # and 19.265625 MiB fixed recurrent state, for which we reserve 64 MiB.
     context_ram = (48 + 64 if verified_hybrid else 512) * 1024**2
-    cold_start_ram = size + 384 * 1024**2 + context_ram
+    # Attention compute: 384 MiB plus 6 KiB per context token (LocalModelMemory).
+    cold_start_ram = size + (384 + 24) * 1024**2 + context_ram
     memory = max(memory, ((cold_start_ram + quantum - 1) // quantum) * quantum)
     return {
         "model_id": model_id,

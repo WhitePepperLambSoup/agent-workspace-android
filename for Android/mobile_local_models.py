@@ -99,6 +99,13 @@ def local_model_diagnostics(controller, hardware=None, *, model_manager=None):
         "measurement": {
             "first_token_ms": measured.get("first_token_ms"),
             "tokens_per_second": measured.get("tokens_per_second"),
+            # How much of the last prompt the engine reused from the previous step.
+            "prompt_tokens": measured.get("prompt_tokens"),
+            "prompt_cached_tokens": measured.get("prompt_cached_tokens"),
+            "prompt_tokens_per_second": measured.get("prompt_tokens_per_second"),
+            # Heat lowers the threads during a generation; threads_lowest is how far.
+            "threads": measured.get("threads"),
+            "threads_lowest": measured.get("threads_lowest"),
             "battery_delta": None,
         },
     }

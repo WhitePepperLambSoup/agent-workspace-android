@@ -12,19 +12,19 @@ An AI agent that runs on your Android phone. It plans and carries out multi-step
 
 ## Download
 
-Get `AgentWorkspace_1.1.0_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app (Device & tools → Version and updates, or "Updates" on the loading screen).
+Get `AgentWorkspace_1.1.1_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app (Device & tools → Version and updates, or "Updates" on the loading screen).
 
 - Android 8.0 (API 26) or newer, 64-bit ARM (`arm64-v8a`) or `x86_64`; phones running a 32-bit-only system cannot install it.
 - The interface is shown by the system's Android System WebView, which must be Chromium 80 or newer. If WebView is disabled, missing or too old, the app explains why and links to the app store to update it.
 - Works on Android 15+ devices with 16 KB memory pages, foldables, split screen and external keyboards, and keeps its own colours under system or vendor "force dark" modes.
-- About 57 MB to install. Local models are optional downloads inside the app.
+- About 60 MB to install. Local models are optional downloads inside the app.
 
 ## Highlights
 
 1. **Real multi-step tasks.** The agent plans, calls tools and shows every step live: the streamed reply, its reasoning, and each tool call as running, finished, failed or cancelled.
 2. **Add to a running task.** Type while a task runs and your message joins it; the agent takes it into account at its next step instead of starting over.
 3. **Approvals you control.** Three execution modes — workspace only, YOLO, full access — and an approval prompt before sensitive actions.
-4. **Cloud or on-device models.** OpenAI-compatible APIs (OpenAI, DeepSeek, Qwen, Kimi, GLM, xAI …), Anthropic, Gemini and Ollama; or download a Qwen3 / Qwen3.5 GGUF model and run it offline on the phone's CPU through llama.cpp, including image input with Qwen3.5.
+4. **Cloud or on-device models.** OpenAI-compatible APIs (OpenAI, DeepSeek, Qwen, Kimi, GLM, xAI …), Anthropic, Gemini and Ollama; or download a Qwen3 / Qwen3.5 GGUF model and run it offline on the phone's CPU through llama.cpp, including image input with Qwen3.5. On-device models reuse the system prompt and conversation they already evaluated, so a new conversation starts answering in about 1–2 seconds; chips with dot-product instructions get an accelerated build, and inference slows down on its own when the phone runs hot.
 5. **Workspaces and files.** Each workspace is a folder. Generated files can be opened, previewed (Markdown, images, sandboxed HTML), shared or saved; text files can be edited in the app, and workspaces appear in Android's file picker.
 6. **Share anything in.** Share files from WeChat, QQ or any app into a conversation; PDFs are read page by page with OCR for scanned pages.
 7. **Memory.** The AI remembers your preferences and recurring details within limits (at most 30 notes, no near-duplicates); the Memory page shows, edits and deletes them.
@@ -60,7 +60,7 @@ Get `AgentWorkspace_1.1.0_android.apk` from [Releases](https://github.com/WhiteP
 | App shell | Kotlin, Android WebView, foreground service, WorkManager |
 | Interface | HTML / CSS / JavaScript (no framework), SVG-filter refraction for the glass style |
 | Agent engine | Python 3.12 embedded with Chaquopy, running the shared `agent_workspace` core in its own process |
-| Local inference | llama.cpp (pinned revision) through JNI, CPU only |
+| Local inference | llama.cpp (pinned revision) through JNI, CPU only; an ARMv8.2 dot-product build is chosen per chip |
 | Storage | SQLite event store in app-private storage; credentials encrypted with Android Keystore |
 | Optional tools | PRoot launcher with a pinned Alpine 3.22 toolchain |
 
@@ -114,7 +114,8 @@ agent-workspace-android/
 
 - Android and phone makers may still freeze or stop background work; the app recovers when reopened, but a task interrupted at that moment needs to be resumed. Background services stop when the engine restarts; those marked "Start with the engine" run again.
 - The built-in browser is a WebView that is not on screen, so the few pages that draw only on animation frames may render incompletely, and some phones cannot capture it as an image; the AI then reads the page text instead.
-- On-device models run on the CPU; speed depends heavily on the phone. Small models suit short tasks.
+- On-device models run on the CPU, so speed depends heavily on the phone. For reference, Qwen3.5 2B on a Snapdragon 888 processes about 28 prompt tokens and generates about 10 tokens per second; after switching to an on-device model the first conversation takes about a minute to start answering, later ones about 1–2 seconds; long tasks such as rewriting a whole web page or analysing a file of tens of KB take from ten to several tens of minutes, and slow down when the phone gets hot. 2B needs about 1.8 GB of available memory; phones with less should use 0.8B.
+- Small models handle questions, reading and writing files and simple pages; for complex edits their code is often incomplete, so check it or use a cloud model.
 - The English interface text was written by the developer; corrections are welcome.
 
 ## License

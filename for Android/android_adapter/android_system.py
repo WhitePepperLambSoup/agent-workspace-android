@@ -125,6 +125,7 @@ def get_android_system_status(bridge: Any | None = None) -> dict[str, Any]:
         "service_component",
         "memory_total_bytes",
         "memory_available_bytes",
+        "memory_usable_bytes",
         "abis",
         "device",
         "app_version",

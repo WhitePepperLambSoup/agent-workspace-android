@@ -1068,8 +1068,19 @@ class AgentRunner:
                             messages.append(partial_assistant)
                             await record_assistant(partial_assistant)
                         repair_incomplete_call = exc.incomplete_tool_call
+                        # Providers may say why a proposal was rejected (an invented tool, a
+                        # broken call format); the model gets that reason with the retry.
+                        repair_hint = getattr(exc, "repair_hint", None)
+                        rejected = isinstance(repair_hint, str) and bool(repair_hint)
                         recovery_instruction = (
-                            "The previous tool call was incomplete and was rejected. "
+                            "The previous tool call was invalid and was rejected: "
+                            f"{str(repair_hint)[:1500]} No tool was executed from that failed "
+                            "response. The original task still needs to be completed. If a tool "
+                            "is needed, call an available tool with all required parameters and "
+                            "valid types; otherwise answer the user directly. Preserve earlier "
+                            "confirmed tool results."
+                            if repair_incomplete_call and rejected
+                            else "The previous tool call was incomplete and was rejected. "
                             "No tool was executed from that failed response. The original task "
                             "still needs to be completed. Submit a complete call to an advertised "
                             "tool with all required parameters and valid types. If the protocol "
@@ -1097,7 +1108,9 @@ class AgentRunner:
                                     "model": model,
                                     "attempt": stream_recoveries,
                                     "reason": (
-                                        "retrying a rejected incomplete tool call"
+                                        "retrying a rejected invalid tool call"
+                                        if repair_incomplete_call and rejected
+                                        else "retrying a rejected incomplete tool call"
                                         if repair_incomplete_call
                                         else "continuing from durable stream prefix"
                                     ),

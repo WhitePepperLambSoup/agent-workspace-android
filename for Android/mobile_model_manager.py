@@ -20,6 +20,7 @@ from mobile_model_catalog import MODEL_CATALOG, VISION_CATALOG
 from mobile_trained_model import LOCAL_MODEL_CATALOG
 
 _MANAGED_MODEL_FILES = ("model.gguf", "installed.json", "model.gguf.part", "partial.json")
+_PREFIX_CACHE = "prefix-cache"
 
 
 def _atomic_json(path: Path, value: dict) -> None:
@@ -380,6 +381,10 @@ class ModelManager:
             raise ValueError("pause this download before removing it")
         for name in _MANAGED_MODEL_FILES:
             (directory / name).unlink(missing_ok=True)
+        # Saved prompt states of this model (written by the native engine) go with it.
+        prefix_cache = directory / _PREFIX_CACHE
+        if prefix_cache.is_dir() and not prefix_cache.is_symlink():
+            shutil.rmtree(prefix_cache, ignore_errors=True)
         try:
             directory.rmdir()
         except FileNotFoundError:

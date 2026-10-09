@@ -72,6 +72,7 @@ class NativeJsBridge(
     private val shareInboxCameraCapture: () -> String = { unavailableShareInbox() },
     private val systemBarsAction: (Boolean, Int) -> Unit = { _, _ -> },
     private val requestTileAction: (() -> String)? = null,
+    private val keepScreenOnAction: (Boolean) -> Unit = {},
 ) {
     /** The web UI's language choice ("auto", "zh" or "en") for native dialogs, notifications and toasts. */
     @JavascriptInterface
@@ -145,6 +146,17 @@ class NativeJsBridge(
         if (!SYSTEM_BAR_COLOR.matches(color)) return
         val parsed = android.graphics.Color.parseColor(color)
         Handler(Looper.getMainLooper()).post { systemBarsAction(dark, parsed) }
+    }
+
+    /**
+     * Keeps the screen on while a task runs on the phone's own model. Some phones (ZTE's
+     * DefendManagerService) kill a large engine process once its app is no longer on a lit
+     * screen, which ended long local tasks when the screen timed out. Only applies while the
+     * conversation window is visible.
+     */
+    @JavascriptInterface
+    fun setKeepScreenOn(enabled: Boolean) {
+        Handler(Looper.getMainLooper()).post { keepScreenOnAction(enabled) }
     }
 
     @JavascriptInterface

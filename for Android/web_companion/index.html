@@ -475,7 +475,7 @@
         <label for="localMemorySelector">本机内存模式</label><select id="localMemorySelector" aria-label="本机内存模式"><option value="balanced">平衡</option><option value="extended">扩展（使用系统可用交换内存）</option></select>
         <label for="localThreadsInput">CPU 线程数（0 为自动）</label><input id="localThreadsInput" type="number" min="0" max="64" step="1" inputmode="numeric" value="0">
         <label for="localTimeoutInput">单次生成超时秒数（0 为自动）</label><input id="localTimeoutInput" type="number" min="0" max="7200" step="1" inputmode="numeric" value="0">
-        <p class="setting-hint">自动值按可用物理内存、模型上限和已测速度推荐。手动上下文保留所选容量，内存估算作为建议；实际分配失败会明确提示。扩展模式可使用系统剩余交换内存。</p>
+        <p class="setting-hint">自动值按可用于模型的内存（含系统可立即回收的部分）、模型上限和已测速度推荐。手动上下文保留所选容量，内存估算作为建议；实际分配失败会明确提示。扩展模式可使用系统剩余交换内存。</p>
         <p id="localContextHint" class="setting-hint">上下文按本机可用内存与模型上限决定。更改后会重启引擎。</p>
         <dl id="localDeviceRecommendation" class="usage-summary"></dl><button id="btnUseLocalRecommendation" class="button-secondary" type="button" aria-describedby="localDeviceStatus" disabled>填入推荐值</button>
         <details class="management-section"><summary>设备性能测试</summary>

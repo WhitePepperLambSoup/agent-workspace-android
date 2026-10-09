@@ -5,6 +5,12 @@ object LocalModelMemory {
     private const val MIB = 1024L * 1024
     const val RAM_HEADROOM_BYTES = 512 * MIB
     const val TEXT_COMPUTE_RESERVE_BYTES = 384 * MIB
+    /**
+     * Without flash attention the attention graph grows with the context. Measured on a ZTE
+     * A2022P with Qwen3.5 2B Q4 at 65,536 tokens: 1.58 GB of anonymous memory for KV (768 MiB),
+     * recurrent state and compute, i.e. about 384 MiB plus 6 KiB per context token for compute.
+     */
+    const val COMPUTE_BYTES_PER_TOKEN = 6L * 1024
     const val VISION_COMPUTE_RESERVE_BYTES = 256 * MIB
     private data class PinnedWeights(val bytes: Long, val sha256: String)
     private val hybridWeights = mutableMapOf(
@@ -36,7 +42,7 @@ object LocalModelMemory {
         modelId: String,
         modelBytes: Long,
         contextTokens: Int,
-        loadedModelId: String?,
+        @Suppress("UNUSED_PARAMETER") loadedModelId: String?,
         installedSha256: String?,
     ): Estimate {
         val maximum = if (modelId.startsWith("qwen3.5-")) 262144 else 32768
@@ -53,12 +59,15 @@ object LocalModelMemory {
         // 18 * 4 * ((4 - 1) * (2048 + 2 * 16 * 128) + 128 * 2048)
         // = 20,201,472 bytes at n_seq_max=1, n_rs_seq=0. Reserve over 3x.
         val recurrent = if (verified) 64 * MIB else 0L
+        // Weights are memory-mapped. Once loaded, their pages sit in the file cache that Android
+        // reports as available memory, so they are charged whether or not the model is loaded;
+        // treating loaded weights as free counted the same pages twice.
         return Estimate(
-            weightsBytes = if (loadedModelId == modelId) 0L else modelBytes,
+            weightsBytes = modelBytes,
             paddedContextTokens = padded,
             kvBytes = kv,
             recurrentReserveBytes = recurrent,
-            computeReserveBytes = TEXT_COMPUTE_RESERVE_BYTES,
+            computeReserveBytes = TEXT_COMPUTE_RESERVE_BYTES + padded * COMPUTE_BYTES_PER_TOKEN,
             verifiedHybridShape = verified,
         )
     }

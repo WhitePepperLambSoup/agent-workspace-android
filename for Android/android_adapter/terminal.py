@@ -44,6 +44,30 @@ def _environment() -> dict[str, str]:
     return environment
 
 
+# Programs that only exist once the optional Linux toolchain is installed.
+_TOOLCHAIN_COMMANDS = frozenset(
+    {"python", "python3", "pip", "pip3", "node", "npm", "npx", "git", "gcc", "make", "pyright"}
+)
+
+
+def _start_failure(command: str, exc: OSError) -> str:
+    """Say why a command could not start, so the model (and the user) know what to do next."""
+    name = os.path.basename(command)
+    if isinstance(exc, FileNotFoundError) and name in _TOOLCHAIN_COMMANDS:
+        return (
+            f"cannot start Android command: {name} is not installed. It comes with the optional "
+            "developer toolchain (Settings > Device & tools > Developer toolchain), which is not "
+            "installed on this phone. Without it only /system/bin/sh and toybox commands run. "
+            "Do not retry this command; tell the user, or finish the task another way."
+        )
+    if isinstance(exc, FileNotFoundError):
+        return (
+            f"cannot start Android command: {name} was not found. /system/bin/sh and toybox "
+            "commands are available; use discover_executables to list others."
+        )
+    return f"cannot start Android command: {name} ({type(exc).__name__})"
+
+
 def _terminate(process: subprocess.Popen[bytes]) -> None:
     # Kill the session even if its leader exited: descendants may retain the pipes.
     if os.name == "nt":
@@ -111,7 +135,7 @@ def _run_sync(
             **options,
         )
     except OSError as exc:
-        raise ToolError(f"cannot start Android command: {argv[0]}") from exc
+        raise ToolError(_start_failure(argv[0], exc)) from exc
     streams: dict[str, dict[str, Any]] = {
         name: {"retained": bytearray(), "tail": bytearray(), "bytes": 0, "digest": hashlib.sha256()}
         for name in ("stdout", "stderr")
