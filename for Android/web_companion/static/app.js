@@ -1358,17 +1358,21 @@
   function quickAsk(options = {}) {
     if (disposed || isLoadingSession || !historyReady || sessionOpening || isPreparingSubmission || !canLeaveFileEditor()) return false;
     const mode = ["text", "voice", "camera", "screen"].includes(options?.mode) ? options.mode : "text";
-    if (typeof options?.share_batch === "string" && options.share_batch) {
-      quickShareBatch = options.share_batch;
-      quickShareDeadline = Date.now() + 60000;
-    }
+    const batch = typeof options?.share_batch === "string" && options.share_batch ? options.share_batch : null;
     closeMenu();
     closeDrawer();
     // Reuse the current conversation while it is still empty instead of piling up blank ones.
     const empty = !activeTask && !timelineMessages().length;
     const text = typeof options?.text === "string" ? options.text.slice(0, 8000) : "";
-    void (empty ? Promise.resolve(true) : createSession()).then(() => {
+    void (empty ? Promise.resolve(true) : createSession()).then((ready) => {
       if (disposed) return;
+      // Claim the screenshot only once its conversation is open: the inbox can finish receiving it
+      // first, and it would then be attached to the conversation that was open before. If the new
+      // conversation could not be created, the screenshot waits in the inbox.
+      if (batch && ready !== false) {
+        quickShareBatch = batch;
+        quickShareDeadline = Date.now() + 60000;
+      }
       if (text && !elements.promptInput.value.trim()) {
         elements.promptInput.value = text;
         elements.promptInput.dispatchEvent(new Event("input", { bubbles: true }));

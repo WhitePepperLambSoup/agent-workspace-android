@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.2.1 — 2026-10-10
+
+修复版：悬浮球截屏提问的截图会加到上一个会话。Hotfix: a floating-bubble screenshot could be attached to the previous conversation.
+
+### 中文
+
+- 修复用悬浮球「截屏提问」时，如果当前会话里已有内容，截图会被加到这个旧会话的输入框，而不是新开的会话：新会话里看不到截图，AI 只能自己去工作区里找。原因是截图接收完成得比新会话创建还早。现在会等新会话建好后再把截图加进去；新会话没能创建时，截图留在附件收件箱里，可以手动添加。
+
+**升级说明**
+- 覆盖安装或在应用内更新即可，数据保留。之前误加到旧会话输入框里的截图，可以点截图旁的 × 移除。
+
+### English
+
+- Fixed "Ask about the screen" from the floating bubble attaching the screenshot to the conversation that was open, when that conversation already had messages, instead of the new one it opened: the new conversation showed no screenshot and the AI had to look for it in the workspace. The screenshot arrived before the new conversation was created. It is now attached once the new conversation is ready; if the conversation could not be created, the screenshot waits in the attachment inbox to be added by hand.
+
+**Upgrading**
+- Install over the existing app or update in the app; your data is kept. A screenshot that was added to an older conversation's draft can be removed with the × next to it.
+
 ## 1.2.0 — 2026-10-10
 
 功能版：知识库、闹钟与日历，本机模型更可靠。Feature release: a knowledge base, alarms and calendar, and more reliable on-device models.
