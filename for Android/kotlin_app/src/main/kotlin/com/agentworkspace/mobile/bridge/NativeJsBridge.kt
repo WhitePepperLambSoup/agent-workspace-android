@@ -14,6 +14,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.webkit.JavascriptInterface
 import android.widget.Toast
+import com.agentworkspace.mobile.embedded.AgentWidgets
 import com.agentworkspace.mobile.embedded.MobileProviderSettings
 import com.agentworkspace.mobile.embedded.TaskNotificationPublisher
 import com.agentworkspace.mobile.embedded.TaskNotificationSettings
@@ -85,21 +86,49 @@ class NativeJsBridge(
         Handler(Looper.getMainLooper()).post { requestCalendarAccessAction() }
     }
 
+    /** Whether the microphone button recognizes speech offline (Local models page). */
+    @JavascriptInterface
+    fun getVoiceInputSettings(): String =
+        com.agentworkspace.mobile.voice.VoiceInputSettings.json(context).toString()
+
+    @JavascriptInterface
+    fun setVoiceInputPreferOffline(value: Boolean): String {
+        com.agentworkspace.mobile.voice.VoiceInputSettings.setPreferOffline(context, value)
+        return getVoiceInputSettings()
+    }
+
     /** The web UI's language choice ("auto", "zh" or "en") for native dialogs, notifications and toasts. */
     @JavascriptInterface
     fun setUiLanguage(value: String) {
+        val wasEnglish = com.agentworkspace.mobile.UiText.isEnglish(context)
         com.agentworkspace.mobile.UiText.setPreference(context, value)
         QuickEntry.publishShortcuts(context)
+        if (wasEnglish != com.agentworkspace.mobile.UiText.isEnglish(context)) AgentWidgets.refreshAll(context)
     }
 
-    /** Floating ball and quick settings tile state for Settings → Global entry. */
+    /** Floating ball, quick settings tile and home screen widget state for Settings → Global entry. */
     @JavascriptInterface
     fun getGlobalEntry(): String = JSONObject()
         .put("ok", true)
         .put("floating_ball", FloatingBallService.isEnabled(context))
         .put("overlay_permission", FloatingBallService.canDraw(context))
         .put("tile_request", requestTileAction != null && Build.VERSION.SDK_INT >= 33)
+        .put("widget_pin", AgentWidgets.pinSupported(context))
         .toString()
+
+    /** The app's style ("glass" or "solid"); home screen widgets follow it. */
+    @JavascriptInterface
+    fun setWidgetStyle(style: String) = AgentWidgets.setStyle(context, style)
+
+    /** The composer's quick tasks, shown by the quick tasks widget. */
+    @JavascriptInterface
+    fun setWidgetQuickTasks(json: String): String =
+        JSONObject().put("ok", AgentWidgets.saveQuickTasks(context, json)).toString()
+
+    /** Asks the launcher to place a widget ("ask", "tasks" or "quick_tasks"); the launcher confirms. */
+    @JavascriptInterface
+    fun requestPinWidget(kind: String): String =
+        JSONObject().put("ok", AgentWidgets.requestPin(context, kind)).toString()
 
     /** Turning the ball on without "display over other apps" opens that system setting first. */
     @JavascriptInterface

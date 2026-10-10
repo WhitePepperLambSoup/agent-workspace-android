@@ -38,7 +38,7 @@
     <section id="approvalShelf" class="hidden" hidden aria-labelledby="approvalTitle">
       <div class="approval-header"><span data-icon="shield"></span><strong id="approvalTitle">待审批操作</strong></div>
       <pre id="approvalDetail"></pre>
-      <label class="approval-scope" for="approvalScopeSelector"><span>授权范围</span><select id="approvalScopeSelector"><option value="once">仅此次</option><option value="session">本会话</option></select></label>
+      <label class="approval-scope" for="approvalScopeSelector"><span>授权范围</span><select id="approvalScopeSelector"><option value="once">仅此次</option><option value="session">本会话</option><option value="task">本任务内都允许</option></select></label>
       <div class="approval-actions"><button id="btnRejectAction" class="button-secondary" type="button">拒绝</button><button id="btnApproveAction" class="button-primary" type="button">批准执行</button></div>
     </section>
     <!-- Filled by app.js from the user's quick tasks (Appearance → Edit quick tasks). -->
@@ -120,7 +120,7 @@
           <div class="menu-group">
             <button id="btnModelPage" class="menu-row" type="button" data-keywords="API 密钥 服务商 云端 思考 推理 deepseek openai provider key reasoning model cloud"><span data-icon="cpu"></span><span>模型与思考<small id="menuModelSummary"></small></span><span data-icon="chevron-right"></span></button>
             <button id="btnPermissionPage" class="menu-row" type="button" data-keywords="审批 批准 授权 自动执行 完全访问 approval autonomy"><span data-icon="shield"></span><span>执行权限<small id="menuPermissionSummary"></small></span><span data-icon="chevron-right"></span></button>
-            <button id="btnLocalModelsPage" class="menu-row" type="button" data-keywords="离线 下载模型 下载来源 魔搭 视觉 上下文 线程 内存 性能测试 qwen gguf local model offline download modelscope hugging face vision context threads benchmark"><span data-icon="hard-drive"></span><span>本地模型</span><span data-icon="chevron-right"></span></button>
+            <button id="btnLocalModelsPage" class="menu-row" type="button" data-keywords="离线 下载模型 下载来源 魔搭 视觉 上下文 线程 内存 性能测试 语音识别 语音输入 麦克风 录音 转写 听写 qwen gguf sensevoice local model offline download modelscope hugging face vision context threads benchmark speech voice microphone dictation transcribe"><span data-icon="hard-drive"></span><span>本地模型</span><span data-icon="chevron-right"></span></button>
             <button id="btnUsagePage" class="menu-row" type="button" data-keywords="费用 价格 统计 cost price usage"><span data-icon="chart-no-axes-column"></span><span>Token 与费用</span><span data-icon="chevron-right"></span></button>
             <button id="btnMemoryPage" class="menu-row" type="button" data-keywords="记住 偏好 memory"><span data-icon="brain"></span><span>记忆<small>AI 记住的关于你的信息</small></span><span data-icon="chevron-right"></span></button>
             <button id="btnKnowledgePage" class="menu-row" type="button" data-keywords="文档 资料 电子书 说明书 检索 引用 RAG pdf knowledge documents"><span data-icon="book-open"></span><span>知识库<small id="menuKnowledgeSummary">让 AI 查阅你的文档</small></span><span data-icon="chevron-right"></span></button>
@@ -150,7 +150,7 @@
           <h3 id="menuSectionApp" class="menu-section-title">应用</h3>
           <div class="menu-group">
             <button id="btnAppearancePage" class="menu-row" type="button" data-keywords="主题 深色 浅色 字体 字号 语言 外观 快捷任务 theme dark font language"><span data-icon="palette"></span><span>界面偏好</span><span data-icon="chevron-right"></span></button>
-            <button id="btnGlobalEntryPage" class="menu-row" type="button" data-keywords="悬浮球 快捷设置 桌面快捷方式 floating tile shortcut" hidden><span data-icon="sparkles"></span><span>全局入口<small>悬浮球、快捷设置开关、桌面图标快捷方式</small></span><span data-icon="chevron-right"></span></button>
+            <button id="btnGlobalEntryPage" class="menu-row" type="button" data-keywords="悬浮球 圈选 截屏 截图 提问 快捷设置 桌面快捷方式 floating bubble circle screenshot screen tile shortcut" hidden><span data-icon="sparkles"></span><span>全局入口<small>悬浮球、快捷设置开关、桌面图标快捷方式</small></span><span data-icon="chevron-right"></span></button>
             <button id="btnBackupPage" class="menu-row" type="button" data-keywords="导出 导入 迁移 换手机 backup restore" hidden><span data-icon="database-backup"></span><span>备份与恢复<small>换手机或重装前保存会话和设置</small></span><span data-icon="chevron-right"></span></button>
             <button id="btnProviderSettings" class="menu-row" type="button" data-keywords="API 密钥 地址 provider key url" hidden><span data-icon="settings"></span><span>服务商与 API 设置</span><span data-icon="chevron-right"></span></button>
             <button id="btnAboutPage" class="menu-row" type="button" data-keywords="版本 更新 升级 自动更新 日志 诊断 反馈 问题 bug version update upgrade log logs diagnostics feedback"><span data-icon="info"></span><span>关于与更新<small id="menuAboutSummary">检查更新、导出诊断日志</small></span><span data-icon="chevron-right"></span></button>
@@ -256,10 +256,16 @@
       <div id="settingsGlobalEntry" class="settings-page" hidden>
         <p class="setting-hint">在手机的任何地方都能快速开一个新对话。</p>
         <label class="toggle-row" for="floatingBallToggle"><span>悬浮球</span><input id="floatingBallToggle" type="checkbox"></label>
-        <p class="setting-hint">在其他应用上方显示一个小圆球：点一下开新对话；长按可以截屏提问、语音提问或隐藏它；拖动可以移到屏幕两侧。需要允许“显示在其他应用上层”，截屏提问还需要在“设备与工具”里开启无障碍服务。</p>
+        <p class="setting-hint">在其他应用上方显示一个小圆球：点一下开新对话；长按可以圈选提问（圈出屏幕上想问的部分）、语音提问或隐藏它；拖动可以移到屏幕两侧。需要允许“显示在其他应用上层”。圈选提问每次会请你允许截取屏幕；在“设备与工具”里开启无障碍服务后就不再询问。</p>
         <button id="btnAddQuickTile" class="menu-row" type="button" hidden><span data-icon="plus"></span><span>添加到快捷设置<small>下拉通知栏就能点“问 Agent”</small></span><span data-icon="chevron-right"></span></button>
         <p class="setting-hint">也可以下拉通知栏，进入快捷开关的编辑页面，把“问 Agent”拖进去。</p>
         <p class="setting-hint">长按桌面上的 Agent Workspace 图标，可以直接选“新对话”“语音提问”或“拍照提问”。</p>
+        <div id="widgetPinSection" hidden>
+          <button id="btnPinWidgetAsk" class="menu-row" type="button" data-widget="ask"><span data-icon="plus"></span><span>添加“快捷提问”小组件<small>像搜索框一样随时提问，也能语音或拍照</small></span><span data-icon="chevron-right"></span></button>
+          <button id="btnPinWidgetTasks" class="menu-row" type="button" data-widget="tasks"><span data-icon="plus"></span><span>添加“任务动态”小组件<small>正在执行和等待批准的任务</small></span><span data-icon="chevron-right"></span></button>
+          <button id="btnPinWidgetQuickTasks" class="menu-row" type="button" data-widget="quick_tasks"><span data-icon="plus"></span><span>添加“常用任务”小组件<small>一键开始你的常用任务</small></span><span data-icon="chevron-right"></span></button>
+        </div>
+        <p class="setting-hint">也可以长按桌面空白处，在“小组件”里找到 Agent Workspace。</p>
         <p id="globalEntryStatus" class="page-status" role="status"></p>
       </div>
       <div id="settingsServices" class="settings-page" hidden>
@@ -532,6 +538,13 @@
         </select>
         <p class="setting-hint">自动：先连 ModelScope 魔搭，连不上再换 Hugging Face。各来源是同一份文件，下载完都按固定的 SHA-256 校验；暂停后换来源会接着下载。</p>
         <div class="page-toolbar"><button id="btnProbeLocalModel" class="button-secondary" type="button"><span data-icon="activity"></span>检查本地引擎</button><button id="btnUnloadLocalModel" class="button-secondary" type="button">释放模型内存</button><button id="btnRestoreCloudModel" class="button-secondary" type="button">恢复原模型配置</button></div><p id="localModelControlStatus" class="page-status" role="status"></p><div id="localModelList" class="management-list"></div>
+        <div id="speechSection" class="management-section">
+          <strong>离线语音识别</strong>
+          <p class="setting-hint">下载语音模型后，输入框的麦克风按钮直接在手机上识别，不需要联网，录音不会上传也不会保存。AI 也能把工作区里的录音、视频转成文字。模型为 SenseVoice Small（FunAudioLLM，FunASR 模型协议），支持中文、英文、日语、韩语和粤语。</p>
+          <label id="offlineVoiceRow" class="toggle-row" for="offlineVoiceToggle"><span>语音输入使用离线识别</span><input id="offlineVoiceToggle" type="checkbox"></label>
+          <p id="offlineVoiceStatus" class="page-status" role="status"></p>
+          <div id="speechModelList" class="management-list"></div>
+        </div>
       </div>
       <p id="settingsError" class="settings-error" role="alert" hidden></p>
       <div id="settingsActions" hidden><button id="btnApplySettings" class="button-primary apply-button" type="button">应用设置</button></div>

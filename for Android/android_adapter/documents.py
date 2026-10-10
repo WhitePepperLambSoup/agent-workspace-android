@@ -246,6 +246,27 @@ class _Job:
         return path
 
 
+def _repaired_text_layer(job: _Job, output: Path) -> Path | None:
+    """A copy of the native PDF whose copied or extracted text has ideographs, not radicals.
+
+    The repair only rewrites ToUnicode maps (see pdf_text); if it cannot run, the native PDF is
+    kept as it is: it renders the same, only its text layer shows radicals for some characters.
+    """
+    from .pdf_text import repair_pdf
+
+    try:
+        with _open_identity_checked(output, "rb") as stream:
+            repaired = repair_pdf(stream.read())
+        if repaired is None:
+            return None
+        target = job.paths.root / "output.text.pdf"
+        with open(target, "xb") as stream:
+            stream.write(repaired)
+        return target
+    except Exception:
+        return None
+
+
 def _page_count(path: Path) -> int:
     from pypdf import PdfReader
 
@@ -654,6 +675,12 @@ class AndroidCreatePdfTool(_NativeTool):
         total = _page_count(output)
         if not 1 <= total <= 200 or result.get("total_pages") != total:
             raise ToolError("Native PDF export returned invalid page metadata")
+        repaired = _repaired_text_layer(job, output)
+        if repaired is not None:
+            size, digest = _checked_copy(job.paths, str(repaired))
+            if _page_count(repaired) != total:
+                raise ToolError("Repaired PDF lost pages")
+            output = repaired
         return _PdfExport(output, total, digest, size)
 
     def _write(

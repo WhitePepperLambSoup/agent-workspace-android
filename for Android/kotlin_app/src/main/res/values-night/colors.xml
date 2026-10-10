@@ -1,4 +1,21 @@
 <resources>
     <!-- Matches the web UI's dark surface token. -->
     <color name="web_surface">#161C1B</color>
+    <color name="widget_surface">#161C1B</color>
+    <color name="widget_field">#1E2625</color>
+    <color name="widget_text">#E6ECEA</color>
+    <color name="widget_text_secondary">#A2AFAB</color>
+    <color name="widget_text_tertiary">#8C9895</color>
+    <color name="widget_accent">#5CC6B1</color>
+    <color name="widget_accent_soft">#1D3632</color>
+    <color name="widget_warning">#F2B35B</color>
+    <color name="widget_warning_soft">#3A2C14</color>
+    <color name="widget_danger">#F97066</color>
+    <color name="widget_glass_fill">#CC161C1B</color>
+    <color name="widget_glass_sheen">#1FFFFFFF</color>
+    <color name="widget_glass_rim">#33FFFFFF</color>
+    <color name="widget_glass_glint">#A6FFFFFF</color>
+    <color name="widget_glass_glint_fade">#0DFFFFFF</color>
+    <color name="widget_glass_inner_fill">#14FFFFFF</color>
+    <color name="widget_glass_inner_rim">#24FFFFFF</color>
 </resources>

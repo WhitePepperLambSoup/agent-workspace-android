@@ -14,6 +14,11 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Optional floating ball; the user grants "display over other apps" only if they turn it on. -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- Circle to ask takes one screenshot after the user allows screen capture each time. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- Offline voice input records the microphone in the app (asked on first use); the audio is
+         recognized on the phone and not stored. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- In-app updates from the project's GitHub releases (the user approves each install). -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
@@ -157,6 +162,19 @@
             <meta-data android:name="android.service.quicksettings.TOGGLEABLE_TILE" android:value="false" />
         </service>
         <service android:name=".entry.FloatingBallService" android:exported="false" />
+        <!-- Circle to ask: its own task, so opening it over another app doesn't bring the app's
+             main window to the front and into the screenshot. -->
+        <activity
+            android:name=".entry.ScreenAskActivity"
+            android:exported="false"
+            android:theme="@style/Theme.AgentWorkspace.ScreenAsk"
+            android:taskAffinity="com.agentworkspace.mobile.screenask"
+            android:excludeFromRecents="true"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation" />
+        <service
+            android:name=".entry.ScreenCaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
         <!-- Notification-triggered tasks; does nothing until the user grants notification access. -->
         <service
             android:name=".notifications.AgentNotificationListener"
@@ -169,9 +187,21 @@
         <receiver android:name=".notifications.NotificationRuleReceiver" android:exported="false" android:process=":engine" />
         <receiver android:name=".embedded.TaskActionReceiver" android:exported="false" />
         <receiver android:name=".embedded.EngineRecoveryReceiver" android:exported="false" />
-        <receiver android:name=".embedded.AgentWidgetProvider" android:exported="true">
+        <!-- Home screen widgets (embedded/AgentWidgets.kt). -->
+        <receiver android:name=".embedded.AgentWidgetProvider" android:exported="true"
+            android:label="@string/widget_quick_ask_label">
             <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
             <meta-data android:name="android.appwidget.provider" android:resource="@xml/agent_widget_info" />
+        </receiver>
+        <receiver android:name=".embedded.AgentTaskWidgetProvider" android:exported="true"
+            android:label="@string/widget_tasks_label">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/agent_task_widget_info" />
+        </receiver>
+        <receiver android:name=".embedded.AgentQuickTasksWidgetProvider" android:exported="true"
+            android:label="@string/widget_quick_tasks_label">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/agent_quick_tasks_widget_info" />
         </receiver>
 
     </application>

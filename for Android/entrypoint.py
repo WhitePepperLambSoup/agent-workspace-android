@@ -276,8 +276,17 @@ def _provider_models(config: ProviderConfig) -> list[str]:
     return list(dict.fromkeys(models))
 
 
+_IMPORTED_AT = time.monotonic()
+
+
 def _startup_phase(message: str) -> None:
-    """Append a start-up step to <data>/logs/engine-startup.log (the Android host shares this file)."""
+    """Record a start-up step with the time since this module loaded.
+
+    It goes to <data>/logs/engine-startup.log (the Android host shares this file and diagnostics
+    include it) and to stdout, which the Android app's log shows as python.stdout.
+    """
+    elapsed = int((time.monotonic() - _IMPORTED_AT) * 1000)
+    print(f"[startup +{elapsed} ms] {message}", flush=True)
     data_dir = os.getenv("AGENT_WORKSPACE_DATA_DIR")
     if not data_dir:
         return
@@ -285,7 +294,9 @@ def _startup_phase(message: str) -> None:
         log = Path(data_dir) / "logs" / "engine-startup.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         with log.open("a", encoding="utf-8") as handle:
-            handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{os.getpid()}] {message}\n")
+            handle.write(
+                f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{os.getpid()}] +{elapsed} ms {message}\n"
+            )
 
 
 def _publish_serve_token(token: str) -> None:

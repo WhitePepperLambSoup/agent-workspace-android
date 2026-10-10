@@ -12,18 +12,18 @@ An AI agent that runs on your Android phone. It plans and carries out multi-step
 
 ## Download
 
-Get `AgentWorkspace_1.2.1_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app (Menu → About and updates, or "Updates" on the loading screen).
+Get `AgentWorkspace_1.3.0_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app (Menu → About and updates, or "Updates" on the loading screen).
 
 - Android 8.0 (API 26) or newer, 64-bit ARM (`arm64-v8a`) or `x86_64`; phones running a 32-bit-only system cannot install it.
 - The interface is shown by the system's Android System WebView, which must be Chromium 80 or newer. If WebView is disabled, missing or too old, the app explains why and links to the app store to update it.
 - Works on Android 15+ devices with 16 KB memory pages, foldables, split screen and external keyboards, and keeps its own colours under system or vendor "force dark" modes.
-- About 60 MB to install. Local models are optional downloads inside the app.
+- About 75 MB to install. Local models are optional downloads inside the app.
 
 ## Highlights
 
 1. **Real multi-step tasks.** The agent plans, calls tools and shows every step live: the streamed reply, its reasoning, and each tool call as running, finished, failed or cancelled.
 2. **Add to a running task.** Type while a task runs and your message joins it; the agent takes it into account at its next step instead of starting over.
-3. **Approvals you control.** Three execution modes — workspace only, YOLO, full access — and an approval prompt before sensitive actions.
+3. **Approvals you control.** Three execution modes — workspace only, YOLO, full access — and an approval prompt before sensitive actions; a long task can be approved as a whole, while deleting files, changing long-term memory and operating other apps still ask every time.
 4. **Cloud or on-device models.** OpenAI-compatible APIs (OpenAI, DeepSeek, Qwen, Kimi, GLM, xAI …), Anthropic, Gemini and Ollama; or download a Qwen3 / Qwen3.5 GGUF model and run it offline on the phone's CPU through llama.cpp, including image input with Qwen3.5. On-device models reuse the system prompt and conversation they already evaluated, so a new conversation starts answering in about 1–2 seconds; chips with dot-product instructions get an accelerated build, and inference slows down on its own when the phone runs hot. Models download from ModelScope (a mainland China CDN) or Hugging Face, and a paused download can continue from the other source; a grammar keeps small models' tool calls well-formed.
 5. **Workspaces and files.** Each workspace is a folder. Generated files can be opened, previewed (Markdown, images, sandboxed HTML), shared or saved; text files can be edited in the app, and workspaces appear in Android's file picker.
 6. **Share anything in.** Share files from WeChat, QQ or any app into a conversation; PDFs are read page by page with OCR for scanned pages.
@@ -32,7 +32,7 @@ Get `AgentWorkspace_1.2.1_android.apk` from [Releases](https://github.com/WhiteP
 9. **Alarms, timers and calendar.** Say "wake me at 7 tomorrow" or "remind me in 20 minutes" and the AI sets it in the system Clock app; with calendar access it can also list and add events.
 10. **Built-in browser.** The AI uses the phone's WebView to open pages, read sites that need JavaScript, click, fill in forms and take screenshots, asking your approval before opening pages and clicking.
 11. **Background services and long commands.** Web servers, bots and other programs the AI starts keep running, with output and controls on the Background services page; installs and builds can run for up to 30 minutes with live output.
-12. **Ask from anywhere.** An "Ask Agent" quick settings tile, a floating bubble that can ask about the current screen, app icon shortcuts, and asking about a photo.
+12. **Ask from anywhere.** An "Ask Agent" quick settings tile, a floating bubble that can ask about the current screen or a part of it you circle, home screen widgets (quick ask, task status, quick tasks), app icon shortcuts, and asking about a photo.
 13. **Notification rules.** When a notification from an app you chose arrives, the AI handles it the way you describe, such as noting a parcel pickup code; by default it asks you first.
 14. **Math and diagrams.** LaTeX formulas and Mermaid diagrams in replies are rendered.
 15. **Model profiles.** Switch between your usual providers and models in one tap, without restarting the engine between cloud models; edit and resend messages, or regenerate a reply.
@@ -43,6 +43,7 @@ Get `AgentWorkspace_1.2.1_android.apk` from [Releases](https://github.com/WhiteP
 20. **Optional developer toolchain.** A pinned Alpine toolchain (Git, Python, Node, Pyright) installs on demand and runs in an isolated PRoot process.
 21. **Phone control (opt-in).** With the accessibility service enabled, the agent can tap, type and navigate apps under your approval; password fields and the lock screen are off limits.
 22. **Recovers on its own.** If Android stops the engine, the app restarts it and reconnects; logs can be exported with secrets removed — shared, saved, or sent as a GitHub issue — even from the loading screen when the app cannot start.
+23. **Offline speech recognition.** With the SenseVoice Small speech model (about 239 MB) downloaded, the microphone recognises Chinese, English, Japanese, Korean and Cantonese on the phone without uploading audio, and the AI can transcribe recordings and videos in the workspace into timestamped text.
 
 <p align="center">
   <img src="docs/screenshots/backgrounds-en.png" width="250" alt="Background picker with twelve backgrounds and a custom wallpaper">
@@ -112,6 +113,7 @@ agent-workspace-android/
 - The built-in browser exposes no app interface to web pages, opens only http/https pages and keeps its sign-ins apart from the app's interface; its data can be cleared in one tap.
 - The system permissions behind notification rules and the floating bubble are requested only when you turn those features on; notification rules read only the apps you chose and pass a notification's content only to the task it triggers.
 - Backups never contain API keys.
+- Offline speech recognition processes audio on the phone only; recordings are neither uploaded nor kept. Circle to ask sends only the screenshot you circled to the model, and takes no screenshot while a password field is on screen.
 
 ## Known Limitations
 
@@ -121,6 +123,9 @@ agent-workspace-android/
 - Small models handle questions, reading and writing files and simple pages; for complex edits their code is often incomplete, so check it or use a cloud model.
 - The knowledge base searches by keyword and does not understand meaning: a question worded completely differently, outside the synonym list, may miss the relevant passage; add your own synonyms on the Knowledge base page. Scanned PDFs have no text layer and are not supported yet.
 - While the app is in the background, Android does not let it open the system Clock app, so alarms and timers arrive as a notification that you tap to finish.
+- Offline speech recognition runs on 64-bit ARM phones only; x86_64 devices use the system recogniser.
+- Launchers do not let a widget blur the wallpaper behind it, so the glass-style widgets approximate the look with translucency and highlights.
+- Web search uses the free DuckDuckGo and Bing pages, so results and availability depend on your network; some phrasings return nothing, and the AI then rephrases.
 - The English interface text was written by the developer; corrections are welcome.
 
 ## License

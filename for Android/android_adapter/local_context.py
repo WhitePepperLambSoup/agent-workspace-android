@@ -89,6 +89,14 @@ _INTENTS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     ),
     (re.compile(r"知识库|资料库|knowledge base", re.IGNORECASE), ("knowledge_search",)),
     (
+        re.compile(
+            r"转写|转录|转成文字|转文字|听写|录音|语音备忘|音频|"
+            r"\.(?:m4a|mp3|wav|aac|amr|opus|ogg|flac)\b|transcri|recording|audio",
+            re.IGNORECASE,
+        ),
+        ("transcribe_audio",),
+    ),
+    (
         re.compile(r"闹钟|叫醒|叫我起床|计时|倒计时|\balarm\b|\btimer\b|wake me", re.IGNORECASE),
         ("set_alarm", "set_timer"),
     ),
@@ -150,6 +158,7 @@ _DIRECT_CALLS = frozenset(
         "memory_search",
         "memory_write",
         "knowledge_search",
+        "transcribe_audio",
     }
 )
 

@@ -366,6 +366,8 @@
     elements.quickActionsToggle.checked = !!preferences.quickActions;
     elements.hapticsToggle.checked = !!preferences.haptics;
     syncSystemBars();
+    // Home screen widgets take the chosen style (their glass needs no backdrop-filter support).
+    try { bridge?.setWidgetStyle?.(preferences.style === "glass" ? "glass" : "solid"); } catch { /* Older APKs have no widgets. */ }
   }
 
   function renderQuickChips() {
@@ -401,6 +403,13 @@
     renderQuickChips();
     renderQuickTaskEditor();
     syncControls();
+    syncWidgetQuickTasks();
+  }
+
+  // The home screen's quick tasks widget shows the same tasks; the APK keeps a copy for the launcher.
+  function syncWidgetQuickTasks() {
+    try { bridge?.setWidgetQuickTasks?.(JSON.stringify(quickTasks.map(({ title, detail, prompt }) => ({ title, detail, prompt })))); }
+    catch { /* Older APKs have no widget. */ }
   }
 
   function renderQuickTaskEditor() {
@@ -815,6 +824,7 @@
     const previousWorkspaceId = currentWorkspaceId;
     const previousSessionId = currentSessionId;
     const previousSessions = sessions;
+    const blank = blankSessionId();
     saveDraft();
     detachSessionTask();
     currentWorkspaceId = id;
@@ -844,7 +854,9 @@
       } finally { isLoadingSession = false; syncControls(); }
       return false;
     }
-    return currentWorkspaceId === id && historyReady;
+    const switched = currentWorkspaceId === id && historyReady;
+    if (switched) discardBlankSession(blank);
+    return switched;
   }
 
   async function createWorkspace(event) {
@@ -2509,6 +2521,7 @@
     memory_write: t("更新记忆"), memory_search: t("查找记忆"), run_terminal: t("运行命令"),
     knowledge_search: t("查阅知识库"), knowledge_add: t("添加到知识库"),
     set_alarm: t("设置闹钟"), set_timer: t("设置计时"), list_calendar_events: t("查看日程"), add_calendar_event: t("添加日程"),
+    transcribe_audio: t("转写录音"),
     start_service: t("启动后台服务"), stop_service: t("停止后台服务"), list_services: t("查看后台服务"), service_logs: t("查看服务输出"),
     browser: t("浏览器"), browser_view: t("查看网页"),
   };
@@ -2580,9 +2593,36 @@
     endToolOutput(card);
     const detail = outcome === "done" ? data.result : (data.error ?? data.reason ?? data.result);
     if (detail === undefined || detail === null || detail === "") return;
+    const view = toolDetailView(detail);
     let result = card.querySelector("pre");
     if (!result) { result = document.createElement("pre"); card.appendChild(result); }
-    result.textContent = typeof detail === "string" ? detail : JSON.stringify(detail, null, 2);
+    result.textContent = view.text;
+    result.classList.toggle("tool-text", view.prose);
+    let meta = card.querySelector(".tool-meta");
+    if (view.meta) {
+      if (!meta) { meta = document.createElement("small"); meta.className = "tool-meta"; card.appendChild(meta); }
+      meta.textContent = view.meta;
+    } else meta?.remove();
+  }
+
+  // Tools answer in JSON. A result that carries one main text (a transcript, a file, command output)
+  // shows that text with its other short fields on one line; anything else stays formatted JSON.
+  const toolTextFields = ["text", "transcript", "content", "output", "stdout", "message"];
+  function toolDetailView(detail) {
+    let value = detail;
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!/^[[{]/.test(trimmed)) return { text: detail, prose: false };
+      try { value = JSON.parse(trimmed); } catch { return { text: detail, prose: false }; }
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) return { text: JSON.stringify(value, null, 2), prose: false };
+    const key = toolTextFields.find(name => typeof value[name] === "string" && value[name].trim());
+    if (!key) return { text: JSON.stringify(value, null, 2), prose: false };
+    const meta = Object.entries(value)
+      .filter(([name, item]) => name !== key && ["string", "number", "boolean"].includes(typeof item) && String(item).length <= 80)
+      .map(([name, item]) => `${name}: ${item}`)
+      .join(" · ");
+    return { text: value[key], prose: key === "text" || key === "transcript" || key === "message", meta };
   }
 
   function settleUnfinishedTools() {
@@ -2807,6 +2847,7 @@
     if (!canLeaveFileEditor()) return false;
     const previousSessionId = currentSessionId;
     const previousWorkspaceId = currentWorkspaceId;
+    const blank = blankSessionId();
     saveDraft();
     if (!sessions.some((session) => session.id === sessionId)) {
       isLoadingSession = true;
@@ -2873,7 +2914,9 @@
       syncControls();
       refreshShareInbox();
     }
-    return historyReady && currentSessionId === sessionId;
+    const switched = historyReady && currentSessionId === sessionId;
+    if (switched) discardBlankSession(blank);
+    return switched;
   }
 
   function makeTask(snapshot, prompt = "") {
@@ -2933,15 +2976,42 @@
     if (approval && activeTask?.resolvedApprovals.has(approval.request_id)) approval = null;
     const changed = approval?.request_id !== pendingApproval?.request_id;
     pendingApproval = approval;
+    elements.appShell.dataset.waiting = String(!!approval);
     elements.approvalShelf.hidden = !approval;
     elements.approvalShelf.classList.toggle("hidden", !approval);
     elements.btnApproveAction.disabled = !approval || isResolvingApproval;
     elements.btnRejectAction.disabled = !approval || isResolvingApproval;
     if (approval) {
       elements.approvalTitle.textContent = approval.kind === "egress" ? t("网络访问审批") : t("工具审批");
-      elements.approvalDetail.textContent = JSON.stringify(approval.details || {}, null, 2);
+      elements.approvalDetail.textContent = approvalText(approval);
+      elements.approvalDetail.dataset.kind = approval.kind || "";
       if (changed) elements.approvalScopeSelector.value = "once";
     }
+  }
+
+  // Approval requests arrive as engine records; the shelf says in words where data goes and what a
+  // tool will do. The digest and ids stay out: they identify the request but tell the user nothing.
+  const egressCategories = {
+    system_instruction: t("系统指令"), tool_schema: t("工具说明"), user_message: t("你的消息"),
+    assistant_history: t("之前的回复"), tool_result: t("工具结果"), sensitive_tool_result: t("敏感的工具结果"),
+    sensitive_content: t("敏感内容"), image_attachment: t("图片"),
+  };
+  function approvalText(approval) {
+    const details = approval.details || {};
+    const plain = (value) => typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    if (approval.kind === "egress" && typeof details.endpoint === "string") {
+      let host = details.endpoint;
+      try { host = new URL(details.endpoint).host || host; } catch { /* Keep the endpoint as given. */ }
+      const categories = Array.isArray(details.data_categories) ? details.data_categories.map(item => egressCategories[item] || item) : [];
+      return [t("发送到 {0}", host), categories.length ? t("内容：{0}", categories.join(t("、"))) : ""].filter(Boolean).join("\n");
+    }
+    if (approval.kind === "tool" && typeof details.tool === "string") {
+      const lines = [t("工具：{0}", toolTitles[details.tool] || details.tool)];
+      const argumentsValue = details.arguments && typeof details.arguments === "object" ? details.arguments : {};
+      for (const [name, value] of Object.entries(argumentsValue)) lines.push(`${name}: ${plain(value)}`);
+      return lines.join("\n");
+    }
+    return JSON.stringify(details, null, 2);
   }
 
   async function resolveApproval(allowed) {
@@ -3909,8 +3979,38 @@
   elements.btnRejectAction.addEventListener("click", () => resolveApproval(false));
   elements.btnNewSession.addEventListener("click", createSession);
   elements.btnDrawerNewSession.addEventListener("click", async () => { if (await createSession()) closeDrawer(); });
+  // A conversation opened and left without anything in it would pile up in the drawer. The engine
+  // only removes one that has no stored events at all; the page also keeps any draft or attachment.
+  function blankSessionId() {
+    if (!currentSessionId || !historyReady || activeTask || pendingRequests[currentSessionId]) return null;
+    // Only a conversation the app opened under its default name and that was never renamed.
+    const current = sessions.find(item => item.id === currentSessionId);
+    if (!current || current.archived === true || current.title !== t("新会话")) return null;
+    if (elements.promptInput.value.trim() || attachments.length || timelineMessages().length) return null;
+    if ([...backgroundTasks.values()].some(task => task.sessionId === currentSessionId && !task.done)) return null;
+    return currentSessionId;
+  }
+
+  function discardBlankSession(sessionId) {
+    if (!sessionId || sessionId === currentSessionId || disposed) return;
+    apiJson(`/sessions/${encodeURIComponent(sessionId)}/discard`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+      .then((result) => {
+        if (!result?.discarded || disposed) return;
+        sessions = sessions.filter(item => item.id !== sessionId);
+        if (drafts[sessionId]) { delete drafts[sessionId]; writeStorage(draftsKey, drafts); }
+        renderSessionNavigation();
+      })
+      .catch(() => {});
+  }
+
   async function createSession() {
     if (elements.btnNewSession.disabled || !canLeaveFileEditor() || fileSaving) return false;
+    // The open conversation is still blank: use it instead of adding another empty one.
+    if (blankSessionId()) {
+      haptic();
+      elements.promptInput.focus();
+      return true;
+    }
     // One tap creates the conversation; it can be renamed later from the menu.
     const title = t("新会话");
     haptic();
@@ -4172,6 +4272,7 @@
 
   applyAppearance();
   try { bridge?.setUiLanguage?.(preferences.language); } catch { /* Older APKs keep native text in Chinese. */ }
+  syncWidgetQuickTasks();
   resizeVisibleViewport();
   syncControls();
   (async () => { await loadSettings(); if (!disposed) await loadWorkspaces(); if (!disposed) await loadSessions(selectedSessionId); if (!disposed) refreshShareInbox(); })();

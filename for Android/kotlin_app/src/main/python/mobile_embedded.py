@@ -145,10 +145,18 @@ _STARTUP_LOG_BYTES = 128 * 1024
 _startup_dump = None
 
 
+_RUN_STARTED = 0.0
+
+
 def _startup_log(files_dir: str, message: str) -> None:
-    """One line per start-up step in agent-data/logs/engine-startup.log, so a hang shows where."""
+    """One line per start-up step in agent-data/logs/engine-startup.log, so a hang shows where.
+
+    Also printed with the time since run() began, which the Android log shows as python.stdout.
+    """
     import time
 
+    elapsed = int((time.monotonic() - _RUN_STARTED) * 1000) if _RUN_STARTED else 0
+    print(f"[engine +{elapsed} ms] {message}", flush=True)
     with contextlib.suppress(OSError):
         log = Path(files_dir) / "agent-data" / "logs" / "engine-startup.log"
         log.parent.mkdir(parents=True, exist_ok=True)
@@ -177,12 +185,15 @@ def _arm_startup_dump(files_dir: str) -> None:
 
 def run(files_dir: str, provider_json: str = "{}") -> None:
     """Run until stopped; the caller must use a background Java thread."""
-    global _running, _stop_requested, _loop, _server_task, _startup_dump
+    global _running, _stop_requested, _loop, _server_task, _startup_dump, _RUN_STARTED
+    import time
+
     with _state_lock:
         if _running:
             raise RuntimeError("the embedded Python service is already running")
         _running = True
         _stop_requested = False
+    _RUN_STARTED = time.monotonic()
 
     loop: asyncio.AbstractEventLoop | None = None
     _startup_log(files_dir, "engine starting")

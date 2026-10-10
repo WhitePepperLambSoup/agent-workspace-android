@@ -2,4 +2,21 @@
 <resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
     <string name="quick_tile_label">Ask Agent</string>
     <string name="notification_listener_label">Agent Workspace notification rules</string>
+    <string name="widget_quick_ask_label">Quick ask</string>
+    <string name="widget_quick_ask_description">Ask anything like a search bar, by voice or photo</string>
+    <string name="widget_tasks_label">Task status</string>
+    <string name="widget_tasks_description">Running tasks and approvals</string>
+    <string name="widget_quick_tasks_label">Quick tasks</string>
+    <string name="widget_quick_tasks_description">Start your saved tasks in one tap</string>
+    <string name="widget_ask_hint">Ask Agent…</string>
+    <string name="widget_no_task">No tasks yet</string>
+    <string name="widget_ready">Ready</string>
+    <string name="widget_task_summarize_title">Summarize</string>
+    <string name="widget_task_summarize_detail">Docs, pages or chats</string>
+    <string name="widget_task_translate_title">Translate</string>
+    <string name="widget_task_translate_detail">Chinese ↔ English, natural tone</string>
+    <string name="widget_task_web_page_title">Make a web page</string>
+    <string name="widget_task_web_page_detail">A page you can preview</string>
+    <string name="widget_task_analyze_title">Analyze data</string>
+    <string name="widget_task_analyze_detail">Findings and a chart from a sheet or CSV</string>
 </resources>

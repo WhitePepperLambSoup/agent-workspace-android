@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Quick tasks widget. The page reports the quick tasks whenever they change. -->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="250dp" android:minHeight="110dp" android:minResizeWidth="180dp" android:minResizeHeight="110dp"
+    android:targetCellWidth="4" android:targetCellHeight="2"
+    android:updatePeriodMillis="0" android:resizeMode="horizontal|vertical"
+    android:initialLayout="@layout/agent_quick_tasks_widget" android:previewLayout="@layout/agent_quick_tasks_widget"
+    android:description="@string/widget_quick_tasks_description"
+    android:widgetCategory="home_screen" />

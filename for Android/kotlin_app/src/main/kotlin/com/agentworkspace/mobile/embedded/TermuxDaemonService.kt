@@ -80,6 +80,7 @@ class TermuxDaemonService : Service() {
         AndroidSystemBridge.initialize(this)
         AndroidTextToSpeech.initialize(this)
         com.agentworkspace.mobile.capabilities.AndroidClockCalendar.initialize(this)
+        com.agentworkspace.mobile.voice.AudioTranscriber.initialize(this)
         AndroidDocumentBridge.initialize(this)
         AndroidToolchainBridge.initialize(this)
         LocalModelBridge.initialize(this)
@@ -280,6 +281,7 @@ class TermuxDaemonService : Service() {
     @Synchronized
     private fun observeTasks(tasks: List<TaskNotificationSnapshot>?) {
         if (serviceClosing || !engineReady) return
+        if (tasks != null) AgentWidgets.publishTasks(this, tasks)
         val states = tasks?.map { it.state }
         val active = states?.any { it == "queued" || it == "running" } == true
         // Services keep the CPU awake with the screen off only when the user turned that on.

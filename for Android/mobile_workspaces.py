@@ -461,6 +461,15 @@ class MobileWorkspaceController:
                 raise
             return controller
 
+    async def discard_if_empty(self, session_id: str) -> bool:
+        """Delete a conversation that has no stored events and no runtime loaded for it."""
+        self._session(session_id)
+        async with self._lock:
+            if self._closing or session_id in self._controllers:
+                return False
+            async with self.store.session_lock(session_id):
+                return self.store.delete_session_if_empty(session_id)
+
     def list_sessions(self, workspace_id: str | None = None) -> list[Session]:
         root = self.catalog.get(workspace_id).path if workspace_id is not None else None
         return [

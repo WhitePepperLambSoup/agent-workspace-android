@@ -313,7 +313,7 @@ object AndroidDocumentBridge {
         val paint = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
             color = Color.BLACK
             textSize = font.toFloat()
-            typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+            typeface = pdfFont.first
         }
         val layout = StaticLayout.Builder.obtain(text, 0, text.length, paint, 523)
             .setAlignment(Layout.Alignment.ALIGN_NORMAL).setIncludePad(true)
@@ -357,11 +357,29 @@ object AndroidDocumentBridge {
             return success(id).put("total_pages", ranges.size).put("page_size", "A4")
                 .put("outputs", JSONArray().put(JSONObject().put("path", output.path)
                     .put("media_type", "application/pdf").put("bytes", output.length())))
-                .put("font", "system_sans_serif_with_fallback").put("unicode_layout", true)
+                .put("font", pdfFont.second).put("unicode_layout", true)
         } finally {
             document.close()
             Files.deleteIfExists(pending.toPath())
         }
+    }
+
+    /**
+     * The PDF writer embeds the fonts it draws with. Vendor system fonts (ZTE's HYZhengYuan, for one) may
+     * forbid subsetting, so a four-page Chinese PDF carried the whole 15 MB font. AOSP's Noto Sans CJK
+     * allows subsetting; its Simplified Chinese face comes first and the system font covers the rest.
+     */
+    private val pdfFont: Pair<Typeface, String> by lazy {
+        val system = Typeface.create("sans-serif", Typeface.NORMAL) to "system_sans_serif_with_fallback"
+        val noto = File("/system/fonts/NotoSansCJK-Regular.ttc")
+        if (android.os.Build.VERSION.SDK_INT < 29 || !noto.isFile) return@lazy system
+        runCatching {
+            // Face 2 of the collection is Simplified Chinese (as in AOSP's fonts.xml).
+            val family = android.graphics.fonts.FontFamily.Builder(
+                android.graphics.fonts.Font.Builder(noto).setTtcIndex(2).build()).build()
+            Typeface.CustomFallbackBuilder(family).setSystemFallback("sans-serif").build() to
+                "noto_sans_cjk_sc_with_system_fallback"
+        }.getOrDefault(system)
     }
 
     private fun exclusiveOutput(file: File, limit: Long? = null): OutputStream {

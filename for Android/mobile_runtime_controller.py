@@ -50,7 +50,9 @@ _ANDROID_SYSTEM_SUFFIX = (
     "inspection only with a vision-capable model. Use create_pdf to generate a real PDF "
     "report, verify it with read_document, and give the saved file link. Do not use "
     "write_file to save text with a .pdf extension or keep inspecting raw PDF bytes in "
-    "the shell when a document tool is available."
+    "the shell when a document tool is available. "
+    "Write every reply, progress note and summary in the language of the user's latest "
+    "message (Chinese for Chinese); keep code, commands and file names unchanged."
 )
 
 

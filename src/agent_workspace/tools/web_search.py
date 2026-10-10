@@ -11,7 +11,6 @@ import time
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
-from xml.etree import ElementTree
 
 from agent_workspace.core.models import Capability, ToolSpec
 
@@ -183,21 +182,79 @@ def _result_records(
     return results, truncated
 
 
-def _parse_bing_rss(content: str, maximum: int) -> tuple[list[dict[str, Any]], bool]:
-    if "<!DOCTYPE" in content.upper() or "<!ENTITY" in content.upper():
-        raise ToolError("search engine XML declarations/entities are unsupported")
-    try:
-        root = ElementTree.fromstring(content)
-    except ElementTree.ParseError as exc:
-        raise ToolError("search engine returned malformed or incomplete RSS") from exc
-    channel = root.find("channel")
-    if root.tag != "rss" or channel is None:
-        raise ToolError("search engine did not return an RSS results channel")
-    raw_results = [
-        (item.findtext("title", ""), item.findtext("link", ""), item.findtext("description", ""))
-        for item in channel.findall("item")
-    ]
-    return _result_records(raw_results, maximum)
+class _BingParser(HTMLParser):
+    """Organic results of Bing's web page: li.b_algo > h2 > a, then the b_caption paragraph.
+
+    Bing's RSS format matched only the first word of a query, so its results were unrelated.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.raw_results: list[tuple[str, str, str]] = []
+        self.no_results = False
+        # Per result: "" outside one, then "heading", "title", "snippet" and "done" in order.
+        self._stage = ""
+        self._capture: str | None = None
+        self._depth = 0
+        self._parts: list[str] = []
+        self._href = ""
+        self._hidden = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        classes = (values.get("class") or "").split()
+        if "b_no" in classes:
+            self.no_results = True
+        if tag in {"script", "style"}:
+            self._hidden += 1
+        if self._capture:
+            if tag not in _VOID_TAGS:
+                self._depth += 1
+            return
+        if tag == "li" and "b_algo" in classes:
+            self._stage = "heading"
+        elif tag == "h2" and self._stage == "heading":
+            self._stage = "title"
+        elif tag == "a" and self._stage == "title":
+            self._capture, self._depth, self._parts = "title", 1, []
+            self._href = values.get("href") or ""
+        elif tag == "p" and self._stage == "snippet":
+            self._capture, self._depth, self._parts = "snippet", 1, []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style"} and self._hidden:
+            self._hidden -= 1
+        if not self._capture or tag in _VOID_TAGS:
+            return
+        self._depth -= 1
+        if self._depth > 0:
+            return
+        text = "".join(self._parts)
+        if self._capture == "title":
+            self.raw_results.append((text, self._href, ""))
+            self._stage = "snippet"
+        else:
+            title, href, _snippet = self.raw_results[-1]
+            self.raw_results[-1] = (title, href, text)
+            self._stage = "done"
+        self._capture = None
+
+    def handle_data(self, data: str) -> None:
+        if self._capture and not self._hidden:
+            self._parts.append(data)
+
+
+def _parse_bing_html(content: str, maximum: int) -> tuple[list[dict[str, Any]], bool]:
+    if _CHALLENGE_ATTRIBUTE.search(content):
+        raise ToolError("search engine requires a CAPTCHA or human verification challenge")
+    parser = _BingParser()
+    parser.feed(content)
+    parser.close()
+    if not parser.raw_results:
+        if parser.no_results:
+            return [], False
+        raise ToolError("search engine returned an unrecognized page without results")
+    return _result_records(parser.raw_results, maximum)
 
 
 class _DuckDuckGoParser(HTMLParser):
@@ -268,26 +325,67 @@ def _parse_duckduckgo_lite(content: str, maximum: int) -> tuple[list[dict[str, A
     return _result_records(parser.raw_results, maximum)
 
 
+# Bing ranks requests without a browser identity and language preference as automated, and from
+# some networks then answers with pages unrelated to the query. Its result page runs to ~130 KB.
+_BING_MAX_BYTES = 384 * 1024
+_BROWSER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/129.0 Safari/537.36"
+)
+_CJK = re.compile(r"[぀-ヿ㐀-䶿一-鿿가-힯]")
+
+
+def _bing_headers(query: str) -> dict[str, str]:
+    language = "zh-CN,zh;q=0.9,en;q=0.8" if _CJK.search(query) else "en-US,en;q=0.9"
+    return {"User-Agent": _BROWSER_AGENT, "Accept-Language": language}
+
+
+# Engines that failed to connect recently go last, so a network that cannot reach one (DuckDuckGo
+# from mainland China, for one) does not spend every search's time budget on it first.
+_UNREACHABLE_SECONDS = 600.0
+_unreachable_since: dict[str, float] = {}
+
+
+def _engine_order(engines: tuple[tuple[str, str], ...]) -> list[tuple[str, str]]:
+    now = time.monotonic()
+    return sorted(
+        engines,
+        key=lambda engine: (
+            now - _unreachable_since.get(engine[0], -math.inf) < _UNREACHABLE_SECONDS
+        ),
+    )
+
+
 def _web_search_sync(query: str, maximum: int, timeout_seconds: int) -> str:
     deadline = time.monotonic() + timeout_seconds
     engines = (
         ("duckduckgo_lite", "https://lite.duckduckgo.com/lite/?" + urlencode({"q": query})),
-        ("bing_rss", "https://www.bing.com/search?" + urlencode({"format": "rss", "q": query})),
+        ("bing", "https://www.bing.com/search?" + urlencode({"q": query})),
     )
     errors: list[str] = []
-    for engine, url in engines:
+    for engine, url in _engine_order(engines):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             errors.append("search deadline exceeded")
             break
         try:
-            response = json.loads(
-                web._web_fetch_sync(
-                    url, _MAX_SEARCH_BYTES, min(timeout_seconds, max(1, math.ceil(remaining)))
+            try:
+                bing = engine == "bing"
+                response = json.loads(
+                    web._web_fetch_sync(
+                        url,
+                        _BING_MAX_BYTES if bing else _MAX_SEARCH_BYTES,
+                        min(timeout_seconds, max(1, math.ceil(remaining))),
+                        headers=_bing_headers(query) if bing else None,
+                    )
                 )
-            )
-            if engine == "bing_rss":
-                results, parser_truncated = _parse_bing_rss(response["content"], maximum)
+            except ToolError as exc:
+                if "transport failed" in str(exc) or "DNS resolution failed" in str(exc):
+                    _unreachable_since[engine] = time.monotonic()
+                raise
+            _unreachable_since.pop(engine, None)
+            if engine == "bing":
+                results, parser_truncated = _parse_bing_html(response["content"], maximum)
             else:
                 results, parser_truncated = _parse_duckduckgo_lite(response["content"], maximum)
             if not results and response["truncated"]:

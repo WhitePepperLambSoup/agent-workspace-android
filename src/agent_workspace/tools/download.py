@@ -88,10 +88,14 @@ def _download_bytes(
         origin = (parsed.scheme, parsed.hostname or "", parsed.port or 443)
         if original_origin is None:
             original_origin = origin
-        elif origin != original_origin:
+        elif origin != original_origin and not web._same_site(origin, original_origin):
             raise ToolError("download_file blocks cross-origin redirects")
         connection = web._PinnedHTTPSConnection(
-            parsed.hostname or "", addresses[0], parsed.port or 443, float(timeout_seconds)
+            parsed.hostname or "",
+            addresses[0],
+            parsed.port or 443,
+            float(timeout_seconds),
+            fallbacks=addresses[1:],
         )
         path = parsed.path or "/"
         if parsed.query:

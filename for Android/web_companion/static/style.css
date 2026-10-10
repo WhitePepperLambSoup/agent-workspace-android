@@ -336,7 +336,7 @@ strong { font-weight: 600; }
 }
 .message-card.tool[data-state="running"] summary::before {
   width: 12px; height: 12px; flex-basis: 12px; background: transparent; border: 2px solid var(--accent-soft); border-top-color: var(--accent);
-  animation: spin .8s linear infinite;
+  animation: spin 1s steps(8) infinite;
 }
 .message-card.tool[data-state="failed"] summary::before, .message-card.tool[data-state="unknown"] summary::before { background: var(--danger); }
 .message-card.tool[data-state="cancelled"] summary::before, .message-card.tool[data-state="rejected"] summary::before,
@@ -354,6 +354,14 @@ strong { font-weight: 600; }
 }
 /* Live output of a running terminal command (last lines only). */
 .message-card.tool pre.tool-live { max-height: 200px; color: var(--text-2); }
+/* A tool's main text (a transcript, a reply) reads as prose; its other fields sit below it. */
+.message-card.tool pre.tool-text { font: 13px/1.65 var(--font-sans); }
+.tool-meta {
+  display: block; margin: -4px 12px 10px; color: var(--text-3); font: 11px/1.5 var(--font-mono); overflow-wrap: anywhere;
+}
+/* Endless animations move in steps on a shared 125 ms grid. In the Android WebView every frame redraws
+   the whole page through the app: a smooth spinner kept it at 90 frames a second and half a CPU core,
+   8 steps a second costs about a tenth of that. Purely decorative motion runs once. */
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .history-error, .task-error {
@@ -391,6 +399,8 @@ strong { font-weight: 600; }
   max-height: 120px; margin: 10px 0; padding: 9px 11px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm);
   background: var(--surface); color: var(--text); font: 11.5px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere;
 }
+/* A network approval is a sentence, not a record. */
+#approvalDetail[data-kind="egress"] { font: 13px/1.6 var(--font-sans); }
 .approval-scope { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 10px; color: var(--text-2); font-size: 12.5px; }
 .approval-scope select {
   min-height: 36px; padding: 4px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface); color: var(--text);
@@ -460,7 +470,7 @@ strong { font-weight: 600; }
 #taskStatusBar[data-busy="true"] { padding-right: 12px; }
 #taskStatusBar[data-busy="true"]::before {
   content: ""; flex: 0 0 11px; width: 11px; height: 11px; border-radius: 50%;
-  border: 2px solid var(--accent-soft); border-top-color: var(--accent); animation: spin .8s linear infinite;
+  border: 2px solid var(--accent-soft); border-top-color: var(--accent); animation: spin 1s steps(8) infinite;
 }
 #taskStateLabel { min-width: 0; overflow-wrap: anywhere; }
 .import-notice { max-width: 100%; margin-bottom: 6px; }
@@ -572,7 +582,7 @@ strong { font-weight: 600; }
 .drawer-session[data-running="true"] small { color: var(--accent); font-weight: 600; }
 .drawer-session[data-running="true"] small::before {
   content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: var(--accent);
-  vertical-align: 1px; animation: caret-blink 1.2s ease-in-out infinite;
+  vertical-align: 1px; animation: caret-blink 1s steps(2) infinite;
 }
 .drawer-empty { margin: 8px 12px; color: var(--text-3); font-size: 13px; }
 .drawer-session-item { display: flex; align-items: center; gap: 2px; }
@@ -951,11 +961,10 @@ strong { font-weight: 600; }
 @keyframes caret-blink { 0%, 45% { opacity: 1; } 50%, 100% { opacity: 0; } }
 @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
-@keyframes pulse-ring { 0% { transform: scale(1); opacity: .55; } 100% { transform: scale(2.4); opacity: 0; } }
 
 #timelineList > .message-card, #timelineList > .task-error, #timelineList > .history-error { animation: rise-in 320ms var(--ease-out) both; }
 .empty-state { animation: fade-in 420ms ease-out both; }
-.empty-state-icon { animation: float 5s ease-in-out infinite; }
+.empty-state-icon { animation: float 5s ease-in-out 1; }
 #approvalShelf:not([hidden]) { animation: rise-in 280ms var(--ease-out) both; }
 #noticeText:not([hidden]), #taskStatusBar:not([hidden]), .import-notice:not([hidden]) { animation: fade-in 200ms ease-out both; }
 #btnJumpLatest:not([hidden]) { animation: rise-in 220ms var(--ease-out) both; }
@@ -971,17 +980,23 @@ strong { font-weight: 600; }
 /* Streaming reply: blinking caret while text arrives; shimmer while the model has not answered yet. */
 .message-card.assistant.streaming .message-body > :last-child::after {
   content: ""; display: inline-block; width: .5em; height: 1.05em; margin-left: 2px; vertical-align: -.15em;
-  border-radius: 2px; background: var(--accent); animation: caret-blink 1s linear infinite;
+  border-radius: 2px; background: var(--accent); animation: caret-blink 1s steps(2) infinite;
 }
 .message-card.assistant.pending .message-body {
   background: linear-gradient(90deg, var(--text-3) 25%, var(--accent) 50%, var(--text-3) 75%) 0 0 / 200% 100%;
-  -webkit-background-clip: text; background-clip: text; color: transparent; animation: shimmer 1.8s linear infinite;
+  -webkit-background-clip: text; background-clip: text; color: transparent; animation: shimmer 2s steps(16) infinite;
 }
-/* Busy pulse on the connection dot while a task runs. */
+/* Busy ring on the connection dot while a task runs. It holds still: the status bar's spinner already
+   moves, and every extra endless animation adds its own frames (each one costs CPU in the WebView). */
 #appShell[data-busy="true"] .status-indicator { background: var(--accent); }
 #appShell[data-busy="true"] .status-indicator::after {
-  content: ""; position: absolute; inset: -2.5px; border-radius: 50%; border: 2px solid var(--accent); animation: pulse-ring 1.6s ease-out infinite;
+  content: ""; position: absolute; inset: -2.5px; border-radius: 50%; border: 2px solid var(--accent); opacity: .45;
 }
+/* Waiting for the user's approval: nothing runs, so the indicators stop until the decision. */
+#appShell[data-waiting="true"] #taskStatusBar[data-busy="true"]::before {
+  animation: none; border-color: var(--warning); background: var(--warning-soft);
+}
+#appShell[data-waiting="true"] .message-card.assistant.pending .message-body { animation: none; background: none; color: var(--text-3); }
 /* Soft cross-fade when switching theme, accent or style. */
 body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-card, .chip, .toggle-row, .usage-summary,
 .management-list, .management-form, .management-section, #settingsSheet {
@@ -993,7 +1008,7 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
 .menu-row:active > [data-icon]:last-child:not(:first-child) { transform: translateX(3px); }
 
 :root[data-motion="reduced"] { --rise: 0px; }
-:root[data-motion="reduced"] .empty-state-icon, :root[data-motion="reduced"] #appShell[data-busy="true"] .status-indicator::after { animation: none !important; }
+:root[data-motion="reduced"] .empty-state-icon { animation: none !important; }
 :root[data-motion="reduced"] .settings-page { --settings-page-offset: 0px; }
 :root[data-motion="reduced"] #settingsSheet { --settings-sheet-x: 0px; --settings-sheet-y: 0px; }
 @media (prefers-reduced-motion: reduce) {
@@ -1162,6 +1177,12 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
 :root[data-style="glass"]:not([data-backdrop="plain"]) .message-card.assistant {
   padding: 12px 14px; border-radius: 20px; background: var(--reply-glass);
   -webkit-backdrop-filter: blur(14px) saturate(160%); backdrop-filter: blur(14px) saturate(160%);
+}
+/* While the page scrolls (liquid-glass.js sets data-glass-moving), replies drop the blur: every moving
+   card re-blurs its backdrop on each frame, which held scrolling near 50 fps on a Snapdragon 888 at 90 Hz.
+   Over the smooth preset wallpapers the tint alone looks the same in motion; the blur returns at rest. */
+:root[data-style="glass"][data-glass-moving]:not([data-backdrop="plain"]) .message-card.assistant {
+  -webkit-backdrop-filter: none; backdrop-filter: none;
 }
 /* Quotes, table headers and inline code inside a reply are lighter panes of the same glass. */
 :root[data-style="glass"]:not([data-backdrop="plain"]) .message-card.assistant {

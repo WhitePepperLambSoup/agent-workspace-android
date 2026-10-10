@@ -32,6 +32,31 @@ LICENSE_INPUTS = {
         "sha256": "46a65cffd1ea955132d95a8dd921640714a8d6b537d2e4e482d31145ae95b603",
         "source": "https://raw.githubusercontent.com/nlohmann/json/v3.12.0/LICENSE.MIT",
     },
+    # Offline speech recognition (prepare_speech_runtime.py).
+    "sherpa-onnx-1.13.8": {
+        "file": "sherpa-onnx-1.13.8-LICENSE.txt",
+        "asset": "sherpa-onnx-Apache-2.0.txt",
+        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+        "source": "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v1.13.8/LICENSE",
+    },
+    "onnxruntime-1.28.2": {
+        "file": "onnxruntime-1.28.2-LICENSE.txt",
+        "asset": "onnxruntime-MIT.txt",
+        "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c",
+        "source": "https://raw.githubusercontent.com/microsoft/onnxruntime/v1.28.2/LICENSE",
+    },
+    "silero-vad": {
+        "file": "silero-vad-LICENSE.txt",
+        "asset": "silero-vad-MIT.txt",
+        "sha256": "2e63e9a38b6e8fc0c7bc37ce174caca1862870856c6daf5697cfb785e925520b",
+        "source": "https://raw.githubusercontent.com/snakers4/silero-vad/v4.0/LICENSE",
+    },
+    "SenseVoice-Small": {
+        "file": "FunASR-MODEL_LICENSE.txt",
+        "asset": "FunASR-Model-License.txt",
+        "sha256": "7dba975a2069691db4992b0592d70828b330d2f8a30a71450f4e152a554e84f8",
+        "source": "https://raw.githubusercontent.com/modelscope/FunASR/main/MODEL_LICENSE",
+    },
 }
 SIGNING_FIELDS = (
     "AGENT_ANDROID_KEYSTORE",
@@ -182,8 +207,10 @@ def main():
     if sys.version_info[:2] != (3, 12):
         parser.error("release preparation requires Python 3.12; use the pinned build interpreter")
     from prepare_android_toolchain import prepare
+    from prepare_speech_runtime import prepare as prepare_speech
 
     prepare()
+    prepare_speech()
     native_source = prepare_native_source()
     prepare_license_assets()
     subprocess.run(

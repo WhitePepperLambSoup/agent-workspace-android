@@ -180,7 +180,14 @@ def _tool_reason(name: str, executables: dict[str, dict[str, str]]) -> str | Non
     ):
         return "No language server executable is installed in the APK environment"
     if name == "transcribe_audio" and not os.getenv("AGENT_WORKSPACE_AUDIO_BASE_URL"):
-        return "No audio transcription endpoint is configured"
+        # The app's offline recognizer (speech_tools) replaces the core's endpoint-based tool.
+        from .speech_tools import speech_runtime_status
+
+        status = speech_runtime_status()
+        if status is None:
+            return "No audio transcription endpoint is configured"
+        if not status.get("runtime_available"):
+            return "Offline speech recognition runs on 64-bit ARM phones only"
     if name in {"browser", "browser_view"}:
         from .browser import browser_available
 
@@ -245,6 +252,12 @@ def configure_android_registry(
 
     if clock_available():
         factories.update(clock_calendar_tools())
+    from .speech_tools import TranscribeAudioTool, speech_runtime_status
+
+    speech = speech_runtime_status()
+    if workspace is not None and speech is not None and speech.get("runtime_available"):
+        # Offered before the model is downloaded too: it then says where to download it.
+        factories["transcribe_audio"] = lambda: TranscribeAudioTool(workspace)
     from .browser import AndroidBrowserTool, AndroidBrowserViewTool, browser_available
 
     if browser_available():

@@ -46,6 +46,7 @@ internal class CrossProcessJsonFile(file: File) {
 class EngineLifecycleState @JvmOverloads constructor(context: Context,
     storageFile: File = File(context.filesDir, "engine-lifecycle.json")) {
     private val storage = CrossProcessJsonFile(storageFile)
+    private val appContext: Context = context.applicationContext ?: context
 
     fun isManuallyStopped(): Boolean = storage.read().optBoolean("manually_stopped")
 
@@ -107,7 +108,9 @@ class EngineLifecycleState @JvmOverloads constructor(context: Context,
     fun markStoppedByUser() { mark("stopped", "Stopped by user", manuallyStopped = true) }
 
     fun mark(state: String, reason: String? = null, manuallyStopped: Boolean? = null) {
+        var previous: String? = null
         storage.update {
+            previous = it.optString("state")
             it.put("state", state).put("reason", reason ?: JSONObject.NULL)
                 .put("updated_at_ms", System.currentTimeMillis())
             if (manuallyStopped != null) it.put("manually_stopped", manuallyStopped)
@@ -117,6 +120,8 @@ class EngineLifecycleState @JvmOverloads constructor(context: Context,
             }
             it
         }
+        // Heartbeats repeat the state every 15 s; the task widget redraws only when it changes.
+        if (previous != state) AgentWidgets.engineStateChanged(appContext)
     }
 
     fun statusJson(): String {

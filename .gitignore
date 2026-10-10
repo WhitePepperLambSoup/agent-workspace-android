@@ -55,6 +55,7 @@ for Android/kotlin_app/src/main/assets/agent_code.zip
 for Android/kotlin_app/src/main/assets/termux-bootstrap-*.zip
 for Android/kotlin_app/src/main/assets/toolchain/
 for Android/kotlin_app/src/main/assets/licenses/
+for Android/kotlin_app/src/main/assets/speech/
 for Android/**/device-backups/
 for Android/**/device_backups/
 for Android/**/agent-data/

@@ -3,6 +3,7 @@ package com.agentworkspace.mobile.entry
 import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.app.Service
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
@@ -22,11 +23,10 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
-import androidx.core.content.FileProvider
 import com.agentworkspace.mobile.R
 import com.agentworkspace.mobile.UiText
+import com.agentworkspace.mobile.automation.AgentAccessibilityService
 import com.agentworkspace.mobile.embedded.EngineHttp
-import com.agentworkspace.mobile.sharing.ShareInboxController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -36,13 +36,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
-import java.util.UUID
 import kotlin.math.abs
 import kotlin.math.hypot
 
 /**
- * A small bubble over other apps. Tap: new conversation. Long press: ask about the screen, ask by
- * voice, or hide the bubble. Drag to move it; it settles against the nearest side.
+ * A small bubble over other apps. Tap: new conversation. Long press: circle to ask about the screen,
+ * ask by voice, or hide the bubble. Drag to move it; it settles against the nearest side.
  * Needs "display over other apps"; the user turns it on in Settings → Global entry.
  */
 class FloatingBallService : Service() {
@@ -50,6 +49,19 @@ class FloatingBallService : Service() {
         private const val PREFERENCES = "agent-floating-ball"
         private const val ACCENT = 0xFF0F766E.toInt()
         private val SCREENSHOT_PATH = Regex("automation/screenshots/screen-[0-9a-fA-F-]{36}\\.png")
+        // Main thread only. Cleared in onDestroy, so it never outlives the service.
+        @SuppressLint("StaticFieldLeak")
+        private var current: FloatingBallService? = null
+        private var hiddenBy = 0
+
+        /**
+         * Keeps the bubble out of sight while a screen is being asked about: it would otherwise float
+         * over the circle-to-ask screen. Counted, so overlapping callers each undo only their own.
+         */
+        fun setBallHidden(hidden: Boolean) {
+            hiddenBy = (hiddenBy + if (hidden) 1 else -1).coerceAtLeast(0)
+            current?.applyVisibility()
+        }
 
         fun isEnabled(context: Context): Boolean =
             context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).getBoolean("enabled", false)
@@ -104,6 +116,12 @@ class FloatingBallService : Service() {
         windowManager = getSystemService(WindowManager::class.java)
         if (!canDraw(this)) { stopSelf(); return }
         runCatching { showBall() }.onFailure { stopSelf() }
+        current = this
+        applyVisibility()
+    }
+
+    private fun applyVisibility() {
+        ball?.visibility = if (busy || hiddenBy > 0) View.INVISIBLE else View.VISIBLE
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -118,6 +136,7 @@ class FloatingBallService : Service() {
     }
 
     override fun onDestroy() {
+        if (current === this) current = null
         scope.cancel()
         hideMenu()
         ball?.let { runCatching { windowManager.removeView(it) } }
@@ -216,9 +235,9 @@ class FloatingBallService : Service() {
         }
     }
 
-    private fun open(mode: String, shareBatch: String? = null) {
+    private fun open(mode: String) {
         hideMenu()
-        runCatching { startActivity(QuickEntry.intent(this, mode, shareBatch)) }
+        runCatching { startActivity(QuickEntry.intent(this, mode)) }
     }
 
     private fun showMenu() {
@@ -241,7 +260,7 @@ class FloatingBallService : Service() {
             setPadding(dp(18), dp(12), dp(18), dp(12))
             setOnClickListener { hideMenu(); action() }
         })
-        item("截屏提问", "Ask about the screen") { askAboutScreen() }
+        item("圈选提问", "Circle to ask") { askAboutScreen() }
         item("语音提问", "Ask by voice") { open("voice") }
         item("新对话", "New chat") { open("text") }
         item("隐藏悬浮球", "Hide the bubble") {
@@ -271,52 +290,80 @@ class FloatingBallService : Service() {
         menu = null
     }
 
-    /** Screenshot through the accessibility service, put into the attachment inbox, then a new chat. */
+    /**
+     * Circle to ask. With the accessibility service on, it takes the screenshot without asking;
+     * otherwise the circle-to-ask screen asks Android for screen capture permission each time.
+     */
     private fun askAboutScreen() {
         if (busy) return
+        if (!accessibilityServiceOn()) { openScreenAsk(null); return }
         busy = true
-        val view = ball
-        view?.visibility = View.INVISIBLE
+        applyVisibility()
         scope.launch {
+            var opened = false
             try {
                 delay(350) // let the bubble and its menu leave the frame
-                val batch = withContext(Dispatchers.IO) { captureScreen() }
-                open("screen", batch)
+                when (val shot = withContext(Dispatchers.IO) { captureScreen() }) {
+                    is Shot.Taken -> { openScreenAsk(shot.file); opened = true }
+                    // Accessibility is on but can't capture here (Android 10, or the service not
+                    // connected yet): the screen capture permission still can.
+                    Shot.Unavailable -> { openScreenAsk(null); opened = true }
+                }
             } catch (failure: Exception) {
                 Toast.makeText(this@FloatingBallService, failure.message ?: UiText.of(this@FloatingBallService,
                     "无法截屏", "Could not take a screenshot"), Toast.LENGTH_LONG).show()
             } finally {
-                view?.visibility = View.VISIBLE
+                // The circle-to-ask screen hides the bubble itself once it is up.
+                if (opened) delay(1500)
                 busy = false
+                applyVisibility()
             }
         }
     }
 
-    private fun captureScreen(): String {
-        val reply = try {
-            EngineHttp.request(this, "POST", "/mobile/android-system", JSONObject().put("action", "screenshot"), 20000)
-        } catch (_: Exception) {
-            throw IllegalStateException(UiText.of(this, "本地引擎未运行，请先打开应用", "The local engine is not running; open the app first"))
+    private fun openScreenAsk(screenshot: File?) {
+        hideMenu()
+        runCatching { startActivity(ScreenAskActivity.intent(this, screenshot)) }
+            .onFailure { screenshot?.delete() }
+    }
+
+    private fun accessibilityServiceOn(): Boolean {
+        val enabled = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: return false
+        val service = ComponentName(this, AgentAccessibilityService::class.java)
+        return enabled.split(':').any { ComponentName.unflattenFromString(it) == service }
+    }
+
+    private sealed interface Shot {
+        data class Taken(val file: File) : Shot
+        data object Unavailable : Shot
+    }
+
+    private fun captureScreen(): Shot {
+        repeat(3) { attempt ->
+            val reply = try {
+                EngineHttp.request(this, "POST", "/mobile/android-system", JSONObject().put("action", "screenshot"), 20000)
+            } catch (_: Exception) {
+                return Shot.Unavailable
+            }
+            val shot = reply.body.optJSONObject("screenshot")
+            val path = shot?.optString("path").orEmpty()
+            if (reply.ok && shot != null && SCREENSHOT_PATH.matches(path)) {
+                val source = File(filesDir, "workspace/$path")
+                val target = File(ScreenCaptureService.folder(this), "screen-${System.currentTimeMillis()}.png")
+                source.copyTo(target, overwrite = true)
+                return Shot.Taken(target)
+            }
+            when (reply.body.optJSONObject("error")?.optString("code").orEmpty()) {
+                // A password field on screen: the screen capture permission would show it too.
+                "protected_content" -> throw IllegalStateException(UiText.of(this,
+                    "屏幕上有密码等敏感内容，不能截屏", "Sensitive content such as a password is on screen; it can't be captured"))
+                // The automation check that the screen held still, tripped by the bubble's menu
+                // closing or an animation: take it again.
+                "stale_snapshot" -> if (attempt < 2) Thread.sleep(300) else return Shot.Unavailable
+                // Accessibility can't capture here; the screen capture permission still may.
+                else -> return Shot.Unavailable
+            }
         }
-        val shot = reply.body.optJSONObject("screenshot")
-        val path = shot?.optString("path").orEmpty()
-        if (!reply.ok || shot == null || !SCREENSHOT_PATH.matches(path)) {
-            val code = reply.body.optJSONObject("error")?.optString("code").orEmpty()
-            val text = reply.body.optJSONObject("error")?.optString("message") ?: reply.body.optString("error")
-            throw IllegalStateException(when {
-                code == "protected_content" -> UiText.of(this, "屏幕上有密码等敏感内容，不能截屏", "Sensitive content such as a password is on screen; it can't be captured")
-                code == "unsupported_api" -> UiText.of(this, "截屏提问需要 Android 11 或更新版本", "Asking about the screen needs Android 11 or newer")
-                code == "service_unavailable" || text.contains("Accessibility", ignoreCase = true) ->
-                    UiText.of(this, "截屏提问需要先开启无障碍服务（设置 → 设备与工具）", "Turn on the accessibility service first (Settings → Device & tools)")
-                else -> UiText.of(this, "无法截屏：$text", "Could not take a screenshot: $text")
-            })
-        }
-        val source = File(filesDir, "workspace/$path")
-        val folder = File(cacheDir, "camera").apply { mkdirs() }
-        val target = File(folder, "screen-${System.currentTimeMillis()}.png")
-        source.copyTo(target, overwrite = true)
-        val batch = UUID.randomUUID().toString()
-        ShareInboxController.get(this).captureFiles(listOf(FileProvider.getUriForFile(this, "$packageName.camera", target)), batch)
-        return batch
+        return Shot.Unavailable
     }
 }

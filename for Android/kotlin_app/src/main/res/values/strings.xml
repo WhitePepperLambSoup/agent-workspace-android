@@ -8,4 +8,23 @@
     <string name="notification_running_desc">本地服务正常监听在端口 8080</string>
     <string name="quick_tile_label">问 Agent</string>
     <string name="notification_listener_label">Agent Workspace 通知触发</string>
+    <!-- Home screen widgets: the picker shows these before the app runs; widgets set their own text. -->
+    <string name="widget_quick_ask_label">快捷提问</string>
+    <string name="widget_quick_ask_description">像搜索框一样随时提问，也能语音或拍照</string>
+    <string name="widget_tasks_label">任务动态</string>
+    <string name="widget_tasks_description">正在执行和等待批准的任务</string>
+    <string name="widget_quick_tasks_label">常用任务</string>
+    <string name="widget_quick_tasks_description">一键开始你的常用任务</string>
+    <string name="widget_ask_hint">问 Agent…</string>
+    <string name="widget_no_task">还没有任务</string>
+    <string name="widget_ready">就绪</string>
+    <!-- The composer's default quick tasks, shown in the widget picker's preview. -->
+    <string name="widget_task_summarize_title">总结要点</string>
+    <string name="widget_task_summarize_detail">文档、网页或聊天记录</string>
+    <string name="widget_task_translate_title">翻译润色</string>
+    <string name="widget_task_translate_detail">中英互译，语气自然</string>
+    <string name="widget_task_web_page_title">做个网页</string>
+    <string name="widget_task_web_page_detail">生成可直接预览的页面</string>
+    <string name="widget_task_analyze_title">分析数据</string>
+    <string name="widget_task_analyze_detail">表格或 CSV 出结论与图表</string>
 </resources>

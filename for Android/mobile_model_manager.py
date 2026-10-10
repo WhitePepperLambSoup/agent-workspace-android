@@ -16,10 +16,25 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
-from mobile_model_catalog import MODEL_CATALOG, VISION_CATALOG
+from mobile_model_catalog import MODEL_CATALOG, SPEECH_CATALOG, VISION_CATALOG
 from mobile_trained_model import LOCAL_MODEL_CATALOG
 
-_MANAGED_MODEL_FILES = ("model.gguf", "installed.json", "model.gguf.part", "partial.json")
+_MANAGED_MODEL_FILES = ("installed.json", "partial.json")
+# The first bytes of each weight format: GGUF's magic; an ONNX model is a protobuf whose first
+# field is ir_version (field 1, varint).
+_FORMAT_MAGIC = {"gguf": b"GGUF", "onnx": b"\x08"}
+
+
+def _weights_name(model) -> str:
+    """The weights' file name in the model's private directory."""
+    return model.get("weights_file", "model.gguf")
+
+
+def _managed_files(model) -> tuple[str, ...]:
+    weights = _weights_name(model)
+    return (weights, weights + ".part", *_MANAGED_MODEL_FILES)
+
+
 _PREFIX_CACHE = "prefix-cache"
 _SOURCE_IDS = ("huggingface", "modelscope")
 
@@ -51,7 +66,7 @@ class ModelManager:
         self.catalog = {
             item["model_id"]: dict(item)
             for item in (
-                (*MODEL_CATALOG, *LOCAL_MODEL_CATALOG, *VISION_CATALOG)
+                (*MODEL_CATALOG, *LOCAL_MODEL_CATALOG, *VISION_CATALOG, *SPEECH_CATALOG)
                 if catalog is None
                 else catalog
             )
@@ -169,8 +184,10 @@ class ModelManager:
             raise ValueError("model integrity failed: size mismatch")
         digest = hashlib.sha256()
         with path.open("rb") as source:
-            if source.read(4) != b"GGUF":
-                raise ValueError("model integrity failed: not GGUF weights")
+            weight_format = model.get("format", "gguf")
+            magic = _FORMAT_MAGIC[weight_format]
+            if source.read(len(magic)) != magic:
+                raise ValueError(f"model integrity failed: not {weight_format.upper()} weights")
             source.seek(0)
             while chunk := source.read(1024 * 1024):
                 digest.update(chunk)
@@ -180,7 +197,7 @@ class ModelManager:
     def installed_path(self, model_id) -> Path:
         model = self._model(model_id)
         directory = self._directory(model_id)
-        path, marker = directory / "model.gguf", directory / "installed.json"
+        path, marker = directory / _weights_name(model), directory / "installed.json"
         try:
             if path.is_symlink() or marker.is_symlink():
                 raise ValueError("model integrity failed: unsafe installed path")
@@ -213,8 +230,9 @@ class ModelManager:
                     state = "failed"
                     record["error"] = "Installed model failed integrity validation"
             received = record.get("downloaded_bytes", 0)
-            if state == "paused" and (directory / "model.gguf.part").is_file():
-                received = (directory / "model.gguf.part").stat().st_size
+            partial = directory / (_weights_name(model) + ".part")
+            if state == "paused" and partial.is_file():
+                received = partial.stat().st_size
             records[model_id] = {
                 **model,
                 **record,
@@ -224,13 +242,17 @@ class ModelManager:
                 "installed": state == "installed",
                 "has_local_files": any(
                     (directory / name).is_file() or (directory / name).is_symlink()
-                    for name in _MANAGED_MODEL_FILES
+                    for name in _managed_files(model)
                 ),
             }
-        models, components = [], []
+        models, components, speech = [], [], []
         for record in records.values():
             if record.get("kind") == "vision_projection":
                 components.append(record)
+                continue
+            # Speech recognition weights are for voice input, never a chat model to select.
+            if record.get("kind") == "speech_recognition":
+                speech.append(record)
                 continue
             component = records.get(record.get("vision_projector_id"))
             models.append(
@@ -242,6 +264,7 @@ class ModelManager:
         return {
             "models": models,
             "vision_components": components,
+            "speech_models": speech,
             "storage_free_bytes": self._disk_free(),
             "weights_bundled": False,
             "downloads_resumable": True,
@@ -352,7 +375,8 @@ class ModelManager:
         sources = self._ordered_sources(model, source, prefer)
         directory = self._directory(model_id)
         directory.mkdir(parents=True, exist_ok=True)
-        partial, metadata_file = directory / "model.gguf.part", directory / "partial.json"
+        weights = _weights_name(model)
+        partial, metadata_file = directory / (weights + ".part"), directory / "partial.json"
         identity = self._identity(model)
         try:
             old_identity = (
@@ -397,7 +421,7 @@ class ModelManager:
                 )
             self._update(model_id, state="verifying", downloaded_bytes=partial.stat().st_size)
             await asyncio.to_thread(self._validate_file, partial, model)
-            final = directory / "model.gguf"
+            final = directory / weights
             partial.replace(final)
             try:
                 _atomic_json(
@@ -445,11 +469,12 @@ class ModelManager:
             raise ValueError(message) from None
 
     def remove(self, model_id):
+        model = self._model(model_id)
         directory = self._directory(model_id)
         job = self._jobs.get(model_id)
         if job is not None and not job.done():
             raise ValueError("pause this download before removing it")
-        for name in _MANAGED_MODEL_FILES:
+        for name in _managed_files(model):
             (directory / name).unlink(missing_ok=True)
         # Saved prompt states of this model (written by the native engine) go with it.
         prefix_cache = directory / _PREFIX_CACHE

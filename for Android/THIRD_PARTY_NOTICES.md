@@ -6,6 +6,10 @@
 |---|---|---|
 | llama.cpp / ggml CPU | `ggml-org/llama.cpp` commit `7fe450e19305b828c199d602c23a8337aaa1f03b` | MIT；`build_release.py` 从固定 SHA256 源码 archive 提取上游 LICENSE 到 APK `assets/licenses/`，并记录来源/revision/digest |
 | nlohmann/json 3.12.0 | 上述 llama.cpp 的 JNI JSON 头文件，许可来自官方 `v3.12.0/LICENSE.MIT` | MIT；完整文本及固定 SHA256 保存于 `licenses/nlohmann-json-3.12.0-LICENSE.txt`，准备时校验并复制到 APK |
+| sherpa-onnx 1.13.8（离线语音识别 JNI，仅 arm64） | 官方 `v1.13.8` 发布包 `sherpa-onnx-v1.13.8-android-static-link-onnxruntime.tar.bz2`（35,101,751 字节，SHA256 `7583ca385ae7d981e65468455c2ea2c9f2da383921dccfc5658d0dc19d309e6f`），由 `prepare_speech_runtime.py` 校验后取出 `libsherpa-onnx-jni.so`；Kotlin 封装在 `com/k2fsa/sherpa/onnx/` | Apache-2.0；完整文本在 `licenses/sherpa-onnx-1.13.8-LICENSE.txt`，准备时复制到 APK |
+| ONNX Runtime 1.28.2 | 静态链接在上述 sherpa-onnx JNI 库中 | MIT；完整文本在 `licenses/onnxruntime-1.28.2-LICENSE.txt` |
+| Silero VAD | sherpa-onnx 官方 `asr-models/silero_vad.onnx`（643,854 字节，SHA256 `9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6`），随 APK 提供 | MIT（Silero Team）；完整文本在 `licenses/silero-vad-LICENSE.txt` |
+| SenseVoice Small int8 语音识别模型 | `mobile_model_catalog.py` 的 `SPEECH_CATALOG`（Hugging Face `csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17` 或 ModelScope 镜像，固定 revision 与 SHA256）；分词表随 APK 提供 | FunASR Model License 1.1（FunAudioLLM / 阿里巴巴）；模型权重为用户可选下载，不打进 APK；许可文本在 `licenses/FunASR-MODEL_LICENSE.txt` |
 | Qwen3 / Qwen3.5 基础模型与 Qwen3.5 视觉组件 | `mobile_model_catalog.py` 的来源、固定 GGUF revision/文件/摘要 | Apache-2.0；用户可选下载，无权重打进 APK。Qwen3 Q8_0 来自 Qwen 官方 GGUF；Q4_K_M、Qwen3.5 Q4/Q8 及 F16 mmproj 来自 Unsloth 社区发布，不能称为 Qwen 官方 GGUF |
 | Gradle Wrapper 8.11.1 | Gradle 官方 `v8.11.1` 标准脚本/JAR及发布校验文件 | Apache-2.0；脚本保留原版权，摘要清单在 `gradle/wrapper/gradle-wrapper-verification.json` |
 | Chaquopy 17.0.0 | 官方 `chaquo/chaquopy/17.0.0/LICENSE.txt` | MIT，Copyright 2017–2025 Chaquo Ltd and contributors；完整文本及 SHA256 保存于 `licenses/Chaquopy-17.0.0-LICENSE.txt`，准备时校验并复制到 APK。嵌入的 CPython 和 Python 依赖仍保留各自许可 |

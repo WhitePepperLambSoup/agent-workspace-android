@@ -34,6 +34,13 @@ class _PendingApproval:
 
 ApprovalRequestListener = Callable[[dict[str, Any]], Awaitable[None] | None]
 
+# Scopes the user can pick on the approval shelf. "task" approves this request and every later
+# request of the same task, until it ends, except the tools below.
+APPROVAL_SCOPES = frozenset({"once", "session", "task"})
+# A task-wide approval never covers deleting files, changing long-term memory or operating
+# other apps: those still ask each time.
+_ALWAYS_ASK_TOOLS = frozenset({"delete_path", "memory_write", "android_action"})
+
 
 class MobileApprovalBroker:
     def __init__(
@@ -46,11 +53,14 @@ class MobileApprovalBroker:
         self.request_listener = request_listener
         self._active_task_id: str | None = None
         self._active_session_id: str | None = None
+        self._trusted_task_id: str | None = None
         self._pending: dict[str, _PendingApproval] = {}
 
     def set_active_task(self, task_id: str, session_id: str) -> None:
         if not task_id or not session_id:
             raise ValueError("task_id and session_id are required")
+        if task_id != self._trusted_task_id:
+            self._trusted_task_id = None
         self._active_task_id = task_id
         self._active_session_id = session_id
 
@@ -59,6 +69,7 @@ class MobileApprovalBroker:
             return
         self._active_task_id = None
         self._active_session_id = None
+        self._trusted_task_id = None
 
     async def request_tool(self, tool: str, arguments: dict[str, Any]) -> ApprovalDecision:
         return await self._request(
@@ -79,8 +90,10 @@ class MobileApprovalBroker:
         pending = self._pending.get(request_id)
         if pending is None:
             return False
-        if scope not in {"once", "session"}:
-            raise ValueError("scope must be once or session")
+        if scope not in APPROVAL_SCOPES:
+            raise ValueError("scope must be once, session or task")
+        if allowed and scope == "task" and pending.task_id == self._active_task_id:
+            self._trusted_task_id = pending.task_id
         self.event_store.append(
             Event(
                 session_id=pending.session_id,
@@ -125,6 +138,24 @@ class MobileApprovalBroker:
         if self._active_task_id is None or self._active_session_id is None:
             raise RuntimeError("no active mobile task is registered")
         request_id = str(uuid4())
+        if self._trusted_task_id == self._active_task_id and details.get("tool") not in (
+            _ALWAYS_ASK_TOOLS
+        ):
+            # Covered by the user's "allow for this task"; recorded for the audit trail.
+            self.event_store.append(
+                Event(
+                    session_id=self._active_session_id,
+                    type="mobile.approval.auto",
+                    data={
+                        "request_id": request_id,
+                        "task_id": self._active_task_id,
+                        "kind": kind,
+                        "subject": details.get("tool") or details.get("endpoint"),
+                        "scope": "task",
+                    },
+                )
+            )
+            return ApprovalDecision(request_id, True, "task", self._active_task_id, kind)
         loop = asyncio.get_running_loop()
         pending = _PendingApproval(
             request_id=request_id,

@@ -45,6 +45,9 @@ import com.agentworkspace.mobile.embedded.ProviderSettingsChange
 import com.agentworkspace.mobile.embedded.TaskNotificationPublisher
 import com.agentworkspace.mobile.embedded.TaskNotificationSettings
 import com.agentworkspace.mobile.voice.MobileVoiceInput
+import com.agentworkspace.mobile.voice.OfflineSpeech
+import com.agentworkspace.mobile.voice.VoiceInputDialog
+import com.agentworkspace.mobile.voice.VoiceInputSettings
 import com.agentworkspace.mobile.localmodels.LocalModelArtifactInstaller
 import com.agentworkspace.mobile.localmodels.TrainedLocalModel
 import com.agentworkspace.mobile.workspace.WorkspaceFileActionController
@@ -77,6 +80,8 @@ class WebUiActivity : ComponentActivity() {
 
     companion object {
         private const val BASE_URL = "http://127.0.0.1:8080"
+        /** Start-up help (logs, updates, model settings) shows after this long on the loading screen. */
+        private const val STARTUP_HELP_DELAY_MS = 8000L
         private val IDENTITY_CONTEXT = "agent-workspace-mobile-identity-v1\n".toByteArray(Charsets.US_ASCII)
         /** Consecutive failed identity checks (about 0.5–1.5 s each) before the engine process is replaced. */
         private const val ENGINE_UNRESPONSIVE_ATTEMPTS = 16
@@ -100,6 +105,7 @@ class WebUiActivity : ComponentActivity() {
     private lateinit var statusText: TextView
     private lateinit var retryButton: Button
     private lateinit var settingsButton: Button
+    private lateinit var startupTools: LinearLayout
     private var fileUploadCallback: ValueCallback<Array<Uri>>? = null
     private val activityScope = CoroutineScope(Dispatchers.Main + Job())
     private val appSupport = AppSupportController(this, activityScope) { pageDialogTheme() }
@@ -435,6 +441,35 @@ class WebUiActivity : ComponentActivity() {
         calendarPermissionLauncher.launch(calendarPermissions)
     }
 
+    private var voiceDialog: VoiceInputDialog? = null
+
+    private val microphonePermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            showOfflineVoiceInput()
+            return@registerForActivityResult
+        }
+        android.widget.Toast.makeText(this, UiText.of(this, "离线语音输入需要麦克风权限", "Offline voice input needs microphone access"),
+            android.widget.Toast.LENGTH_LONG).show()
+        // After "don't ask again" the system shows nothing; its app settings page still can.
+        if (!shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)) openAppSettings()
+    }
+
+    private fun startOfflineVoiceInput() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            showOfflineVoiceInput()
+        } else {
+            microphonePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    private fun showOfflineVoiceInput() {
+        if (isFinishing || isDestroyed || voiceDialog?.isShowing == true) return
+        voiceDialog = VoiceInputDialog(this) { text ->
+            sharedTexts.addLast(text)
+            deliverSharedText()
+        }.also { it.show() }
+    }
+
     private fun openAppSettings() {
         runCatching {
             startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
@@ -498,8 +533,9 @@ class WebUiActivity : ComponentActivity() {
             WindowInsetsCompat.CONSUMED
         }
 
-        // Debug builds only: lets contributors inspect the console page from chrome://inspect.
-        if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+        // Debug and local test builds only: lets contributors inspect the console page from
+        // chrome://inspect.
+        if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0 || resources.getBoolean(R.bool.webview_debug)) {
             WebView.setWebContentsDebuggingEnabled(true)
         }
         // Some ROMs ship WebView disabled, and it is briefly missing while the store updates it.
@@ -550,7 +586,7 @@ class WebUiActivity : ComponentActivity() {
                     statusText.text = UiText.of(this@WebUiActivity, "引擎已停止", "Engine stopped")
                     loadingContainer.visibility = View.VISIBLE
                     webView.visibility = View.INVISIBLE
-                    retryButton.visibility = View.VISIBLE
+                    showRetry()
                 },
                 importLocalModelAction = { requestModelImport(it) },
                 workspaceFileActionHandler = { workspaceFileActions.queue(it) },
@@ -685,7 +721,7 @@ class WebUiActivity : ComponentActivity() {
                     super.onReceivedError(view, request, error)
                     if (request?.isForMainFrame == true) {
                         statusText.text = UiText.of(this@WebUiActivity, "本地连接失败，正在等待守护进程唤醒...", "Local connection failed; waiting for the service to wake...")
-                        retryButton.visibility = View.VISIBLE
+                        showRetry()
                     }
                 }
             }
@@ -722,16 +758,20 @@ class WebUiActivity : ComponentActivity() {
                 }
             }
             // Help that must work even when the engine never comes up: logs, updates, model settings.
-            fun toolButton(label: String, action: () -> Unit) = Button(this@WebUiActivity).apply {
-                text = label
-                isAllCaps = false
-                minWidth = 0
-                minimumWidth = 0
-                setOnClickListener { action() }
-                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = 12 }
-            }
+            // Text buttons in the console's accent colour; they appear only when start-up is slow or fails.
+            fun toolButton(label: String, action: () -> Unit) =
+                Button(this@WebUiActivity, null, android.R.attr.borderlessButtonStyle).apply {
+                    text = label
+                    isAllCaps = false
+                    minWidth = 0
+                    minimumWidth = 0
+                    setTextColor(Color.parseColor(if (startupDark) "#5CC6B1" else "#0F766E"))
+                    setOnClickListener { action() }
+                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = 4 }
+                }
             settingsButton = toolButton(UiText.of(this@WebUiActivity, "模型设置", "Model settings")) { showProviderSettings() }
-            val toolRow = LinearLayout(this@WebUiActivity).apply {
+            startupTools = LinearLayout(this@WebUiActivity).apply {
+                visibility = View.GONE
                 orientation = LinearLayout.HORIZONTAL
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -747,7 +787,7 @@ class WebUiActivity : ComponentActivity() {
             addView(pb)
             addView(statusText)
             addView(retryButton)
-            addView(toolRow)
+            addView(startupTools)
         }
 
         rootLayout.addView(webView)
@@ -934,6 +974,18 @@ class WebUiActivity : ComponentActivity() {
         super.onPause()
     }
 
+    override fun onStop() {
+        // Android stops a background app's microphone anyway; discard rather than deliver half a phrase.
+        voiceDialog?.cancel()
+        voiceDialog = null
+        super.onStop()
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= TRIM_MEMORY_RUNNING_LOW) OfflineSpeech.release()
+    }
+
     private fun requestTaskNotificationPermissionOnce() {
         if (Build.VERSION.SDK_INT < 33 || notificationPermissionInFlight || isFinishing || isDestroyed ||
             !TaskNotificationSettings(this).isEnabled() || ContextCompat.checkSelfPermission(
@@ -991,8 +1043,9 @@ class WebUiActivity : ComponentActivity() {
         val mode = incoming.getStringExtra(QuickEntry.EXTRA_MODE)?.takeIf { it in QuickEntry.MODES } ?: "text"
         val batch = incoming.getStringExtra(QuickEntry.EXTRA_SHARE_BATCH)?.takeIf { it.length in 1..64 }
         // Other apps (Tasker, shortcuts) may prefill the input; the user still decides to send it.
+        // A trailing line break stays: quick task templates end with one so the user types below them.
         val text = runCatching { incoming.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString() }.getOrNull()
-            ?.trim()?.take(8000)?.takeIf { it.isNotEmpty() }
+            ?.trimStart()?.take(8000)?.takeIf { it.isNotBlank() }
         // Handled once; a later recreation must not open yet another conversation.
         incoming.action = Intent.ACTION_MAIN
         pendingQuickAsk = JSONObject().put("mode", mode).apply {
@@ -1218,11 +1271,27 @@ class WebUiActivity : ComponentActivity() {
         dialog.show()
     }
 
+    /** Retry, plus the logs/updates/model settings help, once start-up failed or stopped. */
+    private fun showRetry() {
+        retryButton.visibility = View.VISIBLE
+        startupTools.visibility = View.VISIBLE
+    }
+
+    /** A normal start takes a few seconds; the help buttons appear only if this one takes longer. */
+    private fun revealStartupToolsLater() {
+        val shownAt = System.currentTimeMillis()
+        loadingContainer.postDelayed({
+            if (!isDestroyed && loadingContainer.visibility == View.VISIBLE &&
+                System.currentTimeMillis() - shownAt >= STARTUP_HELP_DELAY_MS) startupTools.visibility = View.VISIBLE
+        }, STARTUP_HELP_DELAY_MS)
+    }
+
     private fun initAndLaunchEngine(restart: Boolean = false, previousEngineToken: String? = null) {
         initializationJob?.cancel()
         loadingContainer.visibility = View.VISIBLE
         webView.visibility = View.INVISIBLE
         retryButton.visibility = View.GONE
+        revealStartupToolsLater()
         initializationJob = activityScope.launch {
             try {
                 var restartEngine = restart
@@ -1297,7 +1366,7 @@ class WebUiActivity : ComponentActivity() {
                             val step = startupStepText(lastStep)
                             withContext(Dispatchers.Main) {
                                 statusText.text = if (token == previousEngineToken && token != null)
-                                    UiText.of(this@WebUiActivity, "正在等待引擎重新启动...", "Waiting for the engine to restart...") else UiText.of(this@WebUiActivity, "正在等待本地服务凭据...", "Waiting for the local service credentials...") + step.orEmpty().let { if (it.isEmpty()) "" else "\n$it" }
+                                    UiText.of(this@WebUiActivity, "正在等待引擎重新启动...", "Waiting for the engine to restart...") else UiText.of(this@WebUiActivity, "正在启动 Agent 引擎...", "Starting the Agent engine...") + step.orEmpty().let { if (it.isEmpty()) "" else "\n$it" }
                             }
                             // A normal start publishes its token within seconds; a long stretch with neither a
                             // token nor a new start-up step means the engine process is gone or stuck.
@@ -1357,14 +1426,14 @@ class WebUiActivity : ComponentActivity() {
                 } else {
                     val step = startupStepText(withContext(Dispatchers.IO) { EngineStartupLog.lastStep(this@WebUiActivity) })?.let { "\n$it" }.orEmpty()
                     statusText.text = UiText.of(this@WebUiActivity, "本地 Agent 服务启动超时，请点击重试，或点右上角“导出日志”$step", "The local Agent service timed out; tap Retry or Export logs$step")
-                    retryButton.visibility = View.VISIBLE
+                    showRetry()
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e("AgentWebUI", "Failed to initialize local Agent", e)
                 statusText.text = UiText.of(this@WebUiActivity, "本地 Agent 初始化失败: ${e.message ?: e.javaClass.simpleName}", "Could not initialize the local Agent: ${e.message ?: e.javaClass.simpleName}")
-                retryButton.visibility = View.VISIBLE
+                showRetry()
             }
         }
     }
@@ -1492,8 +1561,16 @@ class WebUiActivity : ComponentActivity() {
     }
 
     private fun launchVoiceInput() {
+        if (VoiceInputSettings.useOffline(this)) {
+            startOfflineVoiceInput()
+            return
+        }
         if (!MobileVoiceInput.isAvailable(this)) {
-            android.widget.Toast.makeText(this, UiText.of(this@WebUiActivity, "手机没有可用的语音识别服务", "No speech recognition service is available on this phone"), android.widget.Toast.LENGTH_SHORT).show()
+            val message = if (OfflineSpeech.runtimeAvailable(this))
+                UiText.of(this, "手机没有可用的语音识别服务。可以在 菜单 → 本地模型 下载离线语音识别模型",
+                    "No speech recognition service is available on this phone. Download the offline speech model in Menu → Local models")
+            else UiText.of(this, "手机没有可用的语音识别服务", "No speech recognition service is available on this phone")
+            android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_LONG).show()
             return
         }
         runCatching { voiceInputLauncher.launch(MobileVoiceInput.recognizerIntent()) }

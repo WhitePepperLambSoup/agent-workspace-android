@@ -14,6 +14,7 @@ import math
 import os
 import re
 import secrets
+import sqlite3
 import sys
 import threading
 import time
@@ -27,6 +28,7 @@ from typing import Any, BinaryIO
 from urllib.parse import parse_qs, quote, urlparse
 from weakref import WeakValueDictionary
 
+from mobile_approval import APPROVAL_SCOPES
 from mobile_artifacts import write_workspace_file_coordinated
 from mobile_images import attachment_media_type, attachment_receipt
 from mobile_protocol import (
@@ -992,6 +994,17 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._reply(200, document)
             return
+        if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "discard":
+            try:
+                document = self._api.discard_empty_session(parts[1])
+            except KeyError:
+                self._reply(404, {"error": "unknown session"})
+                return
+            except (OSError, sqlite3.Error):
+                self._reply(500, {"error": "could not discard session"})
+                return
+            self._reply(200, document)
+            return
         if parts == ["mobile", "attachments"]:
             try:
                 attachment = self._api.import_mobile_attachment(payload)
@@ -1096,10 +1109,10 @@ class _Handler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[:2] == ["mobile", "approvals"] and parts[3] == "resolve":
             allowed = payload.get("allowed")
             scope = payload.get("scope", "once")
-            if not isinstance(allowed, bool) or scope not in {"once", "session"}:
+            if not isinstance(allowed, bool) or scope not in APPROVAL_SCOPES:
                 self._reply(
                     400,
-                    {"error": "allowed must be boolean and scope must be once or session"},
+                    {"error": "allowed must be boolean and scope must be once, session or task"},
                 )
                 return
             try:
@@ -1610,6 +1623,23 @@ class MobileGateway:
         if event_bus is not None:
             await event_bus.publish(event)
         return {"id": session_id, "archived": archived}
+
+    def discard_empty_session(self, session_id: str) -> dict[str, Any]:
+        return self._run_coro(
+            self._discard_empty_session(session_id), _MOBILE_OPERATION_TIMEOUT_SECONDS
+        )
+
+    async def _discard_empty_session(self, session_id: str) -> dict[str, Any]:
+        """Remove a conversation that was opened and left without anything in it.
+
+        Only a session without a single stored event goes: messages, tasks, renames and archiving
+        all append events, so nothing the user wrote or saw can be removed this way.
+        """
+        if not self.session_exists(session_id):
+            raise KeyError(session_id)
+        discard = getattr(self.controller, "discard_if_empty", None)
+        discarded = bool(await discard(session_id)) if callable(discard) else False
+        return {"id": session_id, "discarded": discarded}
 
     def apply_provider(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         return self._run_coro(self._apply_provider(payload), _MOBILE_OPERATION_TIMEOUT_SECONDS)

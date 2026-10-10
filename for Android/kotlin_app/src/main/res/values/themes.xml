@@ -12,4 +12,16 @@
         <item name="android:forceDarkAllowed" tools:targetApi="q">false</item>
         <item name="android:isLightTheme" tools:targetApi="q">true</item>
     </style>
+
+    <!-- Circle to ask: invisible while the screen is captured, then the screenshot fills it. -->
+    <style name="Theme.AgentWorkspace.ScreenAsk" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="p">shortEdges</item>
+        <item name="android:forceDarkAllowed" tools:targetApi="q">false</item>
+    </style>
 </resources>

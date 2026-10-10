@@ -1,11 +1,60 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Quick ask widget (4x1): a search-bar-like field that opens a new conversation, plus voice and photo.
+     No card behind it: the pills float on the wallpaper, so the bar keeps its height in any cell size. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="match_parent" android:layout_height="match_parent"
-    android:background="#202124" android:orientation="horizontal" android:padding="8dp">
-    <TextView android:id="@+id/widget_open" android:layout_width="0dp" android:layout_height="match_parent"
-        android:layout_weight="1" android:gravity="center_vertical" android:text="Agent Workspace"
-        android:textSize="16sp" android:textColor="#FFFFFF" android:maxLines="2" />
-    <ImageButton android:id="@+id/widget_voice" android:layout_width="48dp" android:layout_height="48dp"
-        android:contentDescription="Voice draft" android:src="@android:drawable/ic_btn_speak_now"
-        android:background="#202124" android:tint="#FFFFFF" />
+    android:id="@android:id/background"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingStart="4dp"
+    android:paddingEnd="4dp">
+
+    <LinearLayout
+        android:id="@+id/widget_open"
+        android:layout_width="0dp"
+        android:layout_height="52dp"
+        android:layout_weight="1"
+        android:background="@drawable/widget_pill"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="16dp"
+        android:paddingEnd="14dp">
+
+        <ImageView
+            android:layout_width="22dp"
+            android:layout_height="22dp"
+            android:importantForAccessibility="no"
+            android:src="@drawable/ic_widget_sparkle" />
+
+        <TextView
+            android:id="@+id/widget_hint"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="10dp"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:singleLine="true"
+            android:text="@string/widget_ask_hint"
+            android:textColor="@color/widget_text_tertiary"
+            android:textSize="16sp" />
+    </LinearLayout>
+
+    <ImageView
+        android:id="@+id/widget_voice"
+        android:layout_width="52dp"
+        android:layout_height="52dp"
+        android:layout_marginStart="8dp"
+        android:background="@drawable/widget_pill"
+        android:padding="14dp"
+        android:src="@drawable/ic_widget_mic" />
+
+    <ImageView
+        android:id="@+id/widget_camera"
+        android:layout_width="52dp"
+        android:layout_height="52dp"
+        android:layout_marginStart="8dp"
+        android:background="@drawable/widget_pill"
+        android:padding="14dp"
+        android:src="@drawable/ic_widget_camera" />
 </LinearLayout>

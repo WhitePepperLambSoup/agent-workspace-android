@@ -25,6 +25,7 @@ import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
 import java.time.Instant
+import java.time.OffsetDateTime
 
 class TaskNotificationSettings(context: Context, storageFile: File? = null) {
     private val storage = AtomicFile(storageFile ?: File(context.filesDir, "task-notification-settings.json"))
@@ -73,6 +74,7 @@ data class TaskNotificationSnapshot(
     val createdAtMillis: Long?,
     val approvalId: String?,
     val sequence: Long,
+    val updatedAtMillis: Long? = null,
 ) {
     companion object {
         private val states = setOf("queued", "running", "waiting_approval", "succeeded", "failed", "cancelled", "interrupted")
@@ -85,11 +87,16 @@ data class TaskNotificationSnapshot(
             return TaskNotificationSnapshot(
                 id, session, state,
                 value.optString("prompt_preview").take(256),
-                runCatching { Instant.parse(value.optString("created_at")).toEpochMilli() }.getOrNull(),
+                isoMillis(value.optString("created_at")),
                 value.optString("approval_id").takeUnless { it.isBlank() || it == "null" },
                 value.optLong("last_sequence"),
+                isoMillis(value.optString("updated_at")),
             )
         }
+
+        /** The engine writes "+00:00" offsets, which Instant.parse rejects before Java 12. */
+        fun isoMillis(text: String): Long? = runCatching { Instant.parse(text).toEpochMilli() }.getOrNull()
+            ?: runCatching { OffsetDateTime.parse(text).toInstant().toEpochMilli() }.getOrNull()
     }
 }
 

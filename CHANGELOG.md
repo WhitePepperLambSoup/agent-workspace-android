@@ -1,5 +1,83 @@
 # Changelog
 
+## 1.3.0 — 2026-10-11
+
+功能版：圈选提问、离线语音识别、桌面小组件，长任务更顺畅。Feature release: circle to ask, offline speech recognition, home screen widgets, and smoother long tasks.
+
+### 中文
+
+**圈选提问（新）**
+- 长按悬浮球选「圈选提问」：屏幕定格成截图，圈出想问的部分（或直接用整屏），就会开一个新对话把它发给 AI。
+- 没开无障碍服务时，每次通过系统的截屏授权，只截一帧就停止；开启无障碍服务后直接截图。屏幕上有密码框时不截图。
+
+**离线语音识别（新）**
+- 在「本地模型」下载 SenseVoice Small 语音模型（约 239 MB，可选 Hugging Face 或 ModelScope）后，输入框的麦克风会在手机上识别中文、英文、日语、韩语和粤语。录音不上传也不保存，说完停顿一下会自动结束。
+- AI 可以把工作区里的录音和视频转成带时间戳的文字，长录音会分段接续。
+- 识别引擎是 sherpa-onnx（内含 ONNX Runtime），只随 64 位 ARM 版本打包，安装包约增大 8.6 MB；x86_64 设备继续使用系统语音识别。
+
+**桌面小组件（新）**
+- 「快捷提问」（4×1）：像搜索框一样开新对话，也能直接语音或拍照提问。
+- 「任务动态」（4×2）：显示等待批准、正在执行或最近的任务，点一下直达那个对话。
+- 「常用任务」（4×2）：输入框上方的常用任务，点一下开新对话并填好指令。
+- 在菜单 →「全局入口」一键添加，或长按桌面空白处从「小组件」里添加。组件跟随系统浅色 / 深色；应用选液态玻璃风格时，组件也换成玻璃样式。
+
+**长任务**
+- 审批新增「本任务内都允许」：这个任务后续的网络请求和工具调用不再逐个询问，任务结束即失效；删除文件、写入长期记忆、操作其他应用仍然每次询问。此前在「仅工作区」模式下，一个多步骤任务可能要批准几十次。
+- AI 的回复、进度说明和总结都使用你提问的语言（此前中文提问有时会收到英文回复）。
+- 网页读取：支持 GBK / GB2312 等中文编码的网站；网站的 IPv6 地址连不通时自动改用其他地址；允许同一网站内的跳转（如 example.com 跳到 www.example.com）。
+- 网页搜索：改为读取必应网页结果，并按查询的语言发出请求，修复部分网络下搜索结果与问题毫不相关；DuckDuckGo 连不上时 10 分钟内优先用必应，不再每次先等它失败。
+- PDF：生成的中文 PDF 从约 8 MB 降到几百 KB（不再嵌入整套系统字体）；在 PDF 里复制、搜索文字也都正确。
+- 已在手机上验证：执行中追加要求、中途停止、应用被强行关闭后恢复任务。
+
+**更快、更省电**
+- 新对话发出第一条消息前的准备时间从几秒降到约 0.1 秒；冷启动快约 1 秒。
+- 界面空闲时不再持续重绘；等待审批时动画停下；进行中的动画降低帧率，更省电。
+
+**界面**
+- 空白的新会话不再越积越多：在空白会话上点「新建」会直接使用它，离开从未使用的空白会话会自动删除（写了草稿的会保留）。
+- 审批卡片用文字说明数据发往哪里、包含哪些内容；工具结果直接显示正文（例如转写出的文字），不再是一大段原始数据。
+- 启动等待页更简洁，「导出日志」「检查更新」「模型设置」只在启动变慢或失败时出现。
+
+**升级说明**
+- 覆盖安装或在应用内更新即可，数据保留。离线语音识别需要先在「本地模型」下载语音模型；小组件在菜单 →「全局入口」添加。
+
+### English
+
+**Circle to ask (new)**
+- Long-press the floating bubble and choose "Circle to ask": the screen freezes as a screenshot, and the part you circle (or the whole screen) goes to the AI in a new conversation.
+- Without the accessibility service, each capture goes through Android's screen-capture consent and takes a single frame; with the service on, the screenshot is taken directly. Nothing is captured while a password field is on screen.
+
+**Offline speech recognition (new)**
+- Download the SenseVoice Small speech model (about 239 MB, from Hugging Face or ModelScope) under Local models, and the microphone button recognises Chinese, English, Japanese, Korean and Cantonese on the phone. Recordings are neither uploaded nor kept; a short pause ends the input.
+- The AI can transcribe recordings and videos in the workspace into timestamped text, continuing long recordings in parts.
+- The recogniser is sherpa-onnx (with ONNX Runtime), packaged for 64-bit ARM only, adding about 8.6 MB to the APK; x86_64 devices keep using the system recogniser.
+
+**Home screen widgets (new)**
+- "Quick ask" (4×1): a search-bar-like entry to a new conversation, with voice and photo buttons.
+- "Task status" (4×2): the task waiting for approval, running or finished last; tap it to open that conversation.
+- "Quick tasks" (4×2): the quick tasks above the input; one tap starts a new conversation with the prompt filled in.
+- Add them from Menu → Global entry, or from Widgets after long-pressing the home screen. They follow the system's light or dark mode, and take a glass look when the app uses the liquid-glass style.
+
+**Long tasks**
+- New approval scope "Everything in this task": later network requests and tool calls of the same task no longer ask one by one, until the task ends. Deleting files, changing long-term memory and operating other apps still ask every time. In workspace mode a multi-step task could previously ask for approval dozens of times.
+- Replies, progress notes and summaries use the language of your question (a Chinese question sometimes got an English answer).
+- Reading web pages: sites in GBK / GB2312 and other Chinese encodings now load; when a site's IPv6 address is unreachable, its other addresses are tried; redirects within one site (example.com to www.example.com) are followed.
+- Web search reads Bing's result pages in the language of the query, fixing results unrelated to the question on some networks; when DuckDuckGo is unreachable, Bing goes first for 10 minutes instead of waiting on DuckDuckGo every time.
+- PDF: a Chinese PDF is now a few hundred KB instead of about 8 MB (the whole system font is no longer embedded), and copying or searching its text works correctly.
+- Verified on a phone: adding instructions to a running task, stopping it, and resuming after the app was force-closed.
+
+**Faster, lighter on the battery**
+- Preparing a new conversation's first message takes about 0.1 s instead of several seconds; a cold start is about 1 s quicker.
+- The interface no longer redraws continuously while idle; animations stop while waiting for an approval and run at a lower frame rate otherwise.
+
+**Interface**
+- Empty "New conversation" entries no longer pile up: New on an empty conversation reuses it, and an empty conversation you leave unused is removed (one with a draft is kept).
+- Approval cards say in words where data goes and what it contains; tool results show their main text, such as a transcript, instead of raw data.
+- The loading screen is cleaner: Export logs, Updates and Model settings appear only when start-up is slow or fails.
+
+**Upgrading**
+- Install over the existing app or update in the app; your data is kept. Offline speech recognition needs the speech model from Local models; add widgets from Menu → Global entry.
+
 ## 1.2.1 — 2026-10-10
 
 修复版：悬浮球截屏提问的截图会加到上一个会话。Hotfix: a floating-bubble screenshot could be attached to the previous conversation.

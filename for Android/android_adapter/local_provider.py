@@ -187,6 +187,11 @@ _COMPACT_TOOLS: dict[str, tuple[str, frozenset[str]]] = {
         "Add a workspace document to the user's knowledge base for later searches.",
         frozenset(),
     ),
+    "transcribe_audio": (
+        "Transcribe speech in a workspace audio file to text, offline. If complete is false, "
+        "call again with start_seconds = next_start_seconds.",
+        frozenset({"max_seconds"}),
+    ),
 }
 # The official template invites reasoning before each call; on a phone CPU every such
 # sentence costs seconds per step, so local prompts ask for the bare call instead.

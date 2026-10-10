@@ -200,6 +200,54 @@ def _projection(model_family, repository, revision, size, digest):
     }
 
 
+def _speech_model():
+    # sherpa-onnx's int8 export of SenseVoice Small (FunAudioLLM, FunASR Model License 1.1, which
+    # asks for the source and model name to be kept). ModelScope's copy, uploaded by a sherpa-onnx
+    # maintainer, has the same SHA-256; the token list ships in the APK (prepare_speech_runtime.py).
+    repository, revision, filename = (
+        "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
+        "2365baeacb507f821a0c8120fcee3d484dba7a07",
+        "model.int8.onnx",
+    )
+    mirror = "pengzhendong/sherpa-onnx-sense-voice-zh-en-ja-ko-yue"
+    mirror_revision = "73eca47697f980daa3d16112404174b6b950b514"
+    return {
+        "model_id": "sensevoice-small-int8",
+        "kind": "speech_recognition",
+        "format": "onnx",
+        "weights_file": "model.onnx",
+        "title": "SenseVoice Small · 离线语音识别",
+        "repository": repository,
+        "revision": revision,
+        "filename": filename,
+        "size_bytes": 239233841,
+        "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
+        "quantization": "int8",
+        "publisher": "FunAudioLLM",
+        "official_weights": False,
+        "license": "FunASR Model License 1.1",
+        "languages": ["zh", "en", "ja", "ko", "yue"],
+        "source_page": f"https://huggingface.co/{repository}/tree/{revision}",
+        "download_url": f"https://huggingface.co/{repository}/resolve/{revision}/{filename}?download=true",
+        "download_sources": [
+            {
+                "id": "huggingface",
+                "title": "Hugging Face",
+                "url": f"https://huggingface.co/{repository}/resolve/{revision}/{filename}?download=true",
+            },
+            {
+                "id": "modelscope",
+                "title": "ModelScope",
+                "url": f"https://modelscope.cn/models/{mirror}/resolve/{mirror_revision}/{filename}",
+            },
+        ],
+        "verified_at": "2026-10-10",
+    }
+
+
+SPEECH_CATALOG = (_speech_model(),)
+
+
 VISION_CATALOG = (
     _projection(
         "qwen3.5-0.8b",

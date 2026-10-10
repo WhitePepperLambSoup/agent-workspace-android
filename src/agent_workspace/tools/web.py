@@ -33,6 +33,19 @@ _ALLOWED_MEDIA_TYPES = frozenset(
     }
 )
 _ALLOWED_CHARSETS = frozenset({"ascii", "iso-8859-1", "us-ascii", "utf-8", "utf8"})
+# Legacy East Asian encodings still common on Chinese, Japanese and Korean sites. GB2312 and GBK
+# pages are decoded as their superset GB18030, so characters outside the declared set survive.
+_CJK_CHARSETS = {
+    "gb2312": "gb18030",
+    "gbk": "gb18030",
+    "x-gbk": "gb18030",
+    "gb18030": "gb18030",
+    "big5": "big5hkscs",
+    "big5-hkscs": "big5hkscs",
+    "shift_jis": "shift_jis",
+    "euc-jp": "euc_jp",
+    "euc-kr": "euc_kr",
+}
 
 
 class _TitleParser(HTMLParser):
@@ -59,13 +72,31 @@ class _TitleParser(HTMLParser):
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
-    def __init__(self, hostname: str, address: str, port: int, timeout: float) -> None:
+    def __init__(
+        self,
+        hostname: str,
+        address: str,
+        port: int,
+        timeout: float,
+        fallbacks: tuple[str, ...] = (),
+    ) -> None:
         self._ssl_context = ssl.create_default_context()
         super().__init__(hostname, port=port, timeout=timeout, context=self._ssl_context)
         self._address = address
+        self._fallbacks = fallbacks
 
     def connect(self) -> None:
-        raw_socket = socket.create_connection((self._address, self.port), self.timeout)
+        # The other validated addresses of the host are tried when one is unreachable.
+        failure: OSError | None = None
+        for address in (self._address, *self._fallbacks):
+            try:
+                raw_socket = socket.create_connection((address, self.port), self.timeout)
+                break
+            except OSError as exc:
+                failure = exc
+        else:
+            assert failure is not None
+            raise failure
         self.sock = self._ssl_context.wrap_socket(raw_socket, server_hostname=self.host)
 
 
@@ -101,7 +132,9 @@ def _normalize_public_https_url(raw_url: str) -> tuple[str, SplitResult, tuple[s
         records = socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
     except OSError as exc:
         raise ToolError("web_fetch DNS resolution failed") from exc
-    addresses = tuple(sorted({str(record[4][0]) for record in records}))
+    # Keep the resolver's order: it ranks addresses for this network (RFC 6724), so an IPv6
+    # address on an IPv4-only connection comes last instead of first.
+    addresses = tuple(dict.fromkeys(str(record[4][0]) for record in records))
     if not addresses:
         raise ToolError("web_fetch DNS resolution returned no addresses")
     try:
@@ -133,12 +166,38 @@ def _media_type_and_charset(value: str | None) -> tuple[str, str]:
         if separator and name.strip().casefold() == "charset":
             charset = raw_charset.strip().strip('"').casefold()
             break
+    if charset in _CJK_CHARSETS:
+        return media_type, _CJK_CHARSETS[charset]
     if charset not in _ALLOWED_CHARSETS:
         raise ToolError(f"web_fetch response charset is unsupported: {charset}")
     return media_type, charset
 
 
-def _web_fetch_sync(raw_url: str, maximum: int, timeout_seconds: int) -> str:
+def _same_site(origin: tuple[str, str, int], original: tuple[str, str, int]) -> bool:
+    """A redirect within one site: same scheme and port, and one host is the other's subdomain.
+
+    example.com -> www.example.com is common; a sibling (a.example.com -> b.example.com) or another
+    site stays blocked. Every hop is still resolved and checked for public addresses.
+    """
+    (scheme, host, port), (first_scheme, first_host, first_port) = origin, original
+    if (scheme, port) != (first_scheme, first_port) or not host or not first_host:
+        return False
+    return host.endswith(f".{first_host}") or first_host.endswith(f".{host}")
+
+
+def _web_fetch_sync(
+    raw_url: str,
+    maximum: int,
+    timeout_seconds: int,
+    headers: dict[str, str] | None = None,
+) -> str:
+    """Fetch a public HTTPS page; `headers` (internal callers only) may set User-Agent and
+    Accept-Language, never the encoding or connection handling."""
+    extra = {
+        name: value
+        for name, value in (headers or {}).items()
+        if name in {"User-Agent", "Accept-Language"}
+    }
     current_url = raw_url
     original_origin: tuple[str, str, int] | None = None
     redirects: list[str] = []
@@ -147,7 +206,7 @@ def _web_fetch_sync(raw_url: str, maximum: int, timeout_seconds: int) -> str:
         origin = (parsed.scheme, parsed.hostname or "", parsed.port or 443)
         if original_origin is None:
             original_origin = origin
-        elif origin != original_origin:
+        elif origin != original_origin and not _same_site(origin, original_origin):
             raise ToolError("web_fetch blocks cross-origin redirects")
         address = addresses[0]
         connection = _PinnedHTTPSConnection(
@@ -155,6 +214,7 @@ def _web_fetch_sync(raw_url: str, maximum: int, timeout_seconds: int) -> str:
             address,
             parsed.port or 443,
             float(timeout_seconds),
+            fallbacks=addresses[1:],
         )
         path = parsed.path or "/"
         if parsed.query:
@@ -168,6 +228,7 @@ def _web_fetch_sync(raw_url: str, maximum: int, timeout_seconds: int) -> str:
                     "Accept-Encoding": "identity",
                     "Connection": "close",
                     "User-Agent": "AgentWorkspace/0.1",
+                    **extra,
                 },
             )
             response = connection.getresponse()

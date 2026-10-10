@@ -5,4 +5,24 @@
     <color name="text_primary">#F0F6FC</color>
     <!-- Matches the web UI's light surface token; values-night overrides it. -->
     <color name="web_surface">#FFFFFF</color>
+    <!-- Home screen widgets follow the web UI's light tokens; values-night holds the dark ones. -->
+    <color name="widget_surface">#FFFFFF</color>
+    <color name="widget_field">#EEF1F0</color>
+    <color name="widget_text">#18201E</color>
+    <color name="widget_text_secondary">#56625F</color>
+    <color name="widget_text_tertiary">#85908D</color>
+    <color name="widget_accent">#0F766E</color>
+    <color name="widget_accent_soft">#DCEEEC</color>
+    <color name="widget_warning">#8A5A00</color>
+    <color name="widget_warning_soft">#FFF1D6</color>
+    <color name="widget_danger">#B42318</color>
+    <!-- Glass widgets (the app's liquid glass style): a launcher cannot blur what is behind a widget, so
+         the panel is a translucent fill with a lit rim and sheen; dense enough to keep text readable. -->
+    <color name="widget_glass_fill">#C2FFFFFF</color>
+    <color name="widget_glass_sheen">#66FFFFFF</color>
+    <color name="widget_glass_rim">#99FFFFFF</color>
+    <color name="widget_glass_glint">#FFFFFFFF</color>
+    <color name="widget_glass_glint_fade">#26FFFFFF</color>
+    <color name="widget_glass_inner_fill">#1418201E</color>
+    <color name="widget_glass_inner_rim">#B3FFFFFF</color>
 </resources>

@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Quick ask widget. The newer attributes (target cells, preview layout, description) apply on Android 12+. -->
 <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
-    android:minWidth="180dp" android:minHeight="80dp" android:updatePeriodMillis="0"
-    android:initialLayout="@layout/agent_widget" android:resizeMode="horizontal"
+    android:minWidth="250dp" android:minHeight="40dp" android:minResizeWidth="180dp"
+    android:targetCellWidth="4" android:targetCellHeight="1"
+    android:updatePeriodMillis="0" android:resizeMode="horizontal"
+    android:initialLayout="@layout/agent_widget" android:previewLayout="@layout/agent_widget"
+    android:description="@string/widget_quick_ask_description"
     android:widgetCategory="home_screen" />

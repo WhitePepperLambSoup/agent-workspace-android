@@ -24,10 +24,16 @@ android {
         applicationId = "com.agentworkspace.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10201
-        versionName = "1.2.1"
+        versionCode = 10300
+        versionName = "1.3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // Local test builds can inspect the console page over adb (chrome://inspect) while keeping
+        // the release signature; published builds never set AGENT_WEBVIEW_DEBUG.
+        // A resource, not a BuildConfig constant: Kotlin inlines constants and incremental builds
+        // then keep a stale value.
+        resValue("bool", "webview_debug",
+            (providers.environmentVariable("AGENT_WEBVIEW_DEBUG").orNull == "1").toString())
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
