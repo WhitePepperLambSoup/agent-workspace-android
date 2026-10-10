@@ -33,7 +33,7 @@ class MainActivity : ComponentActivity() {
 
         // 启动后台守护服务
         val daemonIntent = Intent(this, TermuxDaemonService::class.java)
-        startForegroundService(daemonIntent)
+        TermuxDaemonService.start(this, daemonIntent)
 
         setContent {
             val messages = remember { mutableStateListOf<ChatMessage>() }

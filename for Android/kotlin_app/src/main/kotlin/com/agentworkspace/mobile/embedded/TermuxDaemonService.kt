@@ -36,7 +36,24 @@ class TermuxDaemonService : Service() {
         const val EXTRA_PROVIDER_CONFIGURATION = "provider-configuration"
         const val EXTRA_EXPECTED_ENGINE_TOKEN = "expected-engine-token"
         const val STARTUP_FAILURE_FILE = "engine.failed"
+        private const val NOTIFICATION_ID = 2001
         private val engineMutex = Mutex()
+
+        /**
+         * Start (or deliver an intent to) the engine service. A visible app starts it as an
+         * ordinary service, which then promotes itself to the foreground: if Android refuses the
+         * foreground notification, the engine keeps running while the app is open instead of
+         * the process being killed for a broken startForegroundService promise. Callers in the
+         * background still need startForegroundService.
+         */
+        @JvmStatic
+        fun start(context: Context, intent: Intent) {
+            try {
+                context.startService(intent)
+            } catch (_: IllegalStateException) {
+                context.startForegroundService(intent)
+            }
+        }
         @Volatile private var currentEngineJob: Job? = null
     }
 
@@ -73,7 +90,7 @@ class TermuxDaemonService : Service() {
             acquire(30000L)
         }
 
-        startForeground(2001, buildNotification(com.agentworkspace.mobile.UiText.of(this@TermuxDaemonService, "Agent 内置引擎正在启动...", "Agent engine starting...")))
+        goForeground(buildNotification(com.agentworkspace.mobile.UiText.of(this@TermuxDaemonService, "Agent 内置引擎正在启动...", "Agent engine starting...")))
         notificationJob = serviceScope.launch {
             TaskNotificationMonitor(
                 this@TermuxDaemonService,
@@ -361,6 +378,31 @@ class TermuxDaemonService : Service() {
         if (unexpected) EngineRecovery.enqueue(this, 60)
         releaseWakeLock()
         AndroidTextToSpeech.shutdown()
+    }
+
+    /**
+     * The engine is a long-running local server, Android's "special use" foreground type. The
+     * dataSync type it used before is capped at 6 hours a day from Android 15: once that budget
+     * was spent, startForeground threw and the engine crashed on every start, so the app could
+     * not open at all. If Android still refuses (OEM limits), the engine runs as an ordinary
+     * service while the app is open rather than crashing.
+     */
+    private fun goForeground(notification: Notification) {
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 34) {
+                startForeground(NOTIFICATION_ID, notification,
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (failure: Exception) {
+            android.util.Log.w("AgentEngine", "Android refused the foreground notification; running while the app is open", failure)
+            runCatching {
+                File(filesDir, "agent-data/logs").mkdirs()
+                File(filesDir, "agent-data/logs/engine-restarts.log").appendText(
+                    "${java.time.Instant.now()} foreground refused: ${failure.javaClass.simpleName}: ${failure.message}\n")
+            }
+        }
     }
 
     override fun onTimeout(startId: Int, fgsType: Int) {

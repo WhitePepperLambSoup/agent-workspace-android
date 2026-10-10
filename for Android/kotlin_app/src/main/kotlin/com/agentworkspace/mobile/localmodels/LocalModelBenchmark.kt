@@ -174,7 +174,7 @@ object LocalModelBenchmark {
                     abort = { operation("abort") },
                     status = { operation("status") },
                     restart = {
-                        context.startForegroundService(Intent(context, TermuxDaemonService::class.java)
+                        TermuxDaemonService.start(context, Intent(context, TermuxDaemonService::class.java)
                             .setAction(EngineRecovery.ACTION_RECOVER)
                             .putExtra(TermuxDaemonService.EXTRA_EXPECTED_ENGINE_TOKEN, token))
                     },

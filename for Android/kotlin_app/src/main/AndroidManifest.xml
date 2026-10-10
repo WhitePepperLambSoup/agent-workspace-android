@@ -8,6 +8,8 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- The engine is a local server the user keeps open; dataSync is capped at 6 h a day. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Optional floating ball; the user grants "display over other apps" only if they turn it on. -->
@@ -112,7 +114,11 @@
             android:name=".embedded.TermuxDaemonService"
             android:exported="false"
             android:process=":engine"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="dataSync|specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Local AI agent engine: an on-device server that runs the user's tasks, models and tools while they work in the app" />
+        </service>
 
         <!-- 纯原生前台保活服务 -->
         <provider android:name=".localmodels.LocalModelControlProvider"

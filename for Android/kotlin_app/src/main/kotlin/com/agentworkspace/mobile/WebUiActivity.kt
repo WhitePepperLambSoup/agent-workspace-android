@@ -1225,7 +1225,7 @@ class WebUiActivity : ComponentActivity() {
                     putExtra(TermuxDaemonService.EXTRA_PROVIDER_CONFIGURATION, provider)
                     if (restartEngine) action = TermuxDaemonService.ACTION_RESTART
                 }
-                startForegroundService(daemonIntent)
+                TermuxDaemonService.start(this@WebUiActivity, daemonIntent)
 
                 statusText.text = UiText.of(this@WebUiActivity, "正在连接本地 WebUI 控制台...", "Connecting to the local console...")
                 val consoleUrl = withContext(Dispatchers.IO) {
@@ -1401,7 +1401,7 @@ class WebUiActivity : ComponentActivity() {
         }
         // Give Android a moment to reap the old process before the service starts a new one.
         delay(1500)
-        withContext(Dispatchers.Main) { startForegroundService(daemonIntent) }
+        withContext(Dispatchers.Main) { TermuxDaemonService.start(this@WebUiActivity, daemonIntent) }
     }
 
     /**

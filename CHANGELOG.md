@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.1.2 — 2026-10-10
+
+修复版：Android 15 及以上的手机可能打不开应用。Hotfix: the app could fail to open on Android 15 and later.
+
+### 中文
+
+- 修复在 Android 15 及以上的手机上（例如三星 Galaxy S23，Android 16）应用打不开、一直停在「正在连接」：后台引擎原本使用「数据同步」类前台服务，Android 15 起这类服务每 24 小时最多运行 6 小时。额度用完后系统会停止引擎，再打开应用时引擎一启动就崩溃，并反复重启。引擎现在改用 Android 为长期运行的本地服务提供的类型，不受这个时长限制；即使系统仍拒绝前台通知，引擎也会在应用打开期间照常运行，不再崩溃。
+- 同一原因也会让引擎在一天累计运行约 6 小时后被系统停止，提示「Android 已限制后台执行」。这一问题一并修复。
+
+**升级说明**
+- 覆盖安装即可，数据保留。已经打不开的手机，从本页下载 APK 覆盖安装后即可正常打开。
+
+### English
+
+- Fixed the app failing to open on Android 15 and later (for example a Samsung Galaxy S23 on Android 16), stuck at "Connecting": the engine ran as a "data sync" foreground service, which Android 15 limits to 6 hours in any 24. Once that budget was used, Android stopped the engine, and when the app was opened again the engine crashed on start and was restarted over and over. The engine now uses Android's foreground service type for long-running local services, which has no such limit, and if Android still refuses the foreground notification the engine keeps running while the app is open instead of crashing.
+- For the same reason the engine was stopped after about 6 hours of use in a day, with "Android restricted background work". This is fixed too.
+
+**Upgrading**
+- Install over the existing app; your data is kept. If the app no longer opens, download the APK from this release and install it over the current one.
+
 ## 1.1.1 — 2026-10-09
 
 本机模型改进版。On-device model release.
