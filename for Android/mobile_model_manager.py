@@ -21,6 +21,15 @@ from mobile_trained_model import LOCAL_MODEL_CATALOG
 
 _MANAGED_MODEL_FILES = ("model.gguf", "installed.json", "model.gguf.part", "partial.json")
 _PREFIX_CACHE = "prefix-cache"
+_SOURCE_IDS = ("huggingface", "modelscope")
+
+
+class _SourceFailed(Exception):
+    """One download source could not serve the file; another source still may."""
+
+    def __init__(self, message, *, discard_partial=False):
+        super().__init__(message)
+        self.discard_partial = discard_partial
 
 
 def _atomic_json(path: Path, value: dict) -> None:
@@ -68,14 +77,15 @@ class ModelManager:
                 if model.get("download_url") is not None:
                     raise ValueError("local training artifacts must be imported from a file")
                 continue
-            address = urlsplit(model["download_url"])
-            if (
-                address.scheme != "https"
-                or not address.hostname
-                or address.username
-                or address.fragment
-            ):
-                raise ValueError("model download requires an absolute HTTPS origin")
+            for source in self._sources(model):
+                address = urlsplit(source["url"])
+                if (
+                    address.scheme != "https"
+                    or not address.hostname
+                    or address.username
+                    or address.fragment
+                ):
+                    raise ValueError("model download requires an absolute HTTPS origin")
         self._client_factory = client_factory or (
             lambda: httpx.AsyncClient(
                 timeout=httpx.Timeout(30, read=60),
@@ -127,7 +137,30 @@ class ModelManager:
 
     @staticmethod
     def _identity(model):
-        return {key: model[key] for key in ("sha256", "size_bytes", "download_url", "revision")}
+        # Every source serves the same pinned bytes, so a partial file resumes from any of them.
+        return {key: model[key] for key in ("sha256", "size_bytes", "revision")}
+
+    @staticmethod
+    def _sources(model):
+        sources = model.get("download_sources") or [
+            {
+                "id": "default",
+                "title": urlsplit(model["download_url"]).hostname,
+                "url": model["download_url"],
+            }
+        ]
+        return [dict(source) for source in sources]
+
+    def _ordered_sources(self, model, source, prefer=None):
+        sources = self._sources(model)
+        ids = [item["id"] for item in sources]
+        if source != "auto":
+            if source not in ids:
+                raise ValueError("unknown download source")
+            return [item for item in sources if item["id"] == source]
+        # The preferred source first (when this model has it); the others are fallbacks
+        # tried in turn when it cannot be reached.
+        return sorted(sources, key=lambda item: item["id"] != prefer)
 
     def _validate_file(self, path, model):
         if path.is_symlink() or not path.resolve().is_relative_to(self.root):
@@ -227,14 +260,17 @@ class ModelManager:
             raise ValueError("this model has no compatible vision component")
         return self.installed_path(projection_id)
 
-    def start_download(self, model_id):
+    def start_download(self, model_id, source="auto", prefer=None):
         model = self._model(model_id)
         if model.get("local_artifact") is True:
             raise ValueError("Import this local training artifact from a file")
         if any(not job.done() for job in self._jobs.values()):
             raise ValueError("a model download is already active")
+        self._ordered_sources(model, source, prefer)
         self._update(model_id, state="queued", error=None)
-        task = asyncio.create_task(self.download(model_id), name="model-download-" + model_id)
+        task = asyncio.create_task(
+            self.download(model_id, source, prefer), name="model-download-" + model_id
+        )
         self._jobs[model_id] = task
         # Retrieve errors while preserving them in the persisted progress record.
         task.add_done_callback(lambda job: None if job.cancelled() else job.exception())
@@ -250,10 +286,70 @@ class ModelManager:
             self._update(model_id, state="paused", error=None)
         return self.snapshot()
 
-    async def download(self, model_id):
+    async def _fetch(self, model_id, model, source, partial):
+        """Fetch the rest of the file from one source, resuming whatever is already on disk."""
+        offset = partial.stat().st_size if partial.is_file() else 0
+        if offset >= model["size_bytes"]:
+            return
+        self._update(model_id, state="downloading", downloaded_bytes=offset, source=source["id"])
+        started, start_bytes, last_save = time.monotonic(), offset, time.monotonic()
+        headers = {"Range": f"bytes={offset}-"} if offset else {}
+        async with (
+            self._client_factory() as client,
+            client.stream("GET", source["url"], headers=headers) as response,
+        ):
+            if any(item.url.scheme != "https" for item in [*response.history, response]):
+                raise _SourceFailed("model host redirected to an insecure origin")
+            if response.status_code == 206:
+                match = re.fullmatch(
+                    r"bytes (\d+)-(\d+)/(\d+)",
+                    response.headers.get("Content-Range", ""),
+                )
+                if not match or tuple(map(int, match.groups())) != (
+                    offset,
+                    model["size_bytes"] - 1,
+                    model["size_bytes"],
+                ):
+                    raise _SourceFailed("invalid model download range", discard_partial=True)
+            elif response.status_code == 200:
+                offset = 0
+                start_bytes = 0
+            else:
+                raise _SourceFailed(f"model download returned HTTP {response.status_code}")
+            content_length = response.headers.get("Content-Length")
+            if content_length and int(content_length) != model["size_bytes"] - offset:
+                raise _SourceFailed(
+                    "model integrity failed: response length mismatch", discard_partial=True
+                )
+            with partial.open("ab" if offset else "wb") as output:
+                received = offset
+                async for chunk in response.aiter_bytes():
+                    if received + len(chunk) > model["size_bytes"]:
+                        raise _SourceFailed(
+                            "model integrity failed: oversized response", discard_partial=True
+                        )
+                    output.write(chunk)
+                    received += len(chunk)
+                    now = time.monotonic()
+                    if now - last_save >= 0.75 or received == model["size_bytes"]:
+                        output.flush()
+                        self._update(
+                            model_id,
+                            state="downloading",
+                            downloaded_bytes=received,
+                            bytes_per_second=round(
+                                (received - start_bytes) / max(now - started, 0.01)
+                            ),
+                        )
+                        last_save = now
+                output.flush()
+                os.fsync(output.fileno())
+
+    async def download(self, model_id, source="auto", prefer=None):
         model = self._model(model_id)
         if model.get("local_artifact") is True:
             raise ValueError("Import this local training artifact from a file")
+        sources = self._ordered_sources(model, source, prefer)
         directory = self._directory(model_id)
         directory.mkdir(parents=True, exist_ok=True)
         partial, metadata_file = directory / "model.gguf.part", directory / "partial.json"
@@ -266,8 +362,10 @@ class ModelManager:
             old_identity = None
         if partial.is_symlink():
             raise ValueError("unsafe partial model path")
-        if old_identity != identity or (
-            partial.is_file() and partial.stat().st_size > model["size_bytes"]
+        if (
+            not isinstance(old_identity, dict)
+            or any(old_identity.get(key) != value for key, value in identity.items())
+            or (partial.is_file() and partial.stat().st_size > model["size_bytes"])
         ):
             partial.unlink(missing_ok=True)
         offset = partial.stat().st_size if partial.is_file() else 0
@@ -276,55 +374,27 @@ class ModelManager:
                 raise ValueError("not enough storage space for this model")
             _atomic_json(metadata_file, identity)
             self._update(model_id, state="downloading", downloaded_bytes=offset, error=None)
-            started, start_bytes, last_save = time.monotonic(), offset, time.monotonic()
-            if offset < model["size_bytes"]:
-                headers = {"Range": f"bytes={offset}-"} if offset else {}
-                async with (
-                    self._client_factory() as client,
-                    client.stream("GET", model["download_url"], headers=headers) as response,
-                ):
-                    if any(item.url.scheme != "https" for item in [*response.history, response]):
-                        raise ValueError("model host redirected to an insecure origin")
-                    if response.status_code == 206:
-                        match = re.fullmatch(
-                            r"bytes (\d+)-(\d+)/(\d+)",
-                            response.headers.get("Content-Range", ""),
-                        )
-                        if not match or tuple(map(int, match.groups())) != (
-                            offset,
-                            model["size_bytes"] - 1,
-                            model["size_bytes"],
-                        ):
-                            raise ValueError("invalid model download range")
-                    elif response.status_code == 200:
-                        offset = 0
-                        start_bytes = 0
-                    else:
-                        raise ValueError(f"model download returned HTTP {response.status_code}")
-                    content_length = response.headers.get("Content-Length")
-                    if content_length and int(content_length) != model["size_bytes"] - offset:
-                        raise ValueError("model integrity failed: response length mismatch")
-                    with partial.open("ab" if offset else "wb") as output:
-                        received = offset
-                        async for chunk in response.aiter_bytes():
-                            if received + len(chunk) > model["size_bytes"]:
-                                raise ValueError("model integrity failed: oversized response")
-                            output.write(chunk)
-                            received += len(chunk)
-                            now = time.monotonic()
-                            if now - last_save >= 0.75 or received == model["size_bytes"]:
-                                output.flush()
-                                self._update(
-                                    model_id,
-                                    state="downloading",
-                                    downloaded_bytes=received,
-                                    bytes_per_second=round(
-                                        (received - start_bytes) / max(now - started, 0.01)
-                                    ),
-                                )
-                                last_save = now
-                        output.flush()
-                        os.fsync(output.fileno())
+            failures = []
+            for candidate in sources:
+                try:
+                    await self._fetch(model_id, model, candidate, partial)
+                    break
+                except (_SourceFailed, httpx.HTTPError) as failure:
+                    if getattr(failure, "discard_partial", False):
+                        partial.unlink(missing_ok=True)
+                    reason = (
+                        str(failure)
+                        if isinstance(failure, _SourceFailed)
+                        else "model download interrupted; check connection and storage"
+                    )
+                    failures.append((candidate["title"], reason))
+            else:
+                if len(failures) == 1:
+                    raise ValueError(failures[0][1])
+                raise ValueError(
+                    "every download source failed: "
+                    + "; ".join(f"{title}: {reason}" for title, reason in failures)
+                )
             self._update(model_id, state="verifying", downloaded_bytes=partial.stat().st_size)
             await asyncio.to_thread(self._validate_file, partial, model)
             final = directory / "model.gguf"

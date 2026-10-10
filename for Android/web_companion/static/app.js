@@ -25,7 +25,7 @@
     "btnTasksPage", "btnFilesPage", "btnSessionPage", "btnNotificationsPage",
     "btnTasksRefresh", "taskCenterStatus", "taskCenterList",
     "btnFileParent", "btnFilesRefresh", "workspaceFilePath", "workspaceFilesStatus", "workspaceFilesList",
-    "fileEditorPanel", "fileEditorMeta", "fileEditorStatus", "fileContentInput", "filePreviewPanel", "btnFileSource", "btnFilePreview", "btnFileInteractive", "btnReloadFile", "btnDiscardFileDraft", "btnSaveFile",
+    "fileEditorPanel", "fileEditorMeta", "fileEditorStatus", "fileContentInput", "filePreviewPanel", "btnFileSource", "btnFilePreview", "btnFileInteractive", "btnFileToKnowledge", "btnReloadFile", "btnDiscardFileDraft", "btnSaveFile",
     "sessionTitleInput", "btnRenameSession", "sessionRenameStatus",
     "taskNotificationsToggle", "notificationPermissionStatus", "btnNotificationSettings",
     "settingsUsage", "settingsPricing", "btnUsagePage", "usageScopeSelector", "usageDaysSelector", "usageSummary", "usageModelsList", "usageStatus", "btnUsageRefresh", "btnPricingPage",
@@ -172,6 +172,9 @@
   let workspaceParent = null;
   let fileEditor = null;
   let fileSaving = false;
+  let fileKnowledgeAdding = false;
+  // Document types the knowledge base reads; code files are left out to keep the toolbar quiet.
+  const knowledgeFiles = /\.(pdf|docx|xlsx|epub|html?|xhtml|txt|md|markdown|rst|csv|tsv|json|jsonl|log|ya?ml|toml|ini|xml|tex|srt)$/i;
   let filePreviewUrl = null;
   let renameSaving = false;
   let sessionOpening = null;
@@ -1152,7 +1155,7 @@
     if (settingsPage === "files" && page !== "files") { filesGeneration += 1; resetFilePreview(); }
     if (settingsPage === "usage" && page !== "usage") usageGeneration += 1;
     settingsPage = page;
-    const titles = { home: t("菜单"), model: t("模型与思考"), permission: t("执行权限"), appearance: t("界面偏好"), search: t("搜索会话"), tasks: t("任务中心"), files: t("工作区文件"), attachments: t("附件收件箱"), session: t("会话名称"), notifications: t("通知"), usage: t("Token 与费用"), pricing: t("模型费率"), doctor: t("设备与工具"), extensions: t("MCP 与扩展"), schedules: t("定时任务"), connections: t("设备连接"), outbox: t("待发送与接力"), workflows: t("可复用流程"), evaluations: t("任务评测"), localModels: t("本地模型"), workspaces: t("工作区"), quickTasks: t("快捷任务"), memory: t("记忆"), services: t("后台服务"), globalEntry: t("全局入口"), notificationRules: t("通知触发"), backup: t("备份与恢复") };
+    const titles = { home: t("菜单"), model: t("模型与思考"), permission: t("执行权限"), appearance: t("界面偏好"), search: t("搜索会话"), tasks: t("任务中心"), files: t("工作区文件"), attachments: t("附件收件箱"), session: t("会话名称"), notifications: t("通知"), usage: t("Token 与费用"), pricing: t("模型费率"), doctor: t("设备与工具"), extensions: t("MCP 与扩展"), schedules: t("定时任务"), connections: t("设备连接"), outbox: t("待发送与接力"), workflows: t("可复用流程"), evaluations: t("任务评测"), localModels: t("本地模型"), workspaces: t("工作区"), quickTasks: t("快捷任务"), memory: t("记忆"), knowledge: t("知识库"), services: t("后台服务"), globalEntry: t("全局入口"), notificationRules: t("通知触发"), backup: t("备份与恢复"), about: t("关于与更新") };
     document.querySelectorAll(".settings-page").forEach((element) => { element.hidden = true; });
     const selectedPage = document.getElementById(`settings${page[0].toUpperCase()}${page.slice(1)}`);
     if (selectedPage) {
@@ -1615,6 +1618,22 @@
     elements.btnFileSource.disabled = !loaded || fileSaving;
     elements.btnFileInteractive.hidden = !loaded || !/\.html?$/i.test(fileEditor.path) || typeof bridge?.workspaceFileAction !== "function";
     elements.btnFileInteractive.disabled = !loaded || fileSaving || fileDirty() || restartPending;
+    elements.btnFileToKnowledge.hidden = !loaded || !knowledgeFiles.test(fileEditor.path);
+    elements.btnFileToKnowledge.disabled = fileSaving || fileKnowledgeAdding;
+  }
+
+  async function addFileToKnowledge() {
+    const editor = fileEditor;
+    if (!editor?.loaded || fileKnowledgeAdding) return;
+    fileKnowledgeAdding = true;
+    syncFileControls();
+    try {
+      const added = await apiJson("/mobile/knowledge/import", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: editor.path, ...(editor.workspaceId ? { workspace_id: editor.workspaceId } : {}) }) });
+      if (fileEditor === editor) pageStatus(elements.fileEditorStatus, added?.duplicate ? t("这份文档已经在知识库里了") : t("已加入知识库，正在读取内容，可在“知识库”页查看"));
+    } catch (error) {
+      if (!disposed && fileEditor === editor) pageStatus(elements.fileEditorStatus, t("加入知识库失败: {0}", error.message), true);
+    } finally { fileKnowledgeAdding = false; if (!disposed) syncFileControls(); }
   }
 
   function resetFilePreview() {
@@ -2484,6 +2503,8 @@
 
   const toolTitles = {
     memory_write: t("更新记忆"), memory_search: t("查找记忆"), run_terminal: t("运行命令"),
+    knowledge_search: t("查阅知识库"), knowledge_add: t("添加到知识库"),
+    set_alarm: t("设置闹钟"), set_timer: t("设置计时"), list_calendar_events: t("查看日程"), add_calendar_event: t("添加日程"),
     start_service: t("启动后台服务"), stop_service: t("停止后台服务"), list_services: t("查看后台服务"), service_logs: t("查看服务输出"),
     browser: t("浏览器"), browser_view: t("查看网页"),
   };
@@ -2573,6 +2594,8 @@
       const card = appendMessageCard("user", t("您"), payload.text || payload.content || "");
       if (event.id) { eventCards.set(event.id, card); card.dataset.eventId = event.id; }
     } else if (event.type === "message.assistant" || (event.type === "message.created" && payload.role === "assistant")) {
+      // A step that only called tools has neither; its tool cards follow, as in the live view.
+      if (!(payload.text || payload.content) && !payload.reasoning) return;
       const card = appendMessageCard("assistant", "Agent", payload.text || payload.content || "", payload.reasoning);
       historyAssistantCard = card;
       if (event.id) eventCards.set(event.id, card);
@@ -4004,6 +4027,7 @@
   elements.btnFileParent.addEventListener("click", () => loadWorkspaceFiles(fileEditor ? workspacePath : (workspaceParent || "")));
   elements.btnFilesRefresh.addEventListener("click", () => loadWorkspaceFiles(workspacePath));
   elements.btnReloadFile.addEventListener("click", () => { if (fileEditor) void openWorkspaceFile(fileEditor.path, null, fileEditor.workspaceId); });
+  elements.btnFileToKnowledge.addEventListener("click", () => { void addFileToKnowledge(); });
   elements.btnDiscardFileDraft.addEventListener("click", discardFileDraft);
   elements.btnSaveFile.addEventListener("click", saveWorkspaceFile);
   elements.btnFilePreview.addEventListener("click", showFilePreview);

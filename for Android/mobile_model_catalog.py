@@ -1,5 +1,38 @@
 """Pinned GGUF weights, verified against publisher repository metadata on 2026-09-30."""
 
+# ModelScope serves the same files from a mainland China CDN, where Hugging Face is often
+# unreachable. Pinned to ModelScope commits; on 2026-10-10 every file listed below matched the
+# catalog SHA-256 and size there. Downloads are verified against the catalog either way.
+_MODELSCOPE_REVISIONS = {
+    "unsloth/Qwen3.5-0.8B-GGUF": "88467eb7c8e3b6e7894c794f373050d4dbc6ae8a",
+    "unsloth/Qwen3.5-2B-GGUF": "90057e31161eb95cc0bc1413c4f53b44de9b49c8",
+    "unsloth/Qwen3-0.6B-GGUF": "6091bc857fe0dffa19c581a7ccc7def1b126ff54",
+    "Qwen/Qwen3-0.6B-GGUF": "6abe20cd0aed577f4d0b267935868ecae190aee9",
+    "unsloth/Qwen3-1.7B-GGUF": "1e3f49488e445e2148d2e065ea0612c320da65c3",
+    "Qwen/Qwen3-1.7B-GGUF": "dc80e1956e7551cd4aa5309c914e767b69188639",
+}
+
+
+def _download_sources(repository, revision, filename):
+    sources = [
+        {
+            "id": "huggingface",
+            "title": "Hugging Face",
+            "url": f"https://huggingface.co/{repository}/resolve/{revision}/{filename}?download=true",
+        }
+    ]
+    mirror = _MODELSCOPE_REVISIONS.get(repository)
+    if mirror:
+        sources.append(
+            {
+                "id": "modelscope",
+                "title": "ModelScope",
+                "url": f"https://modelscope.cn/models/{repository}/resolve/{mirror}/{filename}",
+            }
+        )
+    return sources
+
+
 _HYBRID_DIGESTS = {
     "qwen3.5-0.8b-q4-k-m": "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517",
     "qwen3.5-0.8b-q8-0": "0ad885ffd4bb022fc4f0d33a3308fa108ef8613159d3b3a67e23abca056b7a6c",
@@ -34,6 +67,7 @@ def _model(model_id, title, repository, revision, filename, size, digest, quanti
         "license": "Apache-2.0",
         "source_page": f"https://huggingface.co/{repository}/tree/{revision}",
         "download_url": f"https://huggingface.co/{repository}/resolve/{revision}/{filename}?download=true",
+        "download_sources": _download_sources(repository, revision, filename),
         "minimum_available_ram_bytes": memory,
         "memory_note": (
             "Conservative 4096-token baseline estimate; choose automatic or a larger "
@@ -161,6 +195,7 @@ def _projection(model_family, repository, revision, size, digest):
         "official_weights": False,
         "source_page": f"https://huggingface.co/{repository}/tree/{revision}",
         "download_url": f"https://huggingface.co/{repository}/resolve/{revision}/{filename}?download=true",
+        "download_sources": _download_sources(repository, revision, filename),
         "verified_at": "2026-10-01",
     }
 

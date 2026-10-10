@@ -34,6 +34,7 @@ constexpr size_t MAX_TOKENIZER_PROMPT_BYTES = 32 * 1024 * 1024;
 constexpr size_t MAX_TOKENIZER_REQUEST_BYTES = 64 * 1024 * 1024;
 constexpr size_t MAX_OUTPUT_BYTES = 256 * 1024;
 constexpr size_t MAX_IMAGES = 4;
+constexpr size_t MAX_TOOL_GRAMMAR_BYTES = 256 * 1024;
 constexpr size_t MAX_RGB_IMAGE_BYTES = 512 * 512 * 3;
 std::mutex engine_mutex;
 std::mutex state_mutex;
@@ -167,8 +168,9 @@ void drop_prompt_cache() {
 }
 
 // Saved system-message states (prompt_cache.h) live beside each model's weights, so removing
-// the model removes them. The newest few are kept; each is tens of MiB.
-constexpr size_t MAX_PREFIX_FILES = 3;
+// the model removes them. The newest few are kept; each is tens of MiB. Requests of different
+// kinds (files, edits, web, commands) advertise different tools, so each kind has its own prefix.
+constexpr size_t MAX_PREFIX_FILES = 6;
 
 std::string prefix_directory(const std::string & id) {
     return model_root + "/" + id + "/prefix-cache";
@@ -357,6 +359,8 @@ json generate(const std::string & raw, const std::vector<std::string> & rgb_imag
             throw RequestFailure("invalid_request", "Native temperature exceeded its finite limit");
         if (request.contains("reuse_prompt") && !request["reuse_prompt"].is_boolean())
             throw RequestFailure("invalid_request", "Invalid native prompt reuse flag");
+        const std::string tool_grammar = request.contains("tool_grammar")
+            ? required_text(request, "tool_grammar", MAX_TOOL_GRAMMAR_BYTES) : "";
         // Benchmarks measure full evaluation and images use their own context.
         const bool reuse = request.value("reuse_prompt", false) && rgb_images.empty();
         if (!reuse) drop_prompt_cache();
@@ -554,6 +558,64 @@ json generate(const std::string & raw, const std::vector<std::string> & rgb_imag
             llama_sampler_chain_add(sampler.get(), llama_sampler_init_temp(temperature));
             llama_sampler_chain_add(sampler.get(), llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
         }
+        // Tool calls follow a grammar once the model opens one with <tool_call>; plain
+        // answers are never constrained. An unusable grammar leaves sampling unchanged.
+        std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)> grammar(nullptr, llama_sampler_free);
+        int grammar_resamples = 0;
+        if (!tool_grammar.empty()) {
+            static const char * const trigger_text = "<tool_call>";
+            llama_token trigger_token = LLAMA_TOKEN_NULL;
+            const bool single_token = llama_tokenize(vocabulary, trigger_text, 11, &trigger_token, 1, false, true) == 1;
+            const char * patterns[] = {trigger_text};
+            grammar.reset(single_token
+                ? llama_sampler_init_grammar_lazy_patterns(vocabulary, tool_grammar.c_str(), "root",
+                    nullptr, 0, &trigger_token, 1)
+                : llama_sampler_init_grammar_lazy_patterns(vocabulary, tool_grammar.c_str(), "root",
+                    patterns, 1, nullptr, 0));
+            generation_metadata["tool_grammar"] = grammar ? "lazy" : "invalid";
+        }
+        std::vector<llama_token_data> candidates;
+        auto sample_token = [&]() -> llama_token {
+            if (!grammar) return llama_sampler_sample(sampler.get(), context, -1);
+            const float * logits = llama_get_logits_ith(context, -1);
+            const int n_vocab = llama_vocab_n_tokens(vocabulary);
+            auto load = [&] {
+                candidates.resize(n_vocab);
+                for (int i = 0; i < n_vocab; ++i) candidates[i] = {i, logits[i], 0.0f};
+                return llama_token_data_array{candidates.data(), candidates.size(), -1, false};
+            };
+            auto choices = load();
+            llama_sampler_apply(sampler.get(), &choices);
+            llama_token token = choices.data[choices.selected].id;
+            // Checking the one sampled token is cheap; the whole vocabulary is filtered only
+            // when the model reaches for a token the call format does not allow.
+            llama_token_data single = {token, 1.0f, 0.0f};
+            llama_token_data_array check = {&single, 1, -1, false};
+            llama_sampler_apply(grammar.get(), &check);
+            if (single.logit == -INFINITY) {
+                auto allowed = load();
+                llama_sampler_apply(grammar.get(), &allowed);
+                bool any = false;
+                for (size_t i = 0; i < allowed.size && !any; ++i) any = allowed.data[i].logit != -INFINITY;
+                if (any) {
+                    llama_sampler_apply(sampler.get(), &allowed);
+                    token = allowed.data[allowed.selected].id;
+                    ++grammar_resamples;
+                } else {
+                    grammar.reset();
+                    generation_metadata["tool_grammar"] = "abandoned";
+                }
+            }
+            if (grammar) {
+                try { llama_sampler_accept(grammar.get(), token); }
+                catch (const std::exception &) {
+                    grammar.reset();
+                    generation_metadata["tool_grammar"] = "abandoned";
+                }
+            }
+            llama_sampler_accept(sampler.get(), token);
+            return token;
+        };
         const auto prompt_started = Clock::now();
         size_t cached_tokens = 0;
         if (vision) {
@@ -633,7 +695,7 @@ json generate(const std::string & raw, const std::vector<std::string> & rgb_imag
         while (generated < n_predict) {
             if (budget.stopped()) return interrupt();
             follow_thread_limit();
-            llama_token token = llama_sampler_sample(sampler.get(), context, -1);
+            llama_token token = sample_token();
             if (llama_vocab_is_eog(vocabulary, token)) { finish = "stop"; break; }
             char piece[256];
             int length = llama_token_to_piece(vocabulary, token, piece, sizeof(piece), 0, true);
@@ -659,6 +721,7 @@ json generate(const std::string & raw, const std::vector<std::string> & rgb_imag
             }
         }
         const int64_t elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started).count();
+        if (!tool_grammar.empty()) generation_metadata["tool_grammar_resamples"] = grammar_resamples;
         cache_guard.consistent = true;
         if (reuse) publish_prompt_cache();
         return generation_result(generation_metadata, text, n_prompt, generated,

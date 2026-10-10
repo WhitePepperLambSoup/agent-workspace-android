@@ -241,6 +241,10 @@ def configure_android_registry(
     if workspace is not None:
         registry._android_workspace = str(workspace)
     factories: dict[str, Any] = {"speak_text": AndroidSpeakTool}
+    from .clock_calendar import clock_available, clock_calendar_tools
+
+    if clock_available():
+        factories.update(clock_calendar_tools())
     from .browser import AndroidBrowserTool, AndroidBrowserViewTool, browser_available
 
     if browser_available():
@@ -251,6 +255,12 @@ def configure_android_registry(
         # Phone-wide memory (Memory page) replaces the per-workspace core memory tools.
         factories["memory_search"] = lambda: _memory_tools()[0]
         factories["memory_write"] = lambda: _memory_tools()[1]
+        # The phone-wide knowledge base (Knowledge page): the user's own documents.
+        from .knowledge_tools import KnowledgeAddTool, KnowledgeSearchTool
+
+        factories["knowledge_search"] = KnowledgeSearchTool
+        if workspace is not None:
+            factories["knowledge_add"] = lambda: KnowledgeAddTool(workspace)
     documents = document_status()
     native_pdf = bool(documents.get("available"))
     if workspace is not None:

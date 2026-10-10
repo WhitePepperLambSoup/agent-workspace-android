@@ -54,14 +54,49 @@ _ANDROID_SYSTEM_SUFFIX = (
 )
 
 
+_WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def _today_line() -> str:
+    """Today's date for relative dates ("tomorrow at 3"). Only the date: the time of day would
+    change the prompt every minute and defeat the local model's prompt cache."""
+    from datetime import date
+
+    from android_adapter.clock_calendar import phone_now
+
+    now = phone_now()
+    try:
+        today = date.fromisoformat(now["date"]) if now else date.today()
+    except (KeyError, TypeError, ValueError):
+        today = date.today()
+    zone = f", time zone {now['zone']}" if now and isinstance(now.get("zone"), str) else ""
+    return f"Today is {today.isoformat()} ({_WEEKDAYS[today.weekday()]}){zone}."
+
+
 def _android_system_suffix() -> str:
-    """Android guidance plus the phone-wide memory section, rebuilt for every task."""
+    """Android guidance plus the phone-wide memory and knowledge sections, rebuilt per task."""
     if not os.getenv("AGENT_WORKSPACE_DATA_DIR"):
         return _ANDROID_SYSTEM_SUFFIX
     from mobile_memory import memory_system_suffix
 
-    memory = memory_system_suffix()
-    return f"{_ANDROID_SYSTEM_SUFFIX}\n\n{memory}" if memory else _ANDROID_SYSTEM_SUFFIX
+    from mobile_knowledge import knowledge_system_suffix
+
+    sections = [
+        f"{_ANDROID_SYSTEM_SUFFIX}\n{_today_line()}",
+        memory_system_suffix(),
+        knowledge_system_suffix(),
+    ]
+    return "\n\n".join(section for section in sections if section)
+
+
+async def _knowledge_passages(prompt: str) -> dict[str, Any]:
+    """Knowledge-base passages for a new request, as run() options (none when nothing fits)."""
+    if not os.getenv("AGENT_WORKSPACE_DATA_DIR"):
+        return {}
+    from mobile_knowledge import knowledge_supplement
+
+    passages = await asyncio.to_thread(knowledge_supplement, prompt)
+    return {"supplemental_messages": passages} if passages else {}
 
 
 class MobileRuntimeNotReady(ValueError):
@@ -792,6 +827,7 @@ class MobileRuntimeController:
                         reasoning_effort=task.reasoning_effort,
                         system_suffix=_android_system_suffix(),
                         **({"images": images} if task.image_refs else {}),
+                        **(await _knowledge_passages(task.prompt)),
                         **options,
                     )
                 # Adapted services may return without a terminal tool event.

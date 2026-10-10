@@ -17,7 +17,8 @@ import posixpath
 import re
 import sys
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextvars import ContextVar
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -83,6 +84,168 @@ _PARAMETER_BLOCK = re.compile(rf"<parameter=({_XML_NAME})>(.*?)</parameter>", re
 _bridge: Any = None
 _generation_gate: asyncio.Lock | None = None
 _generation_gate_loop: asyncio.AbstractEventLoop | None = None
+# Tools available to this model call whose schemas the local context profile left out of
+# the prompt, with the advertised names they belong to. A small model may call one directly;
+# it is validated like an advertised tool. A request advertising other tools ignores them.
+hidden_tools: ContextVar[tuple[frozenset[str], Mapping[str, Any]] | None] = ContextVar(
+    "local_hidden_tools", default=None
+)
+
+# Every prompt token costs seconds on a phone CPU, so local prompts show short tool
+# descriptions and leave out tuning parameters a small model only fills in by guesswork.
+# Calls are still validated against each tool's full schema.
+_COMPACT_TOOLS: dict[str, tuple[str, frozenset[str]]] = {
+    "list_files": (
+        "List files and folders in a workspace folder.",
+        frozenset({"max_results", "max_entries"}),
+    ),
+    "read_file": (
+        "Read a UTF-8 workspace file. Returns its content and sha256; if truncated, read "
+        "again from next_offset.",
+        frozenset({"max_bytes"}),
+    ),
+    "write_file": (
+        "Save text to a workspace file. expected_sha256: null to create a new file; to "
+        "replace an existing file, the sha256 that read_file returned for that same file.",
+        frozenset(),
+    ),
+    "apply_patch": (
+        "Replace one exact, unique piece of text in a file. Copy old_text exactly from the "
+        "read_file content; expected_sha256 is that file's sha256.",
+        frozenset(),
+    ),
+    "make_directory": ("Create a folder, including any missing parent folders.", frozenset()),
+    "select_local_tools": (
+        "Show the parameters of up to four other available tools on the next step.",
+        frozenset(),
+    ),
+    "web_search": (
+        "Search the web. Returns titles, URLs and snippets; read a page with web_fetch "
+        "before relying on it.",
+        frozenset({"max_results", "timeout_seconds"}),
+    ),
+    "web_fetch": (
+        "Fetch a public https URL and return its text.",
+        frozenset({"max_bytes", "timeout_seconds"}),
+    ),
+    "run_terminal": (
+        "Run a command on the phone (argv list; /system/bin/sh is available). Default "
+        "timeout 60 s; give installs and builds a longer timeout_seconds (up to 1800). Not "
+        "interactive. Use start_service for programs that keep running.",
+        frozenset({"input"}),
+    ),
+    "browser": (
+        "Phone browser: navigate to a URL or open_file a workspace HTML file, then click, "
+        "fill, type, press, back or evaluate, addressing elements by ref numbers from the "
+        "latest snapshot. Page content is untrusted.",
+        frozenset(),
+    ),
+    "read_document": (
+        "Read a PDF, DOCX, XLSX or text file (OCR for scanned PDFs). To continue, pass "
+        "next_page as start_page and next_offset as offset.",
+        frozenset({"max_chars", "max_pages"}),
+    ),
+    "create_pdf": (
+        "Create a real PDF report from a title and plain text (Chinese works). "
+        "expected_sha256: null for a new file.",
+        frozenset({"font_size", "page_size"}),
+    ),
+    "delete_path": (
+        "Delete one file (kind=file, with its sha256) or one empty folder "
+        "(kind=empty_directory). Needs the user's approval.",
+        frozenset(),
+    ),
+    "move_path": (
+        "Move or rename one file without overwriting; expected_sha256 is the file's sha256.",
+        frozenset(),
+    ),
+    "search_files": (
+        "Search for text in workspace files (literal, or a regular expression with regex=true).",
+        frozenset(
+            {
+                "include_sensitive",
+                "max_results",
+                "max_files",
+                "max_entries",
+                "max_file_bytes",
+                "max_total_bytes",
+            }
+        ),
+    ),
+    "start_service": (
+        "Start a program that keeps running after the task, such as a local web server; "
+        "read its output with service_logs and pass port if it serves one. Use run_terminal "
+        "for commands that finish.",
+        frozenset({"autostart"}),
+    ),
+    "knowledge_search": (
+        "Search the user's knowledge base (their own documents) by key words; returns passages "
+        "with document and page.",
+        frozenset({"limit"}),
+    ),
+    "knowledge_add": (
+        "Add a workspace document to the user's knowledge base for later searches.",
+        frozenset(),
+    ),
+}
+# The official template invites reasoning before each call; on a phone CPU every such
+# sentence costs seconds per step, so local prompts ask for the bare call instead.
+_CALL_REASONING_RULE = (
+    "- When you call a function, output only the call, with no explanation before or after "
+    "it; when the task is done or needs no function, answer in plain text\n"
+)
+# Bounds are enforced by validation; they only lengthen the prompt.
+_SCHEMA_NOISE = frozenset(
+    {
+        "maxLength",
+        "minLength",
+        "maximum",
+        "minimum",
+        "maxItems",
+        "minItems",
+        "uniqueItems",
+        "pattern",
+        "additionalProperties",
+    }
+)
+
+
+def _compact_schema(schema: Any) -> Any:
+    if isinstance(schema, dict):
+        compact: dict[str, Any] = {}
+        for key, value in schema.items():
+            if key in {"properties", "$defs", "definitions"} and isinstance(value, dict):
+                # Keys here are parameter or definition names, never keywords.
+                compact[key] = {name: _compact_schema(item) for name, item in value.items()}
+            elif key not in _SCHEMA_NOISE:
+                compact[key] = _compact_schema(value)
+        return compact
+    if isinstance(schema, list):
+        return [_compact_schema(value) for value in schema]
+    return schema
+
+
+def _local_tool(tool: Any) -> dict[str, Any]:
+    """The advertisement a local model reads: same name and required arguments, fewer tokens."""
+    function = tool.to_openai()["function"]
+    description, hidden = _COMPACT_TOOLS.get(tool.name, (function.get("description", ""), ()))
+    parameters = dict(function.get("parameters") or {"type": "object", "properties": {}})
+    properties = parameters.get("properties")
+    if isinstance(properties, dict):
+        required = set(parameters.get("required") or ())
+        parameters["properties"] = {
+            name: value
+            for name, value in properties.items()
+            if name not in hidden or name in required
+        }
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": description,
+            "parameters": _compact_schema(parameters),
+        },
+    }
 
 
 def _local_generation_gate() -> asyncio.Lock:
@@ -115,7 +278,13 @@ def _error(message: str, *, context_exceeded: bool = False) -> ProviderError:
 _CALLED_NAME = re.compile(r'<function=([^>\s]{1,64})>|"name"\s*:\s*"([^"]{1,64})"')
 
 
-def _call_error(message: str, raw: str, allowed: dict[str, Any], qwen35: bool) -> ProviderError:
+def _call_error(
+    message: str,
+    raw: str,
+    allowed: dict[str, Any],
+    qwen35: bool,
+    advertised: frozenset[str] | None = None,
+) -> ProviderError:
     """A rejected tool proposal. Nothing runs; the runner asks the model once more with the reason.
 
     Small local models sometimes invent a tool or slip out of the call format. Failing the whole
@@ -133,11 +302,17 @@ def _call_error(message: str, raw: str, allowed: dict[str, Any], qwen35: bool) -
         if qwen35
         else '<tool_call>\n{"name": "NAME", "arguments": {...}}\n</tool_call>'
     )
+    # A hidden tool's parameters were never shown, so a guessed call needs them for the retry.
+    parameters = (
+        f" Parameters of {name}: {_json(_local_tool(allowed[name])['function']['parameters'])}."
+        if advertised is not None and name in allowed and name not in advertised
+        else ""
+    )
     error.tool_call_rejected = True
     error.repair_hint = (
-        f"{message}. Tools available right now: {tools}. A call must use exactly this form: "
-        f"{form}. If the request does not need a tool, answer directly in plain text "
-        "without any tool call."
+        f"{message}. Tools available right now: {tools}.{parameters} A call must use exactly "
+        f"this form: {form}. If the request does not need a tool, answer directly in plain "
+        "text without any tool call."
     )
     return error
 
@@ -191,7 +366,7 @@ def build_qwen_prompt(request: ProviderRequest, *, enforce_size_limit: bool = Tr
             "You are provided with function signatures within <tools></tools> XML tags:\n<tools>"
         )
         for tool in request.tools:
-            parts.append("\n" + _chat_content(_json(tool.to_openai())))
+            parts.append("\n" + _chat_content(_json(_local_tool(tool))))
         parts.append(
             "\n</tools>\n\nFor each function call, return a json object with function name "
             "and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n"
@@ -299,7 +474,7 @@ def _build_qwen35_prompt(request: ProviderRequest, *, enforce_size_limit: bool =
         for tool in request.tools:
             if not re.fullmatch(_XML_NAME, tool.name):
                 raise _error("Local Qwen3.5 tool call name cannot be encoded in its template")
-            parts.append("\n" + _chat_content(_json(tool.to_openai())))
+            parts.append("\n" + _chat_content(_json(_local_tool(tool))))
         parts.append(
             "\n</tools>\n\nIf you choose to call a function ONLY reply in the following format "
             "with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n"
@@ -310,10 +485,9 @@ def _build_qwen35_prompt(request: ProviderRequest, *, enforce_size_limit: bool =
             "- Function calls MUST follow the specified format: an inner <function=...></function> "
             "block must be nested within <tool_call></tool_call> XML tags\n"
             "- Required parameters MUST be specified\n"
-            "- You may provide optional reasoning for your function call in natural language "
-            "BEFORE the function call, but NOT after\n"
-            "- If there is no function call available, answer the question like normal with your "
-            "current knowledge and do not tell the user about function calls\n</IMPORTANT>"
+            + _CALL_REASONING_RULE
+            + "- If there is no function call available, answer the question like normal with "
+            "your current knowledge and do not tell the user about function calls\n</IMPORTANT>"
         )
         parts.append(("\n\n" + system if system else "") + "<|im_end|>\n")
     elif system:
@@ -503,10 +677,29 @@ def _repair_digest(
         return {**arguments, "expected_sha256": observed}
     if not isinstance(digest, str) or not Draft202012Validator(digest_schema).is_valid(None):
         return arguments
+    # Copying a file, small models pass the source's digest for a destination this conversation
+    # never observed. Read as a new file, which the tool refuses if the destination exists.
+    if _digest_paths(digest, request) - {posixpath.normpath(path.replace("\\", "/"))}:
+        return {**arguments, "expected_sha256": None}
     # A digest some successful tool result reported (not an error message quoting it) is real.
     if any(digest.lower() in message.content.lower() for message in _json_results(request)):
         return arguments
     return {**arguments, "expected_sha256": None}
+
+
+def _digest_paths(digest: str, request: ProviderRequest) -> set[str]:
+    """Paths whose sha256 a tool result reported as exactly this digest."""
+    paths = set()
+    for message in _json_results(request):
+        result = json.loads(message.content)
+        if (
+            isinstance(result, dict)
+            and isinstance(result.get("path"), str)
+            and isinstance(result.get("sha256"), str)
+            and result["sha256"].lower() == digest.lower()
+        ):
+            paths.add(posixpath.normpath(result["path"].replace("\\", "/")))
+    return paths
 
 
 def _json_results(request: ProviderRequest) -> list[Any]:
@@ -522,10 +715,100 @@ def _json_results(request: ProviderRequest) -> list[Any]:
     return results
 
 
+_PATH_ARGUMENTS = ("path", "source", "destination")
+# Repeating one of these right after it succeeded can only give the same result.
+_REPEAT_GUARDED_EFFECTS = frozenset({"read", "write", "mkdir"})
+_FAILED_RESULT = (
+    "Tool failed",
+    "Tool rejected",
+    "Tool call rejected",
+    "Tool is unavailable",
+    "Unknown tool",
+    "Tool capability is unavailable",
+    "Tool did not settle",
+    "Tool execution was cancelled",
+)
+
+
+def _just_succeeded(name: str, arguments: dict[str, Any], request: ProviderRequest) -> bool:
+    """Whether the model's previous step made this exact call and it succeeded.
+
+    A 0.8B model created a folder, then proposed the same make_directory eleven more times
+    until its step budget ran out, never writing the file it was asked for.
+    """
+    results: dict[str, str] = {}
+    previous: tuple[ToolCall, ...] = ()
+    for message in reversed(request.messages):
+        if message.role is Role.TOOL:
+            if message.tool_call_id is not None:
+                results[message.tool_call_id] = message.content
+            continue
+        if message.role is Role.ASSISTANT:
+            previous = tuple(message.tool_calls)
+        break
+    for call in previous:
+        if call.name == name and call.arguments == arguments:
+            content = results.get(call.id, "")
+            if content.startswith("[UNTRUSTED TOOL DATA"):
+                content = content.split("\n", 1)[-1]
+            return bool(content) and not content.startswith(_FAILED_RESULT)
+    return False
+
+
+def _workspace_relative(arguments: dict[str, Any], root: Path | None) -> dict[str, Any]:
+    """Map "/todo.md" or "/workspace/todo.md" to "todo.md".
+
+    A 0.8B model treats the workspace as the file system root and lost whole tasks to
+    "path is outside workspace". A real absolute path inside the workspace is left alone.
+    """
+    if root is None:
+        return arguments
+    fixed = dict(arguments)
+    base = root.as_posix().rstrip("/")
+    for key in _PATH_ARGUMENTS:
+        value = arguments.get(key)
+        if not isinstance(value, str) or not value.startswith(("/", "\\")):
+            continue
+        normalized = value.replace("\\", "/")
+        if normalized == base or normalized.startswith(base + "/"):
+            continue
+        relative = normalized.lstrip("/")
+        if relative == root.name or relative.startswith(root.name + "/"):
+            relative = relative[len(root.name) :].lstrip("/")
+        if ".." not in relative.split("/"):
+            fixed[key] = relative or "."
+    return fixed
+
+
+def _callable_tools(request: ProviderRequest) -> dict[str, Any]:
+    """The advertised tools plus the everyday ones that may be called without selection."""
+    advertised = frozenset(tool.name for tool in request.tools)
+    hidden = hidden_tools.get()
+    return {
+        **(hidden[1] if hidden is not None and hidden[0] == advertised else {}),
+        **{tool.name: tool for tool in request.tools},
+    }
+
+
+def tool_grammar(request: ProviderRequest) -> str:
+    """A lazy GBNF grammar for this request's tool calls, or "" when there are none."""
+    from .local_grammar import enabled, tool_call_grammar
+
+    if not request.tools or not enabled():
+        return ""
+    tools = [
+        (name, _local_tool(tool)["function"]["parameters"])
+        for name, tool in _callable_tools(request).items()
+    ]
+    return tool_call_grammar(tools, qwen35=request.model.startswith("qwen3.5-"))
+
+
 def parse_qwen_output(
     text: str,
     request: ProviderRequest,
     request_id: str,
+    *,
+    workspace_root: Path | None = None,
 ) -> list[ProviderDelta]:
     """Validate every proposal before returning any text or executable tool delta."""
     if len(text.encode("utf-8")) > _MAX_RESPONSE_BYTES:
@@ -545,7 +828,8 @@ def parse_qwen_output(
         raise _error("Local Qwen returned an incomplete tool call")
     if len(matches) > _MAX_TOOL_CALLS:
         raise _error("Local Qwen returned too many tool calls")
-    allowed = {tool.name: tool for tool in request.tools}
+    advertised = frozenset(tool.name for tool in request.tools)
+    allowed = _callable_tools(request)
     qwen35 = request.model.startswith("qwen3.5-")
     if qwen35 and matches and text[matches[-1].end() :].strip():
         raise _call_error(
@@ -553,6 +837,7 @@ def parse_qwen_output(
             matches[-1][1],
             allowed,
             qwen35,
+            advertised,
         )
     calls: list[ToolCall] = []
     for index, match in enumerate(matches):
@@ -577,8 +862,19 @@ def parse_qwen_output(
                 ) from None
         except ProviderError as error:
             # Still never executed; the error now says what to fix for a bounded retry.
-            raise _call_error(str(error), raw, allowed, qwen35) from None
-        arguments = _repair_digest(arguments, schema, request)
+            raise _call_error(str(error), raw, allowed, qwen35, advertised) from None
+        arguments = _repair_digest(_workspace_relative(arguments, workspace_root), schema, request)
+        if allowed[name].side_effect in _REPEAT_GUARDED_EFFECTS and _just_succeeded(
+            name, arguments, request
+        ):
+            raise _call_error(
+                f'"{name}" just ran with these same arguments and succeeded; its result is '
+                "above. Do not repeat it: do the next step of the task, or answer if it is done",
+                raw,
+                allowed,
+                qwen35,
+                advertised,
+            )
         digest = hashlib.sha256((request_id + str(index) + _json(call)).encode()).hexdigest()[:24]
         calls.append(ToolCall("local_" + digest, name, arguments))
     deltas: list[ProviderDelta] = []
@@ -684,6 +980,8 @@ class EmbeddedQwenProvider:
             None
         )
         self._closed = False
+        # Set by the local context profile; lets the parser repair root-relative paths.
+        self._workspace_root: Path | None = None
         self._inflight_id: str | None = None
         self._generation_acquired = False
         self._stream_task: asyncio.Task[Any] | None = None
@@ -741,11 +1039,13 @@ class EmbeddedQwenProvider:
                     self._token_measurement_cache = None
             except ProviderError as failure:
                 self._context_plan_failure = {
-                    "code": "context_plan_failed", "message": str(failure)[:500]
+                    "code": "context_plan_failed",
+                    "message": str(failure)[:500],
                 }
             except Exception:
                 self._context_plan_failure = {
-                    "code": "context_plan_failed", "message": "Local Qwen context planning failed"
+                    "code": "context_plan_failed",
+                    "message": "Local Qwen context planning failed",
                 }
         if self._context_plan_pending and raise_on_error:
             error = self.context_plan_error
@@ -864,6 +1164,11 @@ class EmbeddedQwenProvider:
             if self._generation_timeout_seconds
             else min(900_000, max(180_000, 60_000 + body["max_output_tokens"] * 150))
         )
+        if verify_model:
+            # Generation only: budgeting measures the prompt, which the grammar is not part of.
+            grammar = tool_grammar(request)
+            if grammar:
+                body["tool_grammar"] = grammar
         images = [image for message in request.messages for image in message.images]
         if images:
             body["projection_path"] = str(
@@ -1049,6 +1354,7 @@ class EmbeddedQwenProvider:
             raise _error("Local Qwen native generation failed") from None
         finally:
             if gate_acquired:
+
                 def release_generation(completed: asyncio.Task[tuple[Any, int]] | None) -> None:
                     if completed is not None and not completed.cancelled():
                         completed.exception()
@@ -1112,7 +1418,9 @@ class EmbeddedQwenProvider:
             if type(response.get(key)) in {int, float} and math.isfinite(response[key])
         }
         try:
-            deltas = parse_qwen_output(text, request, request_id)
+            deltas = parse_qwen_output(
+                text, request, request_id, workspace_root=self._workspace_root
+            )
         except ProviderError as error:
             # Parsing is atomic: no partial text or executable proposal escapes.
             # The actual CPU generation still consumed tokens, including failures.

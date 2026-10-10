@@ -814,6 +814,9 @@ class _Handler(BaseHTTPRequestHandler):
         if parts == ["mobile", "attachments", "upload"]:
             self._upload_attachment()
             return
+        if parts == ["mobile", "knowledge", "upload"]:
+            self._upload_knowledge()
+            return
         payload = self._read_json(
             _MAX_ATTACHMENT_JSON_BYTES if parts == ["mobile", "attachments"] else _MAX_BODY_BYTES
         )
@@ -838,6 +841,16 @@ class _Handler(BaseHTTPRequestHandler):
                 self._reply(409, {"error": str(exc), "code": "restart_required"})
             except (TypeError, ValueError) as exc:
                 self._reply(400, {"error": " ".join(str(exc).split())[:1500]})
+            return
+        if parts == ["mobile", "knowledge", "import"]:
+            try:
+                self._reply(202, self._api.import_knowledge_workspace_file(payload))
+            except KeyError:
+                self._reply(404, {"error": "unknown session or workspace"})
+            except (ValueError, TypeError, ToolError) as exc:
+                self._reply(400, {"error": " ".join(str(exc).split())[:2000]})
+            except OSError:
+                self._reply(500, {"error": "could not read the workspace file"})
             return
         if self._api.management is not None:
             managed = self._api._run_coro(
@@ -1148,35 +1161,63 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._reply(404, {"error": "not found"})
 
-    def _upload_attachment(self) -> None:
+    def _upload_body(self) -> tuple[Any, int | None]:
+        """The raw upload body and its declared length, refusing ambiguous HTTP framing."""
+        length_headers = self.headers.get_all("Content-Length", [])
+        transfer_headers = self.headers.get_all("Transfer-Encoding", [])
+        if (
+            len(length_headers) > 1
+            or len(transfer_headers) > 1
+            or (length_headers and transfer_headers)
+        ):
+            raise ValueError("ambiguous upload body framing")
+        if transfer_headers:
+            if transfer_headers[0].strip().lower() != "chunked":
+                raise ValueError("unsupported upload Transfer-Encoding")
+            return _ChunkedUploadReader(self.rfile), None
+        if length_headers:
+            raw_length = length_headers[0].strip()
+            if not re.fullmatch(r"[0-9]{1,19}", raw_length):
+                raise ValueError("invalid Content-Length")
+            return self.rfile, int(raw_length)
+        return self.rfile, 0
+
+    def _upload_knowledge(self) -> None:
+        """A document for the knowledge base, streamed as the raw request body."""
         query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
-        body = self.rfile
         consumed = False
         previous_timeout = self.connection.gettimeout()
         self.connection.settimeout(60)
         try:
             if any(len(values) != 1 for values in query.values()):
                 raise ValueError("upload parameters may not repeat")
-            length_headers = self.headers.get_all("Content-Length", [])
-            transfer_headers = self.headers.get_all("Transfer-Encoding", [])
-            if (
-                len(length_headers) > 1
-                or len(transfer_headers) > 1
-                or (length_headers and transfer_headers)
-            ):
-                raise ValueError("ambiguous upload body framing")
-            length = None
-            if transfer_headers:
-                if transfer_headers[0].strip().lower() != "chunked":
-                    raise ValueError("unsupported upload Transfer-Encoding")
-                body = _ChunkedUploadReader(self.rfile)
-            elif length_headers:
-                raw_length = length_headers[0].strip()
-                if not re.fullmatch(r"[0-9]{1,19}", raw_length):
-                    raise ValueError("invalid Content-Length")
-                length = int(raw_length)
-            else:
-                length = 0
+            body, length = self._upload_body()
+            document = self._api.import_knowledge_upload(
+                query.get("filename", [""])[0], body, content_length=length
+            )
+            consumed = True
+        except (ValueError, TypeError) as error:
+            self._reject_request(400, {"error": " ".join(str(error).split())[:2000]})
+        except TimeoutError:
+            self._reply(408, {"error": "upload timed out; retry this file"})
+        except OSError:
+            self._reject_request(500, {"error": "could not save the document"})
+        else:
+            self._reply(201, document)
+        finally:
+            self.connection.settimeout(previous_timeout)
+            if not consumed:
+                self.close_connection = True
+
+    def _upload_attachment(self) -> None:
+        query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+        consumed = False
+        previous_timeout = self.connection.gettimeout()
+        self.connection.settimeout(60)
+        try:
+            if any(len(values) != 1 for values in query.values()):
+                raise ValueError("upload parameters may not repeat")
+            body, length = self._upload_body()
             attachment = self._api.import_mobile_attachment_stream(
                 {name: values[0] for name, values in query.items()}, body, content_length=length
             )
@@ -1682,6 +1723,69 @@ class MobileGateway:
         return self._run_coro(
             self._import_mobile_attachment(payload), _MOBILE_OPERATION_TIMEOUT_SECONDS
         )
+
+    def import_knowledge_workspace_file(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Add a file of a workspace to the knowledge base (the Files page's book button)."""
+        from mobile_knowledge import get_knowledge_store
+
+        from agent_workspace.tools.paths import is_sensitive_workspace_path
+
+        raw = payload.get("path")
+        if not isinstance(raw, str) or not raw:
+            raise ValueError("a workspace file path is required")
+        runtime = self.scoped_runtime(
+            payload.get("workspace_id"), session_id=payload.get("session_id")
+        )
+        paths = WorkspacePaths(runtime_workspace(runtime))
+        source = paths.resolve(raw)
+        relative = paths.relative(source)
+        if is_sensitive_workspace_path(relative):
+            raise ValueError("sensitive files (keys, credentials, .env) cannot be added")
+        if not source.is_file():
+            raise ValueError(f"not a file: {relative}")
+        store = get_knowledge_store(getattr(getattr(self, "management", None), "data", None))
+        return store.add_file(source, source.name, origin="workspace", origin_path=relative)
+
+    def import_knowledge_upload(
+        self, filename: Any, source: Any, *, content_length: int | None
+    ) -> dict[str, Any]:
+        """Stream an uploaded document into the knowledge base's private folder and queue it."""
+        from mobile_knowledge import (
+            MAX_FILE_BYTES,
+            KnowledgeError,
+            checked_filename,
+            get_knowledge_store,
+        )
+
+        if content_length is not None and (type(content_length) is not int or content_length < 0):
+            raise ValueError("invalid Content-Length")
+        checked_filename(filename)  # refuse an unreadable type before receiving the body
+        too_large = f"the file is larger than {MAX_FILE_BYTES // (1024 * 1024)} MiB; split it first"
+        if content_length is not None and content_length > MAX_FILE_BYTES:
+            raise KnowledgeError(too_large)
+        management = getattr(self, "management", None)
+        store = get_knowledge_store(getattr(management, "data", None))
+        store.incoming.mkdir(parents=True, exist_ok=True)
+        partial = store.incoming / f"upload-{secrets.token_hex(8)}.part"
+        size = 0
+        try:
+            with partial.open("wb") as target:
+                while content_length is None or size < content_length:
+                    wanted = 1 << 20
+                    if content_length is not None:
+                        wanted = min(wanted, content_length - size)
+                    block = source.read(wanted)
+                    if not block:
+                        if content_length is not None:
+                            raise ValueError("incomplete upload body")
+                        break
+                    size += len(block)
+                    if size > MAX_FILE_BYTES:
+                        raise KnowledgeError(too_large)
+                    target.write(block)
+            return store.add_file(partial, filename, origin="upload", move=True)
+        finally:
+            partial.unlink(missing_ok=True)
 
     def import_mobile_attachment_stream(
         self, payload: Mapping[str, Any], source: BinaryIO, *, content_length: int | None

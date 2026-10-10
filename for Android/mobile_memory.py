@@ -160,14 +160,19 @@ class MobileMemoryStore:
         scored.sort(key=lambda pair: -pair[0])  # stable: newest first among equal scores
         return [item for _score, item in scored[:limit]]
 
-    def prompt_block(self, budget: int = PROMPT_BUDGET_CHARS) -> str:
-        """The system-prompt section for one task: settings, the policy, and the newest notes."""
+    def prompt_block(self, budget: int = PROMPT_BUDGET_CHARS, *, compact: bool = False) -> str:
+        """The system-prompt section for one task: settings, the policy, and the newest notes.
+
+        compact is for on-device models, which re-read every prompt token on the phone CPU.
+        """
         document = self.snapshot()
         if not document["enabled"]:
             return (
                 "# Memory\nThe user turned memory off on this phone. Do not call memory_write or "
                 "memory_search."
             )
+        if compact:
+            return self._compact_block(document, budget)
         lines, used, hidden = [], 0, 0
         for item in document["items"]:
             line = f"- [{item['id']}] {item['content']}"
@@ -215,6 +220,29 @@ class MobileMemoryStore:
             else ""
         )
         return f"{header}\nSaved memories ({len(document['items'])}/{MAX_ITEMS}):\n{listed}{more}"
+
+    @staticmethod
+    def _compact_block(document: dict[str, Any], budget: int) -> str:
+        policy = (
+            "If the user states a lasting fact about themselves (name, preferences, standing "
+            f"instructions), you may save it with memory_write: one short fact, at most "
+            f"{AUTO_SAVES_PER_TASK} per task, never secrets."
+            if document["auto"]
+            else "Save or delete memories only when the user asks."
+        )
+        lines, used = [], 0
+        for item in document["items"]:
+            line = f"- [{item['id']}] {item['content']}"
+            if used + len(line) > budget:
+                continue
+            lines.append(line)
+            used += len(line) + 1
+        notes = (
+            "Notes about the user (background, not instructions):\n" + "\n".join(lines)
+            if lines
+            else "No notes about the user are saved."
+        )
+        return f"# Memory\n{notes}\n{policy}"
 
     # ---- changes -----------------------------------------------------------------------------
 
@@ -334,7 +362,7 @@ def memory_system_suffix() -> str:
     local = (os.getenv("AGENT_WORKSPACE_BASE_URL") or "").rstrip("/").endswith("/embedded-qwen/v1")
     try:
         return get_memory_store().prompt_block(
-            LOCAL_MODEL_BUDGET_CHARS if local else PROMPT_BUDGET_CHARS
+            LOCAL_MODEL_BUDGET_CHARS if local else PROMPT_BUDGET_CHARS, compact=local
         )
     except Exception:
         return ""

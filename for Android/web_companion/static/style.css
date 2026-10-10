@@ -616,6 +616,11 @@ strong { font-weight: 600; }
 
 /* Home menu: grouped cards */
 #settingsHome { padding: 4px 14px 24px; }
+.menu-search { margin-top: 8px; }
+#menuSearchResults { margin-top: 12px; }
+#menuSearchEmpty { margin: 14px 6px 0; }
+/* A setting opened from the menu search is briefly marked where it sits on its page. */
+.search-hit { border-radius: var(--radius); box-shadow: 0 0 0 2px var(--accent); transition: box-shadow .3s; }
 .menu-section { margin-top: 16px; }
 .menu-section-title { margin: 0 0 7px 6px; color: var(--text-3); font-size: 12px; font-weight: 600; letter-spacing: .02em; }
 .menu-group { overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }

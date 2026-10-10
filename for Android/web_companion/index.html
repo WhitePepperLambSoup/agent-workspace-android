@@ -93,11 +93,16 @@
       <div class="sheet-header"><button id="settingsBackButton" class="icon-button" type="button" title="返回" aria-label="返回" hidden><span data-icon="chevron-left"></span></button><h2 id="settingsTitle">菜单</h2><div id="settingsHeaderActions" class="sheet-actions"></div><button id="settingsCloseButton" class="icon-button" type="button" title="关闭" aria-label="关闭"><span data-icon="x"></span></button></div>
       <div id="settingsScrollBody">
       <div id="settingsHome" class="settings-page">
+        <div class="menu-search">
+          <input id="menuSearchInput" type="search" autocomplete="off" spellcheck="false" placeholder="搜索功能与设置" aria-label="搜索功能与设置">
+        </div>
+        <div id="menuSearchResults" class="menu-group" hidden></div>
+        <p id="menuSearchEmpty" class="page-status" role="status" hidden>没有找到相关的功能或设置</p>
         <section class="menu-section" aria-labelledby="menuSectionConversation">
           <h3 id="menuSectionConversation" class="menu-section-title">会话</h3>
           <div class="menu-group">
-            <button id="btnSearchPage" class="menu-row" type="button"><span data-icon="search"></span><span>搜索所有会话</span><span data-icon="chevron-right"></span></button>
-            <button id="btnTasksPage" class="menu-row" type="button"><span data-icon="list-checks"></span><span>任务中心</span><span data-icon="chevron-right"></span></button>
+            <button id="btnSearchPage" class="menu-row" type="button" data-keywords="历史 查找 聊天记录 history find"><span data-icon="search"></span><span>搜索所有会话</span><span data-icon="chevron-right"></span></button>
+            <button id="btnTasksPage" class="menu-row" type="button" data-keywords="运行中 排队 后台任务 tasks queue"><span data-icon="list-checks"></span><span>任务中心</span><span data-icon="chevron-right"></span></button>
             <button id="btnSessionPage" class="menu-row" type="button"><span data-icon="pencil"></span><span>会话名称</span><span data-icon="chevron-right"></span></button>
             <button id="btnExport" class="menu-row" type="button"><span data-icon="share-2"></span><span>导出当前会话</span></button>
           </div>
@@ -105,25 +110,26 @@
         <section class="menu-section" aria-labelledby="menuSectionWorkspace">
           <h3 id="menuSectionWorkspace" class="menu-section-title">工作区</h3>
           <div class="menu-group">
-            <button id="btnWorkspacesPage" class="menu-row" type="button"><span data-icon="layers"></span><span>工作区<small id="menuWorkspaceSummary"></small></span><span data-icon="chevron-right"></span></button>
-            <button id="btnFilesPage" class="menu-row" type="button"><span data-icon="folder"></span><span>工作区文件</span><span data-icon="chevron-right"></span></button>
+            <button id="btnWorkspacesPage" class="menu-row" type="button" data-keywords="文件夹 目录 项目 folder project"><span data-icon="layers"></span><span>工作区<small id="menuWorkspaceSummary"></small></span><span data-icon="chevron-right"></span></button>
+            <button id="btnFilesPage" class="menu-row" type="button" data-keywords="文件 编辑 预览 files edit"><span data-icon="folder"></span><span>工作区文件</span><span data-icon="chevron-right"></span></button>
             <button id="btnAttachmentsPage" class="menu-row" type="button"><span data-icon="paperclip"></span><span>附件收件箱<small id="menuImportSummary"></small></span><span data-icon="chevron-right"></span></button>
           </div>
         </section>
         <section class="menu-section" aria-labelledby="menuSectionModel">
           <h3 id="menuSectionModel" class="menu-section-title">模型与执行</h3>
           <div class="menu-group">
-            <button id="btnModelPage" class="menu-row" type="button"><span data-icon="cpu"></span><span>模型与思考<small id="menuModelSummary"></small></span><span data-icon="chevron-right"></span></button>
-            <button id="btnPermissionPage" class="menu-row" type="button"><span data-icon="shield"></span><span>执行权限<small id="menuPermissionSummary"></small></span><span data-icon="chevron-right"></span></button>
-            <button id="btnLocalModelsPage" class="menu-row" type="button"><span data-icon="hard-drive"></span><span>本地模型</span><span data-icon="chevron-right"></span></button>
-            <button id="btnUsagePage" class="menu-row" type="button"><span data-icon="chart-no-axes-column"></span><span>Token 与费用</span><span data-icon="chevron-right"></span></button>
-            <button id="btnMemoryPage" class="menu-row" type="button"><span data-icon="brain"></span><span>记忆<small>AI 记住的关于你的信息</small></span><span data-icon="chevron-right"></span></button>
+            <button id="btnModelPage" class="menu-row" type="button" data-keywords="API 密钥 服务商 云端 思考 推理 deepseek openai provider key reasoning model cloud"><span data-icon="cpu"></span><span>模型与思考<small id="menuModelSummary"></small></span><span data-icon="chevron-right"></span></button>
+            <button id="btnPermissionPage" class="menu-row" type="button" data-keywords="审批 批准 授权 自动执行 完全访问 approval autonomy"><span data-icon="shield"></span><span>执行权限<small id="menuPermissionSummary"></small></span><span data-icon="chevron-right"></span></button>
+            <button id="btnLocalModelsPage" class="menu-row" type="button" data-keywords="离线 下载模型 下载来源 魔搭 视觉 上下文 线程 内存 性能测试 qwen gguf local model offline download modelscope hugging face vision context threads benchmark"><span data-icon="hard-drive"></span><span>本地模型</span><span data-icon="chevron-right"></span></button>
+            <button id="btnUsagePage" class="menu-row" type="button" data-keywords="费用 价格 统计 cost price usage"><span data-icon="chart-no-axes-column"></span><span>Token 与费用</span><span data-icon="chevron-right"></span></button>
+            <button id="btnMemoryPage" class="menu-row" type="button" data-keywords="记住 偏好 memory"><span data-icon="brain"></span><span>记忆<small>AI 记住的关于你的信息</small></span><span data-icon="chevron-right"></span></button>
+            <button id="btnKnowledgePage" class="menu-row" type="button" data-keywords="文档 资料 电子书 说明书 检索 引用 RAG pdf knowledge documents"><span data-icon="book-open"></span><span>知识库<small id="menuKnowledgeSummary">让 AI 查阅你的文档</small></span><span data-icon="chevron-right"></span></button>
           </div>
         </section>
         <section class="menu-section" aria-labelledby="menuSectionAutomation">
           <h3 id="menuSectionAutomation" class="menu-section-title">自动化</h3>
           <div class="menu-group">
-            <button id="btnSchedulesPage" class="menu-row" type="button"><span data-icon="clock"></span><span>定时任务</span><span data-icon="chevron-right"></span></button>
+            <button id="btnSchedulesPage" class="menu-row" type="button" data-keywords="定时 每天 自动运行 schedule"><span data-icon="clock"></span><span>定时任务</span><span data-icon="chevron-right"></span></button>
             <button id="btnWorkflowsPage" class="menu-row" type="button"><span data-icon="workflow"></span><span>可复用流程</span><span data-icon="chevron-right"></span></button>
             <button id="btnNotificationRulesPage" class="menu-row" type="button" hidden><span data-icon="bell-ring"></span><span>通知触发<small>收到特定通知时自动处理</small></span><span data-icon="chevron-right"></span></button>
             <button id="btnEvaluationsPage" class="menu-row" type="button"><span data-icon="clipboard-check"></span><span>任务评测</span><span data-icon="chevron-right"></span></button>
@@ -132,21 +138,22 @@
         <section class="menu-section" aria-labelledby="menuSectionDevice">
           <h3 id="menuSectionDevice" class="menu-section-title">设备与连接</h3>
           <div class="menu-group">
-            <button id="btnDoctorPage" class="menu-row" type="button"><span data-icon="activity"></span><span>设备与工具</span><span data-icon="chevron-right"></span></button>
+            <button id="btnDoctorPage" class="menu-row" type="button" data-keywords="无障碍 诊断 工具链 浏览器 电池优化 后台运行 闹钟 日历 日程 python git accessibility toolchain battery alarm calendar"><span data-icon="activity"></span><span>设备与工具</span><span data-icon="chevron-right"></span></button>
             <button id="btnServicesPage" class="menu-row" type="button"><span data-icon="server"></span><span>后台服务<small id="menuServicesSummary">AI 启动的、一直运行的程序</small></span><span data-icon="chevron-right"></span></button>
             <button id="btnExtensionsPage" class="menu-row" type="button"><span data-icon="puzzle"></span><span>MCP 与扩展</span><span data-icon="chevron-right"></span></button>
-            <button id="btnConnectionsPage" class="menu-row" type="button"><span data-icon="monitor-smartphone"></span><span>设备连接</span><span data-icon="chevron-right"></span></button>
+            <button id="btnConnectionsPage" class="menu-row" type="button" data-keywords="电脑 配对 局域网 远程 pc pair remote"><span data-icon="monitor-smartphone"></span><span>设备连接</span><span data-icon="chevron-right"></span></button>
             <button id="btnOutboxPage" class="menu-row" type="button"><span data-icon="send"></span><span>待发送与接力</span><span data-icon="chevron-right"></span></button>
-            <button id="btnNotificationsPage" class="menu-row" type="button"><span data-icon="bell"></span><span>通知</span><span data-icon="chevron-right"></span></button>
+            <button id="btnNotificationsPage" class="menu-row" type="button" data-keywords="提醒 推送 notification"><span data-icon="bell"></span><span>通知</span><span data-icon="chevron-right"></span></button>
           </div>
         </section>
         <section class="menu-section" aria-labelledby="menuSectionApp">
           <h3 id="menuSectionApp" class="menu-section-title">应用</h3>
           <div class="menu-group">
-            <button id="btnAppearancePage" class="menu-row" type="button"><span data-icon="palette"></span><span>界面偏好</span><span data-icon="chevron-right"></span></button>
-            <button id="btnGlobalEntryPage" class="menu-row" type="button" hidden><span data-icon="sparkles"></span><span>全局入口<small>悬浮球、快捷设置开关、桌面图标快捷方式</small></span><span data-icon="chevron-right"></span></button>
-            <button id="btnBackupPage" class="menu-row" type="button" hidden><span data-icon="database-backup"></span><span>备份与恢复<small>换手机或重装前保存会话和设置</small></span><span data-icon="chevron-right"></span></button>
-            <button id="btnProviderSettings" class="menu-row" type="button" hidden><span data-icon="settings"></span><span>服务商与 API 设置</span><span data-icon="chevron-right"></span></button>
+            <button id="btnAppearancePage" class="menu-row" type="button" data-keywords="主题 深色 浅色 字体 字号 语言 外观 快捷任务 theme dark font language"><span data-icon="palette"></span><span>界面偏好</span><span data-icon="chevron-right"></span></button>
+            <button id="btnGlobalEntryPage" class="menu-row" type="button" data-keywords="悬浮球 快捷设置 桌面快捷方式 floating tile shortcut" hidden><span data-icon="sparkles"></span><span>全局入口<small>悬浮球、快捷设置开关、桌面图标快捷方式</small></span><span data-icon="chevron-right"></span></button>
+            <button id="btnBackupPage" class="menu-row" type="button" data-keywords="导出 导入 迁移 换手机 backup restore" hidden><span data-icon="database-backup"></span><span>备份与恢复<small>换手机或重装前保存会话和设置</small></span><span data-icon="chevron-right"></span></button>
+            <button id="btnProviderSettings" class="menu-row" type="button" data-keywords="API 密钥 地址 provider key url" hidden><span data-icon="settings"></span><span>服务商与 API 设置</span><span data-icon="chevron-right"></span></button>
+            <button id="btnAboutPage" class="menu-row" type="button" data-keywords="版本 更新 升级 自动更新 日志 诊断 反馈 问题 bug version update upgrade log logs diagnostics feedback"><span data-icon="info"></span><span>关于与更新<small id="menuAboutSummary">检查更新、导出诊断日志</small></span><span data-icon="chevron-right"></span></button>
             <button id="btnRefresh" class="menu-row" type="button"><span data-icon="refresh-cw"></span><span>刷新与重连</span></button>
           </div>
         </section>
@@ -275,6 +282,30 @@
         <div id="memoryList" class="management-list"></div>
         <div class="page-toolbar"><button id="btnClearMemory" class="button-secondary" type="button"><span data-icon="trash-2"></span>清空全部记忆</button></div>
       </div>
+      <div id="settingsKnowledge" class="settings-page" hidden>
+        <p class="setting-hint">把说明书、合同、笔记、电子书等文档加进来，聊天时 AI 会从中找相关段落回答，并注明出自哪份文档、第几页。文档只保存在这台手机上，按关键词检索，不用下载模型，也不消耗额度。</p>
+        <label class="toggle-row" for="knowledgeEnabledToggle"><span>在对话中使用知识库</span><input id="knowledgeEnabledToggle" type="checkbox"></label>
+        <label class="toggle-row" for="knowledgeAutoToggle"><span>提问时自动附上相关段落</span><input id="knowledgeAutoToggle" type="checkbox"></label>
+        <p class="setting-hint">开启后，每次提问会先在知识库里找，找到相关段落就随问题一起发给模型；关闭后只在 AI 主动搜索时使用。</p>
+        <div class="page-toolbar"><button id="btnKnowledgeAdd" class="button-primary" type="button"><span data-icon="upload"></span>添加文档</button><span id="knowledgeCounter"></span></div>
+        <input id="knowledgeFileInput" type="file" multiple hidden>
+        <p id="knowledgeStatus" class="page-status" role="status"></p>
+        <div id="knowledgeList" class="management-list"></div>
+        <form id="knowledgeSearchForm" class="management-form">
+          <label for="knowledgeQuery">试着搜一下</label>
+          <input id="knowledgeQuery" type="search" maxlength="500" autocomplete="off" placeholder="输入关键词，看看能找到哪些段落">
+          <div class="page-toolbar"><button id="btnKnowledgeSearch" class="button-secondary" type="submit"><span data-icon="search"></span>搜索</button></div>
+        </form>
+        <div id="knowledgeResults" class="management-list"></div>
+        <details id="knowledgeSynonymsSection" class="management-section">
+          <summary>同义词</summary>
+          <p id="knowledgeSynonymsHint" class="setting-hint"></p>
+          <label for="knowledgeSynonyms">我的同义词</label>
+          <textarea id="knowledgeSynonyms" rows="4" maxlength="20000" placeholder="例如：咖啡机 磨豆机"></textarea>
+          <div class="page-toolbar"><button id="btnSaveKnowledgeSynonyms" class="button-secondary" type="button"><span data-icon="save"></span>保存同义词</button></div>
+        </details>
+        <p class="setting-hint">支持 PDF（需要有文字层，扫描件暂不支持）、Word（.docx）、Excel（.xlsx）、EPUB、网页、Markdown 和文本文件。单个文件最大 100 MiB，最多 300 份。也可以在对话里说“把 xx.pdf 加入知识库”。</p>
+      </div>
       <div id="settingsQuickTasks" class="settings-page" hidden>
         <p class="setting-hint">点一下快捷任务，会把提示词填进输入框，或直接发送。最多 8 个，可调整顺序。</p>
         <div id="quickTaskList" class="management-list"></div>
@@ -333,6 +364,7 @@
               <button id="btnFilePreview" class="icon-button" type="button" title="预览文件" aria-label="预览文件" aria-pressed="false" hidden><span data-icon="eye"></span></button>
               <button id="btnFileInteractive" class="icon-button" type="button" title="交互预览" aria-label="交互预览" hidden><span data-icon="play"></span></button>
             </div>
+            <button id="btnFileToKnowledge" class="icon-button" type="button" title="加入知识库" aria-label="加入知识库" hidden><span data-icon="book-open"></span></button>
             <button id="btnReloadFile" class="icon-button" type="button" title="重新读取文件" aria-label="重新读取文件"><span data-icon="refresh-cw"></span></button>
             <button id="btnDiscardFileDraft" class="icon-button" type="button" title="放弃文件草稿" aria-label="放弃文件草稿" hidden><span data-icon="trash-2"></span></button>
             <button id="btnSaveFile" class="icon-button" type="button" title="保存文件" aria-label="保存文件" disabled><span data-icon="save"></span></button>
@@ -376,24 +408,16 @@
         <label class="toggle-row" for="systemPaused"><span>暂停手机操作</span><input id="systemPaused" type="checkbox"></label>
         <div class="page-toolbar"><button id="btnTakeover" class="button-secondary" type="button"><span data-icon="hand"></span>接管手机</button><button id="btnObserveScreen" class="icon-button" type="button" aria-label="读取当前屏幕" title="读取当前屏幕"><span data-icon="eye"></span></button></div>
         <pre id="systemObservation" class="management-output" hidden></pre><div id="doctorTools" class="management-list"></div>
-        <div class="management-section">
-          <strong>诊断日志</strong>
-          <p class="setting-hint">引擎出错、卡住或连不上时，把日志发给开发者排查。访问令牌和 API 密钥会自动隐藏；日志里可能有任务内容片段，请只发给信任的人。</p>
-          <button id="btnShareDiagnostics" class="menu-row" type="button"><span data-icon="share-2"></span><span>导出诊断日志</span><span data-icon="chevron-right"></span></button>
-          <p id="diagnosticsStatus" class="page-status" role="status"></p>
-        </div>
-        <div class="management-section">
-          <strong>版本与更新</strong>
-          <p id="updateStatus" class="page-status" role="status"></p>
-          <button id="btnCheckUpdates" class="menu-row" type="button"><span data-icon="download"></span><span>检查更新</span><span data-icon="chevron-right"></span></button>
-          <label class="toggle-row" for="autoUpdateToggle"><span>每天自动检查新版本</span><input id="autoUpdateToggle" type="checkbox"></label>
-          <p class="setting-hint">从 GitHub 发布页下载，安装前会校验 SHA-256 和签名；安装需要你在系统安装界面确认。</p>
-        </div>
         <div id="browserSection" class="management-section" hidden>
           <strong>内置浏览器</strong>
           <p class="setting-hint">AI 用它打开网页、点按钮、填表和截图。打开网页和点击需要你批准，只读取当前页面不用。它的登录状态与应用界面分开保存。</p>
           <div class="page-toolbar"><button id="btnBrowserTest" class="button-secondary" type="button"><span data-icon="globe"></span>测试浏览器</button><button id="btnBrowserClear" class="button-secondary" type="button"><span data-icon="trash-2"></span>清除浏览数据</button></div>
           <p id="browserStatus" class="page-status" role="status"></p>
+        </div>
+        <div id="clockCalendarSection" class="management-section" hidden>
+          <strong>闹钟与日历</strong>
+          <p class="setting-hint">说“明早 7 点叫我”或“20 分钟后提醒我”，AI 会在系统时钟里设好闹钟或计时，不需要授权。查看和添加日程需要允许访问日历；在「工作区」执行模式下，添加日程前会先请你确认。</p>
+          <button id="btnCalendarAccess" class="menu-row" type="button"><span data-icon="calendar"></span><span>日历<small id="calendarAccessState"></small></span><span data-icon="chevron-right"></span></button>
         </div>
         <div class="management-section">
           <strong>可选开发工具链</strong><p id="toolchainStatus" class="page-status" role="status"></p><dl id="toolchainSummary" class="usage-summary"></dl>
@@ -406,6 +430,21 @@
           <p class="setting-hint">系统仍可能暂停后台进程。中断的操作需要检查状态后恢复。</p>
           <button id="btnBatterySettings" class="menu-row" type="button"><span data-icon="activity"></span><span>电池优化设置</span><span data-icon="chevron-right"></span></button>
           <button id="btnBackgroundSettings" class="menu-row" type="button"><span data-icon="settings"></span><span>应用后台设置</span><span data-icon="chevron-right"></span></button>
+        </div>
+      </div>
+      <div id="settingsAbout" class="settings-page" hidden>
+        <div class="management-section">
+          <strong>版本与更新</strong>
+          <p id="updateStatus" class="page-status" role="status"></p>
+          <button id="btnCheckUpdates" class="menu-row" type="button"><span data-icon="download"></span><span>检查更新</span><span data-icon="chevron-right"></span></button>
+          <label class="toggle-row" for="autoUpdateToggle"><span>每天自动检查新版本</span><input id="autoUpdateToggle" type="checkbox"></label>
+          <p class="setting-hint">关闭后不会在后台检查，仍可随时手动检查。从 GitHub 发布页下载，安装前会校验 SHA-256 和签名；安装需要你在系统安装界面确认。</p>
+        </div>
+        <div class="management-section">
+          <strong>诊断日志</strong>
+          <p class="setting-hint">引擎出错、卡住或连不上时，把日志发给开发者排查。访问令牌和 API 密钥会自动隐藏；日志里可能有任务内容片段，请只发给信任的人。</p>
+          <button id="btnShareDiagnostics" class="menu-row" type="button"><span data-icon="share-2"></span><span>导出诊断日志</span><span data-icon="chevron-right"></span></button>
+          <p id="diagnosticsStatus" class="page-status" role="status"></p>
         </div>
       </div>
       <div id="settingsExtensions" class="settings-page" hidden>
@@ -485,6 +524,13 @@
         </details>
         <p id="localDeviceStatus" class="page-status" role="status"></p>
         <p class="setting-hint">推荐先下载 Qwen3.5 0.8B Q4。本机 CPU 推理支持文字与工具调用；Qwen3.5 图片理解需配套视觉组件。模型按需下载，校验完成后才能使用。</p>
+        <label for="modelDownloadSource">模型下载来源</label>
+        <select id="modelDownloadSource">
+          <option value="auto">自动（推荐）</option>
+          <option value="modelscope">ModelScope 魔搭（国内 CDN）</option>
+          <option value="huggingface">Hugging Face</option>
+        </select>
+        <p class="setting-hint">自动：先连 ModelScope 魔搭，连不上再换 Hugging Face。各来源是同一份文件，下载完都按固定的 SHA-256 校验；暂停后换来源会接着下载。</p>
         <div class="page-toolbar"><button id="btnProbeLocalModel" class="button-secondary" type="button"><span data-icon="activity"></span>检查本地引擎</button><button id="btnUnloadLocalModel" class="button-secondary" type="button">释放模型内存</button><button id="btnRestoreCloudModel" class="button-secondary" type="button">恢复原模型配置</button></div><p id="localModelControlStatus" class="page-status" role="status"></p><div id="localModelList" class="management-list"></div>
       </div>
       <p id="settingsError" class="settings-error" role="alert" hidden></p>

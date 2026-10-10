@@ -106,6 +106,10 @@ def local_model_diagnostics(controller, hardware=None, *, model_manager=None):
             # Heat lowers the threads during a generation; threads_lowest is how far.
             "threads": measured.get("threads"),
             "threads_lowest": measured.get("threads_lowest"),
+            # Whether the last generation kept its tool calls to the call grammar, and how
+            # often it had to steer the model back to a valid token.
+            "tool_grammar": measured.get("tool_grammar"),
+            "tool_grammar_resamples": measured.get("tool_grammar_resamples"),
             "battery_delta": None,
         },
     }

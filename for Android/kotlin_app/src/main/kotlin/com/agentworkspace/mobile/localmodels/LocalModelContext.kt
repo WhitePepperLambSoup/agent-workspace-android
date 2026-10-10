@@ -9,6 +9,9 @@ object LocalModelContext {
     const val MAX_TOKENIZER_PROMPT_BYTES = 32 * 1024 * 1024
     const val MAX_TOKENIZER_REQUEST_BYTES = 64 * 1024 * 1024
     private const val AUTO_CONTEXT_FLOOR = 4096
+    // Phone tasks rarely need more. A larger automatic context costs memory (on Qwen3.5 0.8B,
+    // 128K kept 2.3 GiB resident against about 1 GiB) and load time; manual choices still go higher.
+    const val AUTO_CONTEXT_CEILING = 32768
     private val choices = listOf(512, 4096, 8192, 16384, 32768, 65536, 131072, 262144)
 
     data class Plan(
@@ -68,7 +71,8 @@ object LocalModelContext {
         // memory modes. Explicit extended contexts may use current free swap,
         // subject to the separate physical compute working-set requirement.
         val recommended = supported.asReversed().firstOrNull {
-            it >= AUTO_CONTEXT_FLOOR && LocalModelMemory.canLoad(lowMemory, availableRamBytes,
+            it in AUTO_CONTEXT_FLOOR..AUTO_CONTEXT_CEILING &&
+                LocalModelMemory.canLoad(lowMemory, availableRamBytes,
                 required(it), 0, "balanced", physicalComputeReserveBytes = physicalCompute)
         } ?: 0
         // An infeasible auto plan is explicit. The bridge reports a memory error

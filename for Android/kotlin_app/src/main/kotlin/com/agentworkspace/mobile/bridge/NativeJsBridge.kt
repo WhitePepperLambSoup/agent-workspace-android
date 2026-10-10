@@ -73,7 +73,18 @@ class NativeJsBridge(
     private val systemBarsAction: (Boolean, Int) -> Unit = { _, _ -> },
     private val requestTileAction: (() -> String)? = null,
     private val keepScreenOnAction: (Boolean) -> Unit = {},
+    private val requestCalendarAccessAction: () -> Unit = {},
 ) {
+    /** Whether the agent may read and add calendar events (Settings → Device & tools). */
+    @JavascriptInterface
+    fun getCalendarAccess(): String = com.agentworkspace.mobile.capabilities.AndroidClockCalendar
+        .calendarAccess(context).put("ok", true).toString()
+
+    @JavascriptInterface
+    fun requestCalendarAccess() {
+        Handler(Looper.getMainLooper()).post { requestCalendarAccessAction() }
+    }
+
     /** The web UI's language choice ("auto", "zh" or "en") for native dialogs, notifications and toasts. */
     @JavascriptInterface
     fun setUiLanguage(value: String) {

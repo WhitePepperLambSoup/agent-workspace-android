@@ -79,6 +79,7 @@ class TermuxDaemonService : Service() {
         MobileScheduleCoordinator.initialize(this)
         AndroidSystemBridge.initialize(this)
         AndroidTextToSpeech.initialize(this)
+        com.agentworkspace.mobile.capabilities.AndroidClockCalendar.initialize(this)
         AndroidDocumentBridge.initialize(this)
         AndroidToolchainBridge.initialize(this)
         LocalModelBridge.initialize(this)

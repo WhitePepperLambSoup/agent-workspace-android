@@ -23,6 +23,27 @@
   let stepSequence = 0;
   const stateNames = { available: t("可用"), pending: t("待发送"), sending: t("发送中"), submitted: t("已接收"), completed: t("已完成"), failed: t("失败"), cancelled: t("已取消"), uncertain: t("结果未知"), approved: t("已授权"), denied: t("已拒绝"), revoked: t("已撤销"), verified: t("已验证"), unverified: t("未验证"), running: t("运行中"), interrupted: t("已中断"), blocked: t("受阻"), success: t("目标已验证"), failure: t("失败"), takeover: t("已接管") };
   function status(id, message, error = false) { $(id).textContent = message || ""; $(id).classList.toggle("error", error); }
+  // Model download source: a per-device choice. Automatic tries the source nearest the user's
+  // language first (ModelScope's mainland CDN for Chinese) and falls back to the other.
+  const downloadSourceKey = "agent-model-download-source";
+  function downloadSource(model) {
+    const chosen = $("modelDownloadSource").value;
+    const available = (model.download_sources || []).map((source) => source.id);
+    return {
+      source: available.includes(chosen) ? chosen : "auto",
+      prefer: window.MobileI18n?.language === "en" ? "huggingface" : "modelscope",
+    };
+  }
+  function sourceTitle(model) {
+    return (model.download_sources || []).find((source) => source.id === model.source)?.title || "";
+  }
+  try {
+    const saved = window.localStorage.getItem(downloadSourceKey);
+    if (["auto", "modelscope", "huggingface"].includes(saved)) $("modelDownloadSource").value = saved;
+  } catch { /* Storage can be unavailable; automatic stays selected. */ }
+  $("modelDownloadSource").addEventListener("change", () => {
+    try { window.localStorage.setItem(downloadSourceKey, $("modelDownloadSource").value); } catch {}
+  });
   function icon(name) { return window.MobileUi?.iconMarkup(name) || ""; }
   function row(title, details = "") {
     const element = document.createElement("div"); element.className = "management-row";
@@ -76,7 +97,7 @@
     else throw new Error(t("当前设备无法导出文本"));
     status(statusId, typeof native?.shareText === "function" ? t("已打开分享") : t("已复制到剪贴板"));
   }
-  function stopPolls() { window.clearTimeout(modelPoll); window.clearTimeout(toolchainPoll); window.clearTimeout(servicesPoll); modelPoll = toolchainPoll = servicesPoll = null; }
+  function stopPolls() { window.clearTimeout(modelPoll); window.clearTimeout(toolchainPoll); window.clearTimeout(servicesPoll); window.clearTimeout(knowledgePoll); modelPoll = toolchainPoll = servicesPoll = knowledgePoll = null; }
   async function post(path, body) { return ui.apiJson(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); }
   function followTask(result, statusId, message) {
     if (ui.adoptTask(result.task)) ui.closeMenu();
@@ -127,9 +148,24 @@
     terms("backgroundSummary", [[t("电池优化"), background.battery_optimization_exempt ? t("已豁免") : t("系统默认")], [t("恢复状态"), background.engine?.requires_user_launch ? t("需要手动启动") : background.engine?.state || t("按系统条件恢复")], [t("后台限制"), background.background_restricted ? t("已限制") : t("未限制")], [t("完成通知"), background.notifications_enabled ? t("已开启") : t("未开启或未授权")]]);
     $("btnBatterySettings").disabled = typeof native?.openBatteryOptimizationSettings !== "function";
     $("btnBackgroundSettings").disabled = typeof native?.openAppBackgroundSettings !== "function";
+    calendarAccess();
+    await toolchain(isCurrent);
+  }
+  // Alarms need no permission; reading and adding calendar events need the calendar one.
+  function calendarAccess() {
+    const supported = typeof native?.getCalendarAccess === "function";
+    $("clockCalendarSection").hidden = !supported;
+    if (!supported) return;
+    let access = {};
+    try { access = JSON.parse(native.getCalendarAccess() || "{}"); } catch {}
+    const granted = access.read && access.write;
+    $("calendarAccessState").textContent = granted ? t("已允许：AI 可以查看和添加日程") : t("未允许：点这里授权");
+  }
+  window.addEventListener("agent-calendar-access-changed", calendarAccess);
+  // Updates and logs had been at the bottom of 设备与工具, where users did not find them.
+  async function about() {
     $("btnShareDiagnostics").disabled = typeof native?.shareDiagnostics !== "function";
     updates();
-    await toolchain(isCurrent);
   }
   function updates() {
     let value = {};
@@ -140,6 +176,9 @@
     $("autoUpdateToggle").checked = value.autoCheck !== false;
     const checked = value.lastCheckedMs ? new Date(value.lastCheckedMs).toLocaleString() : t("尚未检查");
     status("updateStatus", supported ? t("当前版本 {0} · 上次检查 {1}", value.version || "?", checked) : t("当前版本不支持应用内更新"));
+    $("menuAboutSummary").textContent = value.version
+      ? t("版本 {0} · 检查更新、导出诊断日志", value.version)
+      : t("检查更新、导出诊断日志");
   }
   async function toolchain(isCurrent = () => true) {
     let value;
@@ -240,6 +279,136 @@
     }
     $("btnClearMemory").disabled = !items.length;
     status("memoryStatus", value.enabled === false ? t("记忆已关闭：对话中不会使用，AI 也不会保存") : "");
+  }
+
+  // ---- Knowledge base: the user's own documents, searched while they chat ----
+  let knowledgePoll = null;
+  let knowledgeUploading = false;
+  const knowledgeStates = { queued: t("排队中"), indexing: t("正在读取"), ready: t("可用"), failed: t("添加失败") };
+  function knowledgeMessage(error) {
+    const text = String(error?.message || error || "");
+    if (/unsupported document type/i.test(text)) return t("不支持这种文件，请添加 PDF、Word、Excel、EPUB、网页、Markdown 或文本文件");
+    if (/larger than \d+ MiB/i.test(text)) return t("文件超过 100 MiB，请拆分后再添加");
+    if (/knowledge base is full/i.test(text)) return t("知识库已满（300 份），请先删除不需要的文档");
+    if (/file is empty/i.test(text)) return t("文件是空的");
+    if (/being indexed/i.test(text)) return t("这份文档正在读取，完成后再删除");
+    if (/turned off/i.test(text)) return t("知识库已关闭");
+    let match;
+    if ((match = text.match(/line (\d+) needs at least two words/))) return t("第 {0} 行至少要有两个词", match[1]);
+    if ((match = text.match(/line (\d+) has a single character/))) return t("第 {0} 行有单个字，请写完整的词", match[1]);
+    if ((match = text.match(/line (\d+) has a word longer/))) return t("第 {0} 行有超过 20 个字的词", match[1]);
+    if (/at most \d+ synonym groups/.test(text)) return t("同义词最多 200 组");
+    return text || t("操作失败");
+  }
+  // Reasons a document could not be read, and what was left out, as the engine reports them.
+  function knowledgeText(text) {
+    const value = String(text || "");
+    let match;
+    if ((match = value.match(/^(\d+) of (\d+) pages have no readable text.*?skipped: (.*)$/))) return t("{0}/{1} 页没有可读取的文字（扫描页、空白页或无法识别的字体），已跳过：第 {2} 页", match[1], match[2], match[3]);
+    if ((match = value.match(/^only the first ([\d,]+) characters were added/))) return t("只收录了前 {0} 个字符，其余部分请拆分文档后再添加", match[1]);
+    if (/scanned PDFs need OCR/.test(value)) return t("没有读到文字。扫描版 PDF 需要文字识别，知识库暂不支持");
+    if (/^no text was found/.test(value)) return t("文档里没有读到文字");
+    if (/password protected/.test(value)) return t("PDF 有密码保护，请先另存一份没有密码的副本");
+    if (/^cannot open this PDF/.test(value)) return t("无法打开这个 PDF，文件可能已损坏");
+    if (/looks binary/.test(value)) return t("这个文件不是文本格式");
+    if (/EPUB/.test(value)) return t("无法读取这个 EPUB，文件可能已损坏");
+    if (/interrupted/.test(value)) return t("读取被中断，请重新添加");
+    if (/^could not read this document/.test(value)) return t("无法读取这份文档，文件可能已损坏");
+    return value;
+  }
+  function knowledgeDetails(document) {
+    if (document.state === "indexing") return t("正在读取 {0}%", Math.round((document.progress || 0) * 100));
+    if (document.state === "queued") return t("排队中");
+    if (document.state === "failed") return t("添加失败：{0}", knowledgeText(document.error));
+    const parts = [t("{0} 段", document.passages)];
+    if (document.pages) parts.push(t("{0} 页", document.pages));
+    parts.push(document.size_bytes < 1024 ** 2 ? `${Math.max(1, Math.round(document.size_bytes / 1024))} KB` : bytes(document.size_bytes));
+    const lines = [parts.join(" · ")];
+    for (const warning of document.warnings || []) lines.push(knowledgeText(warning));
+    return lines.join("\n");
+  }
+  async function knowledge(isCurrent = () => true, value = null) {
+    value = value || await ui.apiJson("/mobile/knowledge");
+    if (!isCurrent()) return;
+    $("knowledgeEnabledToggle").checked = value.enabled !== false;
+    $("knowledgeAutoToggle").checked = value.auto !== false;
+    $("knowledgeAutoToggle").disabled = value.enabled === false;
+    $("knowledgeSynonymsHint").textContent = t("换个说法也能找到：已内置 {0} 组常用说法，比如“房租”和“租金”、“坏了”和“维修”。也可以加上你自己的，每行一组，词之间用空格或逗号隔开。", value.builtin_synonym_groups || 0);
+    if (document.activeElement !== $("knowledgeSynonyms")) $("knowledgeSynonyms").value = value.synonyms || "";
+    const documents = Array.isArray(value.documents) ? value.documents : [];
+    const ready = documents.filter((document) => document.state === "ready").length;
+    $("knowledgeCounter").textContent = documents.length ? t("{0} 份可用", ready) : "";
+    $("menuKnowledgeSummary").textContent = ready ? t("{0} 份文档", ready) : t("让 AI 查阅你的文档");
+    $("knowledgeList").replaceChildren();
+    for (const document of documents) {
+      const element = row(document.title, knowledgeDetails(document));
+      element.classList.add("knowledge-row");
+      element.dataset.state = document.state;
+      if (document.state !== "indexing") {
+        action(element, "pencil", t("重命名"), async () => {
+          const title = window.prompt(t("文档名称"), document.title);
+          if (title === null || !title.trim() || title.trim() === document.title) return;
+          try { await knowledge(undefined, await post("/mobile/knowledge/rename", { id: document.id, title: title.trim() })); }
+          catch (error) { throw new Error(knowledgeMessage(error)); }
+        });
+        action(element, "trash-2", t("删除"), async () => {
+          if (!window.confirm(t("从知识库删除“{0}”？", document.title))) return;
+          try { await knowledge(undefined, await post("/mobile/knowledge/delete", { id: document.id })); }
+          catch (error) { throw new Error(knowledgeMessage(error)); }
+        });
+      }
+      $("knowledgeList").append(element);
+    }
+    if (!documents.length) $("knowledgeList").append(row(t("还没有文档"), t("点“添加文档”，从手机里选择文件。")));
+    if (!knowledgeUploading) {
+      status("knowledgeStatus", value.enabled === false ? t("知识库已关闭：对话中不会使用") : "");
+    }
+    window.clearTimeout(knowledgePoll);
+    if (documents.some((document) => document.state === "queued" || document.state === "indexing")) {
+      knowledgePoll = window.setTimeout(() => {
+        if (!closed && !$("settingsKnowledge").hidden && !$("settingsOverlay").hidden) knowledge(isCurrent).catch(() => {});
+      }, 1500);
+    }
+  }
+  async function uploadKnowledgeFiles(files) {
+    if (!files.length || knowledgeUploading) return;
+    knowledgeUploading = true;
+    $("btnKnowledgeAdd").disabled = true;
+    const failures = [];
+    let duplicates = 0;
+    try {
+      for (const [index, file] of files.entries()) {
+        status("knowledgeStatus", t("正在上传 {0}（{1}/{2}）", file.name, index + 1, files.length));
+        try {
+          const added = await ui.apiJson(`/mobile/knowledge/upload?filename=${encodeURIComponent(file.name)}`, {
+            method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file,
+          });
+          if (added?.duplicate) duplicates += 1;
+        } catch (error) { failures.push(t("{0}：{1}", file.name, knowledgeMessage(error))); }
+      }
+    } finally {
+      knowledgeUploading = false;
+      $("btnKnowledgeAdd").disabled = false;
+    }
+    if (closed) return;
+    await knowledge();
+    if (failures.length) status("knowledgeStatus", failures.join("\n"), true);
+    else if (duplicates) status("knowledgeStatus", t("{0} 份文档已经在知识库里了", duplicates));
+    else status("knowledgeStatus", t("已添加，正在读取文档内容"));
+  }
+  async function searchKnowledge() {
+    const query = $("knowledgeQuery").value.trim();
+    $("knowledgeResults").replaceChildren();
+    if (!query) return;
+    const value = await post("/mobile/knowledge/search", { query });
+    const results = Array.isArray(value.results) ? value.results : [];
+    for (const result of results) {
+      const where = [result.document, result.page ? t("第 {0} 页", result.page) : "", result.section || ""].filter(Boolean).join(" · ");
+      const element = row(where, result.passage);
+      element.classList.add("knowledge-result");
+      $("knowledgeResults").append(element);
+    }
+    if (!results.length) $("knowledgeResults").append(row(t("没有找到相关段落"), t("换几个文档里会出现的关键词试试。")));
   }
 
   // ---- Services: long-running programs the agent started (Android) ----
@@ -721,7 +890,7 @@
       [t("可用交换内存"), bytes(plan.available_swap_bytes)],
     ] : profile?.active ? [[t("上下文上限"), planPending ? t("等待内存恢复") : `${profile.context_tokens} Token`]] : [];
     const outputTokens = contextStatus?.max_output_tokens ?? profile?.max_output_tokens;
-    terms("localModelSummary", [[t("当前模型"), value.model], [t("当前推理"), value.route === "embedded_qwen" ? t("本机 CPU") : value.route === "local_endpoint" ? t("本地 HTTP 引擎") : t("远程模型")], [t("本机引擎"), engine.available ? t("llama.cpp 已就绪") : engine.last_error || t("未就绪")], ...(engine.cpu_build ? [[t("CPU 指令"), engine.cpu_build === "armv8.2-dotprod" ? t("ARMv8.2 点积加速") : t("通用 ARMv8")]] : []),...capacityTerms, ...(!planPending && outputTokens != null ? [[t("每轮输出上限"), `${outputTokens} Token`]] : []), [t("可用于模型的内存"), bytes(plan?.available_ram_bytes ?? capabilities.android?.memory_usable_bytes ?? capabilities.android?.memory_available_bytes)], [t("系统空闲内存"), bytes(plan?.system_available_ram_bytes ?? capabilities.android?.memory_available_bytes)], [t("可用存储"), bytes(value.storage_free_bytes)], [t("首 Token"), measurement.first_token_ms == null ? t("未测量") : `${measurement.first_token_ms} ms`], ...(measurement.prompt_cached_tokens == null || measurement.prompt_tokens == null ? [] : [[t("复用输入"), `${measurement.prompt_cached_tokens} / ${measurement.prompt_tokens} Token`]]), ...(Number.isFinite(measurement.prompt_tokens_per_second) ? [[t("输入处理速度"), `${measurement.prompt_tokens_per_second.toFixed(2)} Token/s`]] : []), ...(Number.isInteger(measurement.threads) ? [[t("推理线程"), Number.isInteger(measurement.threads_lowest) && measurement.threads_lowest < measurement.threads ? `${measurement.threads} → ${measurement.threads_lowest} · ${t("降温")}` : `${measurement.threads}`]] : []),[t("生成速度"), measurement.tokens_per_second == null ? t("未测量") : `${measurement.tokens_per_second.toFixed(2)} Token/s`]]);
+    terms("localModelSummary", [[t("当前模型"), value.model], [t("当前推理"), value.route === "embedded_qwen" ? t("本机 CPU") : value.route === "local_endpoint" ? t("本地 HTTP 引擎") : t("远程模型")], [t("本机引擎"), engine.available ? t("llama.cpp 已就绪") : engine.last_error || t("未就绪")], ...(engine.cpu_build ? [[t("CPU 指令"), engine.cpu_build === "armv8.2-dotprod" ? t("ARMv8.2 点积加速") : t("通用 ARMv8")]] : []),...capacityTerms, ...(!planPending && outputTokens != null ? [[t("每轮输出上限"), `${outputTokens} Token`]] : []), [t("可用于模型的内存"), bytes(plan?.available_ram_bytes ?? capabilities.android?.memory_usable_bytes ?? capabilities.android?.memory_available_bytes)], [t("系统空闲内存"), bytes(plan?.system_available_ram_bytes ?? capabilities.android?.memory_available_bytes)], [t("可用存储"), bytes(value.storage_free_bytes)], [t("首 Token"), measurement.first_token_ms == null ? t("未测量") : `${measurement.first_token_ms} ms`], ...(measurement.prompt_cached_tokens == null || measurement.prompt_tokens == null ? [] : [[t("复用输入"), `${measurement.prompt_cached_tokens} / ${measurement.prompt_tokens} Token`]]), ...(Number.isFinite(measurement.prompt_tokens_per_second) ? [[t("输入处理速度"), `${measurement.prompt_tokens_per_second.toFixed(2)} Token/s`]] : []), ...(Number.isInteger(measurement.threads) ? [[t("推理线程"), Number.isInteger(measurement.threads_lowest) && measurement.threads_lowest < measurement.threads ? `${measurement.threads} → ${measurement.threads_lowest} · ${t("降温")}` : `${measurement.threads}`]] : []),[t("生成速度"), measurement.tokens_per_second == null ? t("未测量") : `${measurement.tokens_per_second.toFixed(2)} Token/s`], ...(measurement.tool_grammar ? [[t("工具调用约束"), measurement.tool_grammar === "lazy" ? t("已启用 · 纠正 {0} 次", measurement.tool_grammar_resamples || 0) : measurement.tool_grammar === "abandoned" ? t("本轮中途停用") : t("不可用")]] : [])]);
     $("localContextCustomInput").max = String(plan?.model_max_context_tokens || 262144);
     $("localContextHint").textContent = planPending
       ? t("{0}。设置仍可调整；下次推理前会重新检查内存。", planError?.message || t("当前可用内存不足"))
@@ -744,15 +913,15 @@
       const projection = model.kind === "vision_projection";
       ids.add(model.model_id);
       let card = [...list.children].find(item => item.dataset.modelId === model.model_id);
-      if (!card) { card = row(model.title); card.classList.add("local-model-card"); card.dataset.modelId = model.model_id; const progress = document.createElement("progress"); progress.max = 1; progress.setAttribute("aria-label", t("{0}下载进度", model.title)); card.append(progress); const links = document.createElement("div"); links.className = "model-sources"; for (const [label, address] of [[t("下载来源"), model.source_page], [t("直接下载"), model.download_url]]) { try { const url = new URL(address); if (url.protocol !== "https:") continue; const link = document.createElement("a"); link.href = url.href; link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = label; links.append(link); } catch {} } card.append(links); const actions = document.createElement("div"); actions.className = "model-actions"; card.append(actions); list.append(card); }
+      if (!card) { card = row(model.title); card.classList.add("local-model-card"); card.dataset.modelId = model.model_id; const progress = document.createElement("progress"); progress.max = 1; progress.setAttribute("aria-label", t("{0}下载进度", model.title)); card.append(progress); const links = document.createElement("div"); links.className = "model-sources"; for (const [label, address] of [[t("模型主页"), model.source_page], [t("直接下载"), model.download_url]]) { try { const url = new URL(address); if (url.protocol !== "https:") continue; const link = document.createElement("a"); link.href = url.href; link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = label; links.append(link); } catch {} } card.append(links); const actions = document.createElement("div"); actions.className = "model-actions"; card.append(actions); list.append(card); }
       const vision = !projection && model.supports_vision ? t("\n图片理解：{0}", !engine.supports_vision ? t("需支持视觉的本机引擎") : model.vision_component_installed ? t("视觉组件已就绪") : t("请下载配套视觉组件")) : "";
-      card.querySelector("small").textContent = `${model.publisher || ""} · ${model.local_artifact ? t("工具训练版 · 实验") : model.official_weights ? t("官方量化") : t("社区量化")} · ${model.license || ""}\n${bytes(model.size_bytes)}${projection ? t(" · 配套图片理解组件") : t(" · 预计需 {0} 可用内存", bytes(model.minimum_available_ram_bytes))}${vision}\n${model.local_artifact && !model.installed ? t("请选择此版本对应的 GGUF 文件导入") : ({ not_installed: t("未下载"), installed: t("已校验安装"), queued: t("等待下载"), downloading: t("下载中"), verifying: t("校验中"), paused: t("已暂停"), failed: t("下载失败") })[model.state] || model.state}${model.error ? t("：{0}", model.error) : ""}`;
+      card.querySelector("small").textContent = `${model.publisher || ""} · ${model.local_artifact ? t("工具训练版 · 实验") : model.official_weights ? t("官方量化") : t("社区量化")} · ${model.license || ""}\n${bytes(model.size_bytes)}${projection ? t(" · 配套图片理解组件") : t(" · 预计需 {0} 可用内存", bytes(model.minimum_available_ram_bytes))}${vision}\n${model.local_artifact && !model.installed ? t("请选择此版本对应的 GGUF 文件导入") : ({ not_installed: t("未下载"), installed: t("已校验安装"), queued: t("等待下载"), downloading: t("下载中"), verifying: t("校验中"), paused: t("已暂停"), failed: t("下载失败") })[model.state] || model.state}${model.state === "downloading" && sourceTitle(model) ? t(" · 来源 {0}", sourceTitle(model)) : ""}${model.error ? t("：{0}", model.error) : ""}`;
       const progress = card.querySelector("progress"); progress.hidden = !["queued", "downloading", "paused", "verifying"].includes(model.state); progress.value = model.progress || 0;
       const signature = `${model.state}:${!!model.has_local_files}:${busy}:${!!engine.available}:${activeDownload?.model_id}:${value.model}:${value.route}`;
       if (card.dataset.signature !== signature) { card.dataset.signature = signature; const actions = card.querySelector(".model-actions"); actions.replaceChildren();
         if (["queued", "downloading"].includes(model.state)) namedAction(actions, "pause", t("暂停下载"), async () => { await post("/mobile/local-models/cancel", { model_id: model.model_id }); await localModels(isCurrent); });
         else if (!model.installed && model.local_artifact) { const button = namedAction(actions, "folder-open", t("导入训练模型"), () => { nativeResult("importLocalModel", model.model_id); status("localModelsStatus", t("请选择训练模型文件，导入后将自动校验")); }); button.disabled = busy || typeof native?.importLocalModel !== "function"; }
-        else if (!model.installed && model.state !== "verifying") { const button = namedAction(actions, "download", model.downloaded_bytes ? t("继续下载") : projection ? t("下载视觉组件") : t("下载模型"), async () => { await post("/mobile/local-models/download", { model_id: model.model_id }); await localModels(isCurrent); }); setUnavailable(button, downloading ? t("{0} 正在{1}，完成或暂停后可下载", activeDownload.title || activeDownload.model_id, activeDownload.state === "verifying" ? t("校验") : t("下载")) : ""); }
+        else if (!model.installed && model.state !== "verifying") { const button = namedAction(actions, "download", model.downloaded_bytes ? t("继续下载") : projection ? t("下载视觉组件") : t("下载模型"), async () => { await post("/mobile/local-models/download", { model_id: model.model_id, ...downloadSource(model) }); await localModels(isCurrent); }); setUnavailable(button, downloading ? t("{0} 正在{1}，完成或暂停后可下载", activeDownload.title || activeDownload.model_id, activeDownload.state === "verifying" ? t("校验") : t("下载")) : ""); }
         if (model.installed && !projection) { const button = namedAction(actions, "play", value.model === model.model_id && value.route === "embedded_qwen" ? t("当前模型") : t("使用此模型"), () => { nativeResult("selectLocalModel", model.model_id); status("localModelsStatus", t("模型配置已保存，正在切换引擎")); }); button.disabled = busy || !engine.available || typeof native?.selectLocalModel !== "function"; }
         if (model.has_local_files || model.installed || model.downloaded_bytes) { const button = namedAction(actions, "trash-2", projection ? t("移除视觉组件") : t("移除模型"), async () => { if (!window.confirm(t("移除 {0} 的已下载文件？", model.title))) return; await post("/mobile/local-models/remove", { model_id: model.model_id }); await localModels(isCurrent); }); button.disabled = busy || ["queued", "downloading", "verifying"].includes(model.state); }
       }
@@ -767,9 +936,94 @@
     if (downloading || busy) modelPoll = window.setTimeout(() => { if (!closed && !$("settingsLocalModels").hidden && !$("settingsOverlay").hidden) localModels(isCurrent).catch(error => status("localModelsStatus", error.message, true)); }, 2000);
   }
   const pages = {
-    Memory: ["memory", memory, "memoryStatus"], Services: ["services", services, "servicesStatus"], GlobalEntry: ["globalEntry", globalEntry, "globalEntryStatus"], NotificationRules: ["notificationRules", notificationRules, "notificationRulesStatus"], Backup: ["backup", backup, "backupStatus"], Doctor: ["doctor", doctor, "doctorStatus"], Extensions: ["extensions", extensions, "extensionsStatus"], Schedules: ["schedules", schedules, "schedulesStatus"], Connections: ["connections", connections, "connectionsStatus"], Outbox: ["outbox", outbox, "outboxStatus"], Workflows: ["workflows", workflows, "workflowsStatus"], Evaluations: ["evaluations", evaluations, "evaluationsStatus"], LocalModels: ["localModels", localModels, "localModelsStatus"],
+    About: ["about", about, "updateStatus"], Memory: ["memory", memory, "memoryStatus"], Knowledge: ["knowledge", knowledge, "knowledgeStatus"], Services: ["services", services, "servicesStatus"], GlobalEntry: ["globalEntry", globalEntry, "globalEntryStatus"], NotificationRules: ["notificationRules", notificationRules, "notificationRulesStatus"], Backup: ["backup", backup, "backupStatus"], Doctor: ["doctor", doctor, "doctorStatus"], Extensions: ["extensions", extensions, "extensionsStatus"], Schedules: ["schedules", schedules, "schedulesStatus"], Connections: ["connections", connections, "connectionsStatus"], Outbox: ["outbox", outbox, "outboxStatus"], Workflows: ["workflows", workflows, "workflowsStatus"], Evaluations: ["evaluations", evaluations, "evaluationsStatus"], LocalModels: ["localModels", localModels, "localModelsStatus"],
   };
   for (const [name, [route, loader, statusId]] of Object.entries(pages)) on(`btn${name}Page`, "click", () => page(route, loader, statusId), statusId);
+
+  // Menu search covers the menu rows and the labelled settings inside every page, so a setting
+  // can be found without knowing which page holds it.
+  const flat = (value) => (value || "").replace(/\s+/g, " ").trim();
+  function shown(element, page) {
+    for (let node = element; node && node !== page; node = node.parentElement) if (node.hidden) return false;
+    return true;
+  }
+  function menuSearchEntries() {
+    const entries = [];
+    for (const button of $("settingsHome").querySelectorAll(".menu-section .menu-row")) {
+      if (button.hidden || button.closest("[hidden]")) continue;
+      const label = button.querySelector("span:not([data-icon])");
+      entries.push({ button, title: flat(label?.childNodes[0]?.textContent), detail: flat(label?.querySelector("small")?.textContent), keywords: button.dataset.keywords || "" });
+    }
+    for (const page of document.querySelectorAll("#settingsScrollBody > .settings-page")) {
+      const name = page.id.replace(/^settings/, "");
+      const button = $(`btn${name}Page`);
+      if (!button || button.hidden || button.closest("[hidden]") || page.id === "settingsHome") continue;
+      const pageTitle = flat(button.querySelector("span:not([data-icon])")?.childNodes[0]?.textContent);
+      const candidates = page.querySelectorAll(".management-section > strong, label, summary, .form-title, .menu-row > span:not([data-icon])");
+      for (const target of candidates) {
+        const title = flat(target.childNodes[0]?.textContent || target.textContent);
+        if (!title || title === pageTitle || !shown(target, page)) continue;
+        entries.push({ button, title, detail: pageTitle, keywords: "", target: target.closest("label, details, .management-section, .menu-row") || target });
+      }
+    }
+    return entries;
+  }
+  function renderMenuSearch() {
+    const terms = $("menuSearchInput").value.toLowerCase().split(/\s+/).filter(Boolean);
+    const searching = terms.length > 0;
+    const sections = [...$("settingsHome").querySelectorAll(".menu-section")];
+    // Index while the sections are visible: hidden entries are left out on purpose.
+    for (const section of sections) section.hidden = false;
+    const entries = searching ? menuSearchEntries() : [];
+    for (const section of sections) section.hidden = searching;
+    const results = $("menuSearchResults");
+    results.replaceChildren();
+    results.hidden = !searching;
+    $("menuSearchEmpty").hidden = true;
+    if (!searching) return;
+    const seen = new Set();
+    const matches = entries.filter((entry) => {
+      const text = `${entry.title} ${entry.detail} ${entry.keywords}`.toLowerCase();
+      const key = `${entry.button.id}|${entry.title}`;
+      if (seen.has(key) || !terms.every((term) => text.includes(term))) return false;
+      seen.add(key);
+      return true;
+    }).sort((a, b) => Number(!!a.target) - Number(!!b.target)).slice(0, 30);
+    for (const entry of matches) {
+      const item = document.createElement("button");
+      item.type = "button"; item.className = "menu-row";
+      const symbol = document.createElement("span"); symbol.dataset.icon = entry.button.querySelector("[data-icon]")?.dataset.icon || "search"; symbol.innerHTML = icon(symbol.dataset.icon);
+      const label = document.createElement("span"); label.textContent = entry.title;
+      if (entry.detail) { const small = document.createElement("small"); small.textContent = entry.detail; label.append(small); }
+      const chevron = document.createElement("span"); chevron.dataset.icon = "chevron-right"; chevron.innerHTML = icon("chevron-right");
+      item.append(symbol, label, chevron);
+      item.addEventListener("click", () => {
+        entry.button.click();
+        if (!entry.target) return;
+        // The page renders its data asynchronously; scroll once it is on screen.
+        window.setTimeout(() => {
+          entry.target.scrollIntoView?.({ block: "center", behavior: "smooth" });
+          entry.target.classList.add("search-hit");
+          window.setTimeout(() => entry.target.classList.remove("search-hit"), 1600);
+        }, 350);
+      });
+      results.append(item);
+    }
+    results.hidden = !matches.length;
+    $("menuSearchEmpty").hidden = matches.length > 0;
+  }
+  // Updates and diagnostic logs need the Android app; a browser companion has neither.
+  $("btnAboutPage").hidden = !native;
+  $("menuSearchInput").addEventListener("input", renderMenuSearch);
+  $("menuSearchInput").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") $("menuSearchResults").querySelector(".menu-row")?.click();
+    if (event.key === "Escape" && $("menuSearchInput").value) { event.stopPropagation(); $("menuSearchInput").value = ""; renderMenuSearch(); }
+  });
+  // A closed menu forgets its query, so the next open shows the full menu again.
+  new MutationObserver(() => {
+    if ($("settingsOverlay").hidden && $("menuSearchInput").value) { $("menuSearchInput").value = ""; renderMenuSearch(); }
+  }).observe($("settingsOverlay"), { attributes: true, attributeFilter: ["hidden"] });
+  updates();
   for (const [name, loader, statusId] of [["Doctor", doctor, "doctorStatus"], ["Extensions", extensions, "extensionsStatus"], ["Outbox", outbox, "outboxStatus"]]) on(`btn${name}Refresh`, "click", () => loader(), statusId);
   on("memoryForm", "submit", async () => {
     const content = $("memoryContent").value.trim();
@@ -790,6 +1044,27 @@
       catch (error) { $(id).checked = !$(id).checked; throw error; }
     }, "memoryStatus");
   }
+  for (const [id, key] of [["knowledgeEnabledToggle", "enabled"], ["knowledgeAutoToggle", "auto"]]) {
+    on(id, "change", async () => {
+      try { await knowledge(undefined, await post("/mobile/knowledge/settings", { [key]: $(id).checked })); }
+      catch (error) { $(id).checked = !$(id).checked; throw new Error(knowledgeMessage(error)); }
+    }, "knowledgeStatus");
+  }
+  $("btnKnowledgeAdd").addEventListener("click", () => { if (!knowledgeUploading) $("knowledgeFileInput").click(); });
+  $("knowledgeFileInput").addEventListener("change", () => {
+    const files = [...$("knowledgeFileInput").files];
+    $("knowledgeFileInput").value = "";
+    uploadKnowledgeFiles(files).catch((error) => { if (!closed) status("knowledgeStatus", knowledgeMessage(error), true); });
+  });
+  on("knowledgeSearchForm", "submit", searchKnowledge, "knowledgeStatus");
+  on("btnSaveKnowledgeSynonyms", "click", async () => {
+    let saved;
+    try { saved = await post("/mobile/knowledge/synonyms", { text: $("knowledgeSynonyms").value }); }
+    catch (error) { throw new Error(knowledgeMessage(error)); }
+    $("knowledgeSynonyms").blur();  // so the saved, tidied list replaces what was typed
+    await knowledge(undefined, saved);
+    status("knowledgeStatus", t("已保存同义词"));
+  }, "knowledgeStatus");
   on("notificationRulesToggle", "change", async () => {
     const enabled = $("notificationRulesToggle").checked;
     try { await notificationRules(undefined, await post("/mobile/notification-rules/settings", { enabled })); }
@@ -862,6 +1137,7 @@
   on("btnObserveScreen", "click", async () => { const response = await post("/mobile/android-system", { action: "observe" }); $("systemObservation").hidden = false; $("systemObservation").textContent = JSON.stringify(response.observation || response, null, 2); }, "doctorStatus");
   on("btnBatterySettings", "click", () => native?.openBatteryOptimizationSettings?.(), "doctorStatus");
   on("btnBackgroundSettings", "click", () => native?.openAppBackgroundSettings?.(), "doctorStatus");
+  on("btnCalendarAccess", "click", () => native?.requestCalendarAccess?.(), "doctorStatus");
   on("btnShareDiagnostics", "click", () => {
     if (typeof native?.exportDiagnostics === "function") { native.exportDiagnostics(); status("diagnosticsStatus", t("请选择分享、保存到手机或提交到 GitHub")); return; }
     if (typeof native?.shareDiagnostics !== "function") throw new Error(t("当前版本不支持分享诊断日志"));

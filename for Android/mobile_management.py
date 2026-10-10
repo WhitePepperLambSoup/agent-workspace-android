@@ -62,6 +62,8 @@ class MobileManagement:
             ).syncGlobalFromJson(json.dumps(self.schedules.snapshot()))
 
     def start(self):
+        with suppress(Exception):
+            self.knowledge()  # resumes documents whose indexing an engine stop interrupted
         self._job = asyncio.create_task(self._run(), name="mobile-management")
 
     async def _run(self):
@@ -326,6 +328,8 @@ class MobileManagement:
             return 200, (await self.toolchain()).snapshot()
         if path == "/mobile/memory":
             return 200, self.memory().snapshot()
+        if path == "/mobile/knowledge":
+            return 200, await asyncio.to_thread(self.knowledge().snapshot)
         if path == "/mobile/backup/status":
             from mobile_backup import backup_jobs
 
@@ -427,6 +431,35 @@ class MobileManagement:
 
         return get_memory_store(self.data)
 
+    def knowledge(self):
+        from mobile_knowledge import get_knowledge_store
+
+        return get_knowledge_store(self.data)
+
+    async def _knowledge_post(self, action, payload):
+        """Knowledge page: settings, removal, renaming and a test search. Uploads and workspace
+        imports are gateway routes, which stream bodies and resolve workspaces."""
+        store = self.knowledge()
+        if action == "settings":
+            return 200, await asyncio.to_thread(
+                store.set_settings, enabled=payload.get("enabled"), auto=payload.get("auto")
+            )
+        if action == "synonyms":
+            return 200, await asyncio.to_thread(store.set_synonyms, payload.get("text"))
+        if action in {"delete", "rename"}:
+            if action == "delete":
+                await asyncio.to_thread(store.delete, payload.get("id"))
+            else:
+                await asyncio.to_thread(store.rename, payload.get("id"), payload.get("title"))
+            return 200, await asyncio.to_thread(store.snapshot)
+        if action == "search":
+            query = payload.get("query")
+            if not isinstance(query, str) or len(query) > 500:
+                raise ValueError("query must be text of at most 500 characters")
+            results = await asyncio.to_thread(store.search, query, limit=8)
+            return 200, {"results": [store.public(result, excerpt=240) for result in results]}
+        raise KeyError(action)
+
     async def post(self, path, payload):
         if path == "/mobile/backup/create":
             from mobile_backup import backup_jobs
@@ -463,6 +496,8 @@ class MobileManagement:
                 return 200, store.set_settings(
                     enabled=payload.get("enabled"), auto=payload.get("auto")
                 )
+        if path.startswith("/mobile/knowledge/"):
+            return await self._knowledge_post(path[len("/mobile/knowledge/"):], payload)
         if path == "/mobile/notification-rules" or path.startswith("/mobile/notification-rules/"):
             return await self._notification_rules_post(path[len("/mobile/notification-rules/"):], payload)
         if path.startswith("/mobile/browser/"):
@@ -590,7 +625,10 @@ class MobileManagement:
         if path == "/mobile/local-models/probe":
             return 200, await probe_local_model(self.controller, model_manager=self.models)
         if path == "/mobile/local-models/download":
-            return 202, self.models.start_download(payload.get("model_id"))
+            source, prefer = payload.get("source", "auto"), payload.get("prefer")
+            if not isinstance(source, str) or not (prefer is None or isinstance(prefer, str)):
+                raise ValueError("invalid download source")
+            return 202, self.models.start_download(payload.get("model_id"), source, prefer)
         if path == "/mobile/local-models/cancel":
             return 200, await self.models.cancel_download(payload.get("model_id"))
         if path in {"/mobile/local-models/remove", "/mobile/local-models/unload"}:

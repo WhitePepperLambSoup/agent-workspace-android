@@ -1,5 +1,75 @@
 # Changelog
 
+## 1.2.0 — 2026-10-10
+
+功能版：知识库、闹钟与日历，本机模型更可靠。Feature release: a knowledge base, alarms and calendar, and more reliable on-device models.
+
+### 中文
+
+**知识库（新）**
+- 菜单 →「知识库」：把说明书、合同、笔记、电子书加进来，提问时 AI 会从中找出相关段落回答，并注明出自哪份文档、第几页。支持 PDF（需要有文字层，扫描件暂不支持）、Word（.docx）、Excel（.xlsx）、EPUB、网页、Markdown 和文本文件。
+- 三种添加方式：在知识库页选择文件；在工作区文件预览里点「加入知识库」；或在对话里说「把 xx.pdf 加入知识库」。
+- 文档只保存在这台手机上，按关键词检索（SQLite 全文索引，中文按双字切分），不用下载模型，也不消耗额度。单个文件最大 100 MiB，最多 300 份；可以重命名、删除，也可以在页面里直接试搜。
+- 换个说法也能找到：内置 161 组中英文常用说法（如「房租」和「租金」、「坏了」和「维修」），也可以在页面里加上自己的同义词。主动搜索时，文档里没有的中文词还会按单字去找，比如搜「房租」也能找到写着「租金」的段落。
+- 「提问时自动附上相关段落」：开启后每次提问会先在知识库里找，找到相关段落才随问题一起发给模型；关闭后只在 AI 主动搜索时使用。段落会标明是参考资料交给模型，而不是给 AI 的指令。
+
+**闹钟、计时与日历（新）**
+- 让 AI 在系统时钟里设闹钟（指定时间或几分钟后，可每周重复）和倒计时。应用在后台时安卓不允许直接打开时钟，这时会发一条通知，点一下即可完成设置。
+- 在「设备与工具 → 日历」允许访问后，AI 可以查看和添加日程。在「工作区」执行模式下，每次添加日程前都会请你批准。
+- AI 现在知道今天的日期、星期和时区，「明天下午三点」这类说法能正确换算。
+
+**本机模型**
+- 模型下载来源可选 ModelScope 魔搭（国内 CDN）或 Hugging Face。默认自动选择：中文界面先连 ModelScope，英文界面先连 Hugging Face，连不上再换另一个；暂停后换个来源会接着下载，下载完都按固定的 SHA-256 校验。
+- 工具调用加了语法约束（GBNF）：模型开始写工具调用时，只能写出格式正确的内容，不再因为格式错误被退回重试。在 12 个日常任务的测试中，Qwen3.5 0.8B 完成的任务从 6 个增加到 7 个，模型调用从 41 次减少到 29 次；2B 保持 11 个。「本地模型」页会显示本轮是否启用了约束、纠正了几次。
+- 提示更短、首字更快：工具说明更精简，并按你的请求只附上需要的工具（浏览器这类说明较长的工具只在提到时才附上）；记忆部分也更紧凑。
+- 新增「复制文件」工具：小模型复制文件时一次完成，不再把内容逐字重写一遍，也不会把读取结果的格式混进副本。新建文件夹时会自动创建上级文件夹，文件夹已存在也视为完成。
+- 自动上下文最大取 32K Token：更大的上下文会多占内存、加载更慢（Qwen3.5 0.8B 用 128K 时常驻内存约 2.3 GiB，32K 时约 1 GiB）。需要的话仍可以手动选择更大的上下文。
+
+**界面**
+- 菜单顶部新增搜索框：按名称或关键词（中英文都可以）找到功能，以及各页面里的具体设置。
+- 新增「关于与更新」页：检查更新、每天自动检查和导出诊断日志都集中在这里（原来在「设备与工具」）。
+- 重新打开会话时，只调用了工具、没有文字的步骤不再显示成空白的回复卡片。
+
+**修复**
+- 包含 1.1.2 的修复：Android 15 及以上的手机可能打不开应用。
+
+**升级说明**
+- 覆盖安装或在应用内更新即可，数据保留。
+- 新增「设置闹钟」和「日历」权限声明。日历权限只在你点「设备与工具 → 日历」时才会请求；闹钟和计时不需要你另外授权。
+
+### English
+
+**Knowledge base (new)**
+- Menu → Knowledge base: add manuals, contracts, notes and e-books, and the AI answers from the relevant passages, citing the document and, when known, the page. Supports PDF (with a text layer; scans are not supported yet), Word (.docx), Excel (.xlsx), EPUB, web pages, Markdown and text files.
+- Add documents from the Knowledge base page, with "Add to the knowledge base" in the workspace file preview, or by saying "add xx.pdf to the knowledge base" in a conversation.
+- Documents stay on this phone and are searched by keyword (an SQLite full-text index; Chinese is split into two-character units), so no model download and no API usage. Up to 100 MiB per file and 300 documents; documents can be renamed and deleted, and the page has a test search.
+- Other wordings still match: 161 built-in groups of common Chinese and English wordings (for example "repair", "fix" and "maintenance"), plus your own groups on the page. Explicit searches also look up a Chinese word that no document contains by its single characters, so 房租 (rent) still finds a passage about 租金 (rental fee).
+- "Attach relevant passages to each question": when on, every question is first looked up in the knowledge base, and passages are sent with it only when they match; when off, the knowledge base is used only when the AI searches it. Passages reach the model marked as reference material, not as instructions.
+
+**Alarms, timers and calendar (new)**
+- The AI can set alarms (at a time or in some minutes, optionally repeating on weekdays) and timers in the system Clock app. Android does not let an app in the background open the Clock app, so in that case a notification appears; tap it to finish.
+- After you allow calendar access under Device & tools → Calendar, the AI can list and add events. In the Workspace execution mode, every new event needs your approval.
+- The AI now knows today's date, weekday and time zone, so "tomorrow at 3 pm" resolves correctly.
+
+**On-device models**
+- Models can be downloaded from ModelScope (a mainland China CDN) or Hugging Face. Automatic tries ModelScope first in the Chinese interface and Hugging Face first in the English one, and falls back to the other if the first can't be reached. After a pause, another source continues where the download stopped. Every download is checked against its pinned SHA-256.
+- Tool calls are constrained by a grammar (GBNF): once the model starts a tool call, it can only write a well-formed one, so calls are no longer rejected for bad formatting. On 12 everyday tasks, Qwen3.5 0.8B finished 7 instead of 6 with 29 model calls instead of 41; 2B stayed at 11. The Local models page shows whether the grammar was active in the last run and how often it corrected the model.
+- Shorter prompts and a faster first token: tool descriptions are shorter, only the tools your request needs are included (long ones such as the browser only when you mention them), and the memory section is more compact.
+- A new copy_file tool lets small models copy a file in one call instead of rewriting it token by token, which could also paste the read result's wrapper into the copy. Creating a folder now creates missing parent folders and treats an existing folder as done.
+- The automatic context size is capped at 32K tokens: a larger context uses more memory and loads more slowly (Qwen3.5 0.8B kept about 2.3 GiB resident at 128K against about 1 GiB at 32K). You can still choose a larger context by hand.
+
+**Interface**
+- A search box at the top of the menu finds features and the individual settings inside each page, by name or keyword, in Chinese or English.
+- A new About and updates page gathers update checks, the daily automatic check and diagnostic log export (previously under Device & tools).
+- When a conversation is reopened, steps that only called tools no longer show as empty reply cards.
+
+**Fixed**
+- Includes the 1.1.2 fix for the app failing to open on Android 15 and later.
+
+**Upgrading**
+- Install over the existing app or update in the app; your data is kept.
+- The app now declares the "set alarm" and calendar permissions. Calendar access is requested only when you tap Device & tools → Calendar; alarms and timers need no extra permission.
+
 ## 1.1.2 — 2026-10-10
 
 修复版：Android 15 及以上的手机可能打不开应用。Hotfix: the app could fail to open on Android 15 and later.

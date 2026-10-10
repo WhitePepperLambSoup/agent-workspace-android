@@ -420,6 +420,28 @@ class WebUiActivity : ComponentActivity() {
         dispatchNotificationSettingsChanged()
     }
 
+    private val calendarPermissions = arrayOf(Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR)
+
+    private val calendarPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+        val granted = result.values.all { it }
+        // After "don't ask again" the system shows nothing; its app settings page still can.
+        if (!granted && calendarPermissions.none { shouldShowRequestPermissionRationale(it) }) openAppSettings()
+        dispatchPageEvent("agent-calendar-access-changed",
+            com.agentworkspace.mobile.capabilities.AndroidClockCalendar.calendarAccess(this))
+    }
+
+    private fun requestCalendarAccess() {
+        if (isFinishing || isDestroyed) return
+        calendarPermissionLauncher.launch(calendarPermissions)
+    }
+
+    private fun openAppSettings() {
+        runCatching {
+            startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:$packageName")))
+        }
+    }
+
     // 注册原生文件选择器启动协议
     private val filePickerLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
@@ -553,6 +575,7 @@ class WebUiActivity : ComponentActivity() {
                         else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                     }
                 },
+                requestCalendarAccessAction = { requestCalendarAccess() },
             ), "AndroidBridge")
 
             webChromeClient = object : WebChromeClient() {
