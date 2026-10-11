@@ -12,9 +12,13 @@ a 0.8B model otherwise retried "directory target already exists" until its step 
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import re
 from dataclasses import replace
+from html.parser import HTMLParser
+from pathlib import PurePosixPath
 from typing import Any
 
 from agent_workspace.application.ports import ToolExecutionContext
@@ -214,6 +218,143 @@ class UnescapingPatchTool:
         return await self._tool.execute_with_context(fixed, context)
 
 
+# ---- Checking a file before a small model saves it ---------------------------------------------
+# A 2B model writes JSON with a trailing comma, CSV fields with unquoted commas and HTML cut off by
+# its output limit, then reports success. Saving is refused with the exact place to fix instead.
+
+# JSON with comments ("JSONC") by convention.
+_JSONC_NAMES = re.compile(r"^(?:tsconfig|jsconfig)(?:\..+)?\.json$|^\.eslintrc\.json$|^devcontainer\.json$")
+_VOID_TAGS = frozenset(
+    {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+     "track", "wbr"}
+)  # fmt: skip
+# Elements whose end tag HTML lets authors leave out.
+_OPTIONAL_END_TAGS = frozenset(
+    {"p", "li", "dt", "dd", "tr", "td", "th", "thead", "tbody", "tfoot", "option", "optgroup",
+     "colgroup", "caption", "rb", "rt", "rtc", "rp", "html", "head", "body"}
+)  # fmt: skip
+
+
+class _HtmlBalance(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.open: list[tuple[str, int]] = []
+        self.problem: str | None = None
+
+    def handle_starttag(self, tag: str, _attrs: Any) -> None:
+        if tag not in _VOID_TAGS:
+            self.open.append((tag, self.getpos()[0]))
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _VOID_TAGS:
+            return
+        for index in range(len(self.open) - 1, -1, -1):
+            if self.open[index][0] == tag:
+                skipped = [item for item in self.open[index + 1 :] if item[0] not in _OPTIONAL_END_TAGS]
+                if skipped and self.problem is None:
+                    inner, line = skipped[-1]
+                    self.problem = (
+                        f"<{inner}> opened at line {line} is not closed before </{tag}> at line "
+                        f"{self.getpos()[0]}"
+                    )
+                del self.open[index:]
+                return
+        if self.problem is None:
+            self.problem = f"</{tag}> at line {self.getpos()[0]} has no matching <{tag}>"
+
+
+def _html_problem(content: str) -> str | None:
+    parser = _HtmlBalance()
+    parser.feed(content)
+    parser.close()
+    if parser.problem:
+        return parser.problem
+    unclosed = [item for item in parser.open if item[0] not in _OPTIONAL_END_TAGS]
+    if unclosed:
+        tag, line = unclosed[-1]
+        return f"<{tag}> opened at line {line} is never closed; the file looks cut off"
+    if re.search(r"<html[\s>]", content, re.IGNORECASE) and not re.search(
+        r"</html\s*>", content, re.IGNORECASE
+    ):
+        return "it has <html> but no </html>; the file looks cut off"
+    return None
+
+
+def content_problem(path: str, content: str) -> str | None:
+    """Why ``content`` would be a broken file of the type its name says, or None."""
+    name = PurePosixPath(path.replace("\\", "/")).name.casefold()
+    suffix = PurePosixPath(name).suffix
+    if suffix == ".json" and not _JSONC_NAMES.match(name):
+        try:
+            json.loads(content)
+        except json.JSONDecodeError as exc:
+            return (
+                f"{path} would not be valid JSON: {exc.msg} at line {exc.lineno} column "
+                f"{exc.colno}. Write the whole corrected JSON again (no comments, no trailing commas)."
+            )
+    elif suffix == ".jsonl":
+        for number, line in enumerate(content.splitlines(), 1):
+            if line.strip():
+                try:
+                    json.loads(line)
+                except json.JSONDecodeError as exc:
+                    return f"{path} line {number} is not one JSON value: {exc.msg}. Put one JSON object on each line."
+    elif suffix in {".csv", ".tsv"}:
+        try:
+            rows = [row for row in csv.reader(io.StringIO(content), delimiter="\t" if suffix == ".tsv" else ",") if row]
+        except csv.Error as exc:
+            return f"{path} would not be valid CSV: {exc}."
+        if rows:
+            width = len(rows[0])
+            for number, row in enumerate(rows[1:], 2):
+                if len(row) != width:
+                    return (
+                        f"{path}: record {number} has {len(row)} fields but the header has {width}. "
+                        "Put double quotes around a field that contains a comma, a quote or a line "
+                        'break, and double any quote inside it ("").'
+                    )
+    elif suffix in {".html", ".htm"}:
+        problem = _html_problem(content)
+        if problem:
+            return f"{path} is not a complete HTML document: {problem}. Write the whole file again, closing every element."
+    elif suffix == ".py":
+        try:
+            compile(content, path, "exec", dont_inherit=True)
+        except SyntaxError as exc:
+            return f"{path} would not be valid Python: {exc.msg} at line {exc.lineno}. Write the whole corrected file again."
+        except ValueError as exc:  # null bytes
+            return f"{path} would not be valid Python: {exc}."
+    return None
+
+
+class ValidatingWriteTool:
+    """write_file for on-device models: refuses content that is broken for its file type."""
+
+    def __init__(self, tool: Any) -> None:
+        self._tool = tool
+        self.spec = tool.spec
+        self.hard_cancellable = getattr(tool, "hard_cancellable", False)
+        self.paths = getattr(tool, "paths", None)
+
+    @staticmethod
+    def _check(arguments: dict[str, Any]) -> None:
+        path, content = arguments.get("path"), arguments.get("content")
+        if isinstance(path, str) and isinstance(content, str):
+            problem = content_problem(path, content)
+            if problem:
+                raise ToolError(f"Not saved: {problem}")
+
+    async def execute(self, arguments: dict[str, Any]) -> str:
+        self._check(arguments)
+        return await self._tool.execute(arguments)
+
+    async def execute_with_context(
+        self, arguments: dict[str, Any], context: ToolExecutionContext
+    ) -> str:
+        self._check(arguments)
+        return await self._tool.execute_with_context(arguments, context)
+
+
 class AppendFileTool:
     """Adds text at the end of a file, through write_file like copy_file.
 
@@ -276,8 +417,12 @@ class AppendFileTool:
             existing = content.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ToolError(f"append_file edits UTF-8 text files only: {relative}") from exc
+        combined = existing + text
+        problem = content_problem(raw_path, combined)
+        if problem and not content_problem(raw_path, existing):
+            raise ToolError(f"Not saved: with this text added, {problem}")
         # write_file refuses the save unless the file still has the digest the model read.
-        return {"path": raw_path, "content": existing + text, "expected_sha256": expected}
+        return {"path": raw_path, "content": combined, "expected_sha256": expected}
 
     async def execute(self, arguments: dict[str, Any]) -> str:
         write = await run_in_process(self._write_arguments, arguments)

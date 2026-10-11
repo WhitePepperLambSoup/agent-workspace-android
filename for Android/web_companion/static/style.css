@@ -474,6 +474,17 @@ strong { font-weight: 600; }
 }
 #taskStateLabel { min-width: 0; overflow-wrap: anywhere; }
 .import-notice { max-width: 100%; margin-bottom: 6px; }
+/* A shared link: offer to save the page to the knowledge base too. */
+.link-clip {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 8px; padding: 2px 2px 2px 12px; border-radius: var(--radius-sm);
+  background: var(--accent-soft); color: var(--accent-soft-text); font-size: 12.5px; line-height: 1.45; transform-origin: 50% 100%;
+}
+.link-clip[hidden] { display: none; }
+.link-clip > [data-icon] svg { width: 15px; height: 15px; }
+.link-clip > #linkClipText { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.link-clip .icon-button { width: 36px; height: 36px; color: inherit; }
+.link-clip .icon-button svg { width: 15px; height: 15px; }
+:root[data-style="glass"] .link-clip { -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); background: var(--glass-control, var(--accent-soft)); }
 
 .composer {
   display: grid; padding: 4px 6px 6px; border: 1px solid var(--border-strong); border-radius: 24px; background: var(--surface);
@@ -546,7 +557,7 @@ strong { font-weight: 600; }
 }
 #sessionDrawer:not([hidden]) #sessionDrawerPanel { animation: drawer-enter 240ms var(--ease-out); }
 #sessionDrawer:not([hidden]) #sessionDrawerBackdrop { animation: settings-backdrop-enter 180ms ease-out; }
-@keyframes drawer-enter { from { transform: translateX(-28px); opacity: .5; } to { transform: none; opacity: 1; } }
+@keyframes drawer-enter { from { transform: translateX(var(--drawer-from, -100%)); opacity: var(--drawer-fade, 1); } to { transform: none; opacity: 1; } }
 .drawer-header { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; min-height: 60px; padding: 8px 6px 8px 14px; }
 .drawer-header h2 { flex: 1; min-width: 0; margin: 0 0 0 8px; font-size: 16px; font-weight: 700; }
 .drawer-body { flex: 1 1 auto; min-height: 0; padding: 0 10px 16px; overflow-y: auto; overscroll-behavior: contain; }
@@ -618,14 +629,152 @@ strong { font-weight: 600; }
 #settingsOverlay:not([hidden]) #settingsSheet { animation: settings-sheet-enter 220ms var(--ease-out); }
 #settingsOverlay:not([hidden]) #settingsBackdrop { animation: settings-backdrop-enter 180ms ease-out; }
 @keyframes settings-page-enter { from { opacity: 0; transform: translateX(var(--settings-page-offset, 14px)); } to { opacity: 1; transform: translateX(0); } }
-@keyframes settings-sheet-enter { from { opacity: .4; transform: translate(var(--settings-sheet-x, 32px), var(--settings-sheet-y, 0px)); } to { opacity: 1; transform: translate(0, 0); } }
+@keyframes settings-sheet-enter { from { opacity: var(--settings-sheet-fade, .4); transform: translate(var(--settings-sheet-x, 32px), var(--settings-sheet-y, 0px)); } to { opacity: 1; transform: translate(0, 0); } }
 @keyframes settings-backdrop-enter { from { opacity: 0; } to { opacity: 1; } }
 /* Glass panels slide in without fading: fading a surface that filters its backdrop forces an extra
    offscreen render of the whole panel on every frame. */
 :root[data-style="glass"] #sessionDrawer:not([hidden]) #sessionDrawerPanel { animation-name: drawer-enter-glass; }
 :root[data-style="glass"] #settingsOverlay:not([hidden]) #settingsSheet { animation-name: settings-sheet-enter-glass; }
-@keyframes drawer-enter-glass { from { transform: translateX(-28px); } to { transform: none; } }
+@keyframes drawer-enter-glass { from { transform: translateX(var(--drawer-from, -100%)); } to { transform: none; } }
 @keyframes settings-sheet-enter-glass { from { transform: translate(var(--settings-sheet-x, 32px), var(--settings-sheet-y, 0px)); } to { transform: translate(0, 0); } }
+/* Panels move on the spring curves motion.js samples (custom properties on <html>); without the
+   script they fall back to the plain ease-out. Drag-to-dismiss sets the transform directly. */
+#sessionDrawer:not([hidden]) #sessionDrawerPanel { animation-duration: var(--spring-snappy-ms, 240ms); animation-timing-function: var(--spring-snappy, var(--ease-out)); }
+#settingsOverlay:not([hidden]) #settingsSheet { animation-duration: var(--spring-snappy-ms, 220ms); animation-timing-function: var(--spring-snappy, var(--ease-out)); }
+.sheet-header { touch-action: none; }
+#sessionDrawerPanel { touch-action: pan-y; }
+.drawer-workspaces { touch-action: auto; }
+
+/* ---------- Quick model sheet (composer model chip) ---------- */
+#modelSheet { position: fixed; inset: 0; z-index: 35; }
+#modelSheetBackdrop { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; background: var(--scrim); cursor: default; }
+/* It reaches 40px below the screen so the spring's overshoot never shows a gap under it. */
+#modelSheetPanel {
+  position: absolute; left: 0; right: 0; bottom: -40px; display: grid; gap: 14px; max-width: 520px; margin: 0 auto;
+  padding: 8px 18px calc(58px + env(safe-area-inset-bottom)); overflow: hidden; touch-action: pan-x;
+  border-radius: 26px 26px 0 0; background: var(--surface); box-shadow: var(--shadow-3);
+}
+#modelSheetPanel > :not(.model-sheet-glow) { position: relative; z-index: 1; min-width: 0; }
+.sheet-grip { justify-self: center; width: 36px; height: 4px; margin: 0 0 -4px; border-radius: var(--radius-pill); background: var(--border-strong); }
+.model-sheet-glow {
+  position: absolute; z-index: 0; top: -30%; left: -10%; right: -10%; height: 100%; opacity: 0; pointer-events: none;
+  background: radial-gradient(40% 46% at 26% 44%, rgba(167, 139, 250, .5), transparent 72%),
+    radial-gradient(36% 42% at 74% 44%, rgba(34, 211, 238, .4), transparent 72%),
+    radial-gradient(28% 36% at 52% 46%, rgba(244, 114, 182, .34), transparent 72%);
+  transform-origin: 50% 0; transition: opacity .5s ease;
+}
+#modelSheetPanel[data-top="true"] .model-sheet-glow { opacity: 1; }
+.model-sheet-header { display: flex; align-items: center; gap: 12px; }
+.model-sheet-icon { flex: 0 0 40px; width: 40px; height: 40px; border-radius: 13px; background: var(--accent-soft); color: var(--accent); }
+.model-sheet-icon svg { width: 20px; height: 20px; }
+.model-sheet-heading { display: grid; flex: 1 1 auto; min-width: 0; }
+.model-sheet-heading h2 { margin: 0; font-size: 16px; font-weight: 650; line-height: 1.35; }
+#modelSheetModel { overflow: hidden; color: var(--text-2); font: 12.5px/1.45 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+#btnModelSheetMore { flex: 0 0 auto; }
+.model-sheet-profiles { display: flex; gap: 8px; margin: 0 -18px; padding: 2px 18px 4px; overflow-x: auto; scrollbar-width: none; touch-action: auto; }
+.model-sheet-profiles::-webkit-scrollbar { display: none; }
+.model-profile {
+  display: grid; flex: 0 0 auto; gap: 1px; max-width: 64%; padding: 8px 14px; border: 1px solid var(--border); border-radius: 14px;
+  background: var(--surface-2); color: var(--text); text-align: left;
+  transition: transform .2s var(--spring-bouncy, var(--ease-out)), border-color .2s, background-color .2s;
+}
+.model-profile strong, .model-profile small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-profile strong { font-size: 13.5px; }
+.model-profile small { color: var(--text-3); font-size: 11.5px; }
+.model-profile[aria-checked="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.model-profile[aria-checked="true"] strong { color: var(--accent-soft-text); }
+.model-profile:active:not(:disabled) { transform: scale(.95); }
+.model-profile:disabled { opacity: .5; }
+
+/* Thinking effort: a slider over the model's levels. "Automatic" sits beside it. */
+.effort-control { --knob: 28px; display: grid; gap: 6px; }
+.effort-head { display: flex; align-items: center; gap: 10px; min-height: 34px; }
+.effort-title { display: inline-flex; align-items: center; gap: 7px; color: var(--text-2); font-size: 13.5px; font-weight: 600; }
+.effort-title svg { width: 17px; height: 17px; color: var(--accent); }
+#effortValue { display: inline-block; margin-left: auto; color: var(--text); font-size: 17px; font-weight: 750; letter-spacing: .02em; }
+.effort-auto {
+  min-height: 30px; padding: 4px 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-pill); background: transparent;
+  color: var(--text-2); font-size: 12.5px; font-weight: 600;
+  transition: background-color .2s, color .2s, border-color .2s, transform .2s var(--spring-bouncy, var(--ease-out));
+}
+.effort-auto[aria-pressed="true"] { border-color: transparent; background: var(--accent); color: var(--accent-contrast); }
+.effort-auto:active:not(:disabled) { transform: scale(.92); }
+.effort-control[data-auto="true"] #effortValue { color: var(--text-3); font-size: 13px; font-weight: 600; }
+.effort-control[data-levels="0"] :is(.effort-track, .effort-labels, .effort-auto, #effortValue) { display: none; }
+.effort-track { position: relative; height: 44px; outline: none; cursor: pointer; touch-action: none; -webkit-tap-highlight-color: transparent; }
+.effort-rail {
+  position: absolute; left: 0; right: 0; top: 50%; height: 10px; margin-top: -5px; overflow: hidden; border-radius: var(--radius-pill);
+  background: var(--surface-3); transition: box-shadow .4s ease;
+}
+.effort-fill {
+  position: absolute; inset: 0; transform: scaleX(0); transform-origin: 0 50%;
+  background: linear-gradient(90deg, rgba(var(--accent-rgb), .5), rgb(var(--accent-rgb)) 55%, rgb(var(--aurora-3)));
+  transition: opacity .25s ease;
+}
+/* The top level: a flowing aurora fills the rail (two colour cycles, shifted by one so it loops seamlessly). */
+.effort-aurora {
+  position: absolute; top: 0; bottom: 0; left: 0; width: 200%; opacity: 0;
+  background: linear-gradient(90deg, var(--aurora), #60a5fa, #22d3ee, #34d399, #fbbf24, #f472b6, #a78bfa);
+  transition: opacity .35s ease;
+}
+.effort-stops { position: absolute; left: calc(var(--knob) / 2); right: calc(var(--knob) / 2); top: 50%; height: 0; pointer-events: none; }
+.effort-stop { position: absolute; top: -2px; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: var(--text-3); opacity: .5; }
+.effort-thumb { position: absolute; left: 0; top: 50%; width: var(--knob); height: var(--knob); margin-top: calc(var(--knob) / -2); pointer-events: none; }
+.effort-thumb::before, .effort-thumb::after { content: ""; position: absolute; inset: 0; border-radius: 50%; }
+.effort-thumb::before {
+  background: #ffffff; box-shadow: 0 0 0 2px rgb(var(--accent-rgb)), 0 3px 10px rgba(0, 0, 0, .25);
+  transition: transform .3s var(--spring-bouncy, var(--ease-out)), box-shadow .35s ease, background-color .3s ease;
+}
+.effort-thumb::after { inset: -7px; border: 2px solid rgba(167, 139, 250, .75); opacity: 0; }
+.effort-track:focus-visible .effort-thumb::before { box-shadow: var(--focus-ring), 0 0 0 2px rgb(var(--accent-rgb)); }
+.effort-control[data-dragging] .effort-thumb::before { transform: scale(1.2); }
+.effort-control[data-auto="true"]:not([data-dragging]) .effort-thumb::before { transform: scale(.68); background: var(--surface-2); box-shadow: 0 0 0 1.5px var(--border-strong); }
+.effort-control[data-auto="true"]:not([data-dragging]) .effort-fill { opacity: 0; }
+.effort-control[data-disabled="true"] .effort-track, .effort-control[data-disabled="true"] .effort-labels { opacity: .45; cursor: default; }
+.effort-labels { position: relative; height: 30px; margin: -6px calc(var(--knob) / 2) 0; }
+.effort-label {
+  position: absolute; top: 0; min-width: 44px; min-height: 30px; padding: 4px 6px; border: 0; background: none; color: var(--text-3);
+  font-size: 12px; font-weight: 600; white-space: nowrap; transform: translateX(-50%);
+  transition: color .2s ease, transform .3s var(--spring-bouncy, var(--ease-out));
+}
+.effort-label[data-active] { color: var(--text); transform: translateX(-50%) scale(1.1); }
+/* Top level (or a drag passing over it): aurora rail, glowing knob with a halo, shimmering label. */
+.effort-control:is([data-top="true"], [data-preview="top"]) .effort-aurora { opacity: 1; animation: effort-aurora 2.4s linear 4; }
+.effort-control:is([data-top="true"], [data-preview="top"]) .effort-rail { box-shadow: 0 0 14px rgba(167, 139, 250, .55), 0 0 28px rgba(34, 211, 238, .22); }
+.effort-control:is([data-top="true"], [data-preview="top"]) .effort-thumb::before {
+  background: radial-gradient(circle at 35% 30%, #ffffff, #ede9fe 55%, #c4b5fd);
+  box-shadow: 0 0 0 2px #ffffff, 0 0 14px 3px rgba(167, 139, 250, .85), 0 0 28px 8px rgba(34, 211, 238, .4);
+}
+.effort-control[data-top="true"]:not([data-dragging]) .effort-thumb::after { animation: effort-halo 1.5s cubic-bezier(.2, .6, .3, 1) 3; }
+.effort-control:is([data-top="true"], [data-preview="top"]) #effortValue {
+  background: linear-gradient(90deg, var(--aurora)) 0 0 / 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: effort-text 2.4s linear 4;
+}
+.effort-control[data-top="true"] .effort-label[data-active] { color: #8b5cf6; }
+@keyframes effort-aurora { from { transform: translateX(-50%); } to { transform: none; } }
+@keyframes effort-halo { from { opacity: .9; transform: scale(.7); } to { opacity: 0; transform: scale(1.9); } }
+@keyframes effort-text { to { background-position: -200% 0; } }
+
+/* The model chip keeps an aurora rim while the model thinks at its highest level. */
+#modelBar { position: relative; }
+#modelBar[data-top="true"] { border-color: transparent; color: var(--text); }
+#modelBar[data-top="true"] svg { color: #8b5cf6; }
+#modelBar[data-top="true"]::before {
+  content: ""; position: absolute; inset: -1px; padding: 1.5px; border-radius: inherit; pointer-events: none;
+  background: linear-gradient(90deg, var(--aurora)) 0 0 / 200% 100%;
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  animation: effort-text 2.4s linear 2;
+}
+/* Sparks from motion.js: fixed so no scroll container clips them. */
+.motion-sparks { position: fixed; z-index: 60; width: 0; height: 0; pointer-events: none; }
+.motion-sparks > span { position: absolute; left: 0; top: 0; border-radius: 50%; }
+.attach-menu { transform-origin: 20px 100%; }
+:root[data-style="glass"] #modelSheetPanel {
+  left: 8px; right: 8px; bottom: 8px; padding-bottom: calc(18px + env(safe-area-inset-bottom));
+  border: 1px solid var(--glass-edge); border-radius: 28px; background-color: var(--glass-fill-strong);
+}
+:root[data-style="glass"] #modelSheetBackdrop { background: rgba(8, 12, 11, .22); }
 
 /* Home menu: grouped cards */
 #settingsHome { padding: 4px 14px 24px; }
@@ -916,7 +1065,7 @@ strong { font-weight: 600; }
 @media (max-width: 599px) {
   #settingsSheet {
     inset: auto 0 0; width: 100%; height: min(92vh, var(--visible-height, 100vh)); border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-    --settings-sheet-x: 0px; --settings-sheet-y: 28px;
+    --settings-sheet-x: 0px; --settings-sheet-y: 100%; --settings-sheet-fade: 1;
   }
   #settingsSheet::before {
     content: ""; position: absolute; z-index: 1; top: 6px; left: 50%; width: 36px; height: 4px; margin-left: -18px;
@@ -994,7 +1143,7 @@ strong { font-weight: 600; }
 
 /* ---------- Motion ----------
    full: everything below. reduced (or auto + OS reduce): fades only, no travel or loops. off: nothing moves. */
-:root { --rise: 10px; --motion-scale: 1; }
+:root { --rise: 10px; --motion-scale: 1; --aurora: #a78bfa, #60a5fa, #22d3ee, #34d399, #fbbf24, #f472b6, #a78bfa; }
 @keyframes rise-in { from { opacity: 0; transform: translateY(var(--rise)); } to { opacity: 1; transform: none; } }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes caret-blink { 0%, 45% { opacity: 1; } 50%, 100% { opacity: 0; } }
@@ -1015,6 +1164,48 @@ strong { font-weight: 600; }
 .settings-page > .menu-section:nth-child(4) { animation-delay: 90ms; }
 .settings-page > .menu-section:nth-child(5) { animation-delay: 120ms; }
 .settings-page > .menu-section:nth-child(6) { animation-delay: 150ms; }
+/* Spring timing from motion.js (--spring-*); without the script the curves above stay. Animations that
+   end on "transform: none" fill backwards only, so :active press feedback still applies afterwards. */
+#timelineList > .message-card, #timelineList > .task-error, #timelineList > .history-error {
+  animation-duration: var(--spring-gentle-ms, 320ms); animation-timing-function: var(--spring-gentle, var(--ease-out));
+}
+/* Your own message pops up from the composer's corner. */
+#timelineList > .message-card.user {
+  transform-origin: 100% 100%; animation: bubble-in var(--spring-bouncy-ms, 320ms) var(--spring-bouncy, var(--ease-out)) backwards;
+}
+@keyframes bubble-in { from { opacity: 0; transform: translateY(calc(var(--rise) * 1.6)) scale(var(--pop-scale, .94)); } to { opacity: 1; transform: none; } }
+#approvalShelf:not([hidden]) {
+  transform-origin: 50% 100%; animation: bubble-in var(--spring-bouncy-ms, 280ms) var(--spring-bouncy, var(--ease-out)) backwards;
+}
+#noticeText:not([hidden]) { animation: rise-in var(--spring-snappy-ms, 200ms) var(--spring-snappy, ease-out) backwards; }
+.settings-page:not([hidden]) { animation-duration: var(--spring-snappy-ms, 180ms); animation-timing-function: var(--spring-snappy, var(--ease-out)); }
+#btnJumpLatest:not([hidden]) { animation: button-pop var(--spring-bouncy-ms, 220ms) var(--spring-bouncy, var(--ease-out)) backwards; }
+/* Quick tasks cascade in, one after another. */
+#quickChipsBar .chip { animation: rise-in var(--spring-bouncy-ms, 300ms) var(--spring-bouncy, var(--ease-out)) backwards; }
+#quickChipsBar .chip:nth-child(2) { animation-delay: 40ms; }
+#quickChipsBar .chip:nth-child(3) { animation-delay: 80ms; }
+#quickChipsBar .chip:nth-child(4) { animation-delay: 120ms; }
+#quickChipsBar .chip:nth-child(n+5) { animation-delay: 160ms; }
+/* Send and stop swap with a small spin-and-pop. */
+.send-button:not([hidden]), .stop-button:not([hidden]) {
+  animation: button-pop var(--spring-bouncy-ms, 240ms) var(--spring-bouncy, var(--ease-out)) backwards;
+}
+@keyframes button-pop { from { opacity: 0; transform: scale(var(--pop-from, .55)) rotate(var(--pop-turn, -60deg)); } to { opacity: 1; transform: none; } }
+/* Pressing a chip squeezes it; letting go springs it back (transitions below). */
+.composer-chip:active { transform: scale(.95); }
+/* Tool cards and reasoning open and close by growing to their height (WebViews with interpolate-size). */
+@supports (interpolate-size: allow-keywords) and selector(::details-content) {
+  :root { interpolate-size: allow-keywords; }
+  .message-card.tool::details-content, .reasoning-box::details-content {
+    height: 0; overflow: clip;
+    transition: height var(--spring-snappy-ms, 260ms) var(--spring-snappy, var(--ease-out)), content-visibility var(--spring-snappy-ms, 260ms) allow-discrete;
+  }
+  .message-card.tool[open]::details-content, .reasoning-box[open]::details-content { height: auto; }
+  :root[data-motion="reduced"] :is(.message-card.tool, .reasoning-box)::details-content { transition: none; }
+  @media (prefers-reduced-motion: reduce) {
+    :root[data-motion="auto"] :is(.message-card.tool, .reasoning-box)::details-content { transition: none; }
+  }
+}
 
 /* Streaming reply: blinking caret while text arrives; shimmer while the model has not answered yet. */
 .message-card.assistant.streaming .message-body > :last-child::after {
@@ -1041,20 +1232,32 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
 .management-list, .management-form, .management-section, #settingsSheet {
   transition: background-color .35s ease, border-color .35s ease, color .35s ease, box-shadow .35s ease;
 }
+/* Chips also spring back from a press. (Never on panels: drag-to-dismiss moves them directly.) */
+#modelBar, .chip, .composer-chip {
+  transition: background-color .35s ease, border-color .35s ease, color .35s ease, box-shadow .35s ease,
+    transform .32s var(--spring-bouncy, var(--ease-out));
+}
 .send-button { transition: transform .18s var(--ease-out), background-color .25s ease, color .25s ease, box-shadow .25s ease; }
 .send-button:not(:disabled) { box-shadow: 0 4px 14px rgba(var(--accent-rgb), .35); }
 .menu-row > [data-icon]:last-child:not(:first-child) { transition: transform .2s var(--ease-out); }
 .menu-row:active > [data-icon]:last-child:not(:first-child) { transform: translateX(3px); }
 
-:root[data-motion="reduced"] { --rise: 0px; }
+:root[data-motion="reduced"] { --rise: 0px; --pop-scale: 1; --pop-from: 1; --pop-turn: 0deg; }
 :root[data-motion="reduced"] .empty-state-icon { animation: none !important; }
 :root[data-motion="reduced"] .settings-page { --settings-page-offset: 0px; }
-:root[data-motion="reduced"] #settingsSheet { --settings-sheet-x: 0px; --settings-sheet-y: 0px; }
+:root[data-motion="reduced"] #settingsSheet { --settings-sheet-x: 0px; --settings-sheet-y: 0px; --settings-sheet-fade: .4; }
+:root[data-motion="reduced"] #sessionDrawerPanel { --drawer-from: 0px; --drawer-fade: 0; }
+/* Reduced motion keeps the top effort level's colours but nothing flows, pulses or shimmers. */
+:root[data-motion="reduced"] .effort-control *, :root[data-motion="reduced"] .effort-control *::before,
+:root[data-motion="reduced"] .effort-control *::after, :root[data-motion="reduced"] #modelBar::before { animation: none !important; }
 @media (prefers-reduced-motion: reduce) {
-  :root[data-motion="auto"] { --rise: 0px; }
+  :root[data-motion="auto"] { --rise: 0px; --pop-scale: 1; --pop-from: 1; --pop-turn: 0deg; }
   :root[data-motion="auto"] .settings-page:not([hidden]), :root[data-motion="auto"] #settingsOverlay:not([hidden]) #settingsSheet,
   :root[data-motion="auto"] #settingsOverlay:not([hidden]) #settingsBackdrop { animation: none; }
+  :root[data-motion="auto"] #sessionDrawer:not([hidden]) :is(#sessionDrawerPanel, #sessionDrawerBackdrop) { animation: none; }
   :root[data-motion="auto"] .empty-state-icon,
+  :root[data-motion="auto"] .effort-control *, :root[data-motion="auto"] .effort-control *::before,
+  :root[data-motion="auto"] .effort-control *::after, :root[data-motion="auto"] #modelBar::before,
   :root[data-motion="auto"] #appShell[data-busy="true"] .status-indicator::after { animation: none !important; }
   :root[data-motion="auto"] .message-card.tool[data-state="running"] summary::before,
   :root[data-motion="auto"] #taskStatusBar[data-busy="true"]::before { animation-duration: 2.4s; }
@@ -1272,11 +1475,11 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
 :root[data-style="glass"] :is(.chip, .composer, .composer-chip, .message-card.user, .message-card.tool, .menu-group, .toggle-row, .empty-state, #approvalShelf, #taskStatusBar) {
   position: relative;
 }
-:root[data-style="glass"] :is(#mobileHeader, .composer, #sessionDrawerPanel, #settingsSheet, #approvalShelf, #btnJumpLatest, .chip, #taskStatusBar,
+:root[data-style="glass"] :is(#mobileHeader, .composer, #sessionDrawerPanel, #settingsSheet, #modelSheetPanel, #approvalShelf, #btnJumpLatest, .chip, #taskStatusBar,
   .composer-chip, .message-card.user, .message-card.tool, .menu-group, .toggle-row) {
   border-color: transparent;
 }
-:root[data-style="glass"] :is(#mobileHeader, .composer, #sessionDrawerPanel, #settingsSheet, #approvalShelf, #btnJumpLatest, .chip, #taskStatusBar,
+:root[data-style="glass"] :is(#mobileHeader, .composer, #sessionDrawerPanel, #settingsSheet, #modelSheetPanel, #approvalShelf, #btnJumpLatest, .chip, #taskStatusBar,
   .composer-chip, .message-card.user, .message-card.tool, .menu-group, .toggle-row)::after,
 :root[data-style="glass"]:not([data-backdrop="plain"]) :is(.message-card.assistant, .empty-state)::after {
   content: ""; position: absolute; inset: 0; z-index: 1; padding: 1.2px; border-radius: inherit; pointer-events: none;
@@ -1333,7 +1536,7 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
 :root[data-style="glass"] .empty-state { margin-top: calc(var(--header-h, 64px) + 6vh); }
 
 /* The material: frosted fill, bright top rim, faint inner edge, soft drop shadow, specular sheen. */
-:root[data-style="glass"] :is(#mobileHeader, .composer, #sessionDrawerPanel, #settingsSheet, #approvalShelf, #btnJumpLatest, .chip, #taskStatusBar) {
+:root[data-style="glass"] :is(#mobileHeader, .composer, #sessionDrawerPanel, #settingsSheet, #modelSheetPanel, #approvalShelf, #btnJumpLatest, .chip, #taskStatusBar) {
   background-color: var(--glass-fill);
   background-image: var(--glass-sheen);
   -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
@@ -1381,7 +1584,7 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
     --glass-edge: transparent;
   }
 }
-:root.liquid-refraction :is(#mobileHeader, .composer, #sessionDrawerPanel, #settingsSheet, #approvalShelf, #btnJumpLatest, .chip, #taskStatusBar) {
+:root.liquid-refraction :is(#mobileHeader, .composer, #sessionDrawerPanel, #settingsSheet, #modelSheetPanel, #approvalShelf, #btnJumpLatest, .chip, #taskStatusBar) {
   /* Still: the dispersive filter. Moving (scroll, drag, panel animation): the single-pass one.
      liquid-glass.js sets both chains; until it has, the plain frosted blur stands in. */
   -webkit-backdrop-filter: var(--liquid-glass-still, var(--glass-blur));
@@ -1389,20 +1592,20 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
   /* Glass thickness: a faint shade along the lower inside edge. */
   box-shadow: inset 0 -12px 18px -16px rgba(0, 0, 0, .12), var(--glass-shadow);
 }
-:root.liquid-refraction[data-glass-moving] :is(#mobileHeader, .composer, #sessionDrawerPanel, #settingsSheet, #approvalShelf, #btnJumpLatest, .chip, #taskStatusBar) {
+:root.liquid-refraction[data-glass-moving] :is(#mobileHeader, .composer, #sessionDrawerPanel, #settingsSheet, #modelSheetPanel, #approvalShelf, #btnJumpLatest, .chip, #taskStatusBar) {
   -webkit-backdrop-filter: var(--liquid-glass-moving, var(--glass-blur));
   backdrop-filter: var(--liquid-glass-moving, var(--glass-blur));
 }
 :root.liquid-refraction .composer:focus-within { box-shadow: var(--focus-ring), var(--glass-shadow); }
 /* The highlight is a static image computed with the lens (corner-weighted), laid over the glass and
    under its content; being static, it costs nothing per frame. */
-:root.liquid-refraction :is(#mobileHeader, .composer, #sessionDrawerPanel, #settingsSheet, #approvalShelf, #btnJumpLatest, .chip, #taskStatusBar)::after {
+:root.liquid-refraction :is(#mobileHeader, .composer, #sessionDrawerPanel, #settingsSheet, #modelSheetPanel, #approvalShelf, #btnJumpLatest, .chip, #taskStatusBar)::after {
   content: ""; position: absolute; inset: 0; z-index: -1; padding: 0; border-radius: inherit; pointer-events: none;
   background: var(--liquid-glass-specular, none) center / 100% 100% no-repeat;
   -webkit-mask: none; mask: none;
 }
 /* Panels holding long text (drawer, settings, approvals) keep more tint so they stay readable. */
-:root.liquid-refraction :is(#sessionDrawerPanel, #settingsSheet, #approvalShelf) { background-color: var(--glass-panel, rgba(255, 255, 255, .3)); }
+:root.liquid-refraction :is(#sessionDrawerPanel, #settingsSheet, #modelSheetPanel, #approvalShelf) { background-color: var(--glass-panel, rgba(255, 255, 255, .3)); }
 :root.liquid-refraction[data-theme="dark"] { --glass-panel: rgba(20, 25, 26, .38); }
 @media (prefers-color-scheme: dark) { :root.liquid-refraction[data-theme="system"] { --glass-panel: rgba(20, 25, 26, .38); } }
 /* Controls that carry their own text over the scrolling conversation (header title, composer, task
@@ -1416,25 +1619,25 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
 }
 /* Everything inside the sidebar and the settings sheet (groups, rows, fields, lists on every page) is
    a lighter pane of the same glass rather than an opaque card. */
-:root[data-style="glass"] :is(#sessionDrawerPanel, #settingsSheet) {
+:root[data-style="glass"] :is(#sessionDrawerPanel, #settingsSheet, #modelSheetPanel) {
   --surface: rgba(255, 255, 255, .3); --surface-2: rgba(255, 255, 255, .24); --surface-3: rgba(255, 255, 255, .36);
   --field: rgba(255, 255, 255, .34); --content-veil: rgba(255, 255, 255, .3);
 }
-:root[data-style="glass"][data-theme="dark"] :is(#sessionDrawerPanel, #settingsSheet) {
+:root[data-style="glass"][data-theme="dark"] :is(#sessionDrawerPanel, #settingsSheet, #modelSheetPanel) {
   --surface: rgba(255, 255, 255, .06); --surface-2: rgba(255, 255, 255, .09); --surface-3: rgba(255, 255, 255, .13);
   --field: rgba(0, 0, 0, .22); --content-veil: rgba(255, 255, 255, .06);
 }
 @media (prefers-color-scheme: dark) {
-  :root[data-style="glass"][data-theme="system"] :is(#sessionDrawerPanel, #settingsSheet) {
+  :root[data-style="glass"][data-theme="system"] :is(#sessionDrawerPanel, #settingsSheet, #modelSheetPanel) {
     --surface: rgba(255, 255, 255, .06); --surface-2: rgba(255, 255, 255, .09); --surface-3: rgba(255, 255, 255, .13);
     --field: rgba(0, 0, 0, .22); --content-veil: rgba(255, 255, 255, .06);
   }
 }
-:root[data-style="glass"] :is(#sessionDrawerPanel, #settingsSheet) :is(.menu-group, .toggle-row) { background: var(--surface); }
+:root[data-style="glass"] :is(#sessionDrawerPanel, #settingsSheet, #modelSheetPanel) :is(.menu-group, .toggle-row) { background: var(--surface); }
 /* Low-memory devices get a lighter blur; "reduce transparency" gets solid surfaces and no live blur. */
 :root[data-style="glass"].lite-glass { --glass-blur: blur(12px); }
 @media (prefers-reduced-transparency: reduce) {
-  :root[data-style="glass"] :is(#mobileHeader, .composer, #sessionDrawerPanel, #settingsSheet, #approvalShelf, #btnJumpLatest, .chip, #taskStatusBar) {
+  :root[data-style="glass"] :is(#mobileHeader, .composer, #sessionDrawerPanel, #settingsSheet, #modelSheetPanel, #approvalShelf, #btnJumpLatest, .chip, #taskStatusBar) {
     -webkit-backdrop-filter: none; backdrop-filter: none; background-color: var(--surface); background-image: none;
   }
 }

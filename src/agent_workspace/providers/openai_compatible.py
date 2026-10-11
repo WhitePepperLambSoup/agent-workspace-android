@@ -622,6 +622,9 @@ def _parse_usage(value: object, *, status_code: int) -> Usage:
         cached_tokens = _token_count(details, "cached_tokens", status_code=status_code)
     elif "prompt_cache_hit_tokens" in usage:
         cached_tokens = _token_count(usage, "prompt_cache_hit_tokens", status_code=status_code)
+    elif "cached_tokens" in usage:
+        # Moonshot (Kimi) reports cache hits at the top level of usage.
+        cached_tokens = _token_count(usage, "cached_tokens", status_code=status_code)
     return Usage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,

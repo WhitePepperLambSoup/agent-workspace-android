@@ -481,6 +481,12 @@ class MobileManagement:
             )
         if action == "synonyms":
             return 200, await asyncio.to_thread(store.set_synonyms, payload.get("text"))
+        if action == "url":
+            # A web page the user saves: fetched now (public HTTPS addresses only).
+            added = await asyncio.to_thread(
+                store.add_url, payload.get("url"), collection_id=payload.get("collection")
+            )
+            return 200, {**(await asyncio.to_thread(store.snapshot)), "added": added}
         if action in {"delete", "rename"}:
             if action == "delete":
                 await asyncio.to_thread(store.delete, payload.get("id"))

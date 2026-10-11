@@ -48,6 +48,7 @@
       <div id="taskStatusBar" hidden><span id="taskStateLabel"></span><button id="btnResumeTask" class="text-action" type="button" hidden><span data-icon="play"></span>恢复任务</button><button id="btnRetryTask" class="text-action" type="button" hidden><span data-icon="refresh-cw"></span>重试任务</button><button id="btnReconnect" class="text-action" type="button" hidden><span data-icon="refresh-cw"></span>重新连接</button></div>
       <div id="editBanner" class="edit-banner" role="status" hidden><span data-icon="pencil"></span><span>正在编辑之前的消息：发送后会替换它和之后的对话（已改动的文件不会撤销）</span><button id="btnCancelEdit" class="text-action" type="button">取消</button></div>
       <button id="btnImportNotice" class="text-action import-notice" type="button" hidden><span data-icon="paperclip"></span><span id="importNoticeText"></span></button>
+      <div id="linkClipNotice" class="link-clip" role="status" hidden><span data-icon="link"></span><span id="linkClipText"></span><button id="btnLinkClipSave" class="text-action" type="button">存入知识库</button><button id="btnLinkClipDismiss" class="icon-button" type="button" title="关闭" aria-label="关闭"><span data-icon="x"></span></button></div>
       <div class="composer">
         <div id="attachmentList" aria-live="polite"></div>
         <input type="file" id="filePickerInput" hidden multiple>
@@ -59,7 +60,7 @@
             <button id="btnAttachFiles" class="menu-row" type="button" role="menuitem"><span data-icon="paperclip"></span><span>选择文件</span></button>
             <button id="btnAttachVoiceNote" class="menu-row" type="button" role="menuitem" hidden><span data-icon="mic"></span><span>录音速记</span></button>
           </div>
-          <button id="modelBar" class="composer-chip" type="button" aria-label="模型与思考" title="模型与思考"><span data-icon="cpu"></span><span id="modelSummary">正在读取模型...</span></button>
+          <button id="modelBar" class="composer-chip" type="button" aria-label="模型与思考" title="模型与思考" aria-haspopup="dialog" aria-expanded="false" aria-controls="modelSheet"><span data-icon="cpu"></span><span id="modelSummary">正在读取模型...</span></button>
           <button id="btnModeChip" class="composer-chip mode-chip" type="button" aria-label="执行权限" title="执行权限"><span data-icon="shield"></span><span id="executionSummary"></span></button>
           <button id="btnKnowledgeChip" class="composer-chip knowledge-chip" type="button" aria-label="本对话使用的知识库" title="本对话使用的知识库" hidden><span data-icon="book-open"></span><span id="knowledgeChipLabel"></span><span id="knowledgeChipBadge" hidden></span></button>
           <span class="composer-spacer"></span>
@@ -88,6 +89,34 @@
         <div id="drawerSessionList" class="drawer-sessions"></div>
       </div>
     </aside>
+  </div>
+  <!-- Quick model sheet: opened from the composer's model chip. The full model page stays in the menu. -->
+  <div id="modelSheet" hidden>
+    <button id="modelSheetBackdrop" type="button" aria-label="关闭" tabindex="-1"></button>
+    <section id="modelSheetPanel" role="dialog" aria-modal="true" aria-labelledby="modelSheetTitle" data-top="false">
+      <span class="model-sheet-glow" aria-hidden="true"></span>
+      <div class="sheet-grip" aria-hidden="true"></div>
+      <div class="model-sheet-header">
+        <span class="model-sheet-icon" data-icon="cpu"></span>
+        <div class="model-sheet-heading"><h2 id="modelSheetTitle">模型与思考</h2><span id="modelSheetModel"></span></div>
+        <button id="btnModelSheetMore" class="text-action" type="button">更多设置<span data-icon="chevron-right"></span></button>
+      </div>
+      <div id="modelSheetProfiles" class="model-sheet-profiles" role="radiogroup" aria-label="模型配置" hidden></div>
+      <div id="effortControl" class="effort-control" data-auto="true">
+        <div class="effort-head">
+          <span class="effort-title"><span data-icon="brain"></span><span>思考程度</span></span>
+          <strong id="effortValue" aria-hidden="true"></strong>
+          <button id="btnEffortAuto" class="effort-auto" type="button" aria-pressed="true">自动</button>
+        </div>
+        <div id="effortTrack" class="effort-track" role="slider" tabindex="0" aria-label="思考程度" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0">
+          <span class="effort-rail" aria-hidden="true"><span id="effortFill" class="effort-fill"></span><span class="effort-aurora"></span></span>
+          <span id="effortStops" class="effort-stops" aria-hidden="true"></span>
+          <span id="effortThumb" class="effort-thumb" aria-hidden="true"></span>
+        </div>
+        <div id="effortLabels" class="effort-labels" aria-hidden="true"></div>
+        <p id="effortSheetHint" class="setting-hint" role="status"></p>
+      </div>
+    </section>
   </div>
   <div id="settingsOverlay" hidden>
     <button id="settingsBackdrop" type="button" aria-label="关闭菜单" tabindex="-1"></button>
@@ -258,7 +287,7 @@
       <div id="settingsGlobalEntry" class="settings-page" hidden>
         <p class="setting-hint">在手机的任何地方都能快速开一个新对话。</p>
         <label class="toggle-row" for="floatingBallToggle"><span>悬浮球</span><input id="floatingBallToggle" type="checkbox"></label>
-        <p class="setting-hint">在其他应用上方显示一个小圆球：点一下开新对话；长按可以圈选提问（圈出屏幕上想问的部分）、语音提问或隐藏它；拖动可以移到屏幕两侧。需要允许“显示在其他应用上层”。圈选提问每次会请你允许截取屏幕；在“设备与工具”里开启无障碍服务后就不再询问。</p>
+        <p class="setting-hint">在其他应用上方显示一个小圆球：点一下展开新对话、语音提问、圈选提问（圈出屏幕上想问的部分）和录音速记；拖动可以移到屏幕两侧，拖到底部的 × 上就隐藏它。需要允许“显示在其他应用上层”。圈选提问每次会请你允许截取屏幕；在“设备与工具”里开启无障碍服务后就不再询问。</p>
         <button id="btnAddQuickTile" class="menu-row" type="button" hidden><span data-icon="plus"></span><span>添加到快捷设置<small>下拉通知栏就能点“问 Agent”</small></span><span data-icon="chevron-right"></span></button>
         <p class="setting-hint">也可以下拉通知栏，进入快捷开关的编辑页面，把“问 Agent”拖进去。</p>
         <p class="setting-hint">长按桌面上的 Agent Workspace 图标，可以直接选“新对话”“语音提问”或“拍照提问”。</p>
@@ -307,7 +336,13 @@
           <div id="knowledgeBaseList" class="management-list"></div>
           <div class="page-toolbar"><button id="btnKnowledgeBaseCreate" class="button-secondary" type="button"><span data-icon="plus"></span>新建知识库</button></div>
         </section>
-        <div class="page-toolbar knowledge-toolbar"><button id="btnKnowledgeAdd" class="button-primary" type="button"><span data-icon="upload"></span><span id="knowledgeAddLabel">添加文档</span></button><select id="knowledgeFilter" aria-label="查看哪个知识库" hidden></select><span id="knowledgeCounter"></span></div>
+        <div class="page-toolbar knowledge-toolbar"><button id="btnKnowledgeAdd" class="button-primary" type="button"><span data-icon="upload"></span><span id="knowledgeAddLabel">添加文档</span></button><button id="btnKnowledgeLink" class="button-secondary" type="button" aria-controls="knowledgeUrlForm"><span data-icon="link"></span>网页</button><select id="knowledgeFilter" aria-label="查看哪个知识库" hidden></select><span id="knowledgeCounter"></span></div>
+        <form id="knowledgeUrlForm" class="management-form" hidden>
+          <label for="knowledgeUrlInput">网页地址</label>
+          <input id="knowledgeUrlInput" type="text" inputmode="url" maxlength="4096" autocomplete="off" spellcheck="false" placeholder="https://…（也可以粘贴分享来的整段文字）">
+          <p class="setting-hint">保存的是网页现在的内容，之后网页更新不会自动同步。</p>
+          <div class="page-toolbar"><button id="btnKnowledgeUrlSave" class="button-primary" type="submit"><span data-icon="save"></span>保存网页</button><button id="btnKnowledgeUrlCancel" class="text-action" type="button">取消</button></div>
+        </form>
         <input id="knowledgeFileInput" type="file" multiple hidden>
         <p id="knowledgeStatus" class="page-status" role="status"></p>
         <div id="knowledgeList" class="management-list"></div>
@@ -324,7 +359,7 @@
           <textarea id="knowledgeSynonyms" rows="4" maxlength="20000" placeholder="例如：咖啡机 磨豆机"></textarea>
           <div class="page-toolbar"><button id="btnSaveKnowledgeSynonyms" class="button-secondary" type="button"><span data-icon="save"></span>保存同义词</button></div>
         </details>
-        <p class="setting-hint">支持 PDF（需要有文字层，扫描件暂不支持）、Word（.docx）、Excel（.xlsx）、EPUB、网页、Markdown 和文本文件。单个文件最大 100 MiB，最多 300 份。也可以在对话里说“把 xx.pdf 加入知识库”。</p>
+        <p class="setting-hint">支持 PDF（扫描件用手机上的文字识别读取）、Word（.docx）、Excel（.xlsx）、EPUB、网页、Markdown 和文本文件。单个文件最大 100 MiB，最多 300 份。也可以在对话里说“把 xx.pdf 加入知识库”。</p>
       </div>
       <div id="settingsQuickTasks" class="settings-page" hidden>
         <p class="setting-hint">点一下快捷任务，会把提示词填进输入框，或直接发送。最多 8 个，可调整顺序。</p>
@@ -570,6 +605,7 @@
   <script src="/static/compat.js"></script>
   <script src="/static/mobile-vendor.js"></script>
   <script src="/static/i18n.js"></script>
+  <script src="/static/motion.js"></script>
   <script src="/static/app.js"></script>
   <script src="/static/management.js"></script>
   <script src="/static/liquid-glass.js"></script>

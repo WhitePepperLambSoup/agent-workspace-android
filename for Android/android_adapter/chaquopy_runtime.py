@@ -136,8 +136,13 @@ def terminate_process_tree_pid(pid: int, *, timeout: float = 2.0) -> None:
         send(signal.SIGKILL)
 
 
+# A database file is checked in full again at least this often, and after every app update.
+_RECHECK_SECONDS = 7 * 24 * 3600
+
+
 def _validate_database_once_per_process() -> None:
-    """Validate the engine database when the engine first opens it, not for every conversation.
+    """Validate the engine database when the engine first opens it, not for every conversation,
+    and not on every engine start either.
 
     Each conversation runtime opens its own SQLiteEventStore, and the core repeats the full
     database validation (a projection replay that takes seconds on a phone) whenever a WAL file
@@ -145,9 +150,21 @@ def _validate_database_once_per_process() -> None:
     database's only writer while it runs (the base runtime leases the writer lock until exit), so
     after a store of this process validated a file, later opens of that same file here cannot find
     changes this process did not make. A restored database is a new file and is validated again.
+
+    The full check also took over four seconds of every cold start on a phone with a few months
+    of history. The file lives in the app's private storage and only this engine writes it, in
+    transactions, so a check passed by this app's code on this very file still holds at the next
+    start: a record next to the database (file identity, schema, a digest of the storage code
+    that projects and checks events, time) skips it. A restore (a new file), an app update that
+    changes that code, a schema migration and a week without a full check each run it again; the
+    cheap structural check (quick_check) still runs on every open.
     """
+    import hashlib
+    import json
     from pathlib import Path
 
+    from agent_workspace.storage import recovery
+    from agent_workspace.storage import sqlite as storage
     from agent_workspace.storage.sqlite import CURRENT_SCHEMA_VERSION, SQLiteEventStore
 
     cached = SQLiteEventStore._open_validation_cached
@@ -156,6 +173,7 @@ def _validate_database_once_per_process() -> None:
     remember = SQLiteEventStore._cache_open_validation
     check_before_migration = SQLiteEventStore._validate_before_migration
     validated: dict[Path, tuple[int, int]] = {}
+    code: list[str] = []
 
     def file_identity(database: Path) -> tuple[int, int] | None:
         try:
@@ -163,6 +181,47 @@ def _validate_database_once_per_process() -> None:
         except OSError:
             return None
         return metadata.st_dev, metadata.st_ino
+
+    def code_digest() -> str:
+        if not code:
+            digest = hashlib.sha256()
+            for module in (storage, recovery):
+                digest.update(Path(str(module.__file__)).read_bytes())
+            code.append(digest.hexdigest())
+        return code[0]
+
+    def record_path(database: Path) -> Path:
+        return database.with_name(database.name + ".checked.json")
+
+    def checked_before(database: Path) -> bool:
+        identity = file_identity(database)
+        try:
+            record = json.loads(record_path(database).read_text(encoding="utf-8"))
+            fresh = 0 <= time.time() - float(record["checked_at"]) < _RECHECK_SECONDS
+            same = (
+                record["identity"] == list(identity or ())
+                and record["schema"] == CURRENT_SCHEMA_VERSION
+                and record["code"] == code_digest()
+            )
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+        if identity is None or not (fresh and same):
+            return False
+        validated[database] = identity
+        return True
+
+    def record_check(database: Path, identity: tuple[int, int]) -> None:
+        path = record_path(database)
+        temporary = path.with_name(path.name + ".tmp")
+        try:
+            temporary.write_text(
+                json.dumps({"identity": list(identity), "schema": CURRENT_SCHEMA_VERSION,
+                            "code": code_digest(), "checked_at": time.time()}),
+                encoding="utf-8",
+            )  # fmt: skip
+            os.replace(temporary, path)
+        except OSError:
+            pass  # only costs a full check at the next start
 
     def validated_here(database: Path) -> bool:
         known = validated.get(database)
@@ -175,13 +234,29 @@ def _validate_database_once_per_process() -> None:
         return check_before_migration(database)
 
     def open_validation_cached(database: Path, identity: tuple[int, int] | None) -> bool:
-        return cached(database, identity) or validated_here(database)
+        return cached(database, identity) or validated_here(database) or checked_before(database)
 
     def cache_open_validation(database: Path, identity: tuple[int, int] | None) -> None:
+        # Called by the core right after a full check of this file passed.
         remember(database, identity)
         current = file_identity(database)
         if current is not None:
             validated[database] = current
+            record_check(database, current)
+
+    # How long the full check takes shows in the engine log (it grows with the history).
+    validate = recovery.validate_database
+    if not getattr(validate, "_android_timed", False):
+
+        def timed_validate(database: Path, *args: Any, **kwargs: Any) -> Any:
+            started = time.monotonic()
+            try:
+                return validate(database, *args, **kwargs)
+            finally:
+                print(f"[database] full check took {(time.monotonic() - started) * 1000:.0f} ms", flush=True)
+
+        timed_validate._android_timed = True  # type: ignore[attr-defined]
+        recovery.validate_database = timed_validate
 
     open_validation_cached._android_once_per_process = True
     SQLiteEventStore._validate_before_migration = staticmethod(validate_before_migration)

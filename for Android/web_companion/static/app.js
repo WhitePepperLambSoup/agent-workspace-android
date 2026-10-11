@@ -52,6 +52,7 @@
   const workspaceKey = "agent-mobile-workspace-v1";
   const wallpaperKey = "agent-mobile-wallpaper-v1";
   const effortLabels = { auto: t("自动"), none: t("关闭"), low: t("低"), medium: t("中"), high: t("高"), xhigh: t("极高"), max: t("最高") };
+  const effortOrder = ["none", "low", "medium", "high", "xhigh", "max"];
   const autonomyLabels = { workspace: t("工作区"), yolo: "YOLO", full_access: t("完全访问") };
   const localContextOptions = [0, 4096, 8192, 16384, 32768, 65536, 131072, 262144];
   const terminalStates = new Set(["succeeded", "failed", "cancelled"]);
@@ -838,22 +839,29 @@
   }
 
   function openDrawer() {
-    if (disposed || !elements.sessionDrawer.hidden) return;
-    if (!elements.settingsOverlay.hidden && !closeMenu()) return;
+    if (disposed || layerOpen(elements.sessionDrawer)) return;
+    if (layerOpen(elements.settingsOverlay) && !closeMenu()) return;
+    closeModelSheet({ instant: true, keepFocus: true });
     renderDrawer();
-    elements.sessionDrawer.hidden = false;
+    showLayer(elements.sessionDrawer, (motion) => {
+      motion.stagger(elements.drawerSessionList.querySelectorAll(":scope > *:nth-child(-n+10)"), { transform: "translateX(-18px)" }, { delay: 60, step: 22, spring: "snappy" });
+    });
     elements.appShell.inert = true;
     elements.btnSessions.setAttribute("aria-expanded", "true");
     (elements.drawerSessionList.querySelector('[aria-current="true"]') || elements.btnDrawerClose).focus({ preventScroll: true });
     haptic();
   }
 
-  function closeDrawer() {
-    if (elements.sessionDrawer.hidden) return false;
-    elements.sessionDrawer.hidden = true;
+  function closeDrawer(options = {}) {
+    if (!layerOpen(elements.sessionDrawer)) return false;
     elements.appShell.inert = false;
     elements.btnSessions.setAttribute("aria-expanded", "false");
     elements.btnSessions.focus({ preventScroll: true });
+    if (options.instant) { motionApi()?.stop(elements.sessionDrawer); elements.sessionDrawer.hidden = true; delete elements.sessionDrawer.dataset.leaving; return true; }
+    hideLayer(elements.sessionDrawer, (motion) => [
+      motion.play(elements.sessionDrawerPanel, [{ transform: "none" }, { transform: "translateX(-104%)" }], { duration: 220, easing: "cubic-bezier(.4, 0, .9, .55)", fill: "forwards" }),
+      motion.play(elements.sessionDrawerBackdrop, [{ opacity: 1 }, { opacity: 0 }], { duration: 200, easing: "ease-out", fill: "forwards" }),
+    ]);
     return true;
   }
 
@@ -1028,6 +1036,7 @@
     syncWorkspaceControls();
     syncImportControls();
     syncDrawerControls(navigationBusy);
+    if (!$("modelSheet").hidden && !effortDrag) renderEffortState(false);
   }
 
   function syncDrawerControls(navigationBusy) {
@@ -1158,6 +1167,8 @@
     // The composer chip is narrow: name the effort only when it is not automatic.
     elements.modelSummary.textContent = settings.reasoning_effort && settings.reasoning_effort !== "auto" ? `${model} · ${effort}` : model;
     elements.modelBar.title = t("{0} · 思考强度 {1}", model, effort);
+    // The chip keeps a colored rim while the model thinks at its highest level.
+    elements.modelBar.dataset.top = String(isTopEffort(settings.model, settings.reasoning_effort));
     elements.executionSummary.textContent = autonomyLabels[settings.autonomy] || autonomyLabels.workspace;
     // The composer shows the mode as a color-coded shield; the name stays available to touch and screen readers.
     elements.btnModeChip.dataset.mode = settings.autonomy in autonomyLabels ? settings.autonomy : "workspace";
@@ -1375,8 +1386,9 @@
   }
 
   function openMenu() {
-    if (disposed || !elements.settingsOverlay.hidden) return;
-    elements.settingsOverlay.hidden = false;
+    if (disposed || layerOpen(elements.settingsOverlay)) return;
+    closeModelSheet({ instant: true, keepFocus: true });
+    showLayer(elements.settingsOverlay);
     elements.appShell.inert = true;
     elements.btnSettings.setAttribute("aria-expanded", "true");
     settingsScrollPositions.clear();
@@ -1388,8 +1400,9 @@
   function handleBack() {
     if (disposed) return false;
     if (closeAttachMenu()) return true;
+    if (closeModelSheet()) return true;
     if (closeDrawer()) return true;
-    if (elements.settingsOverlay.hidden) return false;
+    if (!layerOpen(elements.settingsOverlay)) return false;
     if (settingsPage === "files" && fileEditor && !fileSaving) { void loadWorkspaceFiles(workspacePath); return true; }
     if (settingsPage === "home") { closeMenu(); return true; }
     setSettingsPage(subPageParents[settingsPage] || "home");
@@ -1398,23 +1411,376 @@
 
   function openModelSettings() {
     if (disposed) return;
-    if (elements.settingsOverlay.hidden) openMenu();
+    if (!layerOpen(elements.settingsOverlay)) openMenu();
     setSettingsPage("model");
   }
 
-  function closeMenu() {
-    if (elements.settingsOverlay.hidden) return false;
+  function closeMenu(options = {}) {
+    if (!layerOpen(elements.settingsOverlay)) return false;
     if (settingsPage === "files" && !canLeaveFileEditor()) return false;
     if (settingsPage === "search") invalidateSearch();
     if (settingsPage === "tasks") taskCenterGeneration += 1;
     if (settingsPage === "files") { filesGeneration += 1; resetFilePreview(); }
     if (settingsPage === "usage") usageGeneration += 1;
-    elements.settingsOverlay.hidden = true;
     elements.appShell.inert = false;
     elements.btnSettings.setAttribute("aria-expanded", "false");
     elements.btnSettings.focus();
+    if (options.instant) { motionApi()?.stop(elements.settingsOverlay); elements.settingsOverlay.hidden = true; delete elements.settingsOverlay.dataset.leaving; return true; }
+    // A phone shows the menu as a bottom sheet, a wider screen as a side panel.
+    const away = window.innerWidth < 600 ? "translateY(100%)" : "translateX(100%)";
+    hideLayer(elements.settingsOverlay, (motion) => [
+      motion.play(elements.settingsSheet, [{ transform: "none" }, { transform: away }], { duration: 240, easing: "cubic-bezier(.4, 0, .9, .55)", fill: "forwards" }),
+      motion.play(elements.settingsBackdrop, [{ opacity: 1 }, { opacity: 0 }], { duration: 210, easing: "ease-out", fill: "forwards" }),
+    ]);
     return true;
   }
+
+  // ---- Quick model sheet ------------------------------------------------------------------------
+  // The composer's model chip opens a small sheet: saved model profiles and a thinking-effort slider.
+  // A cloud model takes the new effort at once (no engine restart). The top level lights up.
+  const motionApi = () => window.MobileMotion;
+  const sheet = {
+    layer: $("modelSheet"), panel: $("modelSheetPanel"), backdrop: $("modelSheetBackdrop"), control: $("effortControl"),
+    track: $("effortTrack"), thumb: $("effortThumb"), fill: $("effortFill"), value: $("effortValue"), hint: $("effortSheetHint"),
+  };
+  let effortLevels = [];
+  let effortDrag = null;
+  let lastExplicitEffort = "";
+
+  function explicitEfforts(model) { return effortOrder.filter((value) => supportedEfforts(model).includes(value)); }
+  function isTopEffort(model, effort) {
+    const levels = explicitEfforts(model);
+    return levels.length > 0 && effort === levels[levels.length - 1];
+  }
+  function layerOpen(layer) { return !layer.hidden && layer.dataset.leaving !== "true"; }
+  function quickEffortBlocked() {
+    return !!activeTask || isLoadingSession || isUploading || isPreparingSubmission || restartPending || localDeviceTesting || !settings.model;
+  }
+
+  // Shows a layer at once and lets motion.js play its entrance (when the script runs).
+  function showLayer(layer, enter) {
+    const motion = motionApi();
+    if (motion) motion.stop(layer);
+    delete layer.dataset.leaving;
+    layer.hidden = false;
+    if (motion && enter) enter(motion);
+  }
+  // Plays the exit, then hides; hides at once when nothing animates (motion off, no motion.js).
+  function hideLayer(layer, leave) {
+    const motion = motionApi();
+    if (!motion || motion.level() === "off" || typeof layer.animate !== "function") { layer.hidden = true; return; }
+    layer.dataset.leaving = "true";
+    Promise.all(leave(motion)).then(() => {
+      if (layer.dataset.leaving !== "true") return; // opened again meanwhile
+      delete layer.dataset.leaving;
+      layer.hidden = true;
+      motion.stop(layer);
+    });
+  }
+
+  function effortRatio(index) { return effortLevels.length <= 1 ? 1 : Math.max(0, index) / (effortLevels.length - 1); }
+
+  function placeEffortThumb(ratio, animate) {
+    const width = sheet.track.clientWidth;
+    const knob = sheet.thumb.offsetWidth || 28;
+    const x = Math.round(ratio * Math.max(0, width - knob));
+    const thumbTo = `translateX(${x}px)`;
+    const fillTo = `scaleX(${width ? Math.min(1, (x + knob / 2) / width).toFixed(4) : ratio})`;
+    const thumbFrom = sheet.thumb.style.transform;
+    const fillFrom = sheet.fill.style.transform;
+    sheet.thumb.style.transform = thumbTo;
+    sheet.fill.style.transform = fillTo;
+    const motion = motionApi();
+    if (!animate || !motion || !thumbFrom || thumbFrom === thumbTo) return;
+    motion.play(sheet.thumb, [{ transform: thumbFrom }, { transform: thumbTo }], { spring: "bouncy" });
+    motion.play(sheet.fill, [{ transform: fillFrom }, { transform: fillTo }], { spring: "bouncy" });
+  }
+
+  function renderEffortState(animate) {
+    const index = effortLevels.indexOf(settings.reasoning_effort);
+    const automatic = index < 0;
+    const top = !automatic && isTopEffort(settings.model, settings.reasoning_effort);
+    const blocked = quickEffortBlocked();
+    sheet.control.dataset.auto = String(automatic);
+    sheet.control.dataset.top = String(top);
+    sheet.panel.dataset.top = String(top);
+    sheet.control.dataset.disabled = String(blocked);
+    sheet.control.style.setProperty("--effort", effortLevels.length ? effortRatio(index).toFixed(3) : "0");
+    // "Automatic" already shows on its own button; the value then says who decides.
+    sheet.value.textContent = automatic ? t("由模型决定") : effortLabels[settings.reasoning_effort];
+    $("btnEffortAuto").setAttribute("aria-pressed", String(automatic));
+    $("btnEffortAuto").disabled = blocked;
+    sheet.track.setAttribute("aria-valuemax", String(Math.max(0, effortLevels.length - 1)));
+    sheet.track.setAttribute("aria-valuenow", String(Math.max(0, index)));
+    sheet.track.setAttribute("aria-valuetext", sheet.value.textContent);
+    sheet.track.setAttribute("aria-disabled", String(blocked));
+    sheet.track.tabIndex = blocked ? -1 : 0;
+    [...$("effortLabels").children].forEach((label, position) => {
+      label.toggleAttribute("data-active", position === index);
+      label.disabled = blocked;
+    });
+    if (!effortLevels.length) pageStatus(sheet.hint, t("此模型使用自动思考强度"));
+    else if (blocked && activeTask) pageStatus(sheet.hint, t("任务进行中，结束后再调整"));
+    else if (!sheet.hint.classList.contains("error")) pageStatus(sheet.hint, "");
+    // Automatic: the knob rests mid-track, dimmed, until a level is picked.
+    placeEffortThumb(automatic ? 0.5 : effortRatio(index), animate);
+  }
+
+  function renderModelSheet() {
+    $("modelSheetModel").textContent = settings.model || t("未配置模型");
+    effortLevels = explicitEfforts(settings.model);
+    if (effortLevels.includes(settings.reasoning_effort)) lastExplicitEffort = settings.reasoning_effort;
+    const stops = $("effortStops");
+    const labels = $("effortLabels");
+    stops.replaceChildren();
+    labels.replaceChildren();
+    effortLevels.forEach((value, index) => {
+      const stop = document.createElement("span");
+      stop.className = "effort-stop";
+      stop.style.left = `${(effortRatio(index) * 100).toFixed(2)}%`;
+      stops.append(stop);
+      const label = document.createElement("button");
+      label.type = "button";
+      label.className = "effort-label";
+      label.tabIndex = -1;
+      label.style.left = stop.style.left;
+      label.textContent = effortLabels[value];
+      label.addEventListener("click", () => chooseEffort(value));
+      labels.append(label);
+    });
+    sheet.control.dataset.levels = String(effortLevels.length);
+    pageStatus(sheet.hint, "");
+    renderSheetProfiles();
+    renderEffortState(false);
+  }
+
+  function renderSheetProfiles() {
+    const row = $("modelSheetProfiles");
+    let profiles = [];
+    if (typeof bridge?.getProviderProfiles === "function") {
+      try { profiles = bridgeResult("getProviderProfiles").profiles || []; } catch { profiles = []; }
+    }
+    row.replaceChildren();
+    row.hidden = profiles.length < 2;
+    for (const profile of profiles) {
+      const pill = document.createElement("button");
+      pill.type = "button";
+      pill.className = "model-profile";
+      pill.setAttribute("role", "radio");
+      pill.setAttribute("aria-checked", String(!!profile.active));
+      const name = document.createElement("strong");
+      name.textContent = profile.name;
+      const detail = document.createElement("small");
+      detail.textContent = profile.local ? t("本机") : profile.model;
+      pill.append(name, detail);
+      pill.disabled = !profile.active && (!!activeTask || restartPending || (!profile.local && !profile.has_api_key));
+      pill.addEventListener("click", () => { if (!profile.active) void switchProfileFromSheet(profile); });
+      row.append(pill);
+    }
+  }
+
+  async function switchProfileFromSheet(profile) {
+    if (activeTask || restartPending) return;
+    flushQuickEffort();
+    let result;
+    try { result = bridgeResult("switchProviderProfile", profile.id); }
+    catch (error) { pageStatus(sheet.hint, error.message, true); return; }
+    haptic(12);
+    if (result.restarting === false) {
+      await loadSettings();
+      if (!layerOpen(sheet.layer)) return;
+      renderModelSheet();
+      motionApi()?.play($("modelSheetModel"), [{ opacity: 0, transform: "translateY(6px)" }, { opacity: 1, transform: "none" }], { spring: "snappy" });
+      notice(t("已切换到 {0}", profile.name), "info");
+      return;
+    }
+    restartPending = true;
+    notice(t("正在切换到 {0}，引擎需要重启...", profile.name), "info");
+    closeModelSheet();
+  }
+
+  // The app saves the effort through a synchronous bridge call that takes ~140 ms on a phone, which
+  // would freeze the slider's animation. The page takes the new level at once (each task also sends
+  // it), and the app is told a moment later, once per burst of changes; sending a task flushes it.
+  let pendingEffort = null;
+  let pendingEffortTimer = 0;
+
+  function rememberEffort(effort) {
+    settings.reasoning_effort = effort;
+    writeStorage(runtimeChoiceKey, { protocol: settings.protocol, base_url: settings.base_url, model: settings.model, reasoning_effort: effort });
+    renderSettings();
+  }
+
+  function applyQuickEffort(effort) {
+    if (effort === settings.reasoning_effort) return;
+    if (typeof bridge?.applyRuntimeSettings === "function") {
+      pendingEffort = { effort, model: settings.model, previous: pendingEffort ? pendingEffort.previous : settings.reasoning_effort };
+      clearTimeout(pendingEffortTimer);
+      pendingEffortTimer = setTimeout(flushQuickEffort, 650);
+    }
+    rememberEffort(effort);
+  }
+
+  function flushQuickEffort() {
+    clearTimeout(pendingEffortTimer);
+    const pending = pendingEffort;
+    pendingEffort = null;
+    if (!pending || disposed || pending.model !== settings.model) return;
+    try {
+      const result = JSON.parse(bridge.applyRuntimeSettings(JSON.stringify({ model: pending.model, reasoning_effort: pending.effort })));
+      if (!result.ok) throw new Error(localizeError(result.error) || t("无法保存设置"));
+      if (result.restarting !== false) {
+        restartPending = true;
+        notice(t("设置已保存，正在重新连接..."), "info");
+      }
+    } catch (error) {
+      rememberEffort(pending.previous);
+      if (layerOpen(sheet.layer)) { renderEffortState(true); pageStatus(sheet.hint, error.message, true); }
+      else notice(error.message);
+    }
+  }
+
+  function chooseEffort(effort) {
+    if (quickEffortBlocked()) { renderEffortState(true); return; }
+    const wasTop = isTopEffort(settings.model, settings.reasoning_effort);
+    pageStatus(sheet.hint, "");
+    applyQuickEffort(effort);
+    if (effortLevels.includes(effort)) lastExplicitEffort = effort;
+    renderEffortState(true);
+    const top = isTopEffort(settings.model, effort);
+    if (top && !wasTop) celebrateTopEffort();
+    else if (effort !== "auto") motionApi()?.play(sheet.value, [{ opacity: 0.4, transform: "translateY(4px)" }, { opacity: 1, transform: "none" }], { spring: "snappy" });
+    haptic(top ? 28 : 10);
+  }
+
+  // The top level: sparks burst from the knob and the label pops; the track's aurora runs in CSS.
+  function celebrateTopEffort() {
+    const motion = motionApi();
+    if (!motion || motion.level() !== "full") return;
+    requestAnimationFrame(() => {
+      motion.sparks(sheet.thumb, { count: 18, spread: 84 });
+      motion.play(sheet.value, [{ transform: "scale(1)" }, { transform: "scale(1.28)", offset: 0.35 }, { transform: "scale(1)" }], { duration: 560, easing: "cubic-bezier(.3, 1.5, .5, 1)" });
+      motion.play(sheet.panel.querySelector(".model-sheet-glow"), [{ opacity: 0, transform: "scaleY(.4)" }, { opacity: 1, transform: "none" }], { spring: "gentle", fill: "none" });
+    });
+  }
+
+  function effortIndexAt(clientX) {
+    const box = sheet.track.getBoundingClientRect();
+    const knob = sheet.thumb.offsetWidth || 28;
+    const ratio = Math.min(1, Math.max(0, (clientX - box.left - knob / 2) / Math.max(1, box.width - knob)));
+    return { ratio, index: effortLevels.length <= 1 ? 0 : Math.round(ratio * (effortLevels.length - 1)) };
+  }
+
+  sheet.track.addEventListener("pointerdown", (event) => {
+    if (!effortLevels.length || quickEffortBlocked() || (event.button !== undefined && event.button !== 0)) return;
+    const { ratio, index } = effortIndexAt(event.clientX);
+    effortDrag = { pointer: event.pointerId, index, moved: false, startX: event.clientX };
+    try { sheet.track.setPointerCapture(event.pointerId); } catch { /* released already */ }
+    sheet.control.dataset.dragging = "true";
+    motionApi()?.stop(sheet.thumb);
+    motionApi()?.stop(sheet.fill);
+    placeEffortThumb(ratio, false);
+    previewEffort(index);
+    event.preventDefault();
+  });
+  sheet.track.addEventListener("pointermove", (event) => {
+    if (!effortDrag || event.pointerId !== effortDrag.pointer) return;
+    if (Math.abs(event.clientX - effortDrag.startX) > 4) effortDrag.moved = true;
+    const { ratio, index } = effortIndexAt(event.clientX);
+    placeEffortThumb(ratio, false);
+    if (index !== effortDrag.index) { effortDrag.index = index; previewEffort(index); haptic(6); }
+  });
+  for (const type of ["pointerup", "pointercancel"]) {
+    sheet.track.addEventListener(type, (event) => {
+      if (!effortDrag || event.pointerId !== effortDrag.pointer) return;
+      const { index } = effortDrag;
+      effortDrag = null;
+      delete sheet.control.dataset.dragging;
+      delete sheet.control.dataset.preview;
+      if (type === "pointercancel") { renderEffortState(true); return; }
+      if (effortLevels[index] === settings.reasoning_effort) renderEffortState(true);
+      else chooseEffort(effortLevels[index]);
+    });
+  }
+  // While the finger moves, the label and colors follow the level under it; nothing is saved yet.
+  function previewEffort(index) {
+    const value = effortLevels[index];
+    sheet.value.textContent = effortLabels[value];
+    sheet.control.dataset.preview = isTopEffort(settings.model, value) ? "top" : "level";
+    sheet.control.style.setProperty("--effort", effortRatio(index).toFixed(3));
+    [...$("effortLabels").children].forEach((label, position) => label.toggleAttribute("data-active", position === index));
+  }
+  sheet.track.addEventListener("keydown", (event) => {
+    if (!effortLevels.length || quickEffortBlocked()) return;
+    const index = Math.max(0, effortLevels.indexOf(settings.reasoning_effort));
+    const next = { ArrowLeft: index - 1, ArrowDown: index - 1, ArrowRight: index + 1, ArrowUp: index + 1, Home: 0, End: effortLevels.length - 1 }[event.key];
+    if (next === undefined) return;
+    event.preventDefault();
+    const clamped = Math.min(effortLevels.length - 1, Math.max(0, next));
+    if (effortLevels[clamped] !== settings.reasoning_effort) chooseEffort(effortLevels[clamped]);
+  });
+  $("btnEffortAuto").addEventListener("click", () => {
+    if (settings.reasoning_effort !== "auto") { chooseEffort("auto"); return; }
+    const fallback = effortLevels.includes(lastExplicitEffort) ? lastExplicitEffort : effortLevels[Math.floor((effortLevels.length - 1) / 2)];
+    if (fallback) chooseEffort(fallback);
+  });
+
+  function openModelSheet() {
+    if (disposed || layerOpen(sheet.layer)) return;
+    if (layerOpen(elements.settingsOverlay) && !closeMenu()) return;
+    closeAttachMenu();
+    closeDrawer();
+    showLayer(sheet.layer);
+    renderModelSheet();
+    elements.appShell.inert = true;
+    elements.modelBar.setAttribute("aria-expanded", "true");
+    const motion = motionApi();
+    if (motion) {
+      const glass = document.documentElement.dataset.style === "glass";
+      // Glass slides without fading: fading a pane that filters its backdrop costs a full offscreen render per frame.
+      motion.play(sheet.panel, [{ transform: `translateY(${Math.min(sheet.panel.offsetHeight + 24, 420)}px)`, ...(glass ? {} : { opacity: 0.6 }) }, { transform: "none", opacity: 1 }], { spring: "bouncy" });
+      motion.play(sheet.backdrop, [{ opacity: 0 }, { opacity: 1 }], { duration: 220, easing: "ease-out" });
+      motion.stagger(sheet.panel.querySelectorAll(".model-sheet-header, .model-sheet-profiles:not([hidden]), .effort-head, .effort-track, .effort-labels"),
+        { transform: "translateY(14px)" }, { delay: 50, step: 32, spring: "bouncy" });
+      if (sheet.control.dataset.top === "true") celebrateTopEffort();
+    }
+    (sheet.track.tabIndex >= 0 ? sheet.track : $("btnModelSheetMore")).focus({ preventScroll: true });
+    haptic(12);
+  }
+
+  function closeModelSheet(options = {}) {
+    if (!layerOpen(sheet.layer)) return false;
+    effortDrag = null;
+    elements.appShell.inert = false;
+    elements.modelBar.setAttribute("aria-expanded", "false");
+    if (!options.keepFocus) elements.modelBar.focus({ preventScroll: true });
+    if (options.instant) { motionApi()?.stop(sheet.layer); sheet.layer.hidden = true; delete sheet.layer.dataset.leaving; return true; }
+    hideLayer(sheet.layer, (motion) => [
+      motion.play(sheet.panel, [{ transform: "none" }, { transform: `translateY(${sheet.panel.offsetHeight + 24}px)` }], { duration: 230, easing: "cubic-bezier(.4, 0, .9, .55)", fill: "forwards" }),
+      motion.play(sheet.backdrop, [{ opacity: 1 }, { opacity: 0 }], { duration: 210, easing: "ease-out", fill: "forwards" }),
+    ]);
+    return true;
+  }
+
+  sheet.backdrop.addEventListener("click", () => closeModelSheet());
+  $("btnModelSheetMore").addEventListener("click", () => { flushQuickEffort(); closeModelSheet({ instant: true, keepFocus: true }); openModelSettings(); });
+  motionApi()?.draggable(sheet.panel, {
+    axis: "y", extras: [sheet.backdrop],
+    canStart: (event) => !event.target.closest(".effort-track, .model-sheet-profiles"),
+    onDismiss: () => closeModelSheet({ instant: true }),
+  });
+  // The drawer follows a leftward swipe; the phone's bottom-sheet menu follows a pull on its header.
+  motionApi()?.draggable(elements.sessionDrawerPanel, {
+    axis: "x-", extras: [elements.sessionDrawerBackdrop],
+    canStart: (event) => !event.target.closest(".drawer-workspaces, input, textarea, select"),
+    onDismiss: () => closeDrawer({ instant: true }),
+  });
+  motionApi()?.draggable(elements.settingsSheet, {
+    axis: "y", handle: elements.settingsSheet.querySelector(".sheet-header"), extras: [elements.settingsBackdrop],
+    canStart: () => window.innerWidth < 600,
+    onDismiss: () => closeMenu({ instant: true }),
+  });
+  window.addEventListener("resize", () => { if (layerOpen(sheet.layer) && !effortDrag) renderEffortState(false); });
 
   function receiveSharedText(text) {
     if (disposed || typeof text !== "string") return false;
@@ -1434,6 +1800,8 @@
     elements.promptInput.value = nextText;
     elements.promptInput.dispatchEvent(new window.Event("input", { bubbles: true }));
     elements.promptInput.focus();
+    // A shared link can also be saved to the knowledge base (management.js offers it).
+    window.dispatchEvent(new window.CustomEvent("agent-shared-text", { detail: text }));
     return true;
   }
 
@@ -2307,6 +2675,7 @@
   }
 
   async function applyRuntimeSettings() {
+    flushQuickEffort();
     if (activeTask || isLoadingSession || isUploading || isPreparingSubmission || restartPending || localDeviceTesting) return;
     const localSettings = settingsPage === "localModels";
     if (localSettings && (localContextBusy || typeof bridge?.applyRuntimeSettings !== "function")) return;
@@ -3629,6 +3998,7 @@
   }
 
   async function sendPrompt(customText = null, attachmentOverride = []) {
+    flushQuickEffort();
     if (customText === null && canSteer()) { await steerActiveTask(); return; }
     const requestedImports = customText === null ? [...attachments] : [...attachmentOverride];
     const defaultPrompt = requestedImports.every(item => item.media_type?.startsWith("image/") || /\.(png|jpe?g|webp|gif)$/i.test(item.name || "")) ? t("请描述图片内容。") : t("请查看附件内容。");
@@ -3944,7 +4314,7 @@
     void runUploads(browserUploads.filter(entry => entry.state === "pending"));
   }
 
-  function showImportPage() { if (elements.settingsOverlay.hidden) openMenu(); setSettingsPage("attachments"); }
+  function showImportPage() { if (!layerOpen(elements.settingsOverlay)) openMenu(); setSettingsPage("attachments"); }
 
   function chooseImportFiles() {
     haptic();
@@ -4121,7 +4491,15 @@
     event.preventDefault();
     sendPrompt();
   });
-  elements.btnSend.addEventListener("click", () => sendPrompt());
+  elements.btnSend.addEventListener("click", () => {
+    // The arrow lifts off and comes back from below, as the message leaves.
+    const arrow = elements.btnSend.querySelector("svg");
+    if (arrow && !elements.btnSend.disabled && motionApi()?.level() === "full") motionApi().play(arrow, [
+      { transform: "none", opacity: 1 }, { transform: "translateY(-16px)", opacity: 0, offset: 0.42 },
+      { transform: "translateY(12px)", opacity: 0, offset: 0.43 }, { transform: "none", opacity: 1 },
+    ], { duration: 520, easing: "cubic-bezier(.3, .7, .3, 1)" });
+    void sendPrompt();
+  });
   elements.btnStop.addEventListener("click", stopTask);
   elements.btnJumpLatest.addEventListener("click", () => scrollToBottom(true));
   elements.btnResumeTask.addEventListener("click", resumeTask);
@@ -4137,16 +4515,22 @@
   });
   // With a camera available the paperclip offers "take a photo" or "choose files"; otherwise it picks files.
   function closeAttachMenu() {
-    if ($("attachMenu").hidden) return false;
-    $("attachMenu").hidden = true;
+    const menu = $("attachMenu");
+    if (!layerOpen(menu)) return false;
     elements.btnAttach.setAttribute("aria-expanded", "false");
+    hideLayer(menu, (motion) => [motion.play(menu, [{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(6px) scale(.94)" }],
+      { duration: 140, easing: "cubic-bezier(.4, 0, 1, 1)", fill: "forwards" })]);
     return true;
   }
   elements.btnAttach.addEventListener("click", () => {
     if (typeof bridge?.captureShareInboxPhoto !== "function") { chooseImportFiles(); return; }
     if (closeAttachMenu()) return;
     haptic();
-    $("attachMenu").hidden = false;
+    const menu = $("attachMenu");
+    showLayer(menu, (motion) => {
+      motion.play(menu, [{ opacity: 0, transform: "translateY(10px) scale(.88)" }, { opacity: 1, transform: "none" }], { spring: "bouncy" });
+      motion.stagger(menu.querySelectorAll(".menu-row:not([hidden])"), { transform: "translateY(8px)" }, { delay: 30, step: 30 });
+    });
     elements.btnAttach.setAttribute("aria-expanded", "true");
     $("btnAttachCamera").focus();
   });
@@ -4295,7 +4679,7 @@
   window.addEventListener("focus", refreshWorkspaceAccess);
   window.addEventListener("agent-workspace-storage-changed", refreshWorkspaceAccess);
   elements.btnSettings.addEventListener("click", openMenu);
-  elements.modelBar.addEventListener("click", openModelSettings);
+  elements.modelBar.addEventListener("click", openModelSheet);
   elements.settingsBackdrop.addEventListener("click", closeMenu);
   elements.settingsCloseButton.addEventListener("click", closeMenu);
   elements.btnSessions.addEventListener("click", openDrawer);
@@ -4304,7 +4688,7 @@
   elements.sessionDrawerBackdrop.addEventListener("click", closeDrawer);
   elements.btnDrawerSearch.addEventListener("click", () => { closeDrawer(); openMenu(); setSettingsPage("search"); });
   elements.btnDrawerWorkspaces.addEventListener("click", () => { closeDrawer(); openMenu(); setSettingsPage("workspaces"); });
-  elements.btnModeChip.addEventListener("click", () => { if (elements.settingsOverlay.hidden) openMenu(); setSettingsPage("permission"); });
+  elements.btnModeChip.addEventListener("click", () => { if (!layerOpen(elements.settingsOverlay)) openMenu(); setSettingsPage("permission"); });
   elements.settingsBackButton.addEventListener("click", () => setSettingsPage(subPageParents[settingsPage] || "home"));
   $("btnQuickTasksPage").addEventListener("click", () => setSettingsPage("quickTasks"));
   $("btnSaveProfile").addEventListener("click", () => {
@@ -4445,8 +4829,9 @@
     window.AgentMobileUi.reloadForLanguage();
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && (closeDrawer() || closeMenu())) event.preventDefault();
-    const dialog = !elements.sessionDrawer.hidden ? elements.sessionDrawerPanel : !elements.settingsOverlay.hidden ? elements.settingsSheet : null;
+    if (event.key === "Escape" && (closeModelSheet() || closeDrawer() || closeMenu())) event.preventDefault();
+    const dialog = layerOpen(sheet.layer) ? sheet.panel : layerOpen(elements.sessionDrawer) ? elements.sessionDrawerPanel
+      : layerOpen(elements.settingsOverlay) ? elements.settingsSheet : null;
     if (event.key !== "Tab" || !dialog) return;
     const controls = [...dialog.querySelectorAll("button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], summary, [tabindex]")]
       .filter((control) => control.tabIndex >= 0 && !control.closest("[hidden], .hidden"));
@@ -4467,11 +4852,11 @@
   window.addEventListener("agent-share-inbox-changed", refreshShareInbox);
   window.addEventListener("agent-share-inbox-imported", refreshShareInbox);
   window.addEventListener("focus", refreshShareInbox);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshShareInbox(); });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshShareInbox(); else flushQuickEffort(); });
   window.addEventListener("beforeunload", (event) => {
     if (fileDirty() && !persistFileDraft()) { event.preventDefault(); event.returnValue = ""; }
   });
-  window.addEventListener("pagehide", () => { saveDraft(); persistFileDraft(); resetFilePreview(); artifactActions.clear(); disposed = true; });
+  window.addEventListener("pagehide", () => { flushQuickEffort(); saveDraft(); persistFileDraft(); resetFilePreview(); artifactActions.clear(); disposed = true; });
   darkSchemeQuery?.addEventListener?.("change", syncSystemBars);
   window.visualViewport?.addEventListener("resize", resizeVisibleViewport);
   window.addEventListener("resize", resizeVisibleViewport);

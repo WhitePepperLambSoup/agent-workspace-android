@@ -827,7 +827,8 @@ class MobileRuntimeController:
                 options: dict[str, Any] = {
                     "summarize_history": configured_mobile_context_summary(self.base_url)
                 }
-                # Providers that cache prompt prefixes (DeepSeek) get requests that only grow
+                # Providers that cache prompt prefixes (DeepSeek, OpenAI, Kimi, Qwen, GLM,
+                # Gemini, Anthropic and others; see mobile_prompt_cache) get requests that only grow
                 # at the end: the conversation keeps its system prompt, later changes arrive
                 # as notes with the next message, and compaction moves in rare large steps.
                 context_notes: tuple[str, ...] = ()

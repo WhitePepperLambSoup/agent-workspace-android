@@ -1,7 +1,8 @@
 # ruff: noqa: RUF001 -- Chinese punctuation and function words are matched on purpose.
 """Phone-wide knowledge base: the user's own documents, searchable from every conversation.
 
-Documents are added from the phone (an upload) or from a workspace file. Their text is extracted
+Documents are added from the phone (an upload), from a workspace file or from a web link (the page
+as it was when saved). Their text is extracted
 once, split into short passages and indexed with SQLite FTS5; the original file is not kept.
 Chinese, Japanese and Korean text has no spaces, so each run of those characters is indexed as
 overlapping two-character tokens ("合同到期" -> 合同 同到 到期), the usual approach when no
@@ -33,7 +34,7 @@ from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 from xml.etree import ElementTree
 
 MAX_DOCUMENTS = 300
@@ -243,6 +244,20 @@ class _Extracted:
 
 
 Progress = Callable[[float], None]
+# Recognizes the text of scanned PDF pages: (pdf, one-based pages) -> {page: text}.
+OcrPages = Callable[[Path, list[int]], dict[int, str]]
+_MAX_OCR_PAGES = 300
+_OCR_BATCH_PAGES = 8
+
+
+def device_ocr() -> OcrPages | None:
+    """The phone's bundled OCR (ML Kit, Chinese and Latin), when this runtime has it."""
+    try:
+        from android_adapter.documents import document_status, ocr_pdf_pages
+    except ImportError:
+        return None
+    status = document_status()
+    return ocr_pdf_pages if status.get("available") and status.get("ocr") else None
 
 
 def _decode_text(raw: bytes) -> str:
@@ -348,7 +363,7 @@ def _split_pdf_pages(text: str, start: int, end: int) -> list[tuple[int, str]]:
     return pages
 
 
-def _pdf(path: Path, progress: Progress) -> _Extracted:
+def _pdf(path: Path, progress: Progress, ocr: OcrPages | None = None) -> _Extracted:
     from pypdf import PdfReader
 
     from agent_workspace.tools.base import ToolError
@@ -364,10 +379,12 @@ def _pdf(path: Path, progress: Progress) -> _Extracted:
         raise
     except Exception as exc:  # pypdf raises several error types across versions
         raise KnowledgeError(f"cannot open this PDF: {exc}") from None
-    sections: list[_Section] = []
+    texts: dict[int, str] = {}
     unreadable: list[int] = []
     used = 0
     truncated = False
+    # With OCR at hand the text layer is the first half of the progress bar, recognition the second.
+    share = 0.5 if ocr is not None else 1.0
 
     def read(first: int, count: int) -> list[tuple[int, str]]:
         with path.open("rb") as stream:
@@ -397,22 +414,63 @@ def _pdf(path: Path, progress: Progress) -> _Extracted:
             if not text:
                 unreadable.append(number)
                 continue
-            if used + len(text) > MAX_DOCUMENT_CHARS:
-                text, truncated = text[: MAX_DOCUMENT_CHARS - used], True
-            sections.append(_Section(text, page=number))
+            texts[number] = text
             used += len(text)
-            if truncated:
+            if used >= MAX_DOCUMENT_CHARS:
+                truncated = True
                 break
         page += count
-        progress(min(page - 1, total) / max(total, 1))
+        progress(share * min(page - 1, total) / max(total, 1))
     warnings = []
+    unreadable = sorted(set(unreadable))
+    # Scanned pages (and fonts without a Unicode map) are recognized on the device.
+    recognized: list[int] = []
+    skipped_ocr = 0
+    if ocr is not None and unreadable and not truncated:
+        pending = unreadable[:_MAX_OCR_PAGES]
+        skipped_ocr = len(unreadable) - len(pending)
+        for start in range(0, len(pending), _OCR_BATCH_PAGES):
+            batch = pending[start : start + _OCR_BATCH_PAGES]
+            try:
+                result = ocr(path, batch)
+            except Exception as exc:  # the native bridge reports failures as ToolError or RuntimeError
+                warnings.append(f"on-device text recognition stopped: {exc}")
+                break
+            for number in batch:
+                text = str(result.get(number) or "").strip()
+                if text:
+                    texts[number] = text
+                    recognized.append(number)
+                    used += len(text)
+            progress(share + (1 - share) * (start + len(batch)) / len(pending))
+            if used >= MAX_DOCUMENT_CHARS:
+                truncated = True
+                break
+        unreadable = [number for number in unreadable if number not in texts]
+    progress(1.0)
+    sections: list[_Section] = []
+    budget = MAX_DOCUMENT_CHARS
+    for number in sorted(texts):
+        text = texts[number][:budget]
+        sections.append(_Section(text, page=number))
+        budget -= len(text)
+        if budget <= 0:
+            break
+    if recognized:
+        warnings.append(
+            f"{len(recognized)} scanned pages were read with on-device text recognition; names "
+            "and numbers there may contain recognition errors"
+        )
+    if skipped_ocr:
+        warnings.append(f"only the first {_MAX_OCR_PAGES} scanned pages were recognized")
     if unreadable:
-        unreadable = sorted(set(unreadable))
         shown = ", ".join(str(number) for number in unreadable[:12])
         more = "…" if len(unreadable) > 12 else ""
+        reason = "blank or unrecognizable pages" if ocr is not None else (
+            "scanned images, blank pages or unmapped fonts")
         warnings.append(
-            f"{len(unreadable)} of {total} pages have no readable text (scanned images, blank "
-            f"pages or unmapped fonts) and were skipped: {shown}{more}"
+            f"{len(unreadable)} of {total} pages have no readable text ({reason}) and were "
+            f"skipped: {shown}{more}"
         )
     return _Extracted(sections, "application/pdf", total, warnings, truncated)
 
@@ -484,15 +542,18 @@ def _epub(path: Path, progress: Progress) -> _Extracted:
 
 
 def extract_document(
-    path: Path, suffix: str, progress: Progress = lambda _done: None
+    path: Path, suffix: str, progress: Progress = lambda _done: None, ocr: OcrPages | None = None
 ) -> _Extracted:
-    """Read the text of a document; KnowledgeError explains anything that cannot be read."""
+    """Read the text of a document; KnowledgeError explains anything that cannot be read.
+
+    ``ocr`` recognizes PDF pages without a text layer (scans); without it they are skipped.
+    """
     from agent_workspace.tools.base import ToolError
     from agent_workspace.tools.document import _docx_text, _xlsx_text
 
     suffix = suffix.casefold()
     if suffix == ".pdf":
-        return _pdf(path, progress)
+        return _pdf(path, progress, ocr)
     if suffix == ".epub":
         return _epub(path, progress)
     if suffix in {".docx", ".xlsx"}:
@@ -629,6 +690,8 @@ def _location(row: dict[str, Any]) -> str:
         parts.append(f"p.{row['page']}")
     if row.get("heading"):
         parts.append(str(row["heading"]))
+    if row.get("url"):
+        parts.append(str(row["url"]))
     return " · ".join(parts)
 
 
@@ -701,6 +764,61 @@ _SCHEMA = (
 _ACTIVE_STATES = ("queued", "indexing")
 
 
+_MAX_WEB_PAGE_BYTES = 4 << 20
+_WEB_SUFFIXES = {"text/html": ".html", "application/xhtml+xml": ".html", "text/markdown": ".md",
+                 "text/plain": ".txt"}  # fmt: skip
+
+
+def fetch_web_page(url: str) -> dict[str, Any]:
+    """A public HTTPS page for the knowledge base (the web_fetch checks: public addresses only,
+    same-site redirects). Returns url, title, media_type, content and truncated."""
+    from agent_workspace.tools.base import ToolError
+    from agent_workspace.tools.web import _web_fetch_sync
+
+    try:
+        raw = _web_fetch_sync(
+            url, _MAX_WEB_PAGE_BYTES, 20,
+            headers={"User-Agent": "Mozilla/5.0 (Linux; Android) AgentWorkspace",
+                     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
+        )  # fmt: skip
+    except ToolError as exc:
+        raise KnowledgeError(f"cannot save this page: {str(exc).removeprefix('web_fetch ')}") from None
+    page = json.loads(raw)
+    source = page.get("source") or {}
+    return {
+        "url": source.get("url") or url,
+        "title": source.get("title") or "",
+        "media_type": page.get("media_type") or "",
+        "content": page.get("content") or "",
+        "truncated": bool(page.get("truncated")),
+    }
+
+
+def web_address(value: object) -> str:
+    """A link as typed or shared: an address alone, or text that contains one; http becomes https."""
+    if not isinstance(value, str):
+        raise KnowledgeError("enter a web address")
+    match = re.search(r"(?:https?://|www\.)[^\s<>\"'，。、；！？）】]+", value.strip(), re.IGNORECASE)
+    if match is None:
+        raise KnowledgeError("enter a web address")
+    address = match.group(0).rstrip(".,;:!?)]}")
+    if address.lower().startswith("www."):
+        address = "https://" + address
+    elif address.lower().startswith("http://"):
+        address = "https://" + address[len("http://") :]
+    if len(address) > 4096:
+        raise KnowledgeError("the web address is too long")
+    return address
+
+
+def _page_filename(title: str, url: str, suffix: str) -> str:
+    name = re.sub(r"[\\/:*?\"<>|\x00-\x1f\x7f]+", " ", title).strip()
+    if not name:
+        parts = urlsplit(url)
+        name = (parts.hostname or "page") + (parts.path.rstrip("/").replace("/", " ") or "")
+    return " ".join(name.split())[:120] + suffix
+
+
 def checked_filename(filename: object) -> tuple[str, str]:
     """A document's display name and lower-case suffix; refuses types that cannot be read."""
     if not isinstance(filename, str):
@@ -757,8 +875,14 @@ def _count(documents: int) -> str:
 
 
 class KnowledgeStore:
-    def __init__(self, root: Path, incoming: Path | None = None) -> None:
+    def __init__(
+        self,
+        root: Path,
+        incoming: Path | None = None,
+        ocr: Callable[[], OcrPages | None] = device_ocr,
+    ) -> None:
         self.root = Path(root)
+        self._ocr = ocr
         self.path = self.root / "knowledge.sqlite3"
         self.incoming = Path(incoming) if incoming is not None else self.root / "incoming"
         self._lock = threading.RLock()
@@ -1205,6 +1329,35 @@ class KnowledgeStore:
             self._enqueue(document_id)
         return self.document(document_id)
 
+    def add_url(
+        self,
+        url: object,
+        *,
+        collection_id: object = None,
+        fetch: Callable[[str], dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Save a web page: fetched now, then indexed like an HTML or text file. The page's
+        address is kept as the document's origin, so answers can point back to it."""
+        address = web_address(url)
+        page = (fetch or fetch_web_page)(address)
+        suffix = _WEB_SUFFIXES.get(str(page.get("media_type")))
+        if suffix is None:
+            raise KnowledgeError("this link is not a web page or text; download the file and add it")
+        content = str(page.get("content") or "")
+        if not content.strip():
+            raise KnowledgeError("this page is empty")
+        final = str(page.get("url") or address)
+        self.incoming.mkdir(parents=True, exist_ok=True)
+        draft = self.incoming / f"web-{uuid.uuid4().hex[:12]}{suffix}"
+        draft.write_text(content, encoding="utf-8")
+        try:
+            return self.add_file(
+                draft, _page_filename(str(page.get("title") or ""), final, suffix),
+                origin="web", origin_path=final, move=True, collection_id=collection_id,
+            )  # fmt: skip
+        finally:
+            draft.unlink(missing_ok=True)
+
     def delete(self, document_id: object) -> None:
         with self._lock:
             with self._connect() as db:
@@ -1346,13 +1499,15 @@ class KnowledgeStore:
                 self._update(document_id, progress=round(0.9 * done, 3))
 
         try:
-            extracted = extract_document(staged, row["suffix"], progress)
+            ocr = self._ocr() if row["suffix"] == ".pdf" else None
+            extracted = extract_document(staged, row["suffix"], progress, ocr)
             passages = build_passages(extracted.sections)
             if not passages:
                 raise KnowledgeError(
                     "no text was found in this document"
-                    + ("; scanned PDFs need OCR, which the knowledge base does not do yet"
-                       if row["suffix"] == ".pdf" else "")
+                    + (("; on-device text recognition found none either" if ocr is not None
+                        else "; scanned PDFs need on-device text recognition, which is not "
+                        "available here") if row["suffix"] == ".pdf" else "")
                 )  # fmt: skip
             warnings = list(extracted.warnings)
             if extracted.truncated:
@@ -1540,7 +1695,8 @@ class KnowledgeStore:
             rank = {row["rowid"]: row["rank"] for row in hits}
             ids = list(rank)
             rows = db.execute(
-                "SELECT p.id, p.document_id, p.ordinal, p.page, p.heading, p.text, d.title "
+                "SELECT p.id, p.document_id, p.ordinal, p.page, p.heading, p.text, d.title, "
+                "CASE WHEN d.origin = 'web' THEN d.origin_path END AS url "
                 "FROM passages AS p JOIN documents AS d ON d.id = p.document_id "
                 f"WHERE d.state = 'ready' AND p.id IN ({', '.join('?' for _ in ids)})",
                 ids,
@@ -1604,7 +1760,7 @@ class KnowledgeStore:
             if excerpt is None
             else _excerpt(result["text"], result["terms"], excerpt)
         )
-        return {
+        public = {
             "document_id": result["document_id"],
             "document": result["title"],
             "page": result["page"],
@@ -1612,6 +1768,9 @@ class KnowledgeStore:
             "passage": text,
             "relevance": result["relevance"],
         }
+        if result.get("url"):
+            public["url"] = result["url"]  # a saved web page: where it came from
+        return public
 
     # ---- prompt pieces -----------------------------------------------------------------------
 

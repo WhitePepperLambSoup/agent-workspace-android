@@ -360,6 +360,8 @@ class AnthropicProvider:
                     temperature = thinking.get("temperature", 1.0)
                     if isinstance(temperature, (int, float)) and 0 <= temperature <= 1:
                         body["temperature"] = temperature
+        if request.metadata.get("prompt_cache") is True:
+            _mark_cache_breakpoints(body)
 
         try:
             json.dumps(body, ensure_ascii=False, allow_nan=False)
@@ -369,6 +371,29 @@ class AnthropicProvider:
                 status_code=None,
             ) from None
         return body
+
+
+def _mark_cache_breakpoints(body: dict[str, Any]) -> None:
+    """Prompt caching for requests that only grow at the end (``prompt_cache`` metadata).
+
+    One breakpoint after the system prompt (tools precede it, so it covers them) and one on the
+    newest message: the next request repeats everything up to that point and reads it from the
+    cache. Thinking blocks cannot carry a breakpoint, so a message ending in one is left unmarked.
+    """
+    marker = {"type": "ephemeral"}
+    system = body.get("system")
+    if isinstance(system, str) and system:
+        body["system"] = [{"type": "text", "text": system, "cache_control": marker}]
+    messages = body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return
+    last = messages[-1]
+    content = last.get("content")
+    if isinstance(content, str) and content:
+        last["content"] = [{"type": "text", "text": content, "cache_control": marker}]
+    elif isinstance(content, list) and content and isinstance(content[-1], dict):
+        if content[-1].get("type") not in {"thinking", "redacted_thinking"}:
+            content[-1] = {**content[-1], "cache_control": marker}
 
 
 def _message_to_anthropic(

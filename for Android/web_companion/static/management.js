@@ -300,7 +300,24 @@
     if (/default knowledge base cannot be removed/i.test(text)) return t("默认知识库不能删除");
     if (/no such knowledge base|there is no knowledge base/i.test(text)) return t("这个知识库已不存在，请刷新后再试");
     if (/turned off/i.test(text)) return t("知识库已关闭");
+    // Saving a web page.
+    if (/enter a web address/i.test(text)) return t("请填写网页地址");
+    if (/web address is too long/i.test(text)) return t("网页地址太长");
+    if (/not a web page or text/i.test(text)) return t("这个链接不是网页，请下载文件后再添加");
+    if (/this page is empty/i.test(text)) return t("这个网页是空的");
     let match;
+    if ((match = text.match(/^cannot save this page: (.*)$/))) {
+      const reason = match[1];
+      if (/private, local, reserved/.test(reason)) return t("只能保存公开网站的网页");
+      if (/DNS resolution/.test(reason)) return t("找不到这个网站，请检查地址和网络");
+      if (/requires an absolute HTTPS URL|permits only HTTPS port/.test(reason)) return t("只能保存 https 网页");
+      if (/cross-origin redirects|redirect limit/.test(reason)) return t("这个链接跳转到了别的网站，请打开最终的网页后再分享");
+      if (/media type is unsupported|charset is unsupported|compressed responses/.test(reason)) return t("这个链接不是可以保存的网页");
+      const status = reason.match(/returned HTTP status (\d+)/);
+      if (status) return t("网站返回错误 {0}", status[1]);
+      if (/timed out/.test(reason)) return t("连接网站超时，请稍后再试");
+      return t("无法保存这个网页：{0}", reason);
+    }
     if ((match = text.match(/line (\d+) needs at least two words/))) return t("第 {0} 行至少要有两个词", match[1]);
     if ((match = text.match(/line (\d+) has a single character/))) return t("第 {0} 行有单个字，请写完整的词", match[1]);
     if ((match = text.match(/line (\d+) has a word longer/))) return t("第 {0} 行有超过 20 个字的词", match[1]);
@@ -311,9 +328,14 @@
   function knowledgeText(text) {
     const value = String(text || "");
     let match;
+    if ((match = value.match(/^(\d+) of (\d+) pages have no readable text \(blank or unrecognizable pages\).*?skipped: (.*)$/))) return t("{0}/{1} 页是空白页或认不出文字，已跳过：第 {2} 页", match[1], match[2], match[3]);
     if ((match = value.match(/^(\d+) of (\d+) pages have no readable text.*?skipped: (.*)$/))) return t("{0}/{1} 页没有可读取的文字（扫描页、空白页或无法识别的字体），已跳过：第 {2} 页", match[1], match[2], match[3]);
     if ((match = value.match(/^only the first ([\d,]+) characters were added/))) return t("只收录了前 {0} 个字符，其余部分请拆分文档后再添加", match[1]);
-    if (/scanned PDFs need OCR/.test(value)) return t("没有读到文字。扫描版 PDF 需要文字识别，知识库暂不支持");
+    if ((match = value.match(/^(\d+) scanned pages were read with on-device text recognition/))) return t("{0} 页扫描页用手机上的文字识别读取，人名和数字可能有识别错误", match[1]);
+    if ((match = value.match(/^only the first (\d+) scanned pages were recognized/))) return t("只识别了前 {0} 页扫描页", match[1]);
+    if ((match = value.match(/^on-device text recognition stopped: (.*)$/))) return t("文字识别中途停止：{0}", match[1]);
+    if (/scanned PDFs need OCR|scanned PDFs need on-device text recognition/.test(value)) return t("没有读到文字。扫描版 PDF 需要文字识别，这台设备上不可用");
+    if (/on-device text recognition found none/.test(value)) return t("没有读到文字，文字识别也没有认出内容");
     if (/^no text was found/.test(value)) return t("文档里没有读到文字");
     if (/password protected/.test(value)) return t("PDF 有密码保护，请先另存一份没有密码的副本");
     if (/^cannot open this PDF/.test(value)) return t("无法打开这个 PDF，文件可能已损坏");
@@ -324,13 +346,15 @@
     return value;
   }
   function knowledgeDetails(document) {
-    if (document.state === "indexing") return t("正在读取 {0}%", Math.round((document.progress || 0) * 100));
-    if (document.state === "queued") return t("排队中");
-    if (document.state === "failed") return t("添加失败：{0}", knowledgeText(document.error));
+    // A saved web page also shows where it came from.
+    const address = document.origin === "web" && document.origin_path ? `\n${document.origin_path}` : "";
+    if (document.state === "indexing") return t("正在读取 {0}%", Math.round((document.progress || 0) * 100)) + address;
+    if (document.state === "queued") return t("排队中") + address;
+    if (document.state === "failed") return t("添加失败：{0}", knowledgeText(document.error)) + address;
     const parts = [t("{0} 段", document.passages)];
     if (document.pages) parts.push(t("{0} 页", document.pages));
     parts.push(document.size_bytes < 1024 ** 2 ? `${Math.max(1, Math.round(document.size_bytes / 1024))} KB` : bytes(document.size_bytes));
-    const lines = [parts.join(" · ")];
+    const lines = [parts.join(" · ") + address];
     for (const warning of document.warnings || []) lines.push(knowledgeText(warning));
     return lines.join("\n");
   }
@@ -1274,6 +1298,76 @@
     }, "knowledgeStatus");
   }
   $("btnKnowledgeAdd").addEventListener("click", () => { if (!knowledgeUploading) $("knowledgeFileInput").click(); });
+  // A link shared into a conversation: offer to save the page to the knowledge base as well.
+  let linkClip = "";
+  let linkClipTimer = 0;
+  const linkPattern = /(?:https?:\/\/|www\.)[^\s<>"'，。、；！？）】]+/i; // i18n-ignore: punctuation that ends a link
+  function hideLinkClip() {
+    window.clearTimeout(linkClipTimer);
+    const notice = $("linkClipNotice");
+    if (notice.hidden) return;
+    const motion = window.MobileMotion;
+    if (motion && motion.level() !== "off") motion.exit(notice, { transform: "translateY(6px)" });
+    else notice.hidden = true;
+  }
+  window.addEventListener("agent-shared-text", (event) => {
+    const text = typeof event.detail === "string" ? event.detail : "";
+    if (closed || !linkPattern.test(text)) return;
+    linkClip = text;
+    window.clearTimeout(linkClipTimer);
+    $("linkClipText").textContent = t("分享的网页可以存入知识库");
+    $("btnLinkClipSave").hidden = false;
+    $("btnLinkClipSave").disabled = false;
+    const notice = $("linkClipNotice");
+    if (window.MobileMotion) window.MobileMotion.enter(notice, { transform: "translateY(10px) scale(.96)" }, { spring: "bouncy" });
+    else notice.hidden = false;
+  });
+  $("btnLinkClipDismiss").addEventListener("click", hideLinkClip);
+  $("btnLinkClipSave").addEventListener("click", async () => {
+    const button = $("btnLinkClipSave");
+    button.disabled = true;
+    $("linkClipText").textContent = t("正在保存网页...");
+    try {
+      const saved = await post("/mobile/knowledge/url", { url: linkClip });
+      if (closed) return;
+      button.hidden = true;
+      $("linkClipText").textContent = saved.added?.duplicate ? t("这个网页已经在知识库里了") : t("已存入知识库，正在读取内容");
+      linkClipTimer = window.setTimeout(hideLinkClip, 4000);
+      if (!$("settingsKnowledge").hidden) knowledge(undefined, saved).catch(() => {});
+    } catch (error) {
+      if (closed) return;
+      $("linkClipText").textContent = knowledgeMessage(error);
+      button.disabled = false;
+    }
+  });
+  // A web page: saved as it is now, into the knowledge base shown on the page.
+  $("btnKnowledgeLink").addEventListener("click", () => {
+    const form = $("knowledgeUrlForm");
+    form.hidden = !form.hidden;
+    if (!form.hidden) $("knowledgeUrlInput").focus();
+  });
+  $("btnKnowledgeUrlCancel").addEventListener("click", () => { $("knowledgeUrlForm").hidden = true; $("knowledgeUrlInput").value = ""; });
+  $("knowledgeUrlForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const url = $("knowledgeUrlInput").value.trim();
+    if (!url || knowledgeUploading) return;
+    knowledgeUploading = true;
+    $("btnKnowledgeUrlSave").disabled = true;
+    status("knowledgeStatus", t("正在保存网页..."));
+    let saved = null;
+    try {
+      saved = await post("/mobile/knowledge/url", { url, ...(knowledgeFilter ? { collection: knowledgeFilter } : {}) });
+    } catch (error) { status("knowledgeStatus", knowledgeMessage(error), true); }
+    finally {
+      knowledgeUploading = false;
+      $("btnKnowledgeUrlSave").disabled = false;
+    }
+    if (!saved || closed) return;
+    $("knowledgeUrlInput").value = "";
+    $("knowledgeUrlForm").hidden = true;
+    await knowledge(undefined, saved);
+    status("knowledgeStatus", saved.added?.duplicate ? t("这个网页已经在知识库里了") : t("已保存网页，正在读取内容"));
+  });
   $("knowledgeFileInput").addEventListener("change", () => {
     const files = [...$("knowledgeFileInput").files];
     $("knowledgeFileInput").value = "";

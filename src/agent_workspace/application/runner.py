@@ -593,11 +593,15 @@ class AgentRunner:
                     effort: str | None = selected_effort,
                     thinking: dict[str, Any] | None = anthropic_thinking,
                     encoder: Callable[[ProviderRequest], bytes] | None = provider_encoder,
+                    stable: bool = prefix_stable,
                 ) -> bytes:
                     if effort is not None:
                         candidate.metadata["reasoning_effort"] = effort
                     if thinking is not None:
                         candidate.metadata["anthropic_thinking"] = thinking
+                    if stable:
+                        # Providers that cache only at marked points (Anthropic) mark them.
+                        candidate.metadata["prompt_cache"] = True
                     return _encode_request_for_budget(candidate, encoder)
 
                 request, compaction = _bounded_provider_request(

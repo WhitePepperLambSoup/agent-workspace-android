@@ -436,8 +436,11 @@ def install_local_context_profile() -> None:
                     CopyFileTool,
                     MakeDirectoriesTool,
                     UnescapingPatchTool,
+                    ValidatingWriteTool,
                 )
 
+                if "write_file" in tools and not isinstance(tools["write_file"], ValidatingWriteTool):
+                    tools["write_file"] = ValidatingWriteTool(tools["write_file"])
                 if "copy_file" not in tools:
                     runner._tools.register(CopyFileTool(workspace))
                 if "append_file" not in tools:

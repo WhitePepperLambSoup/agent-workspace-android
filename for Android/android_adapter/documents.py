@@ -374,6 +374,27 @@ def _rendered_outputs(
     return pages
 
 
+def ocr_pdf_pages(path: Path, pages: list[int], *, bridge: Any = None) -> dict[int, str]:
+    """Recognize the text of up to eight pages of a PDF with the bundled on-device OCR.
+
+    For the knowledge base, which reads its own private copy of a document (not a workspace file).
+    """
+    if not 1 <= len(pages) <= 8:
+        raise ToolArgumentError("OCR takes one to eight pages at a time")
+    source = WorkspacePaths(path.parent)
+    with _Job(bridge if bridge is not None else _bridge()) as job:
+        job.stage_from(source, path.name)
+        requested = {"pages": list(pages)}
+        result = job.execute({"action": "render_pdf", **requested, "max_dimension": 1600, "ocr": True})
+        recognized: dict[int, str] = {}
+        for item, _data in _rendered_outputs(job, result, requested):
+            value = item.get("ocr_text")
+            if not isinstance(value, str):
+                raise ToolError("Native OCR returned no text result")
+            recognized[item["page"]] = value
+        return recognized
+
+
 class _NativeTool:
     hard_cancellable = False
     _SPEC: ToolSpec

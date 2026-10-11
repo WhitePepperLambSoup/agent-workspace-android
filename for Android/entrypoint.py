@@ -81,6 +81,9 @@ def _load_mobile_assets(token: str) -> tuple[str, dict[str, tuple[str, bytes]]]:
         f'src="/static/liquid-glass.js?token={encoded_token}"',
     )
     console_html = console_html.replace(
+        'src="/static/motion.js"', f'src="/static/motion.js?token={encoded_token}"'
+    )
+    console_html = console_html.replace(
         'href="/manifest.json"', f'href="/manifest.json?token={encoded_token}"'
     )
     assets = {
@@ -116,6 +119,10 @@ def _load_mobile_assets(token: str) -> tuple[str, dict[str, tuple[str, bytes]]]:
         "/static/liquid-glass.js": (
             "application/javascript; charset=utf-8",
             (web_root / "static" / "liquid-glass.js").read_bytes(),
+        ),
+        "/static/motion.js": (
+            "application/javascript; charset=utf-8",
+            (web_root / "static" / "motion.js").read_bytes(),
         ),
         "/manifest.json": (
             "application/manifest+json; charset=utf-8",

@@ -24,6 +24,7 @@
     { selector: ".empty-state", bezel: 24, scale: 50, frost: 8, dispersion: false },
     { selector: "#sessionDrawerPanel", bezel: 28, scale: 60, frost: 16, dispersion: false },
     { selector: "#settingsSheet", bezel: 28, scale: 60, frost: 16, dispersion: false },
+    { selector: "#modelSheetPanel", bezel: 26, scale: 56, frost: 14, dispersion: false },
   ];
 
   function refractionAvailable() {
@@ -259,12 +260,13 @@
   // ---- Motion: single-pass filter while anything moves, the rich one once the page is still ----
   let idleTimer = 0;
   let transitions = 0;
+  let animatedUntil = 0; // motion.js reports how long each of its animations runs
   function settle() {
     clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
       transitions = 0; // a transition whose element was removed never reports its end
       delete root.dataset.glassMoving;
-    }, transitions > 0 ? 1500 : 200);
+    }, Math.max(transitions > 0 ? 1500 : 200, animatedUntil - Date.now() + 80));
   }
   function moving() {
     if (root.dataset.glassMoving !== "true") root.dataset.glassMoving = "true";
@@ -273,6 +275,10 @@
   document.addEventListener("scroll", moving, { capture: true, passive: true });
   document.addEventListener("touchmove", moving, { capture: true, passive: true });
   document.addEventListener("transitionrun", () => { transitions += 1; moving(); }, true);
+  document.addEventListener("agent-motion", (event) => {
+    animatedUntil = Math.max(animatedUntil, Date.now() + (Number(event.detail) || 0));
+    moving();
+  });
   for (const type of ["transitionend", "transitioncancel"]) {
     document.addEventListener(type, () => { transitions = Math.max(0, transitions - 1); if (transitions === 0) settle(); }, true);
   }

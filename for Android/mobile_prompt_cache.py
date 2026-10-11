@@ -1,10 +1,10 @@
 """Per-conversation system prompt snapshots for providers with prompt-prefix caching.
 
-DeepSeek bills a cached prompt prefix at about 1/50 of the normal input price, but only a
-byte-identical prefix counts. The Android system prompt carries today's date, the memory notes
-and the knowledge-base list; rebuilding it whenever one of them changes made the next request of
-every conversation miss the cache. Each conversation therefore keeps the prompt it started
-with, and a later change reaches the model as a short note attached to the next user message.
+DeepSeek bills a cached prompt prefix at about 1/50 of the normal input price, others at 1/10 to
+1/2, but only a byte-identical prefix counts. The Android system prompt carries today's date, the
+memory notes and the knowledge-base list; rebuilding it whenever one of them changes made the next
+request of every conversation miss the cache. Each conversation therefore keeps the prompt it
+started with, and a later change reaches the model as a short note attached to the next user message.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -22,10 +23,29 @@ _VERSION = 1
 _SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
+# Services that bill a repeated prompt prefix at a lower price. Most do it on their own (DeepSeek,
+# OpenAI, Kimi, Qwen on DashScope, GLM, Gemini, Grok, and OpenRouter's upstreams); Anthropic needs
+# cache breakpoints, which its provider adds to requests in this mode.
+_PREFIX_CACHE_DOMAINS = (
+    "deepseek.com",
+    "openai.com",
+    "moonshot.cn",
+    "moonshot.ai",
+    "dashscope.aliyuncs.com",
+    "dashscope-intl.aliyuncs.com",
+    "bigmodel.cn",
+    "z.ai",
+    "generativelanguage.googleapis.com",
+    "x.ai",
+    "anthropic.com",
+    "openrouter.ai",
+)
+
+
 def prefix_cache_endpoint(base_url: str | None, model: str | None) -> bool:
-    """True for DeepSeek, whose API caches prompt prefixes automatically."""
+    """True for providers that cache prompt prefixes (see ``_PREFIX_CACHE_DOMAINS``)."""
     host = (urlsplit(base_url or "").hostname or "").lower()
-    if host == "api.deepseek.com" or host.endswith(".deepseek.com"):
+    if any(host == domain or host.endswith("." + domain) for domain in _PREFIX_CACHE_DOMAINS):
         return True
     return (model or "").lower().startswith("deepseek")
 
@@ -71,8 +91,12 @@ class FrozenPrompts:
 
     @classmethod
     def for_data_dir(cls) -> FrozenPrompts:
-        data = Path(os.getenv("AGENT_WORKSPACE_DATA_DIR") or ".")
-        return cls(data / "cache" / "frozen-prompts")
+        data = os.getenv("AGENT_WORKSPACE_DATA_DIR")
+        if not data:
+            # Off the phone (tests, a desktop run) there is no app data folder; never write into
+            # the working directory, which is usually the source tree.
+            return cls(Path(tempfile.gettempdir()) / "agent-workspace-frozen-prompts")
+        return cls(Path(data) / "cache" / "frozen-prompts")
 
     def _path(self, session_id: str) -> Path:
         if not _SESSION_ID.match(session_id):

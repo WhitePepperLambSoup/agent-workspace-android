@@ -1468,9 +1468,11 @@ class SQLiteEventStore:
 
         Events are otherwise immutable. This is the one deliberate exception, for a user who
         deletes a conversation: its events go together with every projection of them in one
-        transaction, which is checked the way a restored database is before it is committed, so
-        the store stays valid or nothing changes. Conversations whose events also built shared
-        state (workspace memories, agent runs, reviews) are refused with a ValueError.
+        transaction. Before it commits, no table may still hold a row for these conversations
+        and every foreign key must resolve, so the store stays valid or nothing changes. (A full
+        projection replay would prove the same but costs seconds per deletion on a phone, growing
+        with all history; the tests run it after deleting.) Conversations whose events also built
+        shared state (workspace memories, agent runs, reviews) are refused with a ValueError.
         """
         ids = list(dict.fromkeys(session_ids))
         if not ids:
@@ -1554,13 +1556,22 @@ class SQLiteEventStore:
                     )
                 if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
                     raise ValueError("deleting the conversations would leave dangling references")
-                schema_version = cast(int, connection.execute("PRAGMA user_version").fetchone()[0])
-                replay_error = SQLiteEventStore.projection_replay_error(connection, schema_version)
-                if replay_error is not None:
-                    raise ValueError(
-                        f"deleting the conversations would leave the store inconsistent: "
-                        f"{replay_error}"
-                    )
+                # Any table keyed by session, including ones added after this code was written.
+                for table in sorted(tables):
+                    columns = {
+                        cast(str, column[1])
+                        for column in connection.execute(f'PRAGMA table_info("{table}")')
+                    }
+                    if "session_id" in columns and (
+                        connection.execute(
+                            f'SELECT 1 FROM "{table}" WHERE session_id IN ({marks}) LIMIT 1',
+                            existing,
+                        ).fetchone()
+                        is not None
+                    ):
+                        raise ValueError(
+                            f"deleting the conversations would leave rows in {table}"
+                        )
                 connection.commit()
             except BaseException:
                 if connection.in_transaction:
@@ -1846,12 +1857,17 @@ class SQLiteEventStore:
         *,
         after_sequence: int = 0,
         limit: int = 100,
+        type_prefixes: tuple[str, ...] = (),
     ) -> tuple[list[Event], int, int, bool]:
         """Read a bounded forward event page with durable stream metadata.
 
         ``after_sequence`` is exclusive.  The extra row used for ``has_more``
         keeps replay callers from loading the full event stream just to decide
         whether a cursor can advance.
+
+        ``type_prefixes`` returns only events whose type starts with one of them. The page and
+        the bounds come from one snapshot, so a caller that saw ``has_more`` false has seen every
+        matching event up to the newest sequence and may move its cursor there.
         """
 
         if not isinstance(session_id, str) or not session_id:
@@ -1860,27 +1876,44 @@ class SQLiteEventStore:
             raise ValueError("event replay cursor must be non-negative")
         if type(limit) is not int or not 1 <= limit <= 1000:
             raise ValueError("event replay limit must be from 1 to 1000")
+        if not isinstance(type_prefixes, tuple) or not all(
+            isinstance(prefix, str) and prefix for prefix in type_prefixes
+        ):
+            raise ValueError("event replay type prefixes must be non-empty strings")
+        type_filter = ""
+        type_arguments: list[int | str] = []
+        if type_prefixes:
+            type_filter = " AND (" + " OR ".join("substr(type, 1, ?) = ?" for _ in type_prefixes) + ")"
+            for prefix in type_prefixes:
+                type_arguments.extend((len(prefix), prefix))
         with self._lock:
             connection = self._get_connection()
-            rows = connection.execute(
-                """
-                SELECT id, session_id, type, data_json, schema_version, sequence,
-                       causation_id, correlation_id, created_at
-                FROM events
-                WHERE session_id = ? AND sequence > ?
-                ORDER BY sequence ASC
-                LIMIT ?
-                """,
-                (session_id, after_sequence, limit + 1),
-            ).fetchall()
-            bounds = connection.execute(
-                """
-                SELECT MIN(sequence) AS oldest_sequence, MAX(sequence) AS newest_sequence
-                FROM events
-                WHERE session_id = ?
-                """,
-                (session_id,),
-            ).fetchone()
+            snapshot = not connection.in_transaction
+            if snapshot:
+                connection.execute("BEGIN")
+            try:
+                rows = connection.execute(
+                    f"""
+                    SELECT id, session_id, type, data_json, schema_version, sequence,
+                           causation_id, correlation_id, created_at
+                    FROM events
+                    WHERE session_id = ? AND sequence > ?{type_filter}
+                    ORDER BY sequence ASC
+                    LIMIT ?
+                    """,
+                    (session_id, after_sequence, *type_arguments, limit + 1),
+                ).fetchall()
+                bounds = connection.execute(
+                    """
+                    SELECT MIN(sequence) AS oldest_sequence, MAX(sequence) AS newest_sequence
+                    FROM events
+                    WHERE session_id = ?
+                    """,
+                    (session_id,),
+                ).fetchone()
+            finally:
+                if snapshot:
+                    connection.execute("COMMIT")
         has_more = len(rows) > limit
         events = self._events_from_rows(rows[:limit])
         oldest = int(bounds["oldest_sequence"] or 0)

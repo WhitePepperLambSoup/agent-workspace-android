@@ -1,5 +1,79 @@
 # Changelog
 
+## 1.5.0 — 2026-10-12
+
+动效与速度版：全面重做的动画、点一下展开的悬浮球、带“拉满”特效的思考程度面板；更多服务商的缓存省钱模式；扫描版 PDF 和网页可以进知识库；启动和删除对话快了很多。Motion and speed release: reworked animations, a floating bubble that fans out on tap, a reasoning-effort sheet with a full-power effect; prompt caching for more providers; scanned PDFs and web pages in the knowledge base; much faster start and conversation deletion.
+
+### 中文
+
+**动画全面升级（新）**
+- 全部改用弹簧曲线：抽屉、菜单、附件菜单打开时有回弹，关闭时有退场动画（此前直接消失）。
+- 会话列表和底部菜单可以用手指拖着关：会话列表向左滑，菜单在手机上按住标题往下拉；跟手移动，松手时按速度和距离决定关上还是弹回。
+- 自己发的消息从输入框一角弹出；审批卡片、提示条、发送和停止按钮的切换都有轻微的弹出效果；发送时箭头“飞出去”再回来。
+- 工具卡片和思考过程展开、收起时平滑地改变高度（Android WebView 131 及以上）。
+- 尊重「界面偏好 → 动效」和系统的“减少动画”：减少时只有淡入淡出，关闭时完全没有动画；不会有一直播放的装饰动画（省电、不发热）。
+
+**思考程度面板（新）**
+- 点输入框里的模型按钮，会从底部弹出「模型与思考」面板：上面切换已保存的模型配置，下面用滑杆选思考程度（关闭 / 低 / 中 / 高 / 极高 / 最高，取决于模型），旁边是「自动」。拖动时标签和颜色跟着变，松手就生效，云端模型不需要重启引擎。
+- 拉到最高时：滑轨变成流动的极光色，滑块发光并扩散光环，“最高”二字闪着彩色光泽，面板顶部泛起极光，还会迸出一小串火花；输入框里的模型按钮也会套上一圈极光色的边。
+- 「更多设置」进入原来的完整模型页面。
+
+**悬浮球（新）**
+- 点一下悬浮球，四个按钮沿弧线弹出：新对话、语音提问、圈选提问、录音速记；悬浮球变成 ×，背景变暗，点空白处或 × 收回。此前需要长按才出菜单，点一下直接开新对话。
+- 拖动悬浮球时屏幕底部会出现一个 ×，拖进去（变成红圈时）松手就隐藏悬浮球；此前要从菜单里选“隐藏”。
+- 悬浮球靠边时，从它开始的拖动不再被系统当成“返回”手势。
+
+**更多服务商的缓存省钱模式**
+- 1.4.0 里只对 DeepSeek 开启的“请求前缀不变”模式，现在也用于 OpenAI、Kimi（月之暗面）、通义千问（DashScope）、智谱 GLM、Gemini、Grok、OpenRouter 和 Anthropic Claude。这些服务对重复的前缀按更低的价格计费（约为原价的 1/10 到 1/2）。
+- Claude 需要在请求里标出缓存位置，现在会自动标注（系统提示词之后和最新一条消息）。
+- 「Token 与费用」能显示 Kimi 返回的缓存命中数。
+
+**知识库**
+- 扫描版 PDF 也能加入了：没有文字层的页面会用手机上的文字识别（ML Kit，中英文，离线）读取，并提示“人名和数字可能有识别错误”。此前这样的页面会被跳过，全是扫描页的 PDF 无法加入。
+- 可以保存网页：知识库页面点「网页」，粘贴地址（或分享来的整段文字）即可；把带链接的文字分享给本应用时，输入框上方也会提示“存入知识库”。保存的是网页当时的内容，搜索结果和回答会附上网页地址。只能保存公开的 https 网页。
+
+**本机模型**
+- 写文件前先检查格式：JSON 有语法错误、CSV 某行列数和表头不一致（逗号、引号、换行没加引号）、HTML 有没闭合的标签或被截断、Python 有语法错误时，不会保存，而是告诉模型具体哪一行要改；追加内容把文件弄坏时同样拦下。
+
+**更快**
+- 冷启动从约 8 秒缩短到约 3 秒（引擎部分 6.1 秒 → 1.5 秒）：数据库的完整一致性检查对同一个数据库文件只做一次（之后每周和每次更新后各做一次），恢复中断任务时只读取任务相关的记录。
+- 删除对话从 2.5–3 秒缩短到约 0.2 秒。
+
+### English
+
+**Reworked motion (new)**
+- Spring curves throughout: the drawer, the menu and the attach menu spring open and now animate out when closing (they used to vanish).
+- Drag to dismiss: swipe the conversation list to the left, or pull the menu down by its title on a phone; the panel follows the finger and closes or springs back depending on distance and speed.
+- Your message pops up from the corner of the message box; approval cards, notices and the send/stop swap pop in; the send arrow lifts off when you send.
+- Tool cards and reasoning grow and shrink smoothly when opened or closed (Android WebView 131 and later).
+- Follows Appearance → Motion and the system's reduce-motion setting: reduced keeps only fades, off has no animation at all; nothing decorative loops forever (battery and heat).
+
+**Reasoning effort sheet (new)**
+- Tap the model button in the message box: a "Model & reasoning" sheet slides up with your saved model profiles and a slider for the reasoning effort (off / low / medium / high / extra high / max, depending on the model) next to "Automatic". The label and colours follow the finger and the choice applies on release, without restarting the engine for cloud models.
+- At the top level the track turns into a flowing aurora, the knob glows with a spreading halo, the label shimmers, an aurora glows at the top of the sheet and a burst of sparks flies off; the model button in the message box keeps an aurora rim.
+- "More settings" opens the full model page.
+
+**Floating bubble (new)**
+- Tap the bubble and four buttons spring out on an arc: new chat, ask by voice, circle to ask and voice note; the bubble turns into ×, the screen dims, and tapping outside or × folds them back. A long press used to open a menu, and a tap opened a new chat.
+- While dragging the bubble an × appears at the bottom of the screen; drop the bubble into it (when it turns into a red ring) to hide the bubble. This used to be a menu item.
+- A drag that starts on the bubble at the screen edge is no longer taken as the system's back gesture.
+
+**Prompt caching for more providers**
+- The prefix-stable mode that 1.4.0 used for DeepSeek now also applies to OpenAI, Kimi (Moonshot), Qwen (DashScope), Zhipu GLM, Gemini, Grok, OpenRouter and Anthropic Claude, which bill a repeated prompt prefix at a lower price (roughly 1/10 to 1/2 of the normal one).
+- Claude needs cache points marked in the request; they are now added automatically (after the system prompt and on the newest message).
+- Token usage now counts the cache hits Kimi reports.
+
+**Knowledge base**
+- Scanned PDFs can be added: pages without a text layer are read with the phone's text recognition (ML Kit, Chinese and English, offline), with a note that names and numbers may contain recognition errors. Such pages used to be skipped, and a fully scanned PDF could not be added.
+- Save web pages: tap "Web page" on the knowledge base page and paste an address (or the whole shared text); sharing text with a link to the app also offers "Save to knowledge base". The page is saved as it is at that moment; search results and answers include its address. Only public https pages can be saved.
+
+**On-device model**
+- Files are checked before they are saved: JSON with a syntax error, a CSV record whose field count differs from the header (a comma, quote or line break left unquoted), HTML with an unclosed element or cut off, or Python with a syntax error is not saved; the model is told which line to fix. Appending text that breaks a file is refused the same way.
+
+**Faster**
+- Cold start went from about 8 s to about 3 s (the engine's part from 6.1 s to 1.5 s): the full database consistency check runs once per database file (and again weekly and after each update), and recovering interrupted tasks reads only task records.
+- Deleting a conversation went from 2.5–3 s to about 0.2 s.
+
 ## 1.4.0 — 2026-10-11
 
 功能版：多个知识库、工作区文件管理、真正删除对话、DeepSeek 缓存命中大幅提高、录音速记、定时任务可在默认模式运行。Feature release: several knowledge bases, file management, real conversation deletion, much higher DeepSeek cache hits, voice notes, and scheduled tasks in the default mode.
