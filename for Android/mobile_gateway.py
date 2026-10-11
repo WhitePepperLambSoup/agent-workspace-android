@@ -29,7 +29,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from weakref import WeakValueDictionary
 
 from mobile_approval import APPROVAL_SCOPES
-from mobile_artifacts import write_workspace_file_coordinated
+from mobile_artifacts import change_workspace_coordinated, write_workspace_file_coordinated
 from mobile_images import attachment_media_type, attachment_receipt
 from mobile_protocol import (
     MobileTaskRequest,
@@ -46,8 +46,12 @@ from mobile_workspace import (
     WorkspaceContentTooLargeError,
     WorkspaceStorageFullError,
     archived_sessions,
+    delete_workspace_path,
+    forget_session_presentation,
     import_workspace_upload,
     list_workspace_files,
+    make_workspace_directory,
+    move_workspace_path,
     open_workspace_download,
     read_workspace_file,
     runtime_workspace,
@@ -77,6 +81,12 @@ _MAX_UPLOAD_RECEIPT_BYTES = 64 * 1024
 _RUN_TIMEOUT_SECONDS = 900.0
 _MOBILE_OPERATION_TIMEOUT_SECONDS = 30.0
 _ACTIVE_TASK_STATES = frozenset({"queued", "running", "waiting_approval"})
+# Files page changes besides saving (POST /mobile/workspace/<name>).
+_FILE_CHANGES = {
+    "delete": delete_workspace_path,
+    "move": move_workspace_path,
+    "mkdir": make_workspace_directory,
+}
 _IDENTITY_CHALLENGE = re.compile(r"[A-Za-z0-9_-]{32,128}")
 _IDENTITY_CONTEXT = b"agent-workspace-mobile-identity-v1\n"
 
@@ -898,6 +908,37 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._reply(200, document)
             return
+        if len(parts) == 3 and parts[:2] == ["mobile", "workspace"] and parts[2] in _FILE_CHANGES:
+            change = _FILE_CHANGES[parts[2]]
+            try:
+                runtime = self._api.scoped_runtime(
+                    payload.get("workspace_id"), session_id=payload.get("session_id")
+                )
+                document = self._api._run_coro(
+                    change_workspace_coordinated(
+                        runtime,
+                        lambda: change(runtime, payload),
+                        lambda done: [done["path"], *filter(None, [done.get("previous_path")])],
+                    ),
+                    _MOBILE_OPERATION_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                self._reply(503, {"error": "workspace is busy; wait for the current tool"})
+                return
+            except FileExistsError:
+                self._reply(409, {"error": "a file or folder with this name already exists"})
+                return
+            except (FileNotFoundError, KeyError):
+                self._reply(404, {"error": "workspace file or folder was not found"})
+                return
+            except (TypeError, ValueError, ToolArgumentError) as exc:
+                self._reply(400, {"error": " ".join(str(exc).split())[:2000]})
+                return
+            except (OSError, ToolError):
+                self._reply(500, {"error": "could not change the workspace"})
+                return
+            self._reply(200, document)
+            return
         if parts == ["mobile", "workspaces"]:
             try:
                 request = parse_mobile_workspace_request(payload)
@@ -991,6 +1032,31 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             except (OSError, ToolError, ValueError):
                 self._reply(500, {"error": "could not archive session"})
+                return
+            self._reply(200, document)
+            return
+        if parts == ["sessions", "delete"]:
+            session_ids = payload.get("session_ids")
+            if (
+                not isinstance(session_ids, list)
+                or not 1 <= len(session_ids) <= 500
+                or not all(isinstance(item, str) and 0 < len(item) <= 256 for item in session_ids)
+            ):
+                self._reply(400, {"error": "session_ids must list 1 to 500 sessions"})
+                return
+            try:
+                document = self._api.delete_sessions(session_ids)
+            except KeyError:
+                self._reply(404, {"error": "unknown session"})
+                return
+            except SessionBusyError:
+                self._reply(409, {"error": "session has a running task; stop it first"})
+                return
+            except ValueError as exc:
+                self._reply(409, {"error": " ".join(str(exc).split())[:500]})
+                return
+            except (OSError, ToolError, sqlite3.Error):
+                self._reply(500, {"error": "could not delete the sessions"})
                 return
             self._reply(200, document)
             return
@@ -1206,7 +1272,10 @@ class _Handler(BaseHTTPRequestHandler):
                 raise ValueError("upload parameters may not repeat")
             body, length = self._upload_body()
             document = self._api.import_knowledge_upload(
-                query.get("filename", [""])[0], body, content_length=length
+                query.get("filename", [""])[0],
+                body,
+                content_length=length,
+                collection_id=query.get("collection", [""])[0] or None,
             )
             consumed = True
         except (ValueError, TypeError) as error:
@@ -1624,6 +1693,75 @@ class MobileGateway:
             await event_bus.publish(event)
         return {"id": session_id, "archived": archived}
 
+    def delete_sessions(self, session_ids: list[str]) -> dict[str, Any]:
+        return self._run_coro(
+            self._delete_sessions(list(dict.fromkeys(session_ids))),
+            # Deleting checks the whole event store before committing.
+            _MOBILE_OPERATION_TIMEOUT_SECONDS * 4,
+        )
+
+    async def _delete_sessions(self, session_ids: list[str]) -> dict[str, Any]:
+        """Delete conversations for good: messages, tasks, images and their settings.
+
+        Files the conversations wrote stay in the workspace. A conversation with an unfinished
+        task is refused, like archiving.
+        """
+        for session_id in session_ids:
+            if not self.session_exists(session_id):
+                raise KeyError(session_id)
+        if any(
+            str(task.state) in _ACTIVE_TASK_STATES
+            for session_id in session_ids
+            for task in self.controller.list(session_id)
+        ):
+            raise SessionBusyError(session_ids[0])
+        runtimes = {
+            session_id: self.scoped_runtime(session_id=session_id) for session_id in session_ids
+        }
+        release = getattr(self.controller, "release_session", None)
+        closers: list[Any] = []
+        if callable(release):
+            for session_id in session_ids:
+                closers.extend(await release(session_id) or ())
+        store = self.runtime.store
+        try:
+            async with contextlib.AsyncExitStack() as locks:
+                for session_id in sorted(session_ids):
+                    await locks.enter_async_context(store.session_lock(session_id))
+                deleted = await asyncio.to_thread(store.delete_sessions, session_ids)
+        finally:
+            # The released runtimes close after the reply (or the failure): closing one can
+            # hold the event loop for seconds.
+            close_released = getattr(self.controller, "close_released", None)
+            if callable(close_released):
+                close_released(closers)
+        gone = set(session_ids)
+        for session_id, runtime in runtimes.items():
+            with contextlib.suppress(Exception):
+                forget_session_presentation(runtime, [session_id])
+        data = getattr(getattr(self, "management", None), "data", None)
+        with contextlib.suppress(Exception):
+            from mobile_knowledge import get_knowledge_store
+
+            store_kb = get_knowledge_store(data)
+            for session_id in session_ids:
+                store_kb.forget_session(session_id)
+        with contextlib.suppress(Exception):
+            from mobile_prompt_cache import FrozenPrompts
+
+            frozen = FrozenPrompts.for_data_dir()
+            for session_id in session_ids:
+                frozen._path(session_id).unlink(missing_ok=True)
+        management = getattr(self, "management", None)
+        schedules = getattr(management, "schedules", None)
+        removed_schedules = 0
+        if schedules is not None:
+            with contextlib.suppress(Exception):
+                removed_schedules = schedules.forget_sessions(gone)
+                if removed_schedules:
+                    management.mirror_schedules()
+        return {"deleted": session_ids, "count": deleted, "schedules_removed": removed_schedules}
+
     def discard_empty_session(self, session_id: str) -> dict[str, Any]:
         return self._run_coro(
             self._discard_empty_session(session_id), _MOBILE_OPERATION_TIMEOUT_SECONDS
@@ -1774,10 +1912,21 @@ class MobileGateway:
         if not source.is_file():
             raise ValueError(f"not a file: {relative}")
         store = get_knowledge_store(getattr(getattr(self, "management", None), "data", None))
-        return store.add_file(source, source.name, origin="workspace", origin_path=relative)
+        return store.add_file(
+            source,
+            source.name,
+            origin="workspace",
+            origin_path=relative,
+            collection_id=payload.get("collection_id") or None,
+        )
 
     def import_knowledge_upload(
-        self, filename: Any, source: Any, *, content_length: int | None
+        self,
+        filename: Any,
+        source: Any,
+        *,
+        content_length: int | None,
+        collection_id: str | None = None,
     ) -> dict[str, Any]:
         """Stream an uploaded document into the knowledge base's private folder and queue it."""
         from mobile_knowledge import (
@@ -1813,7 +1962,9 @@ class MobileGateway:
                     if size > MAX_FILE_BYTES:
                         raise KnowledgeError(too_large)
                     target.write(block)
-            return store.add_file(partial, filename, origin="upload", move=True)
+            return store.add_file(
+                partial, filename, origin="upload", move=True, collection_id=collection_id
+            )
         finally:
             partial.unlink(missing_ok=True)
 

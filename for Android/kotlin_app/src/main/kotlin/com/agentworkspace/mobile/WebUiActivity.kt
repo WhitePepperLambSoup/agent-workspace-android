@@ -1040,7 +1040,8 @@ class WebUiActivity : ComponentActivity() {
 
     private fun queueQuickAsk(incoming: Intent?) {
         if (incoming?.action != QuickEntry.ACTION_QUICK_ASK) return
-        val mode = incoming.getStringExtra(QuickEntry.EXTRA_MODE)?.takeIf { it in QuickEntry.MODES } ?: "text"
+        // "note" (submit a finished voice note) only with the token this app's recorder issued.
+        val mode = QuickEntry.acceptedMode(this, incoming)
         val batch = incoming.getStringExtra(QuickEntry.EXTRA_SHARE_BATCH)?.takeIf { it.length in 1..64 }
         // Other apps (Tasker, shortcuts) may prefill the input; the user still decides to send it.
         // A trailing line break stays: quick task templates end with one so the user types below them.
@@ -1298,7 +1299,7 @@ class WebUiActivity : ComponentActivity() {
                 if (!TermuxBootstrap.isInstalled(this@WebUiActivity)) {
                     statusText.text = UiText.of(this@WebUiActivity, "正在准备本地服务...", "Preparing the local service...")
                     withContext(Dispatchers.IO) {
-                        TermuxBootstrap.installSync(this@WebUiActivity) { msg ->
+                        TermuxBootstrap.ensureInstalled(this@WebUiActivity) { msg ->
                             activityScope.launch { statusText.text = msg }
                         }
                     }

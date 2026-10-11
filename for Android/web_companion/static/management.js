@@ -291,7 +291,14 @@
     if (/larger than \d+ MiB/i.test(text)) return t("文件超过 100 MiB，请拆分后再添加");
     if (/knowledge base is full/i.test(text)) return t("知识库已满（300 份），请先删除不需要的文档");
     if (/file is empty/i.test(text)) return t("文件是空的");
+    if (/of this knowledge base is being indexed/i.test(text)) return t("这个知识库里有文档正在读取，完成后再删除");
     if (/being indexed/i.test(text)) return t("这份文档正在读取，完成后再删除");
+    if (/knowledge base named .* already exists/i.test(text)) return t("已有同名的知识库");
+    if (/at most \d+ knowledge bases/i.test(text)) return t("知识库最多 30 个");
+    if (/knowledge base name is required/i.test(text)) return t("请填写知识库名称");
+    if (/knowledge base name has at most/i.test(text)) return t("知识库名称最多 40 个字");
+    if (/default knowledge base cannot be removed/i.test(text)) return t("默认知识库不能删除");
+    if (/no such knowledge base|there is no knowledge base/i.test(text)) return t("这个知识库已不存在，请刷新后再试");
     if (/turned off/i.test(text)) return t("知识库已关闭");
     let match;
     if ((match = text.match(/line (\d+) needs at least two words/))) return t("第 {0} 行至少要有两个词", match[1]);
@@ -327,6 +334,86 @@
     for (const warning of document.warnings || []) lines.push(knowledgeText(warning));
     return lines.join("\n");
   }
+  // Knowledge bases ("collections"): the default one has no name until the user gives it one.
+  let knowledgeCollections = [];
+  let knowledgeFilter = "";  // the knowledge base shown on the page; "" shows all of them
+  const knowledgeLabel = (collection) => collection?.name || (collection?.id === "default" ? t("默认") : String(collection?.id || ""));
+  function knowledgeBases(collections) {
+    $("knowledgeBaseList").replaceChildren();
+    for (const collection of collections) {
+      const element = row(knowledgeLabel(collection), t("{0} 份文档", collection.documents || 0));
+      element.classList.add("knowledge-base-row");
+      const toggle = document.createElement("label");
+      toggle.className = "knowledge-base-default";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = collection.default_on !== false;
+      input.addEventListener("change", async () => {
+        input.disabled = true;
+        try { await knowledge(undefined, await post("/mobile/knowledge/collections/default", { id: collection.id, default_on: input.checked })); }
+        catch (error) { input.checked = !input.checked; status("knowledgeStatus", knowledgeMessage(error), true); }
+        finally { if (input.isConnected) input.disabled = false; }
+      });
+      toggle.append(input, t("新对话默认使用"));
+      action(element, "pencil", t("重命名"), async () => {
+        const name = window.prompt(t("知识库名称"), knowledgeLabel(collection));
+        if (name === null || !name.trim() || name.trim() === knowledgeLabel(collection)) return;
+        try { await knowledge(undefined, await post("/mobile/knowledge/collections/rename", { id: collection.id, name: name.trim() })); }
+        catch (error) { throw new Error(knowledgeMessage(error)); }
+      });
+      if (collection.id !== "default") {
+        action(element, "trash-2", t("删除"), async () => {
+          const question = collection.documents
+            ? t("删除知识库“{0}”和其中的 {1} 份文档？", knowledgeLabel(collection), collection.documents)
+            : t("删除知识库“{0}”？", knowledgeLabel(collection));
+          if (!window.confirm(question)) return;
+          try { await knowledge(undefined, await post("/mobile/knowledge/collections/delete", { id: collection.id })); }
+          catch (error) { throw new Error(knowledgeMessage(error)); }
+        });
+      }
+      element.append(toggle);
+      $("knowledgeBaseList").append(element);
+    }
+  }
+  function knowledgeFilterOptions(collections) {
+    const select = $("knowledgeFilter");
+    select.hidden = collections.length < 2;
+    if (!collections.some((collection) => collection.id === knowledgeFilter)) knowledgeFilter = "";
+    select.replaceChildren();
+    for (const [value, label] of [["", t("全部知识库")], ...collections.map((collection) => [collection.id, knowledgeLabel(collection)])]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      select.append(option);
+    }
+    select.value = knowledgeFilter;
+    const target = collections.find((collection) => collection.id === knowledgeFilter);
+    $("knowledgeAddLabel").textContent = target && collections.length > 1 ? t("添加到“{0}”", knowledgeLabel(target)) : t("添加文档");
+  }
+  function knowledgeMove(document) {
+    // Moving a document to another knowledge base: its own small picker.
+    const select = window.document.createElement("select");
+    select.className = "knowledge-move";
+    select.setAttribute("aria-label", t("“{0}”所在的知识库", document.title));
+    for (const collection of knowledgeCollections) {
+      const option = window.document.createElement("option");
+      option.value = collection.id;
+      option.textContent = knowledgeLabel(collection);
+      select.append(option);
+    }
+    select.value = document.collection_id || "default";
+    select.addEventListener("change", async () => {
+      select.disabled = true;
+      try {
+        await knowledge(undefined, await post("/mobile/knowledge/move", { id: document.id, collection_id: select.value }));
+        status("knowledgeStatus", t("已把“{0}”移到“{1}”", document.title, knowledgeLabel(knowledgeCollections.find((item) => item.id === select.value))));
+      } catch (error) {
+        select.value = document.collection_id || "default";
+        status("knowledgeStatus", knowledgeMessage(error), true);
+      } finally { if (select.isConnected) select.disabled = false; }
+    });
+    return select;
+  }
   async function knowledge(isCurrent = () => true, value = null) {
     value = value || await ui.apiJson("/mobile/knowledge");
     if (!isCurrent()) return;
@@ -335,15 +422,22 @@
     $("knowledgeAutoToggle").disabled = value.enabled === false;
     $("knowledgeSynonymsHint").textContent = t("换个说法也能找到：已内置 {0} 组常用说法，比如“房租”和“租金”、“坏了”和“维修”。也可以加上你自己的，每行一组，词之间用空格或逗号隔开。", value.builtin_synonym_groups || 0);
     if (document.activeElement !== $("knowledgeSynonyms")) $("knowledgeSynonyms").value = value.synonyms || "";
-    const documents = Array.isArray(value.documents) ? value.documents : [];
-    const ready = documents.filter((document) => document.state === "ready").length;
-    $("knowledgeCounter").textContent = documents.length ? t("{0} 份可用", ready) : "";
+    knowledgeCollections = Array.isArray(value.collections) ? value.collections : [];
+    knowledgeBases(knowledgeCollections);
+    knowledgeFilterOptions(knowledgeCollections);
+    const several = knowledgeCollections.length > 1;
+    const allDocuments = Array.isArray(value.documents) ? value.documents : [];
+    const documents = knowledgeFilter ? allDocuments.filter((document) => (document.collection_id || "default") === knowledgeFilter) : allDocuments;
+    const ready = allDocuments.filter((document) => document.state === "ready").length;
+    const shownReady = documents.filter((document) => document.state === "ready").length;
+    $("knowledgeCounter").textContent = documents.length ? t("{0} 份可用", shownReady) : "";
     $("menuKnowledgeSummary").textContent = ready ? t("{0} 份文档", ready) : t("让 AI 查阅你的文档");
     $("knowledgeList").replaceChildren();
     for (const document of documents) {
       const element = row(document.title, knowledgeDetails(document));
       element.classList.add("knowledge-row");
       element.dataset.state = document.state;
+      if (several && document.state !== "indexing") element.querySelector(".management-row-body").append(knowledgeMove(document));
       if (document.state !== "indexing") {
         action(element, "pencil", t("重命名"), async () => {
           const title = window.prompt(t("文档名称"), document.title);
@@ -359,12 +453,17 @@
       }
       $("knowledgeList").append(element);
     }
-    if (!documents.length) $("knowledgeList").append(row(t("还没有文档"), t("点“添加文档”，从手机里选择文件。")));
+    if (!documents.length) {
+      $("knowledgeList").append(knowledgeFilter
+        ? row(t("这个知识库还没有文档"), t("点“添加到…”，从手机里选择文件；也可以把其他知识库的文档移过来。"))
+        : row(t("还没有文档"), t("点“添加文档”，从手机里选择文件。")));
+    }
     if (!knowledgeUploading) {
       status("knowledgeStatus", value.enabled === false ? t("知识库已关闭：对话中不会使用") : "");
     }
+    void knowledgeChip();
     window.clearTimeout(knowledgePoll);
-    if (documents.some((document) => document.state === "queued" || document.state === "indexing")) {
+    if (allDocuments.some((document) => document.state === "queued" || document.state === "indexing")) {
       knowledgePoll = window.setTimeout(() => {
         if (!closed && !$("settingsKnowledge").hidden && !$("settingsOverlay").hidden) knowledge(isCurrent).catch(() => {});
       }, 1500);
@@ -375,15 +474,17 @@
     knowledgeUploading = true;
     $("btnKnowledgeAdd").disabled = true;
     const failures = [];
-    let duplicates = 0;
+    const duplicates = [];
+    const target = knowledgeFilter;
     try {
       for (const [index, file] of files.entries()) {
         status("knowledgeStatus", t("正在上传 {0}（{1}/{2}）", file.name, index + 1, files.length));
         try {
-          const added = await ui.apiJson(`/mobile/knowledge/upload?filename=${encodeURIComponent(file.name)}`, {
+          const into = target ? `&collection=${encodeURIComponent(target)}` : "";
+          const added = await ui.apiJson(`/mobile/knowledge/upload?filename=${encodeURIComponent(file.name)}${into}`, {
             method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file,
           });
-          if (added?.duplicate) duplicates += 1;
+          if (added?.duplicate) duplicates.push(added);
         } catch (error) { failures.push(t("{0}：{1}", file.name, knowledgeMessage(error))); }
       }
     } finally {
@@ -393,14 +494,18 @@
     if (closed) return;
     await knowledge();
     if (failures.length) status("knowledgeStatus", failures.join("\n"), true);
-    else if (duplicates) status("knowledgeStatus", t("{0} 份文档已经在知识库里了", duplicates));
+    else if (duplicates.length === 1 && knowledgeCollections.length > 1) {
+      const where = knowledgeCollections.find((collection) => collection.id === (duplicates[0].collection_id || "default"));
+      status("knowledgeStatus", t("这份文档已经在知识库“{0}”里了", knowledgeLabel(where)));
+    }
+    else if (duplicates.length) status("knowledgeStatus", t("{0} 份文档已经在知识库里了", duplicates.length));
     else status("knowledgeStatus", t("已添加，正在读取文档内容"));
   }
   async function searchKnowledge() {
     const query = $("knowledgeQuery").value.trim();
     $("knowledgeResults").replaceChildren();
     if (!query) return;
-    const value = await post("/mobile/knowledge/search", { query });
+    const value = await post("/mobile/knowledge/search", { query, ...(knowledgeFilter ? { collections: [knowledgeFilter] } : {}) });
     const results = Array.isArray(value.results) ? value.results : [];
     for (const result of results) {
       const where = [result.document, result.page ? t("第 {0} 页", result.page) : "", result.section || ""].filter(Boolean).join(" · ");
@@ -409,6 +514,84 @@
       $("knowledgeResults").append(element);
     }
     if (!results.length) $("knowledgeResults").append(row(t("没有找到相关段落"), t("换几个文档里会出现的关键词试试。")));
+  }
+
+  // ---- The knowledge bases of the open conversation: the composer chip and its page ----
+  let chipRequest = 0;
+  let conversationSelection = null;
+  function renderKnowledgeChip(value) {
+    const chip = $("btnKnowledgeChip");
+    const available = Array.isArray(value.available) ? value.available : [];
+    const chosen = new Set(Array.isArray(value.collections) ? value.collections : []);
+    const used = available.filter((collection) => chosen.has(collection.id));
+    // With a single knowledge base the chip only appears once a conversation chose otherwise.
+    chip.hidden = value.enabled === false || (available.length < 2 && !value.explicit);
+    $("knowledgeChipLabel").textContent = !used.length ? t("不用知识库")
+      : used.length === available.length && available.length > 1 ? t("全部知识库")
+      : used.length === 1 ? knowledgeLabel(used[0]) : t("{0} 个知识库", used.length);
+    const title = t("本对话使用的知识库：{0}", used.length ? used.map(knowledgeLabel).join(t("、")) : t("无"));
+    chip.title = title;
+    chip.setAttribute("aria-label", title);
+    chip.dataset.empty = String(!used.length);
+    // A number only when the conversation leaves some knowledge bases out.
+    $("knowledgeChipBadge").hidden = used.length === available.length;
+    $("knowledgeChipBadge").textContent = String(used.length);
+  }
+  async function knowledgeChip() {
+    const sessionId = ui.context().sessionId;
+    const request = ++chipRequest;
+    if (!sessionId) { $("btnKnowledgeChip").hidden = true; return; }
+    let value;
+    try { value = await ui.apiJson(`/mobile/knowledge/session?session_id=${encodeURIComponent(sessionId)}`); }
+    catch { if (!closed && request === chipRequest) $("btnKnowledgeChip").hidden = true; return; }
+    if (closed || request !== chipRequest || ui.context().sessionId !== sessionId) return;
+    renderKnowledgeChip(value);
+    if (!$("settingsConversationKnowledge").hidden && conversationSelection?.session_id === sessionId) await conversationKnowledge(undefined, value);
+  }
+  async function conversationKnowledge(isCurrent = () => true, value = null) {
+    const sessionId = ui.context().sessionId;
+    if (!sessionId) throw new Error(t("请先打开一个会话"));
+    value = value || await ui.apiJson(`/mobile/knowledge/session?session_id=${encodeURIComponent(sessionId)}`);
+    if (!isCurrent()) return;
+    conversationSelection = value;
+    renderKnowledgeChip(value);
+    const chosen = new Set(value.collections || []);
+    $("conversationKnowledgeList").replaceChildren();
+    for (const collection of value.available || []) {
+      const label = document.createElement("label");
+      label.className = "toggle-row conversation-knowledge-row";
+      const text = document.createElement("span");
+      const name = document.createElement("strong");
+      name.textContent = knowledgeLabel(collection);
+      const count = document.createElement("small");
+      count.textContent = t("{0} 份文档", collection.ready ?? collection.documents ?? 0);
+      text.append(name, count);
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = chosen.has(collection.id);
+      input.dataset.collection = collection.id;
+      input.disabled = value.enabled === false;
+      input.addEventListener("change", () => { void saveConversationKnowledge(); });
+      label.append(text, input);
+      $("conversationKnowledgeList").append(label);
+    }
+    $("btnConversationKnowledgeDefault").disabled = !value.explicit || value.enabled === false;
+    status("conversationKnowledgeStatus", value.enabled === false ? t("知识库已关闭：对话中不会使用")
+      : value.explicit ? "" : t("这个对话使用默认的知识库（在知识库页面可以设置哪些默认使用）"));
+  }
+  async function saveConversationKnowledge(collections) {
+    const sessionId = conversationSelection?.session_id;
+    if (!sessionId) return;
+    const inputs = [...$("conversationKnowledgeList").querySelectorAll("input[type=checkbox]")];
+    const chosen = collections === undefined ? inputs.filter((input) => input.checked).map((input) => input.dataset.collection) : collections;
+    for (const input of inputs) input.disabled = true;
+    try {
+      await conversationKnowledge(undefined, await post("/mobile/knowledge/session", { session_id: sessionId, collections: chosen }));
+      status("conversationKnowledgeStatus", t("已保存，从下一条消息开始生效"));
+    } catch (error) {
+      status("conversationKnowledgeStatus", knowledgeMessage(error), true);
+      await conversationKnowledge().catch(() => {});
+    }
   }
 
   // ---- Services: long-running programs the agent started (Android) ----
@@ -654,11 +837,26 @@
     if (!result.ok) throw new Error(localizeError(result.error) || t("操作失败"));
   }, "backupStatus");
 
+  const scheduleStates = {
+    scheduled: t("等待运行"), disabled: t("已暂停"), dispatching: t("正在提交"), submitted: t("已运行"),
+    interrupted: t("提交被中断"), missed: t("错过了运行时间"), mode_required: t("当前模式不能运行"),
+    skipped_busy: t("上一次还在运行，本次已跳过"), failed: t("运行失败"),
+  };
+  const scheduleRepeats = { 3600: t("每小时"), 86400: t("每天"), 604800: t("每周") };
+
+  function scheduleSummary(schedule) {
+    const due = new Date(schedule.next_due_at || schedule.due_at);
+    const when = Number.isNaN(due.getTime()) ? (schedule.next_due_at || schedule.due_at) : due.toLocaleString(i18n?.locale || "zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    const repeat = scheduleRepeats[schedule.repeat_seconds] ? ` · ${scheduleRepeats[schedule.repeat_seconds]}` : "";
+    const state = scheduleStates[schedule.last_status] || schedule.last_status || "";
+    return `${schedule.enabled ? t("下次 {0}", when) : t("暂停")}${repeat}\n${state}${schedule.last_error ? ` · ${schedule.last_error}` : ""}`;
+  }
+
   async function schedules(isCurrent = () => true) {
     const value = await ui.apiJson("/mobile/schedules"); if (!isCurrent()) return;
     $("schedulesList").replaceChildren();
     for (const schedule of value.schedules || []) {
-      const item = row(schedule.title, `${schedule.enabled ? t("启用") : t("暂停")} · ${schedule.next_due_at || schedule.due_at}\n${schedule.last_status || ""}`);
+      const item = row(schedule.title, scheduleSummary(schedule));
       const toggle = document.createElement("input"); toggle.type = "checkbox"; toggle.checked = schedule.enabled; toggle.setAttribute("aria-label", t("启用 {0}", schedule.title));
       toggle.addEventListener("change", async () => { toggle.disabled = true; try { await post("/mobile/schedules/update", { schedule_id: schedule.schedule_id, enabled: toggle.checked }); await schedules(); } catch (error) { toggle.checked = !toggle.checked; status("schedulesStatus", error.message, true); } finally { toggle.disabled = false; } });
       item.append(toggle);
@@ -666,8 +864,10 @@
       $("schedulesList").append(item);
     }
     const mode = ui.context().settings.autonomy;
-    $("btnSaveSchedule").disabled = !["yolo", "full_access"].includes(mode);
-    status("schedulesStatus", ["yolo", "full_access"].includes(mode) ? (value.status?.reason || "") : t("无人值守任务需要 YOLO 或完全访问模式"));
+    $("btnSaveSchedule").disabled = false;
+    // Scheduled runs approve their own network requests and tool calls; in workspace mode say
+    // what still waits for the user.
+    status("schedulesStatus", mode === "workspace" ? t("定时任务运行时自动允许本任务内的联网和工具调用；删除文件、写入长期记忆、操作其他应用仍会暂停并通知你批准。") : (value.status?.reason || ""));
   }
   async function connections(isCurrent = () => true) {
     const value = await ui.apiJson("/mobile/connections"); if (!isCurrent()) return;
@@ -1080,6 +1280,31 @@
     uploadKnowledgeFiles(files).catch((error) => { if (!closed) status("knowledgeStatus", knowledgeMessage(error), true); });
   });
   on("knowledgeSearchForm", "submit", searchKnowledge, "knowledgeStatus");
+  $("knowledgeFilter").addEventListener("change", () => {
+    knowledgeFilter = $("knowledgeFilter").value;
+    $("knowledgeResults").replaceChildren();
+    knowledge().catch((error) => { if (!closed) status("knowledgeStatus", knowledgeMessage(error), true); });
+  });
+  on("btnKnowledgeBaseCreate", "click", async () => {
+    const name = window.prompt(t("新知识库的名称，例如“工作”或“学习”"), "");
+    if (name === null || !name.trim()) return;
+    let value;
+    try { value = await post("/mobile/knowledge/collections/create", { name: name.trim() }); }
+    catch (error) { throw new Error(knowledgeMessage(error)); }
+    const created = (value.collections || []).find((collection) => collection.name === name.trim().replace(/\s+/g, " "));
+    if (created) knowledgeFilter = created.id;  // show the new, empty knowledge base, ready for documents
+    await knowledge(undefined, value);
+    status("knowledgeStatus", t("已新建知识库“{0}”，可以往里添加文档了", name.trim()));
+  }, "knowledgeStatus");
+  $("btnKnowledgeChip").addEventListener("click", () => {
+    if ($("settingsOverlay").hidden) ui.openMenu?.();
+    page("conversationKnowledge", conversationKnowledge, "conversationKnowledgeStatus");
+  });
+  on("btnConversationKnowledgeDefault", "click", () => saveConversationKnowledge(null), "conversationKnowledgeStatus");
+  $("btnConversationKnowledgeManage").addEventListener("click", () => page("knowledge", knowledge, "knowledgeStatus"));
+  window.addEventListener("agent-session-changed", () => { void knowledgeChip(); });
+  window.addEventListener("agent-knowledge-changed", () => { void knowledgeChip(); });
+  if (ui.context().sessionId) void knowledgeChip();
   on("btnSaveKnowledgeSynonyms", "click", async () => {
     let saved;
     try { saved = await post("/mobile/knowledge/synonyms", { text: $("knowledgeSynonyms").value }); }

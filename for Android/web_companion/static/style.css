@@ -590,6 +590,9 @@ strong { font-weight: 600; }
 .drawer-session-action { flex: 0 0 38px; width: 38px; height: 38px; border-radius: 50%; color: var(--text-3); }
 .drawer-session-action svg { width: 17px; height: 17px; }
 .drawer-archived-toggle { margin: 12px 0 4px 2px; color: var(--text-2); }
+.drawer-session-action.danger-action { color: var(--danger); }
+.drawer-archived-delete { margin: 8px 0 4px 2px; color: var(--danger); }
+.danger-button { color: var(--danger); }
 
 /* ---------- Settings sheet ---------- */
 #settingsOverlay { position: fixed; inset: 0; z-index: 30; }
@@ -825,6 +828,42 @@ strong { font-weight: 600; }
 .workspace-file-row > svg { flex: 0 0 20px; color: var(--accent); }
 .workspace-file-row > span { flex: 1; min-width: 0; font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
 .workspace-file-row > small { flex: 0 0 auto; color: var(--text-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+/* Knowledge bases: name and size, rename / delete, and whether new conversations use it. */
+.knowledge-base-row .icon-button { flex: 0 0 auto; width: 38px; height: 38px; }
+.knowledge-base-row .icon-button svg { width: 17px; height: 17px; }
+#knowledgeBaseList label.knowledge-base-default {
+  display: flex; flex: 1 1 100%; align-items: center; gap: 8px; margin: 0; color: var(--text-2); font-size: 12.5px; font-weight: 500; cursor: pointer;
+}
+.knowledge-base-default input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+.settings-page .management-row-body > select.knowledge-move:not([type="file"]) {
+  justify-self: start; width: auto; max-width: 100%; min-height: 32px; margin-top: 4px; padding: 3px 10px; border-radius: var(--radius-pill); font-size: 12.5px;
+}
+.knowledge-toolbar { margin-top: 16px; }
+#knowledgeFilter { flex: 0 1 auto; width: auto; max-width: 52%; min-height: 40px; padding: 6px 12px; font-size: 13.5px; }
+/* The conversation's knowledge bases: a book, with how many are used when not all of them. */
+.knowledge-chip { position: relative; flex: 0 0 auto; width: 32px; padding: 0; justify-content: center; }
+.knowledge-chip > #knowledgeChipLabel { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); }
+.knowledge-chip svg { width: 16px; height: 16px; }
+.knowledge-chip[data-empty="true"] svg { color: var(--text-3); }
+#knowledgeChipBadge {
+  position: absolute; top: -5px; right: -5px; min-width: 16px; height: 16px; padding: 0 4px; overflow: visible; border-radius: 8px;
+  background: var(--accent); color: var(--accent-contrast); font-size: 10px; font-weight: 600; line-height: 16px; text-align: center;
+}
+.knowledge-chip[data-empty="true"] #knowledgeChipBadge { background: var(--text-3); }
+.conversation-knowledge-row > span { display: grid; gap: 2px; min-width: 0; }
+.conversation-knowledge-row strong { font-weight: 500; overflow-wrap: anywhere; }
+.conversation-knowledge-row small { color: var(--text-3); font-size: 12px; }
+
+/* A file or folder: open it, or show its rename / move / delete actions. */
+.workspace-file-item { display: flex; flex-wrap: wrap; align-items: center; min-width: 0; border-bottom: 1px solid var(--border); }
+.workspace-file-item > .workspace-file-row { flex: 1 1 0; min-width: 0; border-bottom: 0; }
+.workspace-file-more { flex: 0 0 38px; width: 38px; height: 38px; margin-right: -8px; border-radius: 50%; color: var(--text-3); }
+.workspace-file-more svg { width: 17px; height: 17px; }
+.workspace-file-more[aria-expanded="true"] { color: var(--accent); }
+.workspace-file-actions { display: flex; flex: 1 1 100%; flex-wrap: wrap; gap: 2px 16px; padding: 0 0 8px 30px; }
+.workspace-file-actions .text-action { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; }
+.workspace-file-actions .text-action svg { width: 16px; height: 16px; }
+.workspace-file-actions .danger-action { color: var(--danger); }
 .workspace-folder-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .workspace-folder-row > input { flex: 1; }
 #workspaceFilePath { font-family: var(--font-mono); font-size: 12px; }

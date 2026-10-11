@@ -27,7 +27,7 @@ class MainActivity : ComponentActivity() {
         // 首次启动解压 Termux 基础环境 (若尚未解压)
         if (!TermuxBootstrap.isInstalled(this)) {
             Thread {
-                TermuxBootstrap.installSync(this)
+                TermuxBootstrap.ensureInstalled(this)
             }.start()
         }
 

@@ -269,9 +269,10 @@ def configure_android_registry(
         factories["memory_search"] = lambda: _memory_tools()[0]
         factories["memory_write"] = lambda: _memory_tools()[1]
         # The phone-wide knowledge base (Knowledge page): the user's own documents.
-        from .knowledge_tools import KnowledgeAddTool, KnowledgeSearchTool
+        from .knowledge_tools import KnowledgeAddTool, KnowledgeSearchTool, KnowledgeUseTool
 
         factories["knowledge_search"] = KnowledgeSearchTool
+        factories["knowledge_use"] = KnowledgeUseTool
         if workspace is not None:
             factories["knowledge_add"] = lambda: KnowledgeAddTool(workspace)
     documents = document_status()

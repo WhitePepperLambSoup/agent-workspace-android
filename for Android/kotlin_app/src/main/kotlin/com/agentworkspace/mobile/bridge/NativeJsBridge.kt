@@ -362,6 +362,14 @@ class NativeJsBridge(
     @JavascriptInterface
     fun requestVoiceInput() { Handler(Looper.getMainLooper()).post { requestVoiceInputAction() } }
 
+    /** Opens the voice note recorder; the finished recording comes back as a new conversation. */
+    @JavascriptInterface
+    fun startVoiceNote() {
+        Handler(Looper.getMainLooper()).post {
+            runCatching { context.startActivity(com.agentworkspace.mobile.entry.QuickEntry.voiceNoteActivity(context)) }
+        }
+    }
+
     @JavascriptInterface
     fun restartEngine() { Handler(Looper.getMainLooper()).post { restartEngineAction() } }
 

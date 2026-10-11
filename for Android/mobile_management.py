@@ -330,6 +330,10 @@ class MobileManagement:
             return 200, self.memory().snapshot()
         if path == "/mobile/knowledge":
             return 200, await asyncio.to_thread(self.knowledge().snapshot)
+        if path == "/mobile/knowledge/session":
+            return 200, await asyncio.to_thread(
+                self.knowledge().session_selection, query.get("session_id", [""])[0]
+            )
         if path == "/mobile/backup/status":
             from mobile_backup import backup_jobs
 
@@ -437,9 +441,40 @@ class MobileManagement:
         return get_knowledge_store(self.data)
 
     async def _knowledge_post(self, action, payload):
-        """Knowledge page: settings, removal, renaming and a test search. Uploads and workspace
-        imports are gateway routes, which stream bodies and resolve workspaces."""
+        """Knowledge page: settings, knowledge bases, removal, renaming and a test search, and
+        the knowledge bases of a conversation. Uploads and workspace imports are gateway routes,
+        which stream bodies and resolve workspaces."""
         store = self.knowledge()
+        if action == "session":
+            if "collections" not in payload:
+                raise ValueError("collections is required (a list of ids, or null)")
+            return 200, await asyncio.to_thread(
+                store.set_session_selection, payload.get("session_id"), payload.get("collections")
+            )
+        if action.startswith("collections/") or action == "move":
+            if action == "collections/create":
+                await asyncio.to_thread(
+                    store.create_collection,
+                    payload.get("name"),
+                    default_on=payload.get("default_on", True),
+                )
+            elif action == "collections/rename":
+                await asyncio.to_thread(
+                    store.rename_collection, payload.get("id"), payload.get("name")
+                )
+            elif action == "collections/default":
+                await asyncio.to_thread(
+                    store.set_collection_default, payload.get("id"), payload.get("default_on")
+                )
+            elif action == "collections/delete":
+                await asyncio.to_thread(store.delete_collection, payload.get("id"))
+            elif action == "move":
+                await asyncio.to_thread(
+                    store.move_document, payload.get("id"), payload.get("collection_id")
+                )
+            else:
+                raise KeyError(action)
+            return 200, await asyncio.to_thread(store.snapshot)
         if action == "settings":
             return 200, await asyncio.to_thread(
                 store.set_settings, enabled=payload.get("enabled"), auto=payload.get("auto")
@@ -456,7 +491,15 @@ class MobileManagement:
             query = payload.get("query")
             if not isinstance(query, str) or len(query) > 500:
                 raise ValueError("query must be text of at most 500 characters")
-            results = await asyncio.to_thread(store.search, query, limit=8)
+            collections = payload.get("collections")
+            if collections is not None and (
+                not isinstance(collections, list)
+                or not all(isinstance(item, str) for item in collections)
+            ):
+                raise ValueError("collections must be a list of knowledge base ids")
+            results = await asyncio.to_thread(
+                store.search, query, limit=8, collections=collections
+            )
             return 200, {"results": [store.public(result, excerpt=240) for result in results]}
         raise KeyError(action)
 

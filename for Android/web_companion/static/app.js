@@ -636,6 +636,8 @@
     return sessionsInWorkspace().filter(item => item.archived !== true || item.id === currentSessionId);
   }
 
+  let announcedSessionId = null;  // the conversation other modules were last told about
+
   function renderSessionNavigation() {
     elements.sessionSelector.replaceChildren();
     for (const session of listedSessions()) {
@@ -648,6 +650,10 @@
     const current = sessions.find(item => item.id === currentSessionId);
     elements.sessionTitleText.textContent = current ? (current.title || t("未命名会话")) : t("正在加载会话...");
     renderDrawer();
+    if (announcedSessionId !== currentSessionId) {
+      announcedSessionId = currentSessionId;
+      window.dispatchEvent(new CustomEvent("agent-session-changed", { detail: { sessionId: currentSessionId } }));
+    }
   }
 
   // ----- Conversation drawer: the visible navigation; the hidden selects keep the state. -----
@@ -697,7 +703,63 @@
     toggle.disabled = busy || running;
     toggle.addEventListener("click", () => setSessionArchived(session, !archived));
     item.append(row, toggle);
+    if (archived) {
+      // Archived conversations can also be deleted for good.
+      const remove = actionButton("trash-2", t("删除 {0}", label), "data-session-delete", session.id);
+      remove.classList.add("drawer-session-action", "danger-action");
+      remove.disabled = busy || running;
+      remove.addEventListener("click", () => { void deleteSessions([session]); });
+      item.append(remove);
+    }
     return item;
+  }
+
+  async function deleteSessions(list) {
+    if (disposed || !list.length) return false;
+    const running = new Set([...backgroundTasks.values()].filter(task => !task.done).map(task => task.sessionId));
+    if (list.some(session => running.has(session.id) || (session.id === currentSessionId && activeTask))) {
+      notice(t("该会话仍有运行中的任务，请先停止任务"));
+      return false;
+    }
+    const question = list.length === 1
+      ? t("永久删除「{0}」？\n聊天记录、任务和图片会被彻底删除，无法恢复；在工作区里生成的文件会保留。", list[0].title || t("未命名会话"))
+      : t("永久删除这 {0} 个已归档会话？\n聊天记录、任务和图片会被彻底删除，无法恢复；在工作区里生成的文件会保留。", list.length);
+    if (!window.confirm(question)) return false;
+    // Deleting checks the whole conversation store before it commits, which takes a few seconds.
+    notice(t("正在删除…"), "info");
+    try {
+      await apiJson("/sessions/delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_ids: list.map(session => session.id) }) });
+    } catch (error) {
+      // The reply can be lost on the way while the deletion went through; check before failing.
+      let gone = false;
+      if (error.network) {
+        try {
+          const listing = await apiJson("/sessions");
+          const remaining = new Set((Array.isArray(listing.sessions) ? listing.sessions : []).map(session => session.id));
+          gone = list.every(session => !remaining.has(session.id));
+        } catch {}
+      }
+      if (!gone) {
+        if (!disposed) notice(error.status === 409 ? t("该会话仍有运行中的任务，请先停止任务") : t("删除失败: {0}", error.message));
+        return false;
+      }
+    }
+    haptic(16);
+    const removed = new Set(list.map(session => session.id));
+    sessions = sessions.filter(session => !removed.has(session.id));
+    if (removed.has(currentSessionId)) {
+      const next = sessionsInWorkspace().filter(item => item.archived !== true)
+        .sort((first, second) => String(second.updated_at || "").localeCompare(String(first.updated_at || "")))[0];
+      if (next) await switchSession(next.id);
+      else await createSession();
+    }
+    if (disposed) return true;
+    renderSessionNavigation();
+    const message = list.length === 1 ? t("会话已删除") : t("已删除 {0} 个会话", list.length);
+    notice(message, "info");
+    // A confirmation only; it should not linger over the next conversation.
+    window.setTimeout(() => { if (elements.noticeText.textContent === message) notice(""); }, 4000);
+    return true;
   }
 
   function renderDrawer() {
@@ -737,7 +799,18 @@
       toggle.setAttribute("aria-expanded", String(showArchived));
       toggle.addEventListener("click", () => { showArchived = !showArchived; renderDrawer(); });
       elements.drawerSessionList.appendChild(toggle);
-      if (showArchived) for (const session of archived) elements.drawerSessionList.appendChild(drawerSessionItem(session, busy));
+      if (showArchived) {
+        for (const session of archived) elements.drawerSessionList.appendChild(drawerSessionItem(session, busy));
+        if (archived.length > 1) {
+          const clear = document.createElement("button");
+          clear.type = "button";
+          clear.className = "text-action drawer-archived-delete danger-action";
+          clear.textContent = t("删除全部已归档会话");
+          clear.disabled = busy;
+          clear.addEventListener("click", () => { void deleteSessions(archived); });
+          elements.drawerSessionList.appendChild(clear);
+        }
+      }
     }
     elements.btnDrawerNewSession.disabled = busy || elements.btnNewSession.disabled;
   }
@@ -950,6 +1023,7 @@
     elements.sessionTitleInput.disabled = !currentSessionId || isLoadingSession || renameSaving;
     elements.btnRenameSession.disabled = !currentSessionId || isLoadingSession || renameSaving || !title || title.length > 200;
     $("btnArchiveSession").disabled = !currentSessionId || isLoadingSession || !!activeTask;
+    $("btnDeleteSession").disabled = !currentSessionId || isLoadingSession || !!activeTask;
     syncFileControls();
     syncWorkspaceControls();
     syncImportControls();
@@ -1167,7 +1241,7 @@
     if (settingsPage === "files" && page !== "files") { filesGeneration += 1; resetFilePreview(); }
     if (settingsPage === "usage" && page !== "usage") usageGeneration += 1;
     settingsPage = page;
-    const titles = { home: t("菜单"), model: t("模型与思考"), permission: t("执行权限"), appearance: t("界面偏好"), search: t("搜索会话"), tasks: t("任务中心"), files: t("工作区文件"), attachments: t("附件收件箱"), session: t("会话名称"), notifications: t("通知"), usage: t("Token 与费用"), pricing: t("模型费率"), doctor: t("设备与工具"), extensions: t("MCP 与扩展"), schedules: t("定时任务"), connections: t("设备连接"), outbox: t("待发送与接力"), workflows: t("可复用流程"), evaluations: t("任务评测"), localModels: t("本地模型"), workspaces: t("工作区"), quickTasks: t("快捷任务"), memory: t("记忆"), knowledge: t("知识库"), services: t("后台服务"), globalEntry: t("全局入口"), notificationRules: t("通知触发"), backup: t("备份与恢复"), about: t("关于与更新") };
+    const titles = { home: t("菜单"), model: t("模型与思考"), permission: t("执行权限"), appearance: t("界面偏好"), search: t("搜索会话"), tasks: t("任务中心"), files: t("工作区文件"), attachments: t("附件收件箱"), session: t("会话名称"), notifications: t("通知"), usage: t("Token 与费用"), pricing: t("模型费率"), doctor: t("设备与工具"), extensions: t("MCP 与扩展"), schedules: t("定时任务"), connections: t("设备连接"), outbox: t("待发送与接力"), workflows: t("可复用流程"), evaluations: t("任务评测"), localModels: t("本地模型"), workspaces: t("工作区"), quickTasks: t("快捷任务"), memory: t("记忆"), knowledge: t("知识库"), conversationKnowledge: t("本对话的知识库"), services: t("后台服务"), globalEntry: t("全局入口"), notificationRules: t("通知触发"), backup: t("备份与恢复"), about: t("关于与更新") };
     document.querySelectorAll(".settings-page").forEach((element) => { element.hidden = true; });
     const selectedPage = document.getElementById(`settings${page[0].toUpperCase()}${page.slice(1)}`);
     if (selectedPage) {
@@ -1367,10 +1441,14 @@
   // A floating-ball screenshot arrives in the attachment inbox and is attached to that conversation.
   let quickShareBatch = null;
   let quickShareDeadline = 0;
+  // A finished voice note (the app's recorder checked its token): once its recording is attached,
+  // the minutes request is sent without waiting for the user.
+  let quickNote = null;
   function quickAsk(options = {}) {
     if (disposed || isLoadingSession || !historyReady || sessionOpening || isPreparingSubmission || !canLeaveFileEditor()) return false;
-    const mode = ["text", "voice", "camera", "screen"].includes(options?.mode) ? options.mode : "text";
+    const mode = ["text", "voice", "camera", "screen", "note"].includes(options?.mode) ? options.mode : "text";
     const batch = typeof options?.share_batch === "string" && options.share_batch ? options.share_batch : null;
+    quickNote = mode === "note" && batch ? { batch, attached: false, deadline: Date.now() + 120000 } : null;
     closeMenu();
     closeDrawer();
     // Reuse the current conversation while it is still empty instead of piling up blank ones.
@@ -1409,8 +1487,22 @@
       const result = JSON.parse(bridge.confirmShareInbox(JSON.stringify({ request_id: requestId("share"),
         session_id: currentSessionId, workspace_id: workspaceOfSession(currentSessionId), item_ids: pending })));
       if (!result.ok) throw new Error(localizeError(result.error) || t("无法导入附件"));
-      notice(t("截图已添加到这次对话，输入你的问题吧"), "info");
+      if (quickNote?.batch === items[0].batch_id) notice(t("录音已保存，正在整理纪要…"), "info");
+      else notice(t("截图已添加到这次对话，输入你的问题吧"), "info");
     } catch (error) { notice(error.message); }
+  }
+
+  // Sends the voice note's request once its recording reached this conversation's attachments.
+  function sendQuickNote() {
+    if (!quickNote || disposed) return;
+    if (Date.now() > quickNote.deadline || !currentSessionId) { quickNote = null; return; }
+    const recorded = shareInbox.items.some((item) => item.batch_id === quickNote.batch && item.state === "ready"
+      && attachments.some((file) => file.path === item.attachment?.path));
+    if (!recorded || activeTask || isPreparingSubmission || isUploading) return; // checked again on the next inbox change
+    quickNote = null;
+    elements.promptInput.value = t("把附件里的录音转写成文字，整理成一份纪要（要点、决定、待办事项），保存为 Markdown 文件放到工作区的「录音速记」文件夹，再把纪要加入知识库。最后告诉我纪要的要点和文件位置。");
+    elements.promptInput.dispatchEvent(new Event("input", { bubbles: true }));
+    void sendPrompt();
   }
 
   function openSession(sessionId) {
@@ -1431,7 +1523,7 @@
     return false;
   }
 
-  window.AgentMobileUi = { closeMenu, handleBack, notice, reloadForLanguage: () => window.location.reload(), receiveSharedText, openSession, quickAsk, apiJson, setSettingsPage, adoptTask,
+  window.AgentMobileUi = { openMenu, closeMenu, handleBack, notice, reloadForLanguage: () => window.location.reload(), receiveSharedText, openSession, quickAsk, apiJson, setSettingsPage, adoptTask,
     readLocalContextDraft, setLocalContextDraft,
     setLocalContextBusy: (busy) => { localContextBusy = !!busy; syncControls(); },
     setLocalDeviceTestBusy: (busy) => { localDeviceTesting = !!busy; syncControls(); },
@@ -1627,6 +1719,9 @@
     elements.btnDiscardFileDraft.disabled = fileSaving;
     elements.btnFileParent.disabled = fileSaving || (!fileEditor && workspaceParent === null);
     elements.btnFilesRefresh.disabled = fileSaving;
+    $("btnNewFolder").hidden = !!fileEditor;
+    $("btnNewFolder").disabled = fileSaving || restartPending;
+    for (const button of elements.workspaceFilesList.querySelectorAll(".workspace-file-actions button, .workspace-file-more")) button.disabled = fileSaving || restartPending;
     const preview = loaded && /\.(md|markdown|html?|png|jpe?g|webp|gif|svg)$/i.test(fileEditor.path);
     elements.btnFilePreview.hidden = !preview;
     elements.btnFileSource.hidden = !preview || fileEditor.is_binary;
@@ -1748,13 +1843,112 @@
         size.textContent = file.type === "directory" ? "" : formatBytes(file.size);
         button.append(name, size);
         button.addEventListener("click", () => { if (file.type === "directory") void loadWorkspaceFiles(file.path); else void openWorkspaceFile(file.path); });
-        elements.workspaceFilesList.appendChild(button);
+        elements.workspaceFilesList.appendChild(workspaceFileItem(file, button));
       }
       pageStatus(elements.workspaceFilesStatus, data.truncated ? t("文件较多，仅显示部分结果") : (elements.workspaceFilesList.children.length ? "" : t("目录为空")));
     } catch (error) {
       if (disposed || generation !== filesGeneration || settingsPage !== "files") return;
       pageStatus(elements.workspaceFilesStatus, t("加载文件失败: {0}", error.message), true);
     } finally { if (generation === filesGeneration && !disposed) syncFileControls(); }
+  }
+
+  // ----- Files page changes: rename, move, delete, new folder -----
+  function workspaceFileItem(file, row) {
+    const item = document.createElement("div");
+    item.className = "workspace-file-item";
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "icon-button workspace-file-more";
+    more.title = t("更多操作");
+    more.setAttribute("aria-label", t("{0} 的更多操作", file.name));
+    more.setAttribute("aria-expanded", "false");
+    more.innerHTML = icon("ellipsis");
+    const actions = document.createElement("div");
+    actions.className = "workspace-file-actions";
+    actions.hidden = true;
+    for (const [name, label, run, danger] of [
+      ["pencil", t("重命名"), () => renameWorkspaceEntry(file)],
+      ["folder-open", t("移动到…"), () => moveWorkspaceEntry(file)],
+      ["trash-2", t("删除"), () => deleteWorkspaceEntry(file), true],
+    ]) {
+      const action = document.createElement("button");
+      action.type = "button";
+      action.className = danger ? "text-action danger-action" : "text-action";
+      action.innerHTML = icon(name);
+      action.append(label);
+      action.addEventListener("click", () => { void run(); });
+      actions.appendChild(action);
+    }
+    more.addEventListener("click", () => {
+      actions.hidden = !actions.hidden;
+      more.setAttribute("aria-expanded", String(!actions.hidden));
+    });
+    item.append(row, more, actions);
+    return item;
+  }
+
+  const entryParent = (path) => (path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "");
+  const entryPath = (folder, name) => (folder ? `${folder}/${name}` : name);
+  const validEntryName = (name) => !!name && name.length <= 255 && !/[\/\\]/.test(name) && name !== "." && name !== "..";
+
+  async function changeWorkspaceEntry(action, payload, done, missing) {
+    if (fileSaving || restartPending || disposed) return false;
+    fileSaving = true;
+    syncFileControls();
+    try {
+      await apiJson(`/mobile/workspace/${action}`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...payload, ...(currentWorkspaceId ? { workspace_id: currentWorkspaceId } : {}) }) });
+    } catch (error) {
+      fileSaving = false;
+      if (!disposed) {
+        syncFileControls();
+        pageStatus(elements.workspaceFilesStatus, error.status === 409 ? t("已有同名的文件或文件夹")
+          : error.status === 404 ? missing
+          : error.status === 503 ? t("工作区正忙，请等当前工具运行完再试")
+          : t("操作失败: {0}", error.message), true);
+      }
+      return false;
+    }
+    fileSaving = false;
+    haptic(16);
+    await loadWorkspaceFiles(workspacePath);
+    if (!disposed) pageStatus(elements.workspaceFilesStatus, done);
+    return true;
+  }
+
+  async function renameWorkspaceEntry(file) {
+    const answer = window.prompt(t("新名称"), file.name);
+    if (answer === null) return;
+    const name = answer.trim();
+    if (!validEntryName(name)) { pageStatus(elements.workspaceFilesStatus, t("名称不能为空，也不能包含 / 或 \\"), true); return; }
+    if (name === file.name) return;
+    await changeWorkspaceEntry("move", { path: file.path, destination: entryPath(entryParent(file.path), name) },
+      t("已重命名为“{0}”", name), t("文件或文件夹不存在，可能已被移动或删除"));
+  }
+
+  async function moveWorkspaceEntry(file) {
+    const answer = window.prompt(t("移动到哪个文件夹？填写工作区里的文件夹路径，例如 docs/2026；留空表示工作区根目录"), entryParent(file.path));
+    if (answer === null) return;
+    const folder = answer.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    if (folder === entryParent(file.path)) return;
+    await changeWorkspaceEntry("move", { path: file.path, destination: entryPath(folder, file.name) },
+      folder ? t("已移动到 {0}", folder) : t("已移动到工作区根目录"), t("目标文件夹不存在，请先新建它"));
+  }
+
+  async function deleteWorkspaceEntry(file) {
+    const question = file.type === "directory"
+      ? t("删除文件夹“{0}”和其中的全部内容？删除后无法恢复。", file.name)
+      : t("删除“{0}”？删除后无法恢复。", file.name);
+    if (!window.confirm(question)) return;
+    await changeWorkspaceEntry("delete", { path: file.path }, t("已删除“{0}”", file.name), t("文件或文件夹不存在，可能已被移动或删除"));
+  }
+
+  async function createWorkspaceFolder() {
+    const answer = window.prompt(t("新文件夹名称"), "");
+    if (answer === null) return;
+    const name = answer.trim();
+    if (!validEntryName(name)) { pageStatus(elements.workspaceFilesStatus, t("名称不能为空，也不能包含 / 或 \\"), true); return; }
+    await changeWorkspaceEntry("mkdir", { path: entryPath(workspacePath, name) }, t("已新建文件夹“{0}”", name), t("当前文件夹不存在，请刷新后再试"));
   }
 
   async function openWorkspaceFile(path, sha256 = null, workspaceId = currentWorkspaceId) {
@@ -1895,6 +2089,13 @@
     return `$${record.cost_usd.toFixed(record.cost_usd > 0 && record.cost_usd < 0.01 ? 6 : 2)}`;
   }
 
+  // Share of input tokens the provider served from its prompt cache (billed far cheaper).
+  function cacheHitRate(record) {
+    const input = Number(record?.input_tokens) || 0;
+    if (input <= 0) return "—";
+    return `${(Math.min(Number(record.cached_tokens) || 0, input) / input * 100).toFixed(1)}%`;
+  }
+
   function renderUsage(data) {
     elements.usageSummary.replaceChildren();
     elements.usageModelsList.replaceChildren();
@@ -1902,7 +2103,8 @@
     const values = [
       [t("模型调用"), tokenCount(totals.model_calls)], [t("总 Token"), tokenCount(totals.total_tokens)],
       [t("输入 Token"), tokenCount(totals.input_tokens)], [t("输出 Token"), tokenCount(totals.output_tokens)],
-      [t("缓存输入 Token"), tokenCount(totals.cached_tokens)], [t("预估费用（USD）"), estimatedCost(totals)],
+      [t("缓存输入 Token"), tokenCount(totals.cached_tokens)], [t("缓存命中率"), cacheHitRate(totals)],
+      [t("预估费用（USD）"), estimatedCost(totals)],
     ];
     for (const [label, value] of values) {
       const term = document.createElement("dt");
@@ -1938,7 +2140,8 @@
       heading.append(title, pricing);
       const counts = document.createElement("p");
       counts.className = "usage-model-counts";
-      counts.textContent = t("{0} 次调用 · {1} Token", tokenCount(record.model_calls), tokenCount(record.total_tokens));
+      counts.textContent = t("{0} 次调用 · {1} Token", tokenCount(record.model_calls), tokenCount(record.total_tokens))
+        + (record.pricing?.source !== "on_device" && Number(record.input_tokens) > 0 ? t(" · 缓存命中 {0}", cacheHitRate(record)) : "");
       const cost = document.createElement("p");
       cost.className = "usage-model-cost";
       cost.textContent = t("预估 {0}{1}", estimatedCost(record), record.pricing?.source === "custom" ? t(" · 自定费率") : record.pricing?.source === "reference" ? t(" · 参考费率") : record.pricing?.source === "on_device" ? t(" · 本机推理，无 API 费用") : "");
@@ -2519,7 +2722,8 @@
 
   const toolTitles = {
     memory_write: t("更新记忆"), memory_search: t("查找记忆"), run_terminal: t("运行命令"),
-    knowledge_search: t("查阅知识库"), knowledge_add: t("添加到知识库"),
+    knowledge_search: t("查阅知识库"), knowledge_add: t("添加到知识库"), knowledge_use: t("选择知识库"),
+    append_file: t("追加到文件"),
     set_alarm: t("设置闹钟"), set_timer: t("设置计时"), list_calendar_events: t("查看日程"), add_calendar_event: t("添加日程"),
     transcribe_audio: t("转写录音"),
     start_service: t("启动后台服务"), stop_service: t("停止后台服务"), list_services: t("查看后台服务"), service_logs: t("查看服务输出"),
@@ -3094,11 +3298,16 @@
       if (envelope.source_event_id) eventCards.set(envelope.source_event_id, task.card);
     } else if (event.event_type === "runtime.message.created" && payload.role === "user") {
       if (!task.prompt && typeof payload.content === "string") task.prompt = payload.content;
+    } else if (event.event_type === "runtime.model.requested") {
+      const used = Number(payload.context_bytes), limit = Number(payload.context_threshold_bytes);
+      task.contextPercent = used > 0 && limit > 0 ? Math.min(100, Math.round(used / limit * 100)) : null;
     } else if (event.event_type === "runtime.tool.started") {
       if (task.dirty) { updateAssistantCard(task); task.dirty = false; }
       renderTool(payload);
     } else if (typeof event.event_type === "string" && event.event_type.startsWith("runtime.") && toolOutcomeEvents[event.event_type.slice(8)]) {
       renderTool(payload, toolOutcomeEvents[event.event_type.slice(8)]);
+      // The model switched this conversation's knowledge bases; the composer chip follows.
+      if (payload.name === "knowledge_use") window.dispatchEvent(new CustomEvent("agent-knowledge-changed"));
     }
   }
 
@@ -3150,7 +3359,9 @@
           task.artifacts_truncated = snapshot.task.artifacts_truncated === true;
           task.artifacts_error = snapshot.task.artifacts_error || null;
         }
-        updateTaskStatus(task.stopping ? t("正在停止任务...") : (state === "waiting_approval" ? t("等待审批") : (state === "queued" ? t("任务排队中") : t("任务执行中"))));
+        // Long tasks show how full the context is; older history is compacted near 100%.
+        const context = task.contextPercent >= 30 ? t(" · 上下文 {0}%", task.contextPercent) : "";
+        updateTaskStatus(task.stopping ? t("正在停止任务...") : (state === "waiting_approval" ? t("等待审批") : (state === "queued" ? t("任务排队中") : t("任务执行中") + context)));
         if (["failed", "cancelled", "interrupted"].includes(state)) {
           task.error = state === "failed" ? (snapshot.task.reason || t("任务失败")) : null;
           task.interrupted = state === "interrupted" && snapshot.task.resume_available;
@@ -3851,6 +4062,7 @@
         shareInbox = { items: snapshot.items, batches: Array.isArray(snapshot.batches) ? snapshot.batches : [] };
         applyReadyShares();
         attachQuickShare();
+        sendQuickNote();
         if (snapshot.capture_error) pageStatus(elements.shareInboxStatus, localizeError(String(snapshot.capture_error)), true);
       }
       renderShareInbox(); renderImportUploads();
@@ -3939,6 +4151,9 @@
     $("btnAttachCamera").focus();
   });
   $("btnAttachFiles").addEventListener("click", () => { closeAttachMenu(); chooseImportFiles(); });
+  // Records until the user is done; the recording comes back as a new conversation with minutes.
+  $("btnAttachVoiceNote").hidden = typeof bridge?.startVoiceNote !== "function";
+  $("btnAttachVoiceNote").addEventListener("click", () => { closeAttachMenu(); haptic(); bridge.startVoiceNote(); });
   $("btnCancelEdit").addEventListener("click", () => {
     cancelRewind();
     elements.promptInput.value = "";
@@ -4130,6 +4345,7 @@
   elements.btnTasksRefresh.addEventListener("click", loadTaskCenter);
   elements.btnFileParent.addEventListener("click", () => loadWorkspaceFiles(fileEditor ? workspacePath : (workspaceParent || "")));
   elements.btnFilesRefresh.addEventListener("click", () => loadWorkspaceFiles(workspacePath));
+  $("btnNewFolder").addEventListener("click", () => { void createWorkspaceFolder(); });
   elements.btnReloadFile.addEventListener("click", () => { if (fileEditor) void openWorkspaceFile(fileEditor.path, null, fileEditor.workspaceId); });
   elements.btnFileToKnowledge.addEventListener("click", () => { void addFileToKnowledge(); });
   elements.btnDiscardFileDraft.addEventListener("click", discardFileDraft);
@@ -4154,6 +4370,11 @@
     if (!session || isLoadingSession || activeTask) return;
     closeMenu();
     await setSessionArchived(session, true);
+  });
+  $("btnDeleteSession").addEventListener("click", async () => {
+    const session = sessions.find(item => item.id === currentSessionId);
+    if (!session || isLoadingSession || activeTask) return;
+    if (await deleteSessions([session])) closeMenu();
   });
   elements.taskNotificationsToggle.addEventListener("change", changeNotificationPreference);
   elements.btnNotificationSettings.addEventListener("click", () => {

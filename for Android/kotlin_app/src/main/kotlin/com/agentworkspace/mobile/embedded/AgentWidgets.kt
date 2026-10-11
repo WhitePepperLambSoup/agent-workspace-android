@@ -38,6 +38,33 @@ data class WidgetTaskSummary(val featured: TaskNotificationSnapshot?, val active
 /** A quick task as the composer stores it; the widget opens a new conversation with its prompt. */
 data class WidgetQuickTask(val title: String, val detail: String, val prompt: String)
 
+/** One mirrored schedule as the task widget needs it. */
+data class WidgetSchedule(val title: String, val enabled: Boolean, val nextDue: String, val repeatSeconds: Long)
+
+/** The enabled schedule that runs next, from the schedules the engine mirrors natively. */
+data class WidgetNextSchedule(val title: String, val dueMillis: Long) {
+    companion object {
+        fun of(schedules: JSONArray?, nowMillis: Long): WidgetNextSchedule? = pick(
+            (0 until (schedules?.length() ?: 0)).mapNotNull { schedules?.optJSONObject(it) }.map {
+                WidgetSchedule(it.optString("title"), it.optBoolean("enabled"), it.optString("next_due_at"),
+                    it.optLong("repeat_seconds", 0))
+            },
+            nowMillis,
+        )
+
+        fun pick(schedules: List<WidgetSchedule>, nowMillis: Long): WidgetNextSchedule? = schedules
+            .filter { it.enabled }
+            .mapNotNull { item ->
+                var due = TaskNotificationSnapshot.isoMillis(item.nextDue) ?: return@mapNotNull null
+                val repeat = item.repeatSeconds * 1000L
+                // A repeating schedule whose time just passed runs again one interval later.
+                if (due < nowMillis && repeat > 0) due += ((nowMillis - due) / repeat + 1) * repeat
+                if (due < nowMillis) null else WidgetNextSchedule(item.title.take(60), due)
+            }
+            .minByOrNull { it.dueMillis }
+    }
+}
+
 /**
  * Home screen widgets: quick ask (a search-bar-like entry), task status, and the composer's quick tasks.
  *
@@ -81,6 +108,17 @@ object AgentWidgets {
     private fun readSummary(context: Context): JSONObject =
         runCatching { CrossProcessJsonFile(File(context.filesDir, TASKS_FILE)).read().optJSONObject("summary") }
             .getOrNull() ?: JSONObject()
+
+    private fun nextSchedule(context: Context): WidgetNextSchedule? = runCatching {
+        WidgetNextSchedule.of(
+            CrossProcessJsonFile(File(context.filesDir, MobileScheduleCoordinator.STORAGE_FILE)).read()
+                .optJSONArray("schedules"),
+            System.currentTimeMillis(),
+        )
+    }.getOrNull()
+
+    /** Schedules changed: the task widget shows the next one while nothing else needs the user. */
+    fun schedulesChanged(context: Context) = refresh(context, AgentTaskWidgetProvider::class.java)
 
     // ----- Quick tasks, written by the page -----
 
@@ -202,15 +240,25 @@ object AgentWidgets {
         val alive = engine in engineAlive
         val waiting = summary.optInt("waiting")
         val active = summary.optInt("active")
+        val next = nextSchedule(context)
         val (chip, chipView) = when {
             !alive -> UiText.of(context, "引擎未运行", "Engine stopped") to R.id.task_chip_muted
             waiting > 0 -> UiText.of(context, "待批准 $waiting", "$waiting to approve") to R.id.task_chip_warning
             active > 0 -> UiText.of(context, "执行中 $active", "$active running") to R.id.task_chip_accent
+            next != null -> UiText.of(context, "下次 ${timeLabel(context, next.dueMillis)}",
+                "Next ${timeLabel(context, next.dueMillis)}") to R.id.task_chip_accent
             else -> UiText.of(context, "就绪", "Ready") to R.id.task_chip_accent
         }
         showOne(view, chipView, chip, R.id.task_chip_accent, R.id.task_chip_warning, R.id.task_chip_muted)
 
         val task = summary.optJSONObject("task")
+        if (task == null && next != null) {
+            view.setTextViewText(R.id.task_title, next.title.ifBlank { UiText.of(context, "定时任务", "Scheduled task") })
+            showOne(view, R.id.task_meta, UiText.of(context, "定时任务 · ${timeLabel(context, next.dueMillis)}",
+                "Scheduled · ${timeLabel(context, next.dueMillis)}"), R.id.task_meta, R.id.task_meta_warning, R.id.task_meta_danger)
+            view.setOnClickPendingIntent(R.id.task_open, activity(context, id, 3, QuickEntry.intent(context, "text")))
+            return view
+        }
         if (task == null) {
             view.setTextViewText(R.id.task_title, UiText.of(context, "还没有任务", "No tasks yet"))
             showOne(view, R.id.task_meta, UiText.of(context, "点下面的输入框，开始第一个任务", "Tap the field below to start one"),

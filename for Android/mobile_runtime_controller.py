@@ -23,6 +23,8 @@ from mobile_artifacts import (
     snapshot_task_workspace,
 )
 from mobile_images import resolve_mobile_images
+from mobile_prompt_cache import FrozenPrompts, prefix_cache_endpoint
+from mobile_prompt_cache import assemble as assemble_prompt
 from mobile_protocol import REASONING_EFFORTS, MobileEvent, MobileTask, MobileTaskRequest, TaskState
 from mobile_task_store import MobileTaskStore
 from mobile_workflow_replay import ReplayInterrupted
@@ -52,7 +54,9 @@ _ANDROID_SYSTEM_SUFFIX = (
     "write_file to save text with a .pdf extension or keep inspecting raw PDF bytes in "
     "the shell when a document tool is available. "
     "Write every reply, progress note and summary in the language of the user's latest "
-    "message (Chinese for Chinese); keep code, commands and file names unchanged."
+    "message (Chinese for Chinese); keep code, commands and file names unchanged. When the "
+    "user asks for an exact reply text or format (such as \"reply with OK only\"), output "
+    "exactly that text, untranslated."
 )
 
 
@@ -75,29 +79,34 @@ def _today_line() -> str:
     return f"Today is {today.isoformat()} ({_WEEKDAYS[today.weekday()]}){zone}."
 
 
-def _android_system_suffix() -> str:
-    """Android guidance plus the phone-wide memory and knowledge sections, rebuilt per task."""
+def _prompt_sections(session_id: str | None = None) -> dict[str, str]:
+    """The parts of the Android system prompt that change over time."""
     if not os.getenv("AGENT_WORKSPACE_DATA_DIR"):
-        return _ANDROID_SYSTEM_SUFFIX
+        return {}
     from mobile_memory import memory_system_suffix
 
     from mobile_knowledge import knowledge_system_suffix
 
-    sections = [
-        f"{_ANDROID_SYSTEM_SUFFIX}\n{_today_line()}",
-        memory_system_suffix(),
-        knowledge_system_suffix(),
-    ]
-    return "\n\n".join(section for section in sections if section)
+    return {
+        "date": _today_line(),
+        "memory": memory_system_suffix(),
+        # Each conversation uses the knowledge bases chosen for it.
+        "knowledge": knowledge_system_suffix(session_id),
+    }
 
 
-async def _knowledge_passages(prompt: str) -> dict[str, Any]:
+def _android_system_suffix(session_id: str | None = None) -> str:
+    """Android guidance plus the phone-wide memory and knowledge sections, rebuilt per task."""
+    return assemble_prompt(_ANDROID_SYSTEM_SUFFIX, _prompt_sections(session_id))
+
+
+async def _knowledge_passages(prompt: str, session_id: str | None = None) -> dict[str, Any]:
     """Knowledge-base passages for a new request, as run() options (none when nothing fits)."""
     if not os.getenv("AGENT_WORKSPACE_DATA_DIR"):
         return {}
     from mobile_knowledge import knowledge_supplement
 
-    passages = await asyncio.to_thread(knowledge_supplement, prompt)
+    passages = await asyncio.to_thread(knowledge_supplement, prompt, session_id)
     return {"supplemental_messages": passages} if passages else {}
 
 
@@ -191,6 +200,7 @@ class MobileRuntimeController:
         if approval_broker is not None and approval_broker.request_listener is None:
             approval_broker.request_listener = self._on_approval_requested
         self._jobs: dict[str, asyncio.Task[None]] = {}
+        self._frozen: FrozenPrompts | None = None
         self._execution_checks: dict[str, tuple[Any, Any]] = {}
         self._executions: dict[str, Any] = {}
         self._artifact_baselines: dict[str, dict[str, Any]] = {}
@@ -338,7 +348,9 @@ class MobileRuntimeController:
         after_run: Any = None,
         execution: Any = None,
         execution_kind: str | None = None,
+        preauthorized: bool = False,
     ) -> MobileTask:
+        """Queue a task. ``preauthorized`` grants the "task" approval scope up front."""
         self._ensure_task_admission()
         if not isinstance(request, MobileTaskRequest):
             raise TypeError("request must be a MobileTaskRequest")
@@ -394,6 +406,9 @@ class MobileRuntimeController:
         )
         if task.state is TaskState.QUEUED and task.task_id not in self._jobs:
             self._execution_checks[task.task_id] = (before_run, after_run)
+            if preauthorized:
+                # Recorded with the task, so a resumed run is trusted in the same way.
+                self.tasks.append_event(task.task_id, "task.approval.preauthorized", {"scope": "task"})
             if execution is not None:
                 self.tasks.append_event(
                     task.task_id, "task.execution.bound", {"execution_kind": execution_kind}
@@ -722,6 +737,19 @@ class MobileRuntimeController:
                         resume_available=True,
                     )
 
+    def _frozen_prompts(self) -> FrozenPrompts:
+        if self._frozen is None:
+            self._frozen = FrozenPrompts.for_data_dir()
+            # Snapshots of deleted conversations are removed once per engine start.
+            with suppress(Exception):
+                self._frozen.prune(
+                    {
+                        session.id
+                        for session in self.runtime.store.list_sessions(limit=2_147_483_647)
+                    }
+                )
+        return self._frozen
+
     def _schedule(self, task_id: str) -> None:
         existing = self._jobs.get(task_id)
         if existing is not None and not existing.done():
@@ -742,6 +770,11 @@ class MobileRuntimeController:
                 self._active_task_id = task_id
                 self._active_session_id = task.session_id
                 self.approvals.set_active_task(task_id, task.session_id)
+                if any(
+                    event.event_type == "task.approval.preauthorized"
+                    for event in self.events(task_id)
+                ):
+                    self.approvals.trust_active_task(task_id)
                 has_persisted_input = self.tasks.has_persisted_input(task_id)
                 self.tasks.transition(task_id, TaskState.RUNNING)
                 workspace = Path(session.workspace)
@@ -791,7 +824,23 @@ class MobileRuntimeController:
                 before_run, after_run = self._execution_checks.get(task_id, (None, None))
                 if before_run is not None:
                     await before_run()
-                options = {"summarize_history": configured_mobile_context_summary(self.base_url)}
+                options: dict[str, Any] = {
+                    "summarize_history": configured_mobile_context_summary(self.base_url)
+                }
+                # Providers that cache prompt prefixes (DeepSeek) get requests that only grow
+                # at the end: the conversation keeps its system prompt, later changes arrive
+                # as notes with the next message, and compaction moves in rare large steps.
+                context_notes: tuple[str, ...] = ()
+                if prefix_cache_endpoint(self.base_url, model):
+                    options["prefix_stable"] = True
+                    system_suffix, context_notes = self._frozen_prompts().prepare(
+                        session.id,
+                        _ANDROID_SYSTEM_SUFFIX,
+                        _prompt_sections(session.id),
+                        new_turn=not has_persisted_input,
+                    )
+                else:
+                    system_suffix = _android_system_suffix(session.id)
                 if task.budget_steps is not None:
                     options["budget"] = TaskBudget(
                         max_tool_calls=task.budget_steps,
@@ -811,7 +860,7 @@ class MobileRuntimeController:
                         session,
                         model,
                         reasoning_effort=task.reasoning_effort,
-                        system_suffix=_android_system_suffix(),
+                        system_suffix=system_suffix,
                         continuation_prompt=(
                             "Resume the interrupted Android task from its durable history. "
                             "Reuse confirmed tool results and completed actions. "
@@ -827,9 +876,10 @@ class MobileRuntimeController:
                         task.prompt,
                         model,
                         reasoning_effort=task.reasoning_effort,
-                        system_suffix=_android_system_suffix(),
+                        system_suffix=system_suffix,
                         **({"images": images} if task.image_refs else {}),
-                        **(await _knowledge_passages(task.prompt)),
+                        **({"context_notes": context_notes} if context_notes else {}),
+                        **(await _knowledge_passages(task.prompt, session.id)),
                         **options,
                     )
                 # Adapted services may return without a terminal tool event.

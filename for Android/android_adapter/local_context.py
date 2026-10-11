@@ -58,6 +58,10 @@ _INTENTS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"文件夹|目录|folder|director(?:y|ies)|mkdir", re.IGNORECASE), ("make_directory",)),
     (re.compile(r"复制|拷贝|备份|副本|\bcopy\b|duplicate|backup", re.IGNORECASE), ("copy_file",)),
     (
+        re.compile(r"追加|末尾|结尾|文末|最后加|\bappend|at the end", re.IGNORECASE),
+        ("append_file",),
+    ),
+    (
         re.compile(
             r"上网|网上|搜索|搜一下|查一下|查查|最新|新闻|网站|网址|https?://|"
             r"search|website|online|latest|news",
@@ -86,6 +90,14 @@ _INTENTS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
             re.IGNORECASE,
         ),
         ("knowledge_add",),
+    ),
+    (
+        re.compile(
+            r"(只用|改用|换用|换成|换到|切换|停用|启用|不再用|不要用|别用|关闭|关掉).{0,12}知识库|"
+            r"\b(?:only use|switch to|stop using)\b.{0,40}knowledge bases?\b",
+            re.IGNORECASE,
+        ),
+        ("knowledge_use",),
     ),
     (re.compile(r"知识库|资料库|knowledge base", re.IGNORECASE), ("knowledge_search",)),
     (
@@ -149,6 +161,7 @@ _DIRECT_CALLS = frozenset(
         "write_file",
         "apply_patch",
         "copy_file",
+        "append_file",
         "make_directory",
         "search_files",
         "web_search",
@@ -198,12 +211,22 @@ class _ContextState:
         available = {spec.name: spec for spec in tools if spec.name != SELECTION_TOOL}
         selector_available = any(spec.name == SELECTION_TOOL for spec in tools)
         previous = self.turns.get(session_id)
-        # Within one request the model's own selection stands; a new request starts from
-        # the tools it asks for.
-        selected = (
+        kept = (
             tuple(name for name in previous.selected if name in available)
-            if previous is not None and previous.request == request
-            else tools_for_request(request, available)
+            if previous is not None
+            else ()
+        )
+        # Within one request the model's own selection stands; a new request starts from
+        # the tools it asks for. A follow-up that needs none beyond the shown ones keeps
+        # them: the tools open the prompt, so changing them makes the phone re-read the
+        # whole conversation instead of only the new message.
+        fresh = tools_for_request(request, available)
+        selected = (
+            kept
+            if previous is not None
+            and kept
+            and (previous.request == request or set(fresh) <= set(kept))
+            else fresh
         )
         # A hidden tool the model already called for this request stays shown from now on.
         selected = (
@@ -408,10 +431,21 @@ def install_local_context_profile() -> None:
                 (tool.paths for tool in tools.values() if hasattr(tool, "paths")), None
             )
             if workspace is not None:
-                from .local_tools import CopyFileTool, MakeDirectoriesTool
+                from .local_tools import (
+                    AppendFileTool,
+                    CopyFileTool,
+                    MakeDirectoriesTool,
+                    UnescapingPatchTool,
+                )
 
                 if "copy_file" not in tools:
                     runner._tools.register(CopyFileTool(workspace))
+                if "append_file" not in tools:
+                    runner._tools.register(AppendFileTool(workspace))
+                if "apply_patch" in tools and not isinstance(
+                    tools["apply_patch"], UnescapingPatchTool
+                ):
+                    tools["apply_patch"] = UnescapingPatchTool(tools["apply_patch"], workspace)
                 if "make_directory" in tools:
                     tools["make_directory"] = MakeDirectoriesTool(workspace)
                 # Lets the parser map "/todo.md" style paths back into the workspace.

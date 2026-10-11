@@ -195,7 +195,8 @@ def controlled_http(config, directory):
         raise OSError("Controlled HTTP fixture blocks unrelated external DNS")
 
     class RoutedHTTPSConnection(http.client.HTTPSConnection):
-        def __init__(self, hostname, address, port, timeout):
+        # web.py also passes fallback addresses; the fixture serves one address.
+        def __init__(self, hostname, address, port, timeout, **_options):
             if hostname not in hosts or port != 443 or address != "8.8.8.8":
                 raise OSError("Controlled HTTP fixture blocks an unregistered destination")
             self._fixture_hostname = hostname

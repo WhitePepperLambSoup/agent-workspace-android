@@ -3,6 +3,7 @@ package com.agentworkspace.mobile.embedded
 import android.content.Context
 import java.io.File
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.util.zip.ZipInputStream
 
 /** Installs the versioned application sources; Python is supplied by Chaquopy. */
@@ -10,6 +11,7 @@ object TermuxBootstrap {
 
     private const val AGENT_CODE_ASSET_NAME = "agent_code.zip"
     private const val MARKER_FILE_NAME = ".bootstrap_completed"
+    private const val LOCK_FILE_NAME = ".bootstrap.lock"
 
     fun isInstalled(context: Context): Boolean {
         val marker = File(context.filesDir, MARKER_FILE_NAME)
@@ -17,6 +19,28 @@ object TermuxBootstrap {
         val gateway = File(context.filesDir, "agent/for Android/mobile_gateway.py")
         return marker.isFile && entrypoint.isFile && gateway.isFile &&
             runCatching { marker.readText() == installationVersion(context) }.getOrDefault(false)
+    }
+
+    /** Which APK's sources are unpacked, or null before the first installation. */
+    fun installedVersion(context: Context): String? =
+        runCatching { File(context.filesDir, MARKER_FILE_NAME).readText() }.getOrNull()
+
+    /**
+     * Unpacks this APK's sources unless they are already in place; returns true when this call did.
+     * After an update the app and the engine process (started early by recovery, a schedule or a
+     * widget) may both get here: a file lock lets one of them unpack while the other waits.
+     */
+    @Synchronized
+    fun ensureInstalled(context: Context, onProgress: (String) -> Unit = {}): Boolean {
+        if (isInstalled(context)) return false
+        context.filesDir.mkdirs()
+        RandomAccessFile(File(context.filesDir, LOCK_FILE_NAME), "rw").use { file ->
+            file.channel.lock().use {
+                if (isInstalled(context)) return false
+                installSync(context, onProgress)
+                return true
+            }
+        }
     }
 
     fun installSync(context: Context, onProgress: (String) -> Unit = {}) {

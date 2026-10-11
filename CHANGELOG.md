@@ -1,5 +1,107 @@
 # Changelog
 
+## 1.4.0 — 2026-10-11
+
+功能版：多个知识库、工作区文件管理、真正删除对话、DeepSeek 缓存命中大幅提高、录音速记、定时任务可在默认模式运行。Feature release: several knowledge bases, file management, real conversation deletion, much higher DeepSeek cache hits, voice notes, and scheduled tasks in the default mode.
+
+### 中文
+
+**多个知识库（新）**
+- 可以新建多个知识库（比如“工作”“学习”），把文档分开存放；文档可以在知识库之间移动，上传时可直接选放进哪个。
+- 每个对话可以选择用哪几个知识库：点输入框旁的“知识库”按钮勾选，或者直接在对话里说“这个对话只用学习知识库”“这个对话不要用知识库”。每个知识库可以设置“新对话默认使用”。
+- 只有一个知识库时一切照旧，输入框旁不会多出按钮。
+- 在对话里说“把 xx.pdf 加入学习知识库”会放进对应的知识库，没有就新建。
+
+**工作区文件管理（新）**
+- 「工作区文件」里每个文件和文件夹都可以重命名、移动到其他文件夹、删除（删除文件夹会先确认，并说明会连同里面的内容一起删除）；右上角可以新建文件夹。
+- 不会覆盖已有的同名文件；工作区本身和应用内部数据不能被删除或移动。
+
+**删除对话（新）**
+- 「会话名称」页可以删除当前对话；会话列表的“已归档”里每个对话旁有删除按钮，也可以一次删除全部已归档对话。
+- 删除会彻底清除这段对话的聊天记录、任务、图片和相关设置（定时任务、知识库选择等），无法恢复；它在工作区里生成的文件会保留。此前只能归档（隐藏）。
+
+**DeepSeek 更省钱（新）**
+- 选用 DeepSeek 模型时，每次请求只在末尾追加内容，前面的部分逐字不变，DeepSeek 的上下文缓存能命中（命中部分的价格约为未命中的 1/50）：
+  - 长对话需要压缩时一次压到约三成，之后很久不再压缩；同一处压缩的摘要只生成一次并重复使用。此前上下文满了以后几乎每次请求都重新压缩、重写摘要。
+  - 对话开始时固定系统提示词；之后日期、记忆或知识库有变化，作为附注附在下一条消息里。
+  - 知识库检索到的段落随消息保存，下一轮不再消失。
+- 手机实测（同一个网页调研长任务）：缓存命中率从 44.6% 提高到 95.2%，按 token 计的输入费用约为原来的 1/8。
+- 「Token 与费用」显示缓存命中率；DeepSeek V4.1 Flash / V4 Pro 有了参考价格（此前显示「未定价」）。
+- 长任务执行时显示「上下文 xx%」，接近 100% 时会压缩较早的内容。
+
+**录音速记（新）**
+- 在输入框的回形针菜单、悬浮球菜单或长按桌面图标选「录音速记」：录完点「完成」，会自动开一个新对话，在手机上离线转写、整理成纪要（要点、决定、待办），保存到工作区「录音速记」文件夹，并加入知识库。需要先在「本地模型」下载语音识别模型。
+
+**定时任务**
+- 默认的「仅工作区」模式也能运行定时任务：运行时自动允许本任务内的联网和工具调用；删除文件、写入长期记忆、操作其他应用仍会暂停并通知你批准。此前只能在 YOLO 或完全访问模式下运行。
+- 列表显示下次运行时间、重复方式和上次结果（此前是原始时间和状态代码）。
+- 「任务动态」小组件在没有任务进行时显示下一个定时任务。
+
+**其他改进**
+- 你明确要求的回复内容或格式优先于语言规则（例如「只回复 OK」不会再被回成「好的」）。
+- 本机模型：追问时沿用已显示的工具，手机少重算已经处理过的提示内容（模拟测试中，后续消息可直接复用的部分从 48% 提高到 73%）。
+- 本机模型做文件任务更可靠（2B 模型在 10 个文件类测试任务中的成功数从 3 个提高到 6 个；12 个日常任务从 11 个提高到 12 个）：
+  - 复制文件可以覆盖已有的目标文件（读过目标后）；此前只能复制到新文件，模型只好重写内容，丢掉制表符和换行格式。
+  - 模型想“重打”一遍要复制的文件，或把工具返回的整段数据当成文件内容保存时，会被拦下并提示改用复制。
+  - 新增“追加到文件末尾”的操作，在末尾加内容不再错位。
+  - 修改文件时，模型从读取结果里抄来的 `\t`、`\n` 转义能被正确识别为制表符和换行。
+
+**修复**
+- 应用更新后，如果引擎在打开应用前已经在后台启动，可能一直运行旧版本的代码，新版本的改动不生效。
+- 部分系统（如 Android 12）上，定时任务的系统闹钟可能因为时间格式无法设置。
+
+**升级说明**
+- 覆盖安装或在应用内更新即可，数据保留：原有的知识库文档都归入「默认」知识库。录音速记需要先在「本地模型」下载语音识别模型。
+
+### English
+
+**Several knowledge bases (new)**
+- Create knowledge bases such as "Work" and "Study" to keep documents apart; move documents between them, or choose one when adding.
+- Each conversation chooses which knowledge bases it uses: tick them under the knowledge base button next to the message box, or just say "only use the Study knowledge base here" or "don't use the knowledge base in this conversation". Each knowledge base can be set to be used by new conversations.
+- With a single knowledge base nothing changes and no extra button appears.
+- "Add report.pdf to the Study knowledge base" in a conversation adds it there, creating the knowledge base if needed.
+
+**Workspace file management (new)**
+- In Workspace files, every file and folder can be renamed, moved to another folder or deleted (deleting a folder asks first and says that everything in it goes too); a button creates new folders.
+- An existing file is never replaced, and the workspace itself and the app's own data cannot be deleted or moved.
+
+**Deleting conversations (new)**
+- Delete the open conversation from the Conversation name page; archived conversations in the list have a delete button, and all archived conversations can be deleted at once.
+- Deleting erases the conversation's messages, tasks, images and its settings (schedules, knowledge base choice) for good; files it created in the workspace stay. Before, conversations could only be archived (hidden).
+
+**Cheaper DeepSeek (new)**
+- With a DeepSeek model every request only grows at the end and keeps its beginning byte for byte, so DeepSeek's context cache applies (cached input costs about 1/50 of uncached):
+  - When a long conversation must be compacted, it is cut to about a third at once and then left alone for a long while; the summary for a cut is written once and reused. Before, a full context was compacted again, with a new summary, on almost every request.
+  - A conversation keeps the system prompt it started with; later changes to the date, memory or knowledge base are attached to the next message as a note.
+  - Knowledge-base passages are stored with the message, so they no longer vanish on the next turn.
+- Measured on a phone (the same web research task): cache hits went from 44.6% to 95.2%; input cost per token is about 1/8 of before.
+- Tokens & cost shows the cache hit rate; DeepSeek V4.1 Flash / V4 Pro have reference prices (they showed "unpriced").
+- Long tasks show "context xx%"; near 100% older content is compacted.
+
+**Voice notes (new)**
+- Choose Voice note from the paperclip menu, the floating bubble or a long press on the app icon. Tap Done when finished: a new conversation transcribes the recording on the phone, writes minutes (key points, decisions, action items), saves them in the workspace folder "Voice notes" and adds them to the knowledge base. Needs the speech model from Local models.
+
+**Scheduled tasks**
+- Scheduled tasks also run in the default workspace mode: a run allows its own network requests and tool calls; deleting files, changing long-term memory and operating other apps still pause and notify you. Before, they needed YOLO or full access.
+- The list shows the next run, the repeat and the last result in words.
+- The Task status widget shows the next scheduled task while nothing else is going on.
+
+**Other improvements**
+- A reply text or format you ask for explicitly wins over the language rule ("reply with OK only" no longer gets "好的").
+- On-device models: a follow-up keeps the tools already shown, so the phone re-reads less of the prompt it already processed (in a simulation, the reusable share of follow-up prompts rose from 48% to 73%).
+- On-device models handle files more reliably (the 2B model now completes 6 of 10 file test tasks, up from 3, and all 12 everyday tasks, up from 11):
+  - Copying can replace an existing file once it has been read; before, copies could only go to new files, so the model rewrote the text and lost tabs and line endings.
+  - When the model retypes a file it was asked to copy, or saves a tool result as a file's text, it is sent back to use copy instead.
+  - A new append action adds text at the very end of a file.
+  - When editing, `\t` and `\n` escapes the model copied from a read result are recognised as the tab and line break they stand for.
+
+**Fixes**
+- After an update, an engine started in the background before the app was opened could keep running the previous version's code, so the update did not take effect.
+- On some systems (such as Android 12) the alarm for a scheduled task could not be set because of a time format.
+
+**Upgrading**
+- Install over the existing app or update in the app; your data is kept, and existing knowledge base documents go into the Default knowledge base. Voice notes need the speech model from Local models.
+
 ## 1.3.0 — 2026-10-11
 
 功能版：圈选提问、离线语音识别、桌面小组件，长任务更顺畅。Feature release: circle to ask, offline speech recognition, home screen widgets, and smoother long tasks.

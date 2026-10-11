@@ -36,6 +36,7 @@ from agent_workspace.core.context_manifest import build_context_manifest
 from agent_workspace.core.cost import estimate_cost_usd
 from agent_workspace.core.events import Event
 from agent_workspace.core.models import (
+    MESSAGE_APPENDIX_KEY,
     Autonomy,
     BinaryArtifact,
     ChatMessage,
@@ -137,6 +138,15 @@ _MAX_STREAM_RECOVERIES = 3
 _MAX_DECLARED_TOOL_SECONDS = 3600.0
 _TOKEN_ESTIMATE_BYTES = 3
 _CONTEXT_SUMMARY_CONTRACT_VERSION = 3
+# Prefix-stable runs (providers with prefix caching) compact rarely and in big steps: when the
+# proactive budget is exceeded, the cut is chosen so that about this share of it remains, and
+# it moves only after another (1 - ratio) of the budget has accumulated.
+_PREFIX_STABLE_RETAIN_RATIO = 0.3
+# Fixed per-result caps for excerpting a single oversized turn, largest first.
+_STABLE_TOOL_EXCERPT_LADDER = (
+    256 * 1024, 128 * 1024, 64 * 1024, 32 * 1024, 16 * 1024, 8 * 1024, 4 * 1024, 2 * 1024, 1024
+)
+_MAX_CONTEXT_NOTES_BYTES = 64 * 1024
 
 
 class AgentRunner:
@@ -259,7 +269,17 @@ class AgentRunner:
         summarize_history: bool = False,
         exclude_image_digests: frozenset[str] = frozenset(),
         reasoning_effort: str | None = None,
+        prefix_stable: bool = False,
+        context_notes: tuple[str, ...] = (),
     ) -> RunResult:
+        """Run one turn.
+
+        ``prefix_stable`` keeps every request a byte-for-byte extension of the previous one
+        wherever possible, for providers that bill cached prompt prefixes cheaply: supplemental
+        passages are stored with the user message, assistant messages keep the trust they will
+        have when the history is reloaded, and compaction moves in large deterministic steps.
+        ``context_notes`` are trusted application notes stored with the user message.
+        """
         lock = self._store.session_lock(session.id)
         async with lock:
             return await self._run_locked(
@@ -278,6 +298,8 @@ class AgentRunner:
                 summarize_history=summarize_history,
                 exclude_image_digests=exclude_image_digests,
                 reasoning_effort=reasoning_effort,
+                prefix_stable=prefix_stable,
+                context_notes=context_notes,
             )
 
     async def _run_locked(
@@ -298,9 +320,15 @@ class AgentRunner:
         summarize_history: bool = False,
         exclude_image_digests: frozenset[str] = frozenset(),
         reasoning_effort: str | None = None,
+        prefix_stable: bool = False,
+        context_notes: tuple[str, ...] = (),
     ) -> RunResult:
         if user_input is None and images:
             raise ValueError("images can only accompany a user message")
+        if any(not isinstance(note, str) or not note.strip() for note in context_notes) or (
+            sum(len(note.encode("utf-8")) for note in context_notes) > _MAX_CONTEXT_NOTES_BYTES
+        ):
+            raise ValueError("context notes are empty or too large")
         if any(
             len(digest) != 64 or any(char not in "0123456789abcdefABCDEF" for char in digest)
             for digest in exclude_image_digests
@@ -368,6 +396,21 @@ class AgentRunner:
         assembled_request_ids: list[str] = []
         current_model_request_id: str | None = None
         unrecorded_responses: list[ChatMessage] = []
+        stable_summaries: dict[tuple[int, ...], Any] = {}
+        recorded_compaction: tuple[int, ...] | None = None
+        # Cuts an earlier run already recorded with their summary are not recorded again.
+        recorded_digests: set[str] = (
+            {
+                event.data["dropped_digest"]
+                for event in self._store.list_events_by_type(
+                    "context.compacted", limit=64, workspace=session.workspace
+                )
+                if event.session_id == session.id
+                and isinstance(event.data.get("dropped_digest"), str)
+            }
+            if prefix_stable
+            else set()
+        )
 
         async def record_assistant(message: ChatMessage, *, assembled: bool = False) -> None:
             if unrecorded_responses:
@@ -459,6 +502,17 @@ class AgentRunner:
                 user_metadata: dict[str, Any] = {}
                 if user_image_metadata:
                     user_metadata["agent_workspace.images"] = user_image_metadata
+                appendix = [{"text": note, "trust": "trusted"} for note in context_notes]
+                if prefix_stable and supplemental_messages:
+                    # Stored with the message, the passages are part of every later request
+                    # in the same place instead of disappearing after this run.
+                    appendix.extend(
+                        {"text": message.content, "trust": "untrusted_data"}
+                        for message in supplemental_messages
+                    )
+                    supplemental_messages = ()
+                if appendix:
+                    user_metadata[MESSAGE_APPENDIX_KEY] = appendix
                 user_message = ChatMessage(
                     role=Role.USER,
                     content=user_input,
@@ -568,6 +622,7 @@ class AgentRunner:
                     max_input_tokens=None,
                     reasoning_protocol=getattr(self._provider, "reasoning_protocol", None),
                     request_encoder=encode_with_reasoning,
+                    retain_ratio=_PREFIX_STABLE_RETAIN_RATIO if prefix_stable else None,
                 )
                 if turn_profiler is not None:
                     turn_profiler.stop("prompt_assemble")
@@ -579,16 +634,29 @@ class AgentRunner:
                         nonlocal total_usage
                         total_usage = _add_usage(total_usage, usage)
 
-                    summary_result = await self._summarize_dropped_context(
-                        session,
-                        model,
-                        compaction,
-                        task_budget,
-                        correlation_id=correlation_id,
-                        summarize_history=summarize_history,
-                        request_encoder=encode_with_reasoning,
-                        on_usage=add_summary_usage,
+                    # A prefix-stable run keeps its full history and compacts every request
+                    # the same way until the cut moves, so it summarizes each cut once.
+                    compaction_key = (
+                        compaction.dropped_messages,
+                        *(id(message) for message in compaction.dropped[:1]),
+                        *(id(message) for message in compaction.dropped[-1:]),
                     )
+                    if prefix_stable and compaction_key in stable_summaries:
+                        summary_result = stable_summaries[compaction_key]
+                    else:
+                        summary_result = await self._summarize_dropped_context(
+                            session,
+                            model,
+                            compaction,
+                            task_budget,
+                            correlation_id=correlation_id,
+                            summarize_history=summarize_history,
+                            request_encoder=encode_with_reasoning,
+                            on_usage=add_summary_usage,
+                            lookup_limit=64 if prefix_stable else 8,
+                        )
+                        if prefix_stable:
+                            stable_summaries[compaction_key] = summary_result
                     summary: ChatMessage | None = None
                     summary_text = ""
                     summary_digest = ""
@@ -630,7 +698,11 @@ class AgentRunner:
                                 )
                             ),
                             max_context_bytes=task_budget.max_context_bytes,
-                            proactive_context_bytes=task_budget.proactive_context_bytes,
+                            # The stable cut already left room under the proactive budget;
+                            # trimming the retained history again here would move it.
+                            proactive_context_bytes=(
+                                None if prefix_stable else task_budget.proactive_context_bytes
+                            ),
                             max_input_tokens=None,
                             reasoning_protocol=getattr(self._provider, "reasoning_protocol", None),
                             request_encoder=encode_with_reasoning,
@@ -638,12 +710,14 @@ class AgentRunner:
                         if rebuilt is not None and retained_summary is not None:
                             request = rebuilt
                             summary = retained_summary
-                            messages[:] = [summary, *rebuilt.messages[2:]]
+                            if not prefix_stable:
+                                messages[:] = [summary, *rebuilt.messages[2:]]
                         else:
                             summary = None
                             summary_text = ""
-                            messages[:] = compaction.retained
-                    else:
+                            if not prefix_stable:
+                                messages[:] = compaction.retained
+                    elif not prefix_stable:
                         messages[:] = compaction.retained
                     compacted_data: dict[str, Any] = {
                         "original_bytes": compaction.original_bytes,
@@ -667,14 +741,24 @@ class AgentRunner:
                             _CONTEXT_SUMMARY_CONTRACT_VERSION
                         )
                         compacted_data["summary_complete"] = True
-                    await self._record(
-                        Event(
-                            session_id=session.id,
-                            type="context.compacted",
-                            data=compacted_data,
-                            correlation_id=correlation_id,
+                    if prefix_stable:
+                        compacted_data["prefix_stable"] = True
+                    # A prefix-stable run records each cut once, not every request.
+                    if not prefix_stable or (
+                        compaction_key != recorded_compaction
+                        and summary_digest not in recorded_digests
+                    ):
+                        recorded_compaction = compaction_key
+                        if summary_digest:
+                            recorded_digests.add(summary_digest)
+                        await self._record(
+                            Event(
+                                session_id=session.id,
+                                type="context.compacted",
+                                data=compacted_data,
+                                correlation_id=correlation_id,
+                            )
                         )
-                    )
                 _annotate_request_budget(
                     request, encode_with_reasoning(request), encode_with_reasoning
                 )
@@ -742,6 +826,12 @@ class AgentRunner:
                             "image_wire_bytes": request.metadata.get("image_wire_bytes", 0),
                             "estimated_image_context_bytes": request.metadata.get(
                                 "estimated_image_context_bytes", 0
+                            ),
+                            # How full the context is: the request is compacted once it
+                            # outgrows this threshold (a single turn only at the hard limit).
+                            "context_bytes": request.metadata.get("estimated_context_bytes"),
+                            "context_threshold_bytes": _compaction_threshold_bytes(
+                                messages, task_budget
                             ),
                             "context_manifest": build_context_manifest(
                                 request,
@@ -1051,9 +1141,12 @@ class AgentRunner:
                                 role=Role.ASSISTANT,
                                 content=partial_text,
                                 reasoning=partial_reasoning,
+                                # A reloaded history marks assistant output DERIVED; a
+                                # prefix-stable run sends it the same way from the start.
                                 trust=(
                                     ContentTrust.UNTRUSTED_DATA
-                                    if any(
+                                    if not prefix_stable
+                                    and any(
                                         message.trust is ContentTrust.UNTRUSTED_DATA
                                         for message in messages
                                     )
@@ -1242,7 +1335,8 @@ class AgentRunner:
                 # response untrusted.  Only an explicitly untrusted user
                 # message should propagate that trust marker to an assistant
                 # response.
-                untrusted_user_context = any(
+                # A prefix-stable run sends it as DERIVED, as a reloaded history does.
+                untrusted_user_context = not prefix_stable and any(
                     message.role is Role.USER and message.trust is ContentTrust.UNTRUSTED_DATA
                     for message in messages
                 )
@@ -1370,7 +1464,12 @@ class AgentRunner:
                         # the segment, while the bounded accumulator above keeps
                         # the final answer. Keep only a compact marker so the
                         # provider sees why the prior assistant turn is absent.
+                        # A prefix-stable run only replaces the segment just received:
+                        # earlier ones were replaced when they arrived, and rewriting
+                        # messages already sent would invalidate the cached prefix.
                         for index, message in enumerate(messages):
+                            if prefix_stable and message is not assistant:
+                                continue
                             if message.role is Role.ASSISTANT and not message.tool_calls:
                                 messages[index] = _replace_assistant_content(
                                     message,
@@ -1484,8 +1583,7 @@ class AgentRunner:
                                 autonomy=session.autonomy,
                                 allowed_tools=allowed_tools,
                                 untrusted_context=any(
-                                    message.trust is ContentTrust.UNTRUSTED_DATA
-                                    for message in messages
+                                    message.carries_untrusted_data for message in messages
                                 ),
                                 correlation_id=correlation_id,
                             )
@@ -1543,8 +1641,7 @@ class AgentRunner:
                                 autonomy=session.autonomy,
                                 allowed_tools=allowed_tools,
                                 untrusted_context=any(
-                                    message.trust is ContentTrust.UNTRUSTED_DATA
-                                    for message in messages
+                                    message.carries_untrusted_data for message in messages
                                 ),
                                 correlation_id=correlation_id,
                             )
@@ -2284,6 +2381,7 @@ class AgentRunner:
         summarize_history: bool,
         request_encoder: Callable[[ProviderRequest], bytes] | None = None,
         on_usage: Callable[[Usage], None] | None = None,
+        lookup_limit: int = 8,
     ) -> tuple[ChatMessage, str, Usage, str] | None:
         """Summarize complete history in requests that fit the active capacity.
 
@@ -2317,7 +2415,7 @@ class AgentRunner:
         # Reuse a persisted summary when the same dropped content recurs:
         for event in self._store.list_events_by_type(
             "context.compacted",
-            limit=8,
+            limit=lookup_limit,
             workspace=session.workspace,
         ):
             if event.session_id != session.id:
@@ -3851,7 +3949,14 @@ def _bounded_provider_request(
     max_input_tokens: int | None = None,
     reasoning_protocol: str | None = None,
     request_encoder: Callable[[ProviderRequest], bytes] | None = None,
+    retain_ratio: float | None = None,
 ) -> tuple[ProviderRequest, _ContextCompaction | None]:
+    """Fit a request into the context budget, dropping the oldest conversation groups.
+
+    With ``retain_ratio`` (prefix-stable runs) the cut is a pure function of the history: it
+    moves only after another ``1 - retain_ratio`` of the proactive budget has accumulated, so
+    successive requests and later runs repeat the same compacted prefix until then.
+    """
     _deduplicate_message_images(messages)
     if any(
         message.role is Role.SYSTEM
@@ -3889,9 +3994,17 @@ def _bounded_provider_request(
     )
     hard_context_bytes = min(max_context_bytes, token_byte_limit)
     groups = _conversation_groups(messages)
+    # A leading group of only a summary or compaction notice is not history the
+    # proactive target can usefully drop: dropping it alone would summarize the
+    # summary again on every request of a long turn.
+    droppable_groups = sum(
+        1 for group in groups if any(message.role is not Role.SYSTEM for message in group)
+    )
     proactive_limit = (
         min(hard_context_bytes, proactive_context_bytes)
-        if proactive_context_bytes is not None and proactive_context_bytes > 0 and len(groups) > 1
+        if proactive_context_bytes is not None
+        and proactive_context_bytes > 0
+        and droppable_groups > 1
         else hard_context_bytes
     )
     effective_context_bytes = proactive_limit
@@ -3899,7 +4012,7 @@ def _bounded_provider_request(
         return request, None
     # A single oversized latest turn may still fit the provider hard limit. Do
     # not reject it merely because the proactive history target is smaller.
-    if len(groups) <= 1 and original_context_bytes <= hard_context_bytes:
+    if droppable_groups <= 1 and original_context_bytes <= hard_context_bytes:
         return request, None
 
     exhausted_message = (
@@ -3924,6 +4037,7 @@ def _bounded_provider_request(
             effective_context_bytes=hard_context_bytes,
             reasoning_protocol=reasoning_protocol,
             request_encoder=request_encoder,
+            stable=retain_ratio is not None,
         )
         if latest_compaction is not None:
             compacted_latest, compacted_bytes = latest_compaction
@@ -3945,26 +4059,55 @@ def _bounded_provider_request(
                 ),
             )
         raise BudgetExceededError(exhausted_message)
-    low = 1
-    high = len(groups) - 1
+
+    def smallest_cut(limit: int) -> tuple[ProviderRequest, int, int] | None:
+        low = 1
+        high = len(groups) - 1
+        found: tuple[ProviderRequest, int, int] | None = None
+        while low <= high:
+            start = (low + high) // 2
+            retained = [message for group in groups[start:] for message in group]
+            candidate = ProviderRequest(
+                model=model,
+                messages=(system_message, notice, *retained),
+                tools=tools,
+                max_output_tokens=max_output_tokens,
+                metadata={"reasoning_protocol": reasoning_protocol},
+            )
+            candidate_encoded = _encode_request_for_budget(candidate, request_encoder)
+            candidate_bytes = _annotate_request_budget(
+                candidate, candidate_encoded, request_encoder
+            )
+            if candidate_bytes <= limit:
+                found = candidate, start, candidate_bytes
+                high = start - 1
+            else:
+                low = start + 1
+        return found
+
     best: tuple[ProviderRequest, int, int] | None = None
-    while low <= high:
-        start = (low + high) // 2
-        retained = [message for group in groups[start:] for message in group]
-        candidate = ProviderRequest(
+    if retain_ratio is not None and 0 < retain_ratio < 1:
+        # Drop whole steps of (1 - ratio) x the history budget (what is left
+        # after the system prompt and tools): for a growing history the number
+        # of steps, and with it the cut, changes only when another step has
+        # accumulated. The dropped prefix (and its stored summary) repeat.
+        bare = ProviderRequest(
             model=model,
-            messages=(system_message, notice, *retained),
+            messages=(system_message, notice),
             tools=tools,
             max_output_tokens=max_output_tokens,
             metadata={"reasoning_protocol": reasoning_protocol},
         )
-        candidate_encoded = _encode_request_for_budget(candidate, request_encoder)
-        candidate_bytes = _annotate_request_budget(candidate, candidate_encoded, request_encoder)
-        if candidate_bytes <= effective_context_bytes:
-            best = candidate, start, candidate_bytes
-            high = start - 1
-        else:
-            low = start + 1
+        overhead = _annotate_request_budget(
+            bare, _encode_request_for_budget(bare, request_encoder), request_encoder
+        )
+        room = effective_context_bytes - overhead
+        if room > 0:
+            step = max(1, int(room * (1 - retain_ratio)))
+            steps = -(-(original_context_bytes - effective_context_bytes) // step)
+            best = smallest_cut(original_context_bytes - steps * step)
+    if best is None:
+        best = smallest_cut(effective_context_bytes)
     if best is None:
         # A long tool-driven turn can itself exceed the provider context window
         # before another user message creates a boundary that ordinary history
@@ -3980,6 +4123,7 @@ def _bounded_provider_request(
             effective_context_bytes=hard_context_bytes,
             reasoning_protocol=reasoning_protocol,
             request_encoder=request_encoder,
+            stable=retain_ratio is not None,
         )
         if latest_compaction is not None:
             compacted_latest, compacted_bytes = latest_compaction
@@ -4072,6 +4216,7 @@ def _compact_latest_group_to_fit(
     effective_context_bytes: int,
     reasoning_protocol: str | None,
     request_encoder: Callable[[ProviderRequest], bytes] | None,
+    stable: bool = False,
 ) -> tuple[tuple[ChatMessage, ...], int] | None:
     """Fit an oversized latest turn by excerpting tool results.
 
@@ -4081,6 +4226,9 @@ def _compact_latest_group_to_fit(
     while bounding every tool result and preserving its image attachments.
     If the images cannot fit, the caller reports budget exhaustion rather than
     sending an incomplete visual request. Persisted events remain complete.
+
+    ``stable`` picks the per-result cap from a fixed ladder with headroom, so
+    the excerpts (and the prompt prefix) stay the same while the turn grows.
     """
 
     if not latest_group:
@@ -4105,6 +4253,13 @@ def _compact_latest_group_to_fit(
         size = _annotate_request_budget(request, encoded, request_encoder)
         return size, tuple(compacted)
 
+    if stable:
+        headroom_limit = effective_context_bytes * 3 // 4
+        for cap in _STABLE_TOOL_EXCERPT_LADDER:
+            size, compacted = build(cap)
+            if size <= headroom_limit:
+                return compacted, size
+
     # Start with a useful excerpt and binary-search the largest one that fits.
     high = 256 * 1024
     low = 512
@@ -4119,6 +4274,18 @@ def _compact_latest_group_to_fit(
         else:
             right = middle - 1
     return best
+
+
+def _compaction_threshold_bytes(messages: list[ChatMessage], budget: TaskBudget) -> int:
+    """The request size at which history would be compacted, as _bounded_provider_request does."""
+    droppable_groups = sum(
+        1
+        for group in _conversation_groups(messages)
+        if any(message.role is not Role.SYSTEM for message in group)
+    )
+    if budget.proactive_context_bytes and droppable_groups > 1:
+        return min(budget.max_context_bytes, budget.proactive_context_bytes)
+    return budget.max_context_bytes
 
 
 def _conversation_groups(messages: list[ChatMessage]) -> list[list[ChatMessage]]:

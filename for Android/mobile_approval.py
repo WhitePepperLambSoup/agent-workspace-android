@@ -71,6 +71,16 @@ class MobileApprovalBroker:
         self._active_session_id = None
         self._trusted_task_id = None
 
+    def trust_active_task(self, task_id: str) -> bool:
+        """Grant the "task" scope in advance, as for a schedule the user set up to run alone.
+
+        The always-ask tools still ask. Applies only to the task that is running.
+        """
+        if not task_id or task_id != self._active_task_id:
+            return False
+        self._trusted_task_id = task_id
+        return True
+
     async def request_tool(self, tool: str, arguments: dict[str, Any]) -> ApprovalDecision:
         return await self._request(
             "tool",

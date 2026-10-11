@@ -11,7 +11,7 @@ import os
 import re
 import shutil
 import stat
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager, suppress
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, BinaryIO
@@ -230,6 +230,7 @@ def _relative_path(value: Any, *, allow_root: bool = False) -> str:
     pure = PurePosixPath(value)
     if (
         not value
+        or not pure.parts  # "." is the workspace itself
         or len(value) > 2048
         or "\\" in value
         or ":" in value
@@ -466,6 +467,81 @@ def write_workspace_file(runtime: Any, payload: Mapping[str, Any]) -> dict[str, 
     return {"path": paths.relative(target), "sha256": digest, "size": len(encoded)}
 
 
+def _existing_entry(runtime: Any, paths: WorkspacePaths, relative: str) -> tuple[Path, bool]:
+    """A file or folder the Files page shows, and whether it is a folder."""
+    target = paths.resolve(relative)
+    if target == paths.root:
+        raise ValueError("the workspace itself cannot be changed here")
+    _assert_public_runtime_path(runtime, target)
+    metadata = target.lstat()  # FileNotFoundError when it is gone
+    if stat.S_ISDIR(metadata.st_mode):
+        return target, True
+    if stat.S_ISREG(metadata.st_mode):
+        return target, False
+    raise ValueError("only files and folders can be changed here")
+
+
+def _free_destination(runtime: Any, paths: WorkspacePaths, relative: str) -> Path:
+    target = paths.resolve(relative)
+    if target == paths.root:
+        raise ValueError("the workspace itself cannot be changed here")
+    _assert_public_runtime_path(runtime, target)
+    if os.path.lexists(target):
+        raise FileExistsError(relative)
+    if not target.parent.is_dir():
+        raise FileNotFoundError(PurePosixPath(relative).parent.as_posix())
+    return target
+
+
+def delete_workspace_path(runtime: Any, payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Delete a file, or a folder with everything in it (the Files page asks first)."""
+    relative = _relative_path(payload.get("path"))
+    paths = WorkspacePaths(runtime_workspace(runtime))
+    target, directory = _existing_entry(runtime, paths, relative)
+    if directory:
+        if any(target in private.parents for private in runtime_private_paths(runtime)):
+            raise ValueError("path holds internal runtime data")
+        files = 0
+        for _root, _directories, names in os.walk(target):
+            files += len(names)
+        shutil.rmtree(target)
+        fsync_directory(target.parent)
+        return {"path": relative, "type": "directory", "files": files}
+    target.unlink()
+    fsync_directory(target.parent)
+    return {"path": relative, "type": "file", "files": 1}
+
+
+def move_workspace_path(runtime: Any, payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Rename or move a file or folder; an existing destination is never replaced."""
+    relative = _relative_path(payload.get("path"))
+    destination = _relative_path(payload.get("destination"))
+    if destination == relative:
+        raise ValueError("the new path is the same as the old one")
+    if destination.startswith(relative + "/"):
+        raise ValueError("a folder cannot be moved into itself")
+    paths = WorkspacePaths(runtime_workspace(runtime))
+    source, directory = _existing_entry(runtime, paths, relative)
+    target = _free_destination(runtime, paths, destination)
+    if directory and any(source in private.parents for private in runtime_private_paths(runtime)):
+        raise ValueError("path holds internal runtime data")
+    os.rename(source, target)
+    fsync_directory(target.parent)
+    if source.parent != target.parent:
+        fsync_directory(source.parent)
+    return {"path": destination, "previous_path": relative,
+            "type": "directory" if directory else "file"}  # fmt: skip
+
+
+def make_workspace_directory(runtime: Any, payload: Mapping[str, Any]) -> dict[str, Any]:
+    relative = _relative_path(payload.get("path"))
+    paths = WorkspacePaths(runtime_workspace(runtime))
+    target = _free_destination(runtime, paths, relative)
+    target.mkdir()
+    fsync_directory(target.parent)
+    return {"path": relative, "type": "directory"}
+
+
 def _presentation_path(runtime: Any) -> Path:
     database = getattr(runtime, "database", None)
     if database is None:
@@ -544,6 +620,21 @@ def save_session_alias(runtime: Any, session_id: str, title: str) -> dict[str, A
 
 def save_session_archived(runtime: Any, session_id: str, archived: bool) -> dict[str, Any]:
     return _save_presentation_record(runtime, session_id, archived=archived)
+
+
+def forget_session_presentation(runtime: Any, session_ids: Iterable[str]) -> None:
+    """Remove the names and archive marks of deleted conversations."""
+    path, document, digest = _read_presentation(runtime)
+    prefix = hashlib.sha256(str(runtime_workspace(runtime)).encode()).hexdigest() + ":"
+    keys = [prefix + session_id for session_id in session_ids]
+    if not any(key in document["records"] for key in keys):
+        return
+    for key in keys:
+        document["records"].pop(key, None)
+    encoded = json.dumps(
+        document, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ).encode()
+    atomic_write(WorkspacePaths(path.parent), path, encoded, digest)
 
 
 def _save_presentation_record(

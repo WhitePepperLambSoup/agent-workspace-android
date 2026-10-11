@@ -55,6 +55,8 @@ class TermuxDaemonService : Service() {
             }
         }
         @Volatile private var currentEngineJob: Job? = null
+        /** The sources this process's Python interpreter imported (it cannot unload them). */
+        @Volatile private var loadedCodeVersion: String? = null
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
@@ -171,6 +173,15 @@ class TermuxDaemonService : Service() {
                         ?: activeProviderConfiguration
                         ?: MobileProviderSettings.load(this@TermuxDaemonService).toJson()
                     LocalModelBridge.configureRuntime(configuration)
+                    // After an update this process can start before the app has unpacked the new
+                    // sources (recovery, a schedule or a widget); unpack them before Python imports.
+                    TermuxBootstrap.ensureInstalled(this@TermuxDaemonService)
+                    val codeVersion = TermuxBootstrap.installedVersion(this@TermuxDaemonService)
+                    if (Python.isStarted() && loadedCodeVersion != null && loadedCodeVersion != codeVersion) {
+                        // Restarting in this interpreter would keep running the previous sources.
+                        replaceEngineProcess("sources were updated while the engine ran; engine process replaced")
+                    }
+                    if (loadedCodeVersion == null) loadedCodeVersion = codeVersion
                     if (!Python.isStarted()) {
                         // The first start after an install or update unpacks the Python runtime and can take a while.
                         EngineStartupLog.append(this@TermuxDaemonService, "service: starting the Python runtime")
@@ -257,17 +268,25 @@ class TermuxDaemonService : Service() {
      * killed individually, so end this whole :engine process; the sticky service and the app's start-up
      * path bring up a clean engine in a new process.
      */
-    private fun replaceStalledEngineProcess(): Nothing {
-        android.util.Log.e("AgentEmbedded", "The previous embedded engine did not stop; replacing the engine process")
+    private fun replaceStalledEngineProcess(): Nothing = replaceEngineProcess(
+        "previous engine did not stop within 10 s; engine process replaced",
+        "The engine did not stop in time and was restarted",
+    )
+
+    private fun replaceEngineProcess(
+        reason: String,
+        stateReason: String = "The engine restarted with the updated app",
+    ): Nothing {
+        android.util.Log.e("AgentEmbedded", "Replacing the engine process: $reason")
         runCatching {
             File(filesDir, "agent-data/logs").mkdirs()
             File(filesDir, "agent-data/logs/engine-restarts.log")
-                .appendText("${java.time.Instant.now()} previous engine did not stop within 10 s; engine process replaced\n")
+                .appendText("${java.time.Instant.now()} $reason\n")
         }
         File(filesDir, "serve.token").delete()
-        runCatching { lifecycleState.mark("interrupted", "The engine did not stop in time and was restarted") }
+        runCatching { lifecycleState.mark("interrupted", stateReason) }
         android.os.Process.killProcess(android.os.Process.myPid())
-        throw IllegalStateException("The previous embedded engine did not stop")
+        throw IllegalStateException(reason)
     }
 
     private fun stopPython() {

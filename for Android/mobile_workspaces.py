@@ -13,7 +13,7 @@ import json
 import os
 import threading
 from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -342,6 +342,8 @@ class MobileWorkspaceController:
         self._controllers: dict[str, Any] = {}
         self._owned_runtimes: dict[str, Any] = {}
         self._starts: set[str] = set()
+        self._releasing: set[asyncio.Task[None]] = set()
+        self._deferred_closes: dict[int, tuple[asyncio.TimerHandle, list[Any]]] = {}
         self._lock = asyncio.Lock()
         self._started = False
         self._closing = False
@@ -460,6 +462,52 @@ class MobileWorkspaceController:
                         await close()
                 raise
             return controller
+
+    async def release_session(self, session_id: str) -> list[Any]:
+        """Let go of what was loaded for a conversation that is being deleted.
+
+        Returns the close calls for close_released: nothing reaches the conversation's runtime
+        once it is out of the tables, so it can close after the deletion has answered.
+        """
+        async with self._lock:
+            controller = self._controllers.pop(session_id, None)
+            runtime = self._owned_runtimes.pop(session_id, None)
+            self._starts.discard(session_id)
+            controller_shared = controller is self.base_controller or any(
+                other is controller for other in self._controllers.values()
+            )
+            runtime_shared = any(other is runtime for other in self._owned_runtimes.values())
+        return [
+            owned.aclose
+            for owned, shared in ((controller, controller_shared), (runtime, runtime_shared))
+            if owned is not None and not shared and callable(getattr(owned, "aclose", None))
+        ]
+
+    def close_released(self, closers: list[Any], *, delay: float = 0.5) -> None:
+        """Close what release_session let go of, a moment later.
+
+        On a phone, closing a conversation's runtime held the event loop for 5 s while it
+        waited for its worker threads; started at once it delayed the reply to the deletion.
+        """
+        if not closers:
+            return
+        loop = asyncio.get_running_loop()
+
+        def start() -> None:
+            self._deferred_closes.pop(id(closers), None)
+            closing = loop.create_task(self._close_released(closers))
+            self._releasing.add(closing)
+            closing.add_done_callback(self._releasing.discard)
+
+        self._deferred_closes[id(closers)] = (loop.call_later(delay, start), closers)
+
+    @staticmethod
+    async def _close_released(closers: list[Any]) -> None:
+        for close in closers:
+            with suppress(Exception):  # the conversation is going away either way
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
 
     async def discard_if_empty(self, session_id: str) -> bool:
         """Delete a conversation that has no stored events and no runtime loaded for it."""
@@ -755,6 +803,12 @@ class MobileWorkspaceController:
 
     async def aclose(self) -> None:
         self._closing = True
+        for handle, closers in tuple(self._deferred_closes.values()):
+            handle.cancel()
+            await self._close_released(closers)
+        self._deferred_closes.clear()
+        if self._releasing:
+            await asyncio.gather(*tuple(self._releasing), return_exceptions=True)
         errors = []
         for controller in tuple(dict.fromkeys(self._controllers.values())):
             if controller is self.base_controller:

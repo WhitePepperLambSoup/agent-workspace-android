@@ -125,6 +125,8 @@ class ApplicationService:
         reasoning_effort: str | None = None,
         include_instructions: bool = True,
         include_skills: bool = True,
+        prefix_stable: bool = False,
+        context_notes: tuple[str, ...] = (),
     ) -> RunResult:
         task = self._begin_run()
         try:
@@ -151,6 +153,8 @@ class ApplicationService:
                     summarize_history=summarize_history,
                     exclude_image_digests=exclude_image_digests,
                     reasoning_effort=reasoning_effort,
+                    prefix_stable=prefix_stable,
+                    context_notes=context_notes,
                 )
         finally:
             self._active_runs.discard(task)
@@ -173,6 +177,7 @@ class ApplicationService:
         summarize_history: bool = False,
         include_instructions: bool = True,
         include_skills: bool = True,
+        prefix_stable: bool = False,
     ) -> RunResult:
         task = self._begin_run()
         try:
@@ -200,6 +205,7 @@ class ApplicationService:
                     exclude_image_digests=exclude_image_digests,
                     reasoning_effort=reasoning_effort,
                     summarize_history=summarize_history,
+                    prefix_stable=prefix_stable,
                 )
         finally:
             self._active_runs.discard(task)

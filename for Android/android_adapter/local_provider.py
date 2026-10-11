@@ -29,6 +29,7 @@ from mobile_trained_model import LOCAL_MODEL_CATALOG
 
 from agent_workspace.config import ProviderConfig, ProviderProtocol
 from agent_workspace.core.models import (
+    ContentTrust,
     DeltaKind,
     ProviderDelta,
     ProviderRequest,
@@ -181,10 +182,14 @@ _COMPACT_TOOLS: dict[str, tuple[str, frozenset[str]]] = {
     "knowledge_search": (
         "Search the user's knowledge base (their own documents) by key words; returns passages "
         "with document and page.",
-        frozenset({"limit"}),
+        frozenset({"limit", "knowledge_bases"}),
     ),
     "knowledge_add": (
         "Add a workspace document to the user's knowledge base for later searches.",
+        frozenset(),
+    ),
+    "knowledge_use": (
+        "Choose which knowledge bases this conversation uses: every name to use; [] for none.",
         frozenset(),
     ),
     "transcribe_audio": (
@@ -760,6 +765,102 @@ def _just_succeeded(name: str, arguments: dict[str, Any], request: ProviderReque
     return False
 
 
+_TOOL_DATA_MARKERS = ("[UNTRUSTED TOOL DATA", "[END UNTRUSTED TOOL DATA]")
+_COPY_REQUEST = re.compile(
+    r"复制|拷贝|备份|原样|完整原文|逐字|\bcop(?:y|ies)\b|\bduplicate\b|\bbackup\b|\bverbatim\b|"
+    r"every character",
+    re.IGNORECASE,
+)
+
+
+def _tool_data(content: str) -> Any:
+    """A tool result's JSON, with or without the untrusted-data wrapper."""
+    text = content
+    if text.startswith(_TOOL_DATA_MARKERS[0]):
+        text = text.split("\n", 1)[-1].rsplit(_TOOL_DATA_MARKERS[1], 1)[0]
+    try:
+        return json.loads(text)
+    except ValueError:
+        return None
+
+
+def _is_read_result(value: Any) -> bool:
+    return isinstance(value, dict) and {"content", "path", "sha256"} <= set(value)
+
+
+def _turn_reads(request: ProviderRequest) -> tuple[str, list[dict[str, Any]]]:
+    """The user's latest request and the whole files read since it."""
+    messages = request.messages
+    start, text = 0, ""
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if message.role is Role.USER and message.trust is ContentTrust.TRUSTED:
+            start, text = index, message.content if isinstance(message.content, str) else ""
+            break
+    names: dict[str, str] = {}
+    reads = []
+    for message in messages[start:]:
+        names.update((call.id, call.name) for call in message.tool_calls)
+        if message.role is not Role.TOOL or names.get(message.tool_call_id or "") != "read_file":
+            continue
+        result = _tool_data(message.content) if isinstance(message.content, str) else None
+        if (
+            _is_read_result(result)
+            and isinstance(result["content"], str)
+            and not result.get("truncated")
+            and not result.get("offset")
+        ):
+            reads.append(result)
+    return text, reads
+
+
+def _content_problem(
+    name: str, arguments: dict[str, Any], request: ProviderRequest, allowed: Mapping[str, Any]
+) -> str | None:
+    """Why a write would save the wrong bytes, for a retry before anything is written.
+
+    A 2B model asked to copy a file retyped it and lost its tabs and line endings, and after a
+    copy_file conflict it saved a whole read_file result, wrapper lines and all, as the file.
+    """
+    key = {"write_file": "content", "apply_patch": "new_text"}.get(name)
+    content = arguments.get(key) if key else None
+    if not isinstance(content, str):
+        return None
+    copy_hint = (
+        "; to copy a file exactly, call copy_file with source and path (for an existing "
+        "destination add expected_sha256, the sha256 it was read with)"
+        if "copy_file" in allowed
+        else ""
+    )
+    if any(marker in content for marker in _TOOL_DATA_MARKERS) or (
+        content.lstrip().startswith("{") and _is_read_result(_tool_data(content.strip()))
+    ):
+        return (
+            "The text to save is a pasted tool result (its [UNTRUSTED TOOL DATA] lines or "
+            "read_file JSON), not the file's own text. Save only the text the file should "
+            f"contain{copy_hint}"
+        )
+    request_text, reads = _turn_reads(request)
+    target = arguments.get("path")
+    if name != "write_file" or "copy_file" not in allowed or not _COPY_REQUEST.search(request_text):
+        return None
+    squashed = "".join(content.split())
+    for read in reads:
+        source = read["path"]
+        if source == target or read["content"] == content or not squashed:
+            continue
+        if "".join(read["content"].split()) == squashed:
+            existing = next(
+                (item["sha256"] for item in reads if item["path"] == target), None
+            )
+            replace = f' and expected_sha256 "{existing}"' if existing else ""
+            return (
+                f"This retypes {source} but changes its spaces, tabs or line endings. To copy it "
+                f'exactly, call copy_file with source "{source}" and path "{target}"{replace}'
+            )
+    return None
+
+
 def _workspace_relative(arguments: dict[str, Any], root: Path | None) -> dict[str, Any]:
     """Map "/todo.md" or "/workspace/todo.md" to "todo.md".
 
@@ -880,6 +981,9 @@ def parse_qwen_output(
                 qwen35,
                 advertised,
             )
+        problem = _content_problem(name, arguments, request, allowed)
+        if problem is not None:
+            raise _call_error(problem, raw, allowed, qwen35, advertised)
         digest = hashlib.sha256((request_id + str(index) + _json(call)).encode()).hexdigest()[:24]
         calls.append(ToolCall("local_" + digest, name, arguments))
     deltas: list[ProviderDelta] = []

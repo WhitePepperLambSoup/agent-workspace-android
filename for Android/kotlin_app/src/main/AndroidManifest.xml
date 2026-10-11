@@ -171,6 +171,13 @@
             android:taskAffinity="com.agentworkspace.mobile.screenask"
             android:excludeFromRecents="true"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation" />
+        <activity
+            android:name=".entry.VoiceNoteActivity"
+            android:exported="false"
+            android:theme="@style/Theme.AgentWorkspace.ScreenAsk"
+            android:taskAffinity="com.agentworkspace.mobile.voicenote"
+            android:excludeFromRecents="true"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation" />
         <service
             android:name=".entry.ScreenCaptureService"
             android:exported="false"

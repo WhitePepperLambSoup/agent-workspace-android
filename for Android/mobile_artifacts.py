@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import os
 import stat
+from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
@@ -431,6 +432,19 @@ def validated_partial_artifacts(baseline, checkpoint) -> list[dict[str, Any]]:
 
 async def write_workspace_file_coordinated(runtime: Any, payload: Any) -> dict[str, Any]:
     """Serialize editor writes with task output attribution for this workspace."""
+    return await change_workspace_coordinated(
+        runtime, lambda: write_workspace_file(runtime, payload), lambda document: [document["path"]]
+    )
+
+
+async def change_workspace_coordinated(
+    runtime: Any,
+    change: Callable[[], dict[str, Any]],
+    touched: Callable[[dict[str, Any]], list[str]],
+) -> dict[str, Any]:
+    """Run a change the user makes on the Files page (a save, deletion, move or new folder)
+    without crediting it to a running task: the paths it touched, and everything under them,
+    leave the task's output receipts."""
     workspace = runtime_workspace(runtime)
     loop = asyncio.get_running_loop()
     coordinators = _COORDINATORS.setdefault(loop, WeakValueDictionary())
@@ -456,7 +470,8 @@ async def write_workspace_file_coordinated(runtime: Any, payload: Any) -> dict[s
                 except Exception:
                     checkpoint = {"artifacts": [], "artifacts_error": "Output inspection failed."}
                 pending[scope] = checkpoint
-        document = await asyncio.to_thread(write_workspace_file, runtime, payload)
+        document = await asyncio.to_thread(change)
+        changed = touched(document)
         for scope in tuple(coordinator.scopes.values()):
             checkpoint = pending.get(scope)
             if checkpoint is not None:
@@ -469,8 +484,13 @@ async def write_workspace_file_coordinated(runtime: Any, payload: Any) -> dict[s
                 if checkpoint.get("artifacts_error") or checkpoint.get("artifacts_truncated"):
                     scope.error = "Some outputs could not be attributed before an editor save."
             scope.overlapped = True
-            scope.files.pop(document["path"], None)
-            scope.version_files.pop(document["path"], None)
+            for records in (scope.files, scope.version_files):
+                for key in [
+                    key
+                    for key in records
+                    if any(key == path or key.startswith(path + "/") for path in changed)
+                ]:
+                    records.pop(key, None)
         return document
 
     async with coordinator.lock:

@@ -22,11 +22,10 @@ import kotlinx.coroutines.CancellationException
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.time.Instant
 
 /** Native metadata mirrors due times; prompts and dispatch checkpoints stay in Python. */
 class MobileScheduleCoordinator @JvmOverloads constructor(private val context: Context,
-    storageFile: File = File(context.filesDir, "mobile-native-schedules.json")) {
+    storageFile: File = File(context.filesDir, STORAGE_FILE)) {
     private val storage = CrossProcessJsonFile(storageFile)
     private val alarms = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
 
@@ -40,7 +39,7 @@ class MobileScheduleCoordinator @JvmOverloads constructor(private val context: C
             val id = item.getString("schedule_id")
             require(id.isNotBlank() && id.length <= 256 && ids.add(id)) { "Invalid schedule ID" }
             val due = item.getString("next_due_at")
-            Instant.parse(due)
+            requireNotNull(TaskNotificationSnapshot.isoMillis(due)) { "Invalid schedule time" }
             val rawRepeat = item.opt("repeat_seconds")
             val repeat = if (rawRepeat == null || rawRepeat == JSONObject.NULL) null else {
                 require(rawRepeat is Number) { "Invalid schedule repeat interval" }
@@ -81,6 +80,7 @@ class MobileScheduleCoordinator @JvmOverloads constructor(private val context: C
             TaskNotificationPublisher(context).cancelSchedule(it.getString("schedule_id"))
         }
         restoreAlarms()
+        AgentWidgets.schedulesChanged(context)
     }
 
     fun statusJson(): String = storage.read().let {
@@ -92,7 +92,7 @@ class MobileScheduleCoordinator @JvmOverloads constructor(private val context: C
         val item = records(storage.read().optJSONArray("schedules") ?: JSONArray())
             .firstOrNull { it.optString("schedule_id") == scheduleId } ?: return null
         if (!item.optBoolean("enabled")) return null
-        val due = runCatching { Instant.parse(item.getString("next_due_at")).toEpochMilli() }.getOrNull() ?: return null
+        val due = TaskNotificationSnapshot.isoMillis(item.optString("next_due_at")) ?: return null
         val alerted = item.optString("alerted_due_at") == item.optString("next_due_at")
         if (alerted && item.optLong("repeat_seconds", 0) <= 0) return null
         return item.takeIf { due <= nowMillis }
@@ -122,7 +122,7 @@ class MobileScheduleCoordinator @JvmOverloads constructor(private val context: C
             val id = item.optString("schedule_id")
             cancelAlarm(id)
             if (manual || !item.optBoolean("enabled")) return@forEach
-            var due = runCatching { Instant.parse(item.getString("next_due_at")).toEpochMilli() }.getOrNull() ?: return@forEach
+            var due = TaskNotificationSnapshot.isoMillis(item.optString("next_due_at")) ?: return@forEach
             if (item.optString("alerted_due_at") == item.optString("next_due_at")) {
                 val repeatMillis = item.optLong("repeat_seconds", 0) * 1000L
                 if (repeatMillis <= 0) return@forEach
@@ -165,6 +165,7 @@ class MobileScheduleCoordinator @JvmOverloads constructor(private val context: C
     private fun records(array: JSONArray): List<JSONObject> = (0 until array.length()).mapNotNull(array::optJSONObject)
 
     companion object {
+        const val STORAGE_FILE = "mobile-native-schedules.json"
         const val ACTION_WAKE = "com.agentworkspace.mobile.SCHEDULE_WAKE"
         const val EXTRA_SCHEDULE_ID = "schedule_id"
         const val CHANNEL_ID = "agent_scheduled_tasks"

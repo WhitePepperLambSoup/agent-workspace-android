@@ -262,6 +262,7 @@ class FloatingBallService : Service() {
         })
         item("圈选提问", "Circle to ask") { askAboutScreen() }
         item("语音提问", "Ask by voice") { open("voice") }
+        item("录音速记", "Voice note") { runCatching { startActivity(QuickEntry.voiceNoteActivity(this)) } }
         item("新对话", "New chat") { open("text") }
         item("隐藏悬浮球", "Hide the bubble") {
             setEnabled(this, false)

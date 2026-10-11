@@ -38,6 +38,12 @@ DEFAULT_PRICING: dict[str, ModelPricing] = {
     "gemini-2.0-flash": ModelPricing(0.1, 0.4, cached_usd_per_million=0.025),
     "deepseek-chat": ModelPricing(0.27, 1.1, cached_usd_per_million=0.07),
     "deepseek-reasoner": ModelPricing(0.55, 2.19),
+    # DeepSeek V4.1 peak-hour list prices (off-peak hours cost half), October 2026:
+    # https://api-docs.deepseek.com/quick_start/pricing
+    "deepseek-flash": ModelPricing(0.30, 1.20, cached_usd_per_million=0.006),
+    "deepseek-v4-flash": ModelPricing(0.30, 1.20, cached_usd_per_million=0.006),
+    "deepseek-v4.1-flash": ModelPricing(0.30, 1.20, cached_usd_per_million=0.006),
+    "deepseek-v4-pro": ModelPricing(1.32, 3.96, cached_usd_per_million=0.044),
     "qwen2.5-coder": ModelPricing(0.0, 0.0),
 }
 

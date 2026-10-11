@@ -1440,6 +1440,136 @@ class SQLiteEventStore:
                     connection.rollback()
                 raise
 
+    # Rows that belong to a single session, children before the tables they reference.
+    _SESSION_OWNED_TABLES = (
+        "research_citations",
+        "research_sources",
+        "sandbox_change_states",
+        "sandbox_change_artifacts",
+        "background_jobs",
+        "queued_turns",
+        "file_checkpoints",
+        "todos",
+        "todo_id_owners",
+        "search_documents",
+        "tool_attempts",
+    )
+    # Shared state built from a session's events; such sessions are not deleted.
+    _SESSION_SHARED_REFERENCES = (
+        ("memory_id_owners", "source_session_id"),
+        ("memories", "updated_by_session_id"),
+        ("agent_runs", "session_id"),
+        ("attention_items", "session_id"),
+        ("review_snapshots", "session_id"),
+    )
+
+    def delete_sessions(self, session_ids: Sequence[str]) -> int:
+        """Erase conversations and everything stored for them; returns how many were deleted.
+
+        Events are otherwise immutable. This is the one deliberate exception, for a user who
+        deletes a conversation: its events go together with every projection of them in one
+        transaction, which is checked the way a restored database is before it is committed, so
+        the store stays valid or nothing changes. Conversations whose events also built shared
+        state (workspace memories, agent runs, reviews) are refused with a ValueError.
+        """
+        ids = list(dict.fromkeys(session_ids))
+        if not ids:
+            return 0
+        with self._lock:
+            connection = self._get_connection()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                existing = [
+                    cast(str, row[0])
+                    for row in connection.execute(
+                        f"SELECT id FROM sessions WHERE id IN ({', '.join('?' for _ in ids)})",
+                        ids,
+                    )
+                ]
+                if not existing:
+                    connection.rollback()
+                    return 0
+                marks = ", ".join("?" for _ in existing)
+                tables = {
+                    cast(str, row[0])
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_schema WHERE type = 'table'"
+                    )
+                }
+                for table, column in self._SESSION_SHARED_REFERENCES:
+                    if (
+                        table in tables
+                        and connection.execute(
+                            f"SELECT 1 FROM {table} WHERE {column} IN ({marks}) LIMIT 1",
+                            existing,
+                        ).fetchone()
+                        is not None
+                    ):
+                        raise ValueError(
+                            f"a conversation to delete owns shared {table.replace('_', ' ')}"
+                        )
+                for table in self._SESSION_OWNED_TABLES:
+                    if table in tables:
+                        connection.execute(
+                            f"DELETE FROM {table} WHERE session_id IN ({marks})", existing
+                        )
+                trigger = connection.execute(
+                    "SELECT sql FROM sqlite_schema WHERE type = 'trigger' "
+                    "AND name = 'events_no_delete'"
+                ).fetchone()
+                if trigger is not None:
+                    connection.execute("DROP TRIGGER events_no_delete")
+                connection.execute(f"DELETE FROM events WHERE session_id IN ({marks})", existing)
+                if trigger is not None:
+                    # The same definition, so the schema still matches its migrations.
+                    connection.execute(cast(str, trigger[0]))
+                connection.execute(f"DELETE FROM sessions WHERE id IN ({marks})", existing)
+                # Artifacts nothing refers to any more: their content goes with the events.
+                if "binary_artifacts" in tables:
+                    connection.execute(
+                        """
+                        DELETE FROM binary_artifacts
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM sandbox_change_artifacts AS r
+                            WHERE r.artifact_sha256 = binary_artifacts.sha256
+                        )
+                          AND NOT EXISTS (
+                              SELECT 1 FROM events AS e
+                              WHERE e.type = 'image.attached'
+                                AND json_extract(e.data_json, '$.sha256') = binary_artifacts.sha256
+                          )
+                        """
+                    )
+                if "text_artifacts" in tables:
+                    connection.execute(
+                        """
+                        DELETE FROM text_artifacts
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM events AS e
+                            WHERE e.type = 'research.source.saved'
+                              AND json_extract(e.data_json, '$.artifact_sha256')
+                                  = text_artifacts.sha256
+                        )
+                        """
+                    )
+                if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                    raise ValueError("deleting the conversations would leave dangling references")
+                schema_version = cast(int, connection.execute("PRAGMA user_version").fetchone()[0])
+                replay_error = SQLiteEventStore.projection_replay_error(connection, schema_version)
+                if replay_error is not None:
+                    raise ValueError(
+                        f"deleting the conversations would leave the store inconsistent: "
+                        f"{replay_error}"
+                    )
+                connection.commit()
+            except BaseException:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise
+        for session_id in existing:
+            self._session_locks.pop(session_id, None)
+        return len(existing)
+
     def append_many(self, events: tuple[Event, ...]) -> list[Event]:
         return self.append_many_with_artifacts(events, ())
 

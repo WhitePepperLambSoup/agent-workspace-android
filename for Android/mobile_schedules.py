@@ -95,7 +95,9 @@ class MobileScheduleManager:
                 "enabled": sum(item["enabled"] is True for item in items),
                 "recovery_window_seconds": int(_RECOVERY_WINDOW.total_seconds()),
                 "max_dispatch_per_wake": 4,
-                "unattended_mode_required": "yolo or full_access",
+                # Scheduled runs approve their own network requests and tool calls; the
+                # always-ask tools wait for the user.
+                "approval_scope": "task",
             },
         }
 
@@ -144,6 +146,16 @@ class MobileScheduleManager:
             self._get(schedule_id)
             del self._items[schedule_id]
             self._save()
+
+    def forget_sessions(self, session_ids: set[str]) -> int:
+        """Remove the schedules of deleted conversations."""
+        with self._lock:
+            doomed = [key for key, item in self._items.items() if item["session_id"] in session_ids]
+            for key in doomed:
+                del self._items[key]
+            if doomed:
+                self._save()
+            return len(doomed)
 
     async def dispatch_due(self, *, now: datetime | None = None) -> list[dict[str, object]]:
         current = now or datetime.now(UTC)
@@ -208,7 +220,10 @@ class MobileScheduleManager:
                     schedule_id = item["schedule_id"]
                     request = parse_mobile_task_request(item)
                 try:
-                    task = await self.controller.submit(request)
+                    # Creating the schedule is the user's approval for its network requests
+                    # and tool calls; deleting files, memory changes and operating other apps
+                    # still wait for a decision (with a notification).
+                    task = await self.controller.submit(request, preauthorized=True)
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
@@ -244,9 +259,10 @@ class MobileScheduleManager:
             getattr(self.controller.runtime.service, "_execution_autonomy", None)
             or session.autonomy
         )
-        allowed = {Autonomy.YOLO, Autonomy.FULL_ACCESS}
+        # Workspace mode runs with the "task" approval scope granted in advance (see dispatch).
+        allowed = {Autonomy.WORKSPACE, Autonomy.YOLO, Autonomy.FULL_ACCESS}
         if effective not in allowed or session.autonomy not in allowed:
-            raise ValueError("Unattended schedules require yolo or full_access execution mode.")
+            raise ValueError("this execution mode cannot run scheduled tasks")
         workspace = self.controller.tasks.workspace
         if workspace is not None and Path(session.workspace).resolve() != workspace:
             raise ValueError("schedule session is outside the mobile workspace")

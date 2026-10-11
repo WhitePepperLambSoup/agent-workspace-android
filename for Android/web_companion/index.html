@@ -57,9 +57,11 @@
           <div id="attachMenu" class="attach-menu" role="menu" hidden>
             <button id="btnAttachCamera" class="menu-row" type="button" role="menuitem"><span data-icon="camera"></span><span>拍照</span></button>
             <button id="btnAttachFiles" class="menu-row" type="button" role="menuitem"><span data-icon="paperclip"></span><span>选择文件</span></button>
+            <button id="btnAttachVoiceNote" class="menu-row" type="button" role="menuitem" hidden><span data-icon="mic"></span><span>录音速记</span></button>
           </div>
           <button id="modelBar" class="composer-chip" type="button" aria-label="模型与思考" title="模型与思考"><span data-icon="cpu"></span><span id="modelSummary">正在读取模型...</span></button>
           <button id="btnModeChip" class="composer-chip mode-chip" type="button" aria-label="执行权限" title="执行权限"><span data-icon="shield"></span><span id="executionSummary"></span></button>
+          <button id="btnKnowledgeChip" class="composer-chip knowledge-chip" type="button" aria-label="本对话使用的知识库" title="本对话使用的知识库" hidden><span data-icon="book-open"></span><span id="knowledgeChipLabel"></span><span id="knowledgeChipBadge" hidden></span></button>
           <span class="composer-spacer"></span>
           <button id="btnVoiceInput" class="icon-button" type="button" title="语音输入" aria-label="语音输入" hidden><span data-icon="mic"></span></button>
           <button id="btnSend" class="send-button" type="button" title="发送" aria-label="发送" disabled><span data-icon="arrow-up"></span></button>
@@ -288,12 +290,24 @@
         <div id="memoryList" class="management-list"></div>
         <div class="page-toolbar"><button id="btnClearMemory" class="button-secondary" type="button"><span data-icon="trash-2"></span>清空全部记忆</button></div>
       </div>
+      <div id="settingsConversationKnowledge" class="settings-page" hidden>
+        <p class="setting-hint">选择这个对话要查阅的知识库。也可以直接在对话里说，比如“这个对话只用学习知识库”。</p>
+        <div id="conversationKnowledgeList"></div>
+        <p id="conversationKnowledgeStatus" class="page-status" role="status"></p>
+        <div class="page-toolbar"><button id="btnConversationKnowledgeDefault" class="button-secondary" type="button"><span data-icon="rotate-ccw"></span>恢复默认</button><button id="btnConversationKnowledgeManage" class="text-action" type="button">管理知识库</button></div>
+      </div>
       <div id="settingsKnowledge" class="settings-page" hidden>
         <p class="setting-hint">把说明书、合同、笔记、电子书等文档加进来，聊天时 AI 会从中找相关段落回答，并注明出自哪份文档、第几页。文档只保存在这台手机上，按关键词检索，不用下载模型，也不消耗额度。</p>
         <label class="toggle-row" for="knowledgeEnabledToggle"><span>在对话中使用知识库</span><input id="knowledgeEnabledToggle" type="checkbox"></label>
         <label class="toggle-row" for="knowledgeAutoToggle"><span>提问时自动附上相关段落</span><input id="knowledgeAutoToggle" type="checkbox"></label>
         <p class="setting-hint">开启后，每次提问会先在知识库里找，找到相关段落就随问题一起发给模型；关闭后只在 AI 主动搜索时使用。</p>
-        <div class="page-toolbar"><button id="btnKnowledgeAdd" class="button-primary" type="button"><span data-icon="upload"></span>添加文档</button><span id="knowledgeCounter"></span></div>
+        <section id="knowledgeBasesSection" class="management-section" aria-labelledby="knowledgeBasesTitle">
+          <strong id="knowledgeBasesTitle">分类知识库</strong>
+          <p class="setting-hint">把文档分到不同的知识库，比如“工作”“学习”。每个对话可以选用其中几个：点输入框旁的“知识库”按钮，或在对话里直接说“这个对话只用学习知识库”。</p>
+          <div id="knowledgeBaseList" class="management-list"></div>
+          <div class="page-toolbar"><button id="btnKnowledgeBaseCreate" class="button-secondary" type="button"><span data-icon="plus"></span>新建知识库</button></div>
+        </section>
+        <div class="page-toolbar knowledge-toolbar"><button id="btnKnowledgeAdd" class="button-primary" type="button"><span data-icon="upload"></span><span id="knowledgeAddLabel">添加文档</span></button><select id="knowledgeFilter" aria-label="查看哪个知识库" hidden></select><span id="knowledgeCounter"></span></div>
         <input id="knowledgeFileInput" type="file" multiple hidden>
         <p id="knowledgeStatus" class="page-status" role="status"></p>
         <div id="knowledgeList" class="management-list"></div>
@@ -359,7 +373,7 @@
         </form>
       </div>
       <div id="settingsFiles" class="settings-page" hidden>
-        <div class="page-toolbar"><button id="btnFileParent" class="icon-button" type="button" title="上级目录" aria-label="上级目录" disabled><span data-icon="chevron-left"></span></button><span id="workspaceFilePath">工作区</span><button id="btnFilesRefresh" class="icon-button" type="button" title="刷新文件" aria-label="刷新文件"><span data-icon="refresh-cw"></span></button></div>
+        <div class="page-toolbar"><button id="btnFileParent" class="icon-button" type="button" title="上级目录" aria-label="上级目录" disabled><span data-icon="chevron-left"></span></button><span id="workspaceFilePath">工作区</span><button id="btnNewFolder" class="icon-button" type="button" title="新建文件夹" aria-label="新建文件夹"><span data-icon="plus"></span></button><button id="btnFilesRefresh" class="icon-button" type="button" title="刷新文件" aria-label="刷新文件"><span data-icon="refresh-cw"></span></button></div>
         <p id="workspaceFilesStatus" class="page-status" role="status"></p>
         <div id="workspaceFilesList" class="workspace-files-list"></div>
         <div id="fileEditorPanel" hidden>
@@ -385,6 +399,8 @@
         <button id="btnRenameSession" class="button-primary apply-button" type="button" disabled><span data-icon="check"></span>保存名称</button>
         <p id="sessionRenameStatus" class="page-status" role="status"></p>
         <button id="btnArchiveSession" class="button-secondary apply-button" type="button"><span data-icon="archive"></span>归档会话</button>
+        <button id="btnDeleteSession" class="button-secondary apply-button danger-button" type="button"><span data-icon="trash-2"></span>删除会话</button>
+        <p class="setting-hint">归档只是从列表隐藏，可随时恢复；删除会彻底清除这段对话的聊天记录、任务和图片，无法恢复。在工作区里生成的文件不受影响。</p>
       </div>
       <div id="settingsNotifications" class="settings-page" hidden>
         <label class="toggle-row" for="taskNotificationsToggle"><span>任务完成通知</span><input id="taskNotificationsToggle" type="checkbox" disabled></label>
