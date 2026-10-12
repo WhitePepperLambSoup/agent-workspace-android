@@ -44,7 +44,9 @@ object AndroidSystemBridge {
             .put("local_connection", service != null)
             .put("paused", state.optBoolean("paused"))
             .put("takeover_requested", state.optBoolean("takeover_requested"))
-            .put("screenshot_supported", Build.VERSION.SDK_INT >= 30)
+            .put("screenshot_supported", Build.VERSION.SDK_INT >= 30 || LiveScreen.active)
+            // Only meaningful in the :engine process, where the live screen runs.
+            .put("live_screen_active", LiveScreen.active)
             .put("api_level", Build.VERSION.SDK_INT)
             .put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
             .put("app_version", context?.let {
@@ -102,6 +104,16 @@ object AndroidSystemBridge {
         true
     }.getOrDefault(false)
 
+    /** Asks for the screen capture consent; the live screen then runs until turned off or idle. */
+    @JvmStatic
+    fun startLiveScreen(context: Context): Boolean = runCatching {
+        context.startActivity(Intent(context, LiveScreenConsentActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        true
+    }.getOrDefault(false)
+
+    @JvmStatic
+    fun stopLiveScreen(context: Context) = LiveScreenService.stop(context)
+
     @JvmStatic
     fun execute(requestJson: String): String {
         val request = try {
@@ -128,7 +140,7 @@ object AndroidSystemBridge {
             "swipe" -> setOf("snapshot_version", "x", "y", "x2", "y2", "expect", "timeout_ms")
             "ref" -> setOf("snapshot_version", "ref", "expect", "timeout_ms")
             "type_text" -> setOf("snapshot_version", "ref", "text", "expect", "timeout_ms")
-            "launch_app" -> setOf("snapshot_version", "package_name", "expect", "timeout_ms")
+            "launch_app" -> setOf("snapshot_version", "package_name", "app_name", "expect", "timeout_ms")
             "back", "home" -> setOf("snapshot_version", "expect", "timeout_ms")
             else -> error("Unsupported action")
         }
@@ -149,8 +161,12 @@ object AndroidSystemBridge {
             require(string(request, "ref", 160).matches(Regex("n[0-9]{1,3}")))
         }
         if (action == "type_text") string(request, "text", 4096)
-        if (action == "launch_app") require(string(request, "package_name", 255)
-            .matches(Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)+")))
+        if (action == "launch_app") {
+            require(request.has("package_name") || request.has("app_name"))
+            if (request.has("package_name")) require(string(request, "package_name", 255)
+                .matches(Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)+")))
+            if (request.has("app_name")) string(request, "app_name", 100)
+        }
         if (action == "verify") require(request.has("expect"))
         if (request.has("expect")) {
             val expectation = request.getJSONObject("expect")

@@ -63,6 +63,21 @@
   const acknowledgedShares = new Set();
   let shareInbox = { items: [], batches: [] };
   let refreshingImports = false;
+  // Files picked or photographed from a conversation go straight into it: the app names the inbox
+  // batch the pick will fill, and each file is added as soon as it has been received. Kept in
+  // storage because the camera can stop this page while it is open.
+  const autoImportsKey = "agent-mobile-auto-imports-v1";
+  let autoImports = (() => {
+    const saved = readStorage(autoImportsKey, []);
+    return Array.isArray(saved) ? saved.filter(entry => typeof entry?.batch === "string" && typeof entry.sessionId === "string"
+      && Number.isFinite(entry.deadline) && Array.isArray(entry.confirmed)) : [];
+  })();
+  const reportedImportErrors = new Set();
+  // The import page's own "add" request, until its files have settled.
+  let importWatch = null;
+  // The conversation chosen on the import page; null follows the open conversation.
+  let shareTargetChoice = null;
+  const thumbnails = new Map(); // attachment path -> object URL; null while loading, false when unavailable
 
   function readStorage(key, fallback) {
     try {
@@ -1295,7 +1310,14 @@
       if (elements.sessionSearchInput.value.trim()) queueSessionSearch();
     }
     if (page === "tasks") void loadTaskCenter();
-    if (page === "attachments") refreshShareInbox();
+    if (page === "attachments") {
+      // Opening the page targets the open conversation again, not the one chosen last time.
+      if (previousPage !== "attachments") {
+        shareTargetChoice = null;
+        if (!importWatch) pageStatus(elements.shareInboxStatus, "");
+      }
+      refreshShareInbox();
+    }
     if (page === "workspaces") { renderWorkspaceNavigation(); refreshWorkspaceAccess(); void loadWorkspaces(); }
     if (page === "files") {
       if (fileEditor?.loaded) renderFileEditor();
@@ -3862,6 +3884,11 @@
       if (receipt.media_type.startsWith("image/") && !["image/png", "image/jpeg", "image/webp", "image/gif"].includes(receipt.media_type)) {
         throw new Error(t("暂不支持 {0}，请转换成 PNG、JPEG、WebP 或 GIF", receipt.media_type));
       }
+      // The engine reads at most 4 MiB per picture (mobile_images.MAX_MOBILE_ATTACHMENT_BYTES);
+      // pictures added through the app are shrunk on the way in.
+      if (receipt.media_type.startsWith("image/") && receipt.size > 4 * 1024 * 1024) {
+        throw new Error(t("图片 {0} 超过 4 MB，请移除后重新添加，应用会自动压缩", item.name || item.path));
+      }
       prepared.push(attachmentReceipt(receipt));
     }
     const images = prepared.filter(item => item.media_type.startsWith("image/"));
@@ -4000,6 +4027,7 @@
   async function sendPrompt(customText = null, attachmentOverride = []) {
     flushQuickEffort();
     if (customText === null && canSteer()) { await steerActiveTask(); return; }
+    if (customText === null && importsInFlight(currentSessionId)) { notice(t("附件还在导入，稍等片刻再发送"), "info"); return; }
     const requestedImports = customText === null ? [...attachments] : [...attachmentOverride];
     const defaultPrompt = requestedImports.every(item => item.media_type?.startsWith("image/") || /\.(png|jpe?g|webp|gif)$/i.test(item.name || "")) ? t("请描述图片内容。") : t("请查看附件内容。");
     const plainText = customText || elements.promptInput.value.trim() || (requestedImports.length ? defaultPrompt : "");
@@ -4165,13 +4193,43 @@
     }
   }
 
+  // Pictures in the message box show a small thumbnail, as other chat apps do. Each one is shrunk
+  // to 96 px once, so a few large photos do not hold full-size bitmaps in the page.
+  async function loadThumbnail(item, workspaceId) {
+    if (thumbnails.has(item.path) || typeof window.createImageBitmap !== "function") return;
+    thumbnails.set(item.path, null);
+    try {
+      const blob = await downloadArtifact({ path: item.path, sha256: item.sha256, workspaceId });
+      const bitmap = await window.createImageBitmap(blob, { resizeHeight: 96, resizeQuality: "medium" });
+      const canvas = document.createElement("canvas");
+      canvas.width = bitmap.width; canvas.height = bitmap.height;
+      canvas.getContext("2d").drawImage(bitmap, 0, 0);
+      bitmap.close?.();
+      const small = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", 0.8));
+      if (!small || disposed) throw new Error("thumbnail");
+      thumbnails.set(item.path, URL.createObjectURL(small));
+      for (const [path, url] of thumbnails) {
+        if (thumbnails.size <= 24) break;
+        if (url) URL.revokeObjectURL(url);
+        thumbnails.delete(path);
+      }
+      renderAttachments();
+    } catch { thumbnails.set(item.path, false); }
+  }
+
   function renderAttachments() {
     elements.attachmentList.replaceChildren();
     for (const item of attachments) {
       const chip = document.createElement("div");
       chip.className = "attachment-chip";
       const label = document.createElement("span");
-      label.textContent = `${item.media_type?.startsWith("image/") ? t("图片 · ") : ""}${item.name}`;
+      const thumbnail = item.media_type?.startsWith("image/") ? thumbnails.get(item.path) : false;
+      if (thumbnail) {
+        const img = document.createElement("img");
+        img.className = "attachment-thumb"; img.src = thumbnail; img.alt = "";
+        chip.classList.add("has-thumb"); chip.append(img);
+      } else if (thumbnail === undefined) void loadThumbnail(item, workspaceOfSession(currentSessionId));
+      label.textContent = `${item.media_type?.startsWith("image/") && !thumbnail ? t("图片 · ") : ""}${item.name}`;
       const remove = document.createElement("button");
       remove.type = "button";
       remove.className = "icon-button attachment-remove";
@@ -4204,6 +4262,35 @@
         saveDraft();
       });
       chip.append(label, remove);
+      elements.attachmentList.appendChild(chip);
+    }
+    // Files still on their way in from the picker, the camera or the import page.
+    for (const item of incomingFor(currentSessionId)) {
+      const chip = document.createElement("div");
+      chip.className = "attachment-chip incoming";
+      chip.dataset.state = item.state === "error" ? "error" : "busy";
+      const label = document.createElement("span");
+      const state = item.state === "error" ? (item.uncertain ? t("等待确认") : t("导入失败"))
+        : item.state === "staging" ? t("接收中") : t("导入中");
+      label.textContent = `${state} · ${item.name || t("附件")}`;
+      if (item.error) label.title = localizeError(item.error);
+      chip.append(label);
+      if (item.state === "error") {
+        const retry = document.createElement("button");
+        retry.type = "button"; retry.className = "icon-button attachment-remove";
+        retry.title = t("重试 {0}", item.name || t("附件")); retry.setAttribute("aria-label", retry.title);
+        retry.innerHTML = icon("refresh-cw");
+        retry.addEventListener("click", () => retryIncoming(item));
+        chip.append(retry);
+      }
+      if (["pending", "error"].includes(item.state) && typeof bridge?.discardShareInbox === "function") {
+        const remove = document.createElement("button");
+        remove.type = "button"; remove.className = "icon-button attachment-remove";
+        remove.title = t("移除 {0}", item.name || t("附件")); remove.setAttribute("aria-label", remove.title);
+        remove.innerHTML = icon("x");
+        remove.addEventListener("click", () => discardIncoming(item));
+        chip.append(remove);
+      }
       elements.attachmentList.appendChild(chip);
     }
   }
@@ -4316,15 +4403,103 @@
 
   function showImportPage() { if (!layerOpen(elements.settingsOverlay)) openMenu(); setSettingsPage("attachments"); }
 
-  function chooseImportFiles() {
+  // From the message box the files go to the open conversation; from the import page, to the
+  // conversation chosen there.
+  function chooseImportFiles(fromPage = false) {
     haptic();
     if (typeof bridge?.pickShareInboxFiles === "function") {
-      showImportPage();
-      try {
-        const result = JSON.parse(bridge.pickShareInboxFiles());
-        if (!result.ok) throw new Error(localizeError(result.error) || t("无法选择文件"));
-      } catch (error) { pageStatus(elements.shareInboxStatus, error.message, true); }
+      pickIntoConversation(() => bridge.pickShareInboxFiles(), t("无法选择文件"),
+        fromPage ? elements.shareTargetSession.value : currentSessionId, fromPage);
     } else elements.filePickerInput.click();
+  }
+
+  function pickIntoConversation(launch, failure, sessionId, fromPage) {
+    try {
+      const result = JSON.parse(launch());
+      if (!result.ok) throw new Error(localizeError(result.error) || failure);
+      if (typeof result.batch_id !== "string" || !sessionId) { showImportPage(); return; } // an app without batch ids
+      autoImports = [...autoImports.filter(entry => entry.deadline > Date.now() || entry.seen),
+        { batch: result.batch_id, sessionId, deadline: Date.now() + 30 * 60000, confirmed: [] }];
+      writeStorage(autoImportsKey, autoImports);
+      if (fromPage) pageStatus(elements.shareInboxStatus, t("选好的文件会自动添加到「{0}」", sessionTitle(sessionId)));
+    } catch (error) {
+      if (fromPage) pageStatus(elements.shareInboxStatus, error.message, true);
+      else notice(error.message);
+    }
+  }
+
+  function sessionTitle(sessionId) {
+    return sessions.find(session => session.id === sessionId)?.title || t("会话");
+  }
+
+  // Inbox files on their way into a conversation: picked for it, or confirmed for it on the import page.
+  function incomingFor(sessionId) {
+    if (!sessionId) return [];
+    const batches = new Set(autoImports.filter(entry => entry.sessionId === sessionId).map(entry => entry.batch));
+    return shareInbox.items.filter(item => item.kind === "file" && !acknowledgedShares.has(item.id)
+      && (item.session_id ? item.session_id === sessionId : batches.has(item.batch_id)));
+  }
+
+  function importsInFlight(sessionId) {
+    return incomingFor(sessionId).some(item => item.state !== "error");
+  }
+
+  // Confirms each picked file for its conversation once it has been received.
+  function importPickedFiles() {
+    if (!autoImports.length || typeof bridge?.confirmShareInbox !== "function" || !sessions.length) return;
+    let changed = false;
+    autoImports = autoImports.filter((entry) => {
+      const items = shareInbox.items.filter(item => item.batch_id === entry.batch && !acknowledgedShares.has(item.id));
+      if (!items.length) {
+        // Nothing (more) to receive: the pick was cancelled or every file was added.
+        const done = entry.seen || Date.now() > entry.deadline;
+        if (done) changed = true;
+        return !done;
+      }
+      if (!entry.seen) { entry.seen = true; changed = true; }
+      // The conversation is gone: its files wait in the inbox for another one.
+      if (!sessions.some(session => session.id === entry.sessionId)) { changed = true; return false; }
+      const ids = items.filter(item => item.state === "pending" && !entry.confirmed.includes(item.id)).map(item => item.id);
+      if (!ids.length) return true;
+      entry.confirmed.push(...ids);
+      changed = true;
+      try {
+        const result = JSON.parse(bridge.confirmShareInbox(JSON.stringify({ request_id: requestId("share"),
+          session_id: entry.sessionId, workspace_id: workspaceOfSession(entry.sessionId), item_ids: ids })));
+        if (!result.ok) throw new Error(localizeError(result.error) || t("无法导入附件"));
+      } catch (error) { notice(t("附件导入失败: {0}", error.message)); }
+      return true;
+    });
+    if (changed) writeStorage(autoImportsKey, autoImports);
+  }
+
+  function retryIncoming(item) {
+    const sessionId = item.session_id || autoImports.find(entry => entry.batch === item.batch_id)?.sessionId;
+    if (!sessionId || typeof bridge?.confirmShareInbox !== "function") return;
+    reportedImportErrors.delete(item.id);
+    try {
+      const result = JSON.parse(bridge.confirmShareInbox(JSON.stringify({ request_id: requestId("share"),
+        session_id: sessionId, workspace_id: item.workspace_id || workspaceOfSession(sessionId), item_ids: [item.id] })));
+      if (!result.ok) throw new Error(localizeError(result.error) || t("无法导入附件"));
+      refreshShareInbox();
+    } catch (error) { notice(error.message); }
+  }
+
+  function discardIncoming(item) {
+    try {
+      const result = JSON.parse(bridge.discardShareInbox(JSON.stringify({ item_ids: [item.id] })));
+      if (!result.ok) throw new Error(localizeError(result.error) || t("无法丢弃附件"));
+      refreshShareInbox();
+    } catch (error) { notice(error.message); }
+  }
+
+  // A failed file is reported once in the conversation it was meant for.
+  function reportImportErrors() {
+    for (const item of incomingFor(currentSessionId)) {
+      if (item.state !== "error" || reportedImportErrors.has(item.id)) continue;
+      reportedImportErrors.add(item.id);
+      notice(t("附件 {0} 导入失败: {1}", item.name || t("附件"), localizeError(item.error) || t("请重试")));
+    }
   }
 
   function syncImportControls() {
@@ -4396,15 +4571,26 @@
     elements.shareTargetControls.hidden = !native;
     elements.shareImportActions.hidden = !native;
     elements.btnRefreshImports.hidden = !native;
-    const selected = elements.shareTargetSession.value || currentSessionId;
+    const selected = shareTargetChoice || currentSessionId;
     elements.shareTargetSession.replaceChildren();
     for (const session of sessions) {
       const option = document.createElement("option"); option.value = session.id;
       const workspace = workspaces.find(value => value.id === session.workspace_id);
-      option.textContent = `${workspace?.name || t("工作区")} · ${session.title || t("会话")}`;
+      option.textContent = `${workspace?.name || t("工作区")} · ${session.title || t("会话")}${session.id === currentSessionId ? t("（当前对话）") : ""}`;
       elements.shareTargetSession.append(option);
     }
     elements.shareTargetSession.value = sessions.some(session => session.id === selected) ? selected : currentSessionId;
+    if (importWatch) {
+      // The page's own request is reported once its files have been added or have failed.
+      const open = shareInbox.items.filter(item => importWatch.ids.includes(item.id) && !acknowledgedShares.has(item.id));
+      if (!open.some(item => item.state !== "error")) {
+        const failed = open.length, added = importWatch.ids.length - failed;
+        pageStatus(elements.shareInboxStatus, failed
+          ? t("{0} 个已添加到「{1}」，{2} 个失败，可以选中后重试", added, sessionTitle(importWatch.sessionId), failed)
+          : t("已添加到「{0}」，回到这个对话就能看到", sessionTitle(importWatch.sessionId)), failed > 0);
+        importWatch = null;
+      }
+    }
     elements.shareInboxList.replaceChildren();
     const stateNames = { staging: t("接收中"), pending: t("等待导入"), uploading: t("导入中"), importing: t("导入中"), ready: t("已导入"), error: t("导入失败"), uncertain: t("等待确认") };
     for (const item of shareInbox.items) {
@@ -4431,11 +4617,13 @@
         if (!snapshot.ok || !Array.isArray(snapshot.items)) throw new Error(localizeError(snapshot.error) || t("无法读取收件箱"));
         shareInbox = { items: snapshot.items, batches: Array.isArray(snapshot.batches) ? snapshot.batches : [] };
         applyReadyShares();
+        importPickedFiles();
         attachQuickShare();
         sendQuickNote();
+        reportImportErrors();
         if (snapshot.capture_error) pageStatus(elements.shareInboxStatus, localizeError(String(snapshot.capture_error)), true);
       }
-      renderShareInbox(); renderImportUploads();
+      renderShareInbox(); renderImportUploads(); renderAttachments(); syncControls();
     } catch (error) { pageStatus(elements.shareInboxStatus, error.message, true); }
     finally { refreshingImports = false; }
   }
@@ -4449,7 +4637,8 @@
       const result = JSON.parse(bridge.confirmShareInbox(JSON.stringify({ request_id: requestId("share"),
         session_id: session.id, workspace_id: workspaceOfSession(session.id), item_ids: ids })));
       if (!result.ok) throw new Error(localizeError(result.error) || t("无法导入附件"));
-      pageStatus(elements.shareInboxStatus, t("正在添加到目标会话...")); refreshShareInbox();
+      importWatch = { ids, sessionId: session.id };
+      pageStatus(elements.shareInboxStatus, t("正在添加到「{0}」...", sessionTitle(session.id))); refreshShareInbox();
     } catch (error) { pageStatus(elements.shareInboxStatus, error.message, true); }
   }
 
@@ -4535,6 +4724,12 @@
     $("btnAttachCamera").focus();
   });
   $("btnAttachFiles").addEventListener("click", () => { closeAttachMenu(); chooseImportFiles(); });
+  $("btnAttachPhotos").hidden = typeof bridge?.pickShareInboxPhotos !== "function";
+  $("btnAttachPhotos").addEventListener("click", () => {
+    closeAttachMenu();
+    haptic();
+    pickIntoConversation(() => bridge.pickShareInboxPhotos(), t("无法选择照片"), currentSessionId, false);
+  });
   // Records until the user is done; the recording comes back as a new conversation with minutes.
   $("btnAttachVoiceNote").hidden = typeof bridge?.startVoiceNote !== "function";
   $("btnAttachVoiceNote").addEventListener("click", () => { closeAttachMenu(); haptic(); bridge.startVoiceNote(); });
@@ -4546,11 +4741,7 @@
   $("btnAttachCamera").addEventListener("click", () => {
     closeAttachMenu();
     haptic();
-    showImportPage();
-    try {
-      const result = JSON.parse(bridge.captureShareInboxPhoto());
-      if (!result.ok) throw new Error(localizeError(result.error) || t("无法打开相机"));
-    } catch (error) { pageStatus(elements.shareInboxStatus, error.message, true); }
+    pickIntoConversation(() => bridge.captureShareInboxPhoto(), t("无法打开相机"), currentSessionId, false);
   });
   document.addEventListener("click", (event) => {
     if (!$("attachMenu").hidden && !event.target.closest("#attachMenu, #btnAttach")) closeAttachMenu();
@@ -4558,11 +4749,11 @@
   elements.filePickerInput.addEventListener("change", (event) => uploadFiles(Array.from(event.target.files || [])));
   elements.btnAttachmentsPage.addEventListener("click", () => setSettingsPage("attachments"));
   elements.btnImportNotice.addEventListener("click", showImportPage);
-  elements.btnPickImportFiles.addEventListener("click", chooseImportFiles);
+  elements.btnPickImportFiles.addEventListener("click", () => chooseImportFiles(true));
   elements.btnRefreshImports.addEventListener("click", refreshShareInbox);
   elements.btnImportShares.addEventListener("click", confirmShares);
   elements.btnDiscardShares.addEventListener("click", discardShares);
-  elements.shareTargetSession.addEventListener("change", syncImportControls);
+  elements.shareTargetSession.addEventListener("change", () => { shareTargetChoice = elements.shareTargetSession.value; syncImportControls(); });
   elements.quickChipsBar.addEventListener("click", (event) => {
     const chip = event.target.closest(".chip");
     if (!chip || chip.disabled) return;
@@ -4585,7 +4776,7 @@
     // Only a conversation the app opened under its default name and that was never renamed.
     const current = sessions.find(item => item.id === currentSessionId);
     if (!current || current.archived === true || current.title !== t("新会话")) return null;
-    if (elements.promptInput.value.trim() || attachments.length || timelineMessages().length) return null;
+    if (elements.promptInput.value.trim() || attachments.length || timelineMessages().length || incomingFor(currentSessionId).length) return null;
     if ([...backgroundTasks.values()].some(task => task.sessionId === currentSessionId && !task.done)) return null;
     return currentSessionId;
   }

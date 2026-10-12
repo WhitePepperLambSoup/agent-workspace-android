@@ -95,6 +95,32 @@ def _prompt_sections(session_id: str | None = None) -> dict[str, str]:
     }
 
 
+def _phone_control_note(app: str | None = None, retry: bool = False) -> str:
+    """How to carry out a request typed into the phone control panel, stored with the message."""
+    where = f" over the app {app}" if app else ""
+    return (
+        f"[Phone control] The user typed this into the phone control window{where}. Do it "
+        "directly on this phone. Look at the screen first (android_observe; android_screenshot "
+        "when the tree is empty or unclear), then use android_action one step at a time and check "
+        "the result after each step. Open apps with launch_app and app_name (the name under the "
+        "icon) instead of guessing a package. If an action returns target_changed or "
+        "stale_snapshot, look again and retry; when controls cannot be read, tap where the "
+        "screenshot shows them (image pixels times pixel_to_screen_x/y). Only the android_* tools "
+        "reach other apps: shell commands such as am, input or monkey cannot. Do not switch to "
+        "Agent Workspace. If automation is paused, stop and tell the user instead of looking for "
+        "another way. Ask before paying, entering passwords, deleting anything or messaging other "
+        "people. When done, tell the user the result in a sentence or two. Write progress notes "
+        "and the result in the language of the user's request above, not in the language of "
+        "this note."
+        + (
+            " This retries a request that did not finish: the screen may have changed, so look "
+            "at it again first and carry on from where things are now."
+            if retry
+            else ""
+        )
+    )
+
+
 def _android_system_suffix(session_id: str | None = None) -> str:
     """Android guidance plus the phone-wide memory and knowledge sections, rebuilt per task."""
     return assemble_prompt(_ANDROID_SYSTEM_SUFFIX, _prompt_sections(session_id))
@@ -406,9 +432,19 @@ class MobileRuntimeController:
         )
         if task.state is TaskState.QUEUED and task.task_id not in self._jobs:
             self._execution_checks[task.task_id] = (before_run, after_run)
-            if preauthorized:
+            # "Always allow" on the phone control panel: the phone task starts allowed.
+            if preauthorized or (request.phone_control and request.auto_approve):
                 # Recorded with the task, so a resumed run is trusted in the same way.
                 self.tasks.append_event(task.task_id, "task.approval.preauthorized", {"scope": "task"})
+            if request.phone_control:
+                self.tasks.append_event(
+                    task.task_id,
+                    "task.phone_control",
+                    {
+                        **({"app": request.phone_app} if request.phone_app else {}),
+                        **({"retry": True} if request.phone_retry else {}),
+                    },
+                )
             if execution is not None:
                 self.tasks.append_event(
                     task.task_id, "task.execution.bound", {"execution_kind": execution_kind}
@@ -770,11 +806,16 @@ class MobileRuntimeController:
                 self._active_task_id = task_id
                 self._active_session_id = task.session_id
                 self.approvals.set_active_task(task_id, task.session_id)
-                if any(
-                    event.event_type == "task.approval.preauthorized"
-                    for event in self.events(task_id)
-                ):
+                task_events = self.events(task_id)
+                recorded = {event.event_type for event in task_events}
+                if "task.approval.preauthorized" in recorded:
                     self.approvals.trust_active_task(task_id)
+                phone = next(
+                    (event.payload for event in task_events if event.event_type == "task.phone_control"),
+                    None,
+                )
+                if phone is not None:
+                    self.approvals.mark_phone_control(task_id)
                 has_persisted_input = self.tasks.has_persisted_input(task_id)
                 self.tasks.transition(task_id, TaskState.RUNNING)
                 workspace = Path(session.workspace)
@@ -842,6 +883,11 @@ class MobileRuntimeController:
                     )
                 else:
                     system_suffix = _android_system_suffix(session.id)
+                if phone is not None:
+                    context_notes = (
+                        *context_notes,
+                        _phone_control_note(phone.get("app"), bool(phone.get("retry"))),
+                    )
                 if task.budget_steps is not None:
                     options["budget"] = TaskBudget(
                         max_tool_calls=task.budget_steps,

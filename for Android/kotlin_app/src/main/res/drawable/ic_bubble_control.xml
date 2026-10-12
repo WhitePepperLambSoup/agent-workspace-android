@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Lucide "pointer": operate the phone, in the floating bubble's menu (tinted in code). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M22,14a8,8 0,0 1,-8 8M18,11v-1a2,2 0,0 0,-2 -2a2,2 0,0 0,-2 2M14,10V9a2,2 0,0 0,-2 -2a2,2 0,0 0,-2 2v1M10,9.5V4a2,2 0,0 0,-2 -2a2,2 0,0 0,-2 2v10M18,11a2,2 0,1 1,4 0v3a8,8 0,0 1,-8 8h-2c-2.8,0 -4.5,-0.86 -5.99,-2.34l-3.6,-3.6a2,2 0,0 1,2.83 -2.82L7,15" />
+</vector>

@@ -49,11 +49,13 @@ internal object AndroidAutomationControl {
         JSONObject().put("paused", true).put("takeover_requested", true)
     }
 
+    /** [automatic]: the service paused itself after an action Android rejected, not the user. */
     @Synchronized
-    fun set(context: Context, paused: Boolean, takeover: Boolean): JSONObject {
+    fun set(context: Context, paused: Boolean, takeover: Boolean, automatic: Boolean = false): JSONObject {
         // Both the UI and engine process can change control state.
         return locked(context) {
             val state = JSONObject().put("paused", paused).put("takeover_requested", takeover)
+                .put("automatic", paused && automatic)
                 .put("updated_at_ms", System.currentTimeMillis())
                 .put("revision", UUID.randomUUID().toString())
             write(atomic(context, "control.json"), state)

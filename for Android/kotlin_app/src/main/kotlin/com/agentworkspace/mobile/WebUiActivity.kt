@@ -146,11 +146,21 @@ class WebUiActivity : ComponentActivity() {
     private val shareInboxPickerLock = Any()
     @Volatile private var shareInboxPickerPending = false
     private var incomingShareBatchId = UUID.randomUUID().toString()
+    // The inbox batch of the file pick or photo in progress: the page learns it when it asks, and
+    // adds that batch to the conversation it was asked from as soon as the files arrive.
+    @Volatile private var pendingPickBatch: String? = null
 
-    private val shareInboxFilePicker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+    private val shareInboxFilePicker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments(), ::receivePicked)
+    // The system photo picker: newest first, cloud photos included, no storage permission. Four is
+    // the most pictures one message can carry (core MAX_IMAGES_PER_MESSAGE).
+    private val shareInboxPhotoPicker = registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(4), ::receivePicked)
+
+    private fun receivePicked(uris: List<Uri>) {
         synchronized(shareInboxPickerLock) { shareInboxPickerPending = false }
+        val batch = pendingPickBatch ?: UUID.randomUUID().toString()
+        pendingPickBatch = null
         uris.forEach { uri -> runCatching { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) } }
-        if (uris.isNotEmpty()) shareInbox.captureFiles(uris)
+        if (uris.isNotEmpty()) shareInbox.captureFiles(uris, batch)
         else dispatchShareInboxChanged()
     }
 
@@ -161,9 +171,11 @@ class WebUiActivity : ComponentActivity() {
     private val cameraCapture = registerForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
         synchronized(shareInboxPickerLock) { shareInboxPickerPending = false }
         val photo = pendingCameraPhoto?.let(::File)
+        val batch = pendingPickBatch ?: UUID.randomUUID().toString()
         pendingCameraPhoto = null
+        pendingPickBatch = null
         if (saved && photo != null && photo.isFile && photo.length() > 0) {
-            shareInbox.captureFiles(listOf(androidx.core.content.FileProvider.getUriForFile(this, "$packageName.camera", photo)))
+            shareInbox.captureFiles(listOf(androidx.core.content.FileProvider.getUriForFile(this, "$packageName.camera", photo)), batch)
         } else {
             photo?.delete()
             dispatchShareInboxChanged()
@@ -171,9 +183,11 @@ class WebUiActivity : ComponentActivity() {
     }
 
     private fun queueCameraCapture(): String = shareInboxAccess {
+        val batch = UUID.randomUUID().toString()
         synchronized(shareInboxPickerLock) {
             if (shareInboxPickerPending) return@shareInboxAccess ShareInboxController.failure("请先完成当前文件选择")
             shareInboxPickerPending = true
+            pendingPickBatch = batch
         }
         shareHandler.post {
             if (!trustedWorkspacePage || isDestroyed || isFinishing) {
@@ -196,28 +210,33 @@ class WebUiActivity : ComponentActivity() {
                 android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_SHORT).show()
             }
         }
-        JSONObject().put("ok", true).put("queued", true).toString()
+        JSONObject().put("ok", true).put("queued", true).put("batch_id", batch).toString()
     }
 
     private fun shareInboxAccess(action: () -> String): String =
         if (!trustedWorkspacePage || isDestroyed || isFinishing) ShareInboxController.failure("请从工作区页面打开分享收件箱")
         else action()
 
-    private fun queueShareInboxFilePicker(): String = shareInboxAccess {
+    private fun queueShareInboxFilePicker(photos: Boolean = false): String = shareInboxAccess {
+        val batch = UUID.randomUUID().toString()
         synchronized(shareInboxPickerLock) {
             if (shareInboxPickerPending) return@shareInboxAccess ShareInboxController.failure("请先完成当前文件选择")
             shareInboxPickerPending = true
+            pendingPickBatch = batch
         }
         shareHandler.post {
             if (!trustedWorkspacePage || isDestroyed || isFinishing) {
                 synchronized(shareInboxPickerLock) { shareInboxPickerPending = false }
-            } else try { shareInboxFilePicker.launch(arrayOf("*/*")) }
-            catch (_: Exception) {
+            } else try {
+                if (photos) shareInboxPhotoPicker.launch(androidx.activity.result.PickVisualMediaRequest(
+                    ActivityResultContracts.PickVisualMedia.ImageOnly))
+                else shareInboxFilePicker.launch(arrayOf("*/*"))
+            } catch (_: Exception) {
                 synchronized(shareInboxPickerLock) { shareInboxPickerPending = false }
                 android.widget.Toast.makeText(this, UiText.of(this, "无法打开系统文件选择器", "Could not open the system file picker"), android.widget.Toast.LENGTH_SHORT).show()
             }
         }
-        JSONObject().put("ok", true).put("queued", true).toString()
+        JSONObject().put("ok", true).put("queued", true).put("batch_id", batch).toString()
     }
 
     private fun dispatchShareInboxChanged() {
@@ -511,6 +530,7 @@ class WebUiActivity : ComponentActivity() {
         }
         savedInstanceState?.getString("workspace-folder-uri")?.let { resolveWorkspaceFolder(Uri.parse(it)) }
         pendingCameraPhoto = savedInstanceState?.getString("pending-camera-photo")
+        pendingPickBatch = savedInstanceState?.getString("pending-pick-batch")?.takeIf { runCatching { UUID.fromString(it) }.isSuccess }
         WindowCompat.setDecorFitsSystemWindows(window, false)
         workspaceFileActions = WorkspaceFileActionController(this, activityScope,
             trustedPage = { trustedWorkspacePage && !isDestroyed && !isFinishing },
@@ -602,6 +622,7 @@ class WebUiActivity : ComponentActivity() {
                 shareInboxDiscard = { raw -> shareInboxAccess { shareInbox.discard(raw) } },
                 shareInboxAcknowledgement = { raw -> shareInboxAccess { shareInbox.acknowledge(raw) } },
                 shareInboxFilePicker = { queueShareInboxFilePicker() },
+                shareInboxPhotoPicker = { queueShareInboxFilePicker(photos = true) },
                 shareInboxCameraCapture = { queueCameraCapture() },
                 systemBarsAction = { dark, color -> applySystemBars(dark, color) },
                 requestTileAction = { requestQuickSettingsTile() },
@@ -943,6 +964,7 @@ class WebUiActivity : ComponentActivity() {
         outState.putStringArrayList("workspace-folder-results", ArrayList(workspaceFolderResults.map { it.toString() }))
         outState.putString("workspace-folder-uri", pendingWorkspaceFolderUri)
         outState.putString("pending-camera-photo", pendingCameraPhoto)
+        outState.putString("pending-pick-batch", pendingPickBatch)
         if (::workspaceFileActions.isInitialized) workspaceFileActions.saveState()?.let {
             outState.putBundle("workspace-file-save", it)
             savedWorkspaceFilePicker = true

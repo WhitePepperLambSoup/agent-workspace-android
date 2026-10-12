@@ -4,9 +4,11 @@ import android.animation.TimeInterpolator
 import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Color
@@ -32,7 +34,11 @@ import android.widget.TextView
 import android.widget.Toast
 import com.agentworkspace.mobile.R
 import com.agentworkspace.mobile.UiText
+import androidx.core.content.ContextCompat
 import com.agentworkspace.mobile.automation.AgentAccessibilityService
+import com.agentworkspace.mobile.automation.AndroidSystemBridge
+import com.agentworkspace.mobile.automation.PhoneControlPanel
+import com.agentworkspace.mobile.automation.PhoneControlReceiver
 import com.agentworkspace.mobile.embedded.EngineHttp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -154,6 +160,16 @@ class FloatingBallService : Service() {
     private var targetIcon: View? = null
     private var overTarget = false
     private var settleAnimator: ValueAnimator? = null
+    // The phone control panel (in :engine) is open; it says when it closes.
+    private var hiddenForPanel = false
+    private val panelReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == PhoneControlPanel.ACTION_PANEL_OPENED) {
+                // Opened some other way than the bubble's own action: step aside all the same.
+                if (!hiddenForPanel) { hiddenForPanel = true; setBallHidden(true) }
+            } else panelClosed()
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -164,6 +180,9 @@ class FloatingBallService : Service() {
         runCatching { showBall() }.onFailure { stopSelf() }
         current = this
         applyVisibility()
+        ContextCompat.registerReceiver(this, panelReceiver, IntentFilter(PhoneControlPanel.ACTION_PANEL_CLOSED).apply {
+            addAction(PhoneControlPanel.ACTION_PANEL_OPENED)
+        }, ContextCompat.RECEIVER_NOT_EXPORTED)
     }
 
     private fun applyVisibility() {
@@ -185,6 +204,8 @@ class FloatingBallService : Service() {
     }
 
     override fun onDestroy() {
+        runCatching { unregisterReceiver(panelReceiver) }
+        panelClosed()
         if (current === this) current = null
         scope.cancel()
         settleAnimator?.cancel()
@@ -302,6 +323,32 @@ class FloatingBallService : Service() {
         runCatching { startActivity(QuickEntry.intent(this, mode)) }
     }
 
+    /**
+     * Operate the phone: the accessibility service opens its panel over the app in front. The bubble
+     * stays out of sight (and out of the agent's screenshots and taps) until the panel closes.
+     */
+    private fun openPhoneControl() {
+        android.util.Log.i("PhoneControlPanel", "Bubble: operate the phone (accessibility on: ${accessibilityServiceOn()})")
+        if (!accessibilityServiceOn()) {
+            Toast.makeText(this, UiText.of(this, "AI 操作手机需要无障碍权限：请在列表里开启 Agent Workspace",
+                "Operating the phone needs accessibility: turn on Agent Workspace in the list"), Toast.LENGTH_LONG).show()
+            AndroidSystemBridge.openAccessibilitySettings(this)
+            return
+        }
+        if (!hiddenForPanel) { hiddenForPanel = true; setBallHidden(true) }
+        runCatching {
+            sendBroadcast(Intent(this, PhoneControlReceiver::class.java).setAction(PhoneControlReceiver.ACTION_OPEN))
+        }.onFailure {
+            android.util.Log.w("PhoneControlPanel", "Could not reach the accessibility service", it)
+            panelClosed()
+        }
+    }
+
+    private fun panelClosed() {
+        android.util.Log.i("PhoneControlPanel", "Panel closed; bubble hidden for it: $hiddenForPanel")
+        if (hiddenForPanel) { hiddenForPanel = false; setBallHidden(false) }
+    }
+
     private fun dark() = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
 
     // ---- The menu: four actions spring out on an arc toward the middle of the screen ------------
@@ -319,6 +366,7 @@ class FloatingBallService : Service() {
         }
         root.addView(scrim, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         val actions = listOf(
+            BubbleAction("操作手机", "Operate phone", R.drawable.ic_bubble_control) { openPhoneControl() },
             BubbleAction("新对话", "New chat", R.drawable.ic_bubble_new) { open("text") },
             BubbleAction("语音提问", "Ask by voice", R.drawable.ic_bubble_mic) { open("voice") },
             BubbleAction("圈选提问", "Circle to ask", R.drawable.ic_bubble_scan, capturesScreen = true) { askAboutScreen() },
@@ -402,7 +450,10 @@ class FloatingBallService : Service() {
                 applyVisibility()
                 val onLeft = cx < root.width / 2f
                 // Fan toward the middle of the screen; near the top or bottom edge, turn it away from the edge.
-                val radius = dp(112).toFloat()
+                // Five actions need a wider arc than four to keep their circles apart.
+                val radius = dp(if (views.size > 4) 136 else 112).toFloat()
+                val step = if (views.size > 4) 32.0 else 40.0
+                val first = step * (views.size - 1) / 2
                 val room = radius + dp(44)
                 var middle = if (onLeft) 0.0 else 180.0
                 if (cy < room) middle += if (onLeft) 52.0 else -52.0
@@ -412,8 +463,8 @@ class FloatingBallService : Service() {
                     if (onLeft) { item.addView(button, LinearLayout.LayoutParams(circle, circle)); item.addView(label, gap(onLeft)) }
                     else { item.addView(label, gap(onLeft)); item.addView(button, LinearLayout.LayoutParams(circle, circle)) }
                     item.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
-                    // Top to bottom in list order, 40° apart.
-                    val angle = Math.toRadians(if (onLeft) middle - 60 + 40 * index else middle + 60 - 40 * index)
+                    // Top to bottom in list order, [step] degrees apart.
+                    val angle = Math.toRadians(if (onLeft) middle - first + step * index else middle + first - step * index)
                     val px = cx + (radius * cos(angle)).toFloat()
                     val py = cy + (radius * sin(angle)).toFloat()
                     val circleX = if (onLeft) circle / 2f else item.measuredWidth - circle / 2f
@@ -664,9 +715,8 @@ class FloatingBallService : Service() {
                 // A password field on screen: the screen capture permission would show it too.
                 "protected_content" -> throw IllegalStateException(UiText.of(this,
                     "屏幕上有密码等敏感内容，不能截屏", "Sensitive content such as a password is on screen; it can't be captured"))
-                // The automation check that the screen held still, tripped by the bubble's menu
-                // closing or an animation: take it again.
-                "stale_snapshot" -> if (attempt < 2) Thread.sleep(300) else return Shot.Unavailable
+                // Windows still opening or closing (the bubble's menu going away): take it again.
+                "stale_snapshot", "screen_unsettled" -> if (attempt < 2) Thread.sleep(300) else return Shot.Unavailable
                 // Accessibility can't capture here; the screen capture permission still may.
                 else -> return Shot.Unavailable
             }

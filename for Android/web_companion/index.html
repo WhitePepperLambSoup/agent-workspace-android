@@ -57,6 +57,7 @@
           <button id="btnAttach" class="icon-button" type="button" title="附加文件" aria-label="附加文件" aria-haspopup="menu" aria-expanded="false"><span data-icon="paperclip"></span></button>
           <div id="attachMenu" class="attach-menu" role="menu" hidden>
             <button id="btnAttachCamera" class="menu-row" type="button" role="menuitem"><span data-icon="camera"></span><span>拍照</span></button>
+            <button id="btnAttachPhotos" class="menu-row" type="button" role="menuitem" hidden><span data-icon="image-plus"></span><span>照片</span></button>
             <button id="btnAttachFiles" class="menu-row" type="button" role="menuitem"><span data-icon="paperclip"></span><span>选择文件</span></button>
             <button id="btnAttachVoiceNote" class="menu-row" type="button" role="menuitem" hidden><span data-icon="mic"></span><span>录音速记</span></button>
           </div>
@@ -207,7 +208,7 @@
         <div id="shareTargetControls" hidden><label for="shareTargetSession">目标会话</label><select id="shareTargetSession" aria-label="附件目标会话"></select></div>
         <p id="shareInboxStatus" class="page-status" role="status"></p>
         <div id="shareInboxList" class="import-list"></div>
-        <div id="shareImportActions" class="page-toolbar" hidden><button id="btnImportShares" class="button-primary" type="button" aria-label="添加到草稿"><span data-icon="plus"></span>添加到草稿</button><button id="btnDiscardShares" class="icon-button" type="button" title="丢弃所选附件" aria-label="丢弃所选附件"><span data-icon="trash-2"></span></button></div>
+        <div id="shareImportActions" class="page-toolbar" hidden><button id="btnImportShares" class="button-primary" type="button" aria-label="添加到对话"><span data-icon="plus"></span>添加到对话</button><button id="btnDiscardShares" class="icon-button" type="button" title="丢弃所选附件" aria-label="丢弃所选附件"><span data-icon="trash-2"></span></button></div>
         <div id="browserUploadList" class="import-list"></div>
       </div>
       <div id="settingsPermission" class="settings-page" hidden>
@@ -287,7 +288,7 @@
       <div id="settingsGlobalEntry" class="settings-page" hidden>
         <p class="setting-hint">在手机的任何地方都能快速开一个新对话。</p>
         <label class="toggle-row" for="floatingBallToggle"><span>悬浮球</span><input id="floatingBallToggle" type="checkbox"></label>
-        <p class="setting-hint">在其他应用上方显示一个小圆球：点一下展开新对话、语音提问、圈选提问（圈出屏幕上想问的部分）和录音速记；拖动可以移到屏幕两侧，拖到底部的 × 上就隐藏它。需要允许“显示在其他应用上层”。圈选提问每次会请你允许截取屏幕；在“设备与工具”里开启无障碍服务后就不再询问。</p>
+        <p class="setting-hint">在其他应用上方显示一个小圆球：点一下展开操作手机、新对话、语音提问、圈选提问（圈出屏幕上想问的部分）和录音速记；拖动可以移到屏幕两侧，拖到底部的 × 上就隐藏它。需要允许“显示在其他应用上层”。「操作手机」在当前应用上弹出小窗，直接告诉 AI 要做什么，它用无障碍服务替你点按、输入和滑动；系统设置等页面会隐藏悬浮球，可以先在别处呼出小窗，再让 AI 打开设置去做。圈选提问每次会请你允许截取屏幕；在“设备与工具”里开启无障碍服务后就不再询问。</p>
         <button id="btnAddQuickTile" class="menu-row" type="button" hidden><span data-icon="plus"></span><span>添加到快捷设置<small>下拉通知栏就能点“问 Agent”</small></span><span data-icon="chevron-right"></span></button>
         <p class="setting-hint">也可以下拉通知栏，进入快捷开关的编辑页面，把“问 Agent”拖进去。</p>
         <p class="setting-hint">长按桌面上的 Agent Workspace 图标，可以直接选“新对话”“语音提问”或“拍照提问”。</p>
@@ -462,6 +463,8 @@
         <button id="btnDoctorRefresh" data-header-action class="icon-button" type="button" aria-label="刷新诊断" title="刷新诊断"><span data-icon="refresh-cw"></span></button>
         <p id="doctorStatus" class="page-status" role="status"></p><dl id="doctorSummary" class="usage-summary"></dl>
         <button id="btnAccessibilitySettings" class="menu-row" type="button"><span data-icon="shield"></span><span>系统无障碍设置</span><span data-icon="chevron-right"></span></button>
+        <label class="toggle-row" for="liveScreenToggle"><span>实时画面</span><input id="liveScreenToggle" type="checkbox"></label>
+        <p class="setting-hint">AI 操作手机时直接看当前画面：截图更快，画面在动（视频、动画）也能截到，Android 10 及以下也能截图。开启时系统会请你允许录制屏幕，状态栏会显示录屏标志；画面只留在手机上供 AI 截图用，半小时不用会自动关闭。</p>
         <label class="toggle-row" for="systemPaused"><span>暂停手机操作</span><input id="systemPaused" type="checkbox"></label>
         <div class="page-toolbar"><button id="btnTakeover" class="button-secondary" type="button"><span data-icon="hand"></span>接管手机</button><button id="btnObserveScreen" class="icon-button" type="button" aria-label="读取当前屏幕" title="读取当前屏幕"><span data-icon="eye"></span></button></div>
         <pre id="systemObservation" class="management-output" hidden></pre><div id="doctorTools" class="management-list"></div>

@@ -134,7 +134,9 @@
     const android = value.android || {};
     let engine = {};
     try { engine = JSON.parse(native?.getEngineStatus?.() || "{}"); } catch {}
-    terms("doctorSummary", [[t("运行环境"), value.runtime], [t("引擎状态"), engine.state || t("已连接")], [t("系统操作"), android.enabled && android.connected ? t("已连接") : t("需要无障碍权限")], [t("截图"), android.screenshot_supported ? t("支持") : t("不可用")], [t("内存"), android.memory_total_bytes ? `${(android.memory_total_bytes / 1024 ** 3).toFixed(1)} GiB` : t("未测量")]]);
+    terms("doctorSummary", [[t("运行环境"), value.runtime], [t("引擎状态"), engine.state || t("已连接")], [t("系统操作"), android.enabled && android.connected ? t("已连接") : t("需要无障碍权限")], [t("截图"), android.live_screen_active ? t("实时画面") : android.screenshot_supported ? t("支持") : t("不可用")], [t("内存"), android.memory_total_bytes ? `${(android.memory_total_bytes / 1024 ** 3).toFixed(1)} GiB` : t("未测量")]]);
+    $("liveScreenToggle").checked = !!android.live_screen_active;
+    $("liveScreenToggle").disabled = typeof native?.startLiveScreen !== "function";
     $("systemPaused").checked = !!android.paused;
     $("systemPaused").disabled = typeof native?.setSystemPaused !== "function";
     $("btnAccessibilitySettings").disabled = typeof native?.openAccessibilitySettings !== "function";
@@ -1482,6 +1484,21 @@
   }, "memoryStatus");
   on("btnAccessibilitySettings", "click", () => native?.openAccessibilitySettings?.(), "doctorStatus");
   on("systemPaused", "change", async () => { native?.setSystemPaused?.($("systemPaused").checked); await doctor(); }, "doctorStatus");
+  // Turning the live screen on goes through Android's consent dialog; the page follows its outcome.
+  let livePoll = null;
+  function followLiveScreen(wanted, tries = 0) {
+    window.clearTimeout(livePoll);
+    livePoll = window.setTimeout(async () => {
+      if (closed || $("settingsDoctor").hidden || $("settingsOverlay").hidden) return;
+      try { await doctor(); } catch { /* The next look or the refresh button reports it. */ }
+      if ($("liveScreenToggle").checked !== wanted && tries < 20) followLiveScreen(wanted, tries + 1);
+    }, 1500);
+  }
+  on("liveScreenToggle", "change", () => {
+    const wanted = $("liveScreenToggle").checked;
+    if (wanted) native?.startLiveScreen?.(); else native?.stopLiveScreen?.();
+    followLiveScreen(wanted);
+  }, "doctorStatus");
   on("btnTakeover", "click", async () => { native?.requestSystemTakeover?.(); await doctor(); }, "doctorStatus");
   on("btnObserveScreen", "click", async () => { const response = await post("/mobile/android-system", { action: "observe" }); $("systemObservation").hidden = false; $("systemObservation").textContent = JSON.stringify(response.observation || response, null, 2); }, "doctorStatus");
   on("btnBatterySettings", "click", () => native?.openBatteryOptimizationSettings?.(), "doctorStatus");

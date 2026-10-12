@@ -141,6 +141,14 @@ class MobileTaskRequest:
     # Edit-and-resend / regenerate: the user message this task replaces, and why.
     rewind_from_event_id: str | None = None
     rewind_reason: str | None = None
+    # Started from the phone control panel: "allow for this task" then covers its taps and typing.
+    phone_control: bool = False
+    # The user chose "always allow" for phone tasks: the task starts allowed (phone tasks only).
+    auto_approve: bool = False
+    # Phone tasks: the app the panel was opened over, and whether this retries an unfinished task.
+    # The engine adds its phone instructions as a note, so the prompt is the user's own words.
+    phone_app: str | None = None
+    phone_retry: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.image_refs, tuple) or any(
@@ -174,6 +182,10 @@ class MobileTaskRequest:
                 if self.rewind_from_event_id
                 else {}
             ),
+            **({"phone_control": True} if self.phone_control else {}),
+            **({"auto_approve": True} if self.auto_approve else {}),
+            **({"phone_app": self.phone_app} if self.phone_app else {}),
+            **({"phone_retry": True} if self.phone_retry else {}),
         }
 
 
@@ -198,6 +210,24 @@ def parse_mobile_task_request(payload: Mapping[str, Any]) -> MobileTaskRequest:
         rewind_reason = payload.get("rewind_reason", "edit")
         if rewind_reason not in {"edit", "regenerate"}:
             raise ValueError("rewind_reason must be edit or regenerate")
+    phone_control = payload.get("phone_control", False)
+    if not isinstance(phone_control, bool):
+        raise ValueError("phone_control must be true or false")
+    auto_approve = payload.get("auto_approve", False)
+    if not isinstance(auto_approve, bool):
+        raise ValueError("auto_approve must be true or false")
+    if auto_approve and not phone_control:
+        raise ValueError("auto_approve is only for phone_control tasks")
+    phone_app = payload.get("phone_app")
+    if phone_app is not None:
+        phone_app = _required_text(phone_app, "phone_app", max_length=200)
+        if any(ord(character) < 32 or ord(character) == 127 for character in phone_app):
+            raise ValueError("phone_app must not contain control characters")
+    phone_retry = payload.get("phone_retry", False)
+    if not isinstance(phone_retry, bool):
+        raise ValueError("phone_retry must be true or false")
+    if (phone_app is not None or phone_retry) and not phone_control:
+        raise ValueError("phone_app and phone_retry are only for phone_control tasks")
     return MobileTaskRequest(
         session_id=session_id,
         prompt=prompt,
@@ -206,6 +236,10 @@ def parse_mobile_task_request(payload: Mapping[str, Any]) -> MobileTaskRequest:
         image_refs=parse_mobile_image_refs(payload.get("image_refs", [])),
         rewind_from_event_id=rewind_from,
         rewind_reason=rewind_reason,
+        phone_control=phone_control,
+        auto_approve=auto_approve,
+        phone_app=phone_app,
+        phone_retry=phone_retry,
     )
 
 

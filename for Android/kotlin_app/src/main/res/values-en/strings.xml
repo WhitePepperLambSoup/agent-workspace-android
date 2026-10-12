@@ -19,4 +19,5 @@
     <string name="widget_task_web_page_detail">A page you can preview</string>
     <string name="widget_task_analyze_title">Analyze data</string>
     <string name="widget_task_analyze_detail">Findings and a chart from a sheet or CSV</string>
+    <string name="android_system_accessibility_description">Allow Agent Workspace to read the controls visible on screen and perform the actions you approve. In any app, tap Operate phone on the floating bubble to tell the agent what to do there. You can pause control or take over in Agent Workspace at any time.</string>
 </resources>

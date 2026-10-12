@@ -38,8 +38,10 @@ ApprovalRequestListener = Callable[[dict[str, Any]], Awaitable[None] | None]
 # request of the same task, until it ends, except the tools below.
 APPROVAL_SCOPES = frozenset({"once", "session", "task"})
 # A task-wide approval never covers deleting files, changing long-term memory or operating
-# other apps: those still ask each time.
+# other apps: those still ask each time. The exception is a task the user started from the phone
+# control panel to operate the phone: there "allow for this task" covers its taps and typing.
 _ALWAYS_ASK_TOOLS = frozenset({"delete_path", "memory_write", "android_action"})
+_PHONE_CONTROL_TOOLS = frozenset({"android_action"})
 
 
 class MobileApprovalBroker:
@@ -54,6 +56,7 @@ class MobileApprovalBroker:
         self._active_task_id: str | None = None
         self._active_session_id: str | None = None
         self._trusted_task_id: str | None = None
+        self._phone_task_id: str | None = None
         self._pending: dict[str, _PendingApproval] = {}
 
     def set_active_task(self, task_id: str, session_id: str) -> None:
@@ -61,6 +64,8 @@ class MobileApprovalBroker:
             raise ValueError("task_id and session_id are required")
         if task_id != self._trusted_task_id:
             self._trusted_task_id = None
+        if task_id != self._phone_task_id:
+            self._phone_task_id = None
         self._active_task_id = task_id
         self._active_session_id = session_id
 
@@ -70,6 +75,14 @@ class MobileApprovalBroker:
         self._active_task_id = None
         self._active_session_id = None
         self._trusted_task_id = None
+        self._phone_task_id = None
+
+    def mark_phone_control(self, task_id: str) -> bool:
+        """The running task operates the phone for the user (started from the phone control panel)."""
+        if not task_id or task_id != self._active_task_id:
+            return False
+        self._phone_task_id = task_id
+        return True
 
     def trust_active_task(self, task_id: str) -> bool:
         """Grant the "task" scope in advance, as for a schedule the user set up to run alone.
@@ -148,9 +161,11 @@ class MobileApprovalBroker:
         if self._active_task_id is None or self._active_session_id is None:
             raise RuntimeError("no active mobile task is registered")
         request_id = str(uuid4())
-        if self._trusted_task_id == self._active_task_id and details.get("tool") not in (
-            _ALWAYS_ASK_TOOLS
-        ):
+        tool = details.get("tool")
+        covered = tool not in _ALWAYS_ASK_TOOLS or (
+            tool in _PHONE_CONTROL_TOOLS and self._phone_task_id == self._active_task_id
+        )
+        if self._trusted_task_id == self._active_task_id and covered:
             # Covered by the user's "allow for this task"; recorded for the audit trail.
             self.event_store.append(
                 Event(

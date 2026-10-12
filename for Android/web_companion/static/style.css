@@ -500,6 +500,18 @@ strong { font-weight: 600; }
 .attachment-chip > span { min-width: 0; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .attachment-remove { width: 34px; height: 34px; border-radius: 50%; }
 .attachment-remove svg { width: 14px; height: 14px; }
+.attachment-chip.has-thumb { padding-left: 4px; }
+.attachment-thumb { width: 28px; height: 28px; margin-right: 6px; border-radius: 10px; object-fit: cover; flex: none; }
+/* A file still on its way in: a light sweep while it is received and added, red when it failed. */
+.attachment-chip.incoming { min-height: 34px; color: var(--text-2); }
+.attachment-chip.incoming[data-state="busy"] {
+  padding-right: 12px; background: linear-gradient(100deg, var(--surface-2) 35%, rgba(var(--accent-rgb), .16) 50%, var(--surface-2) 65%) 0 0 / 300% 100%;
+  animation: attachment-arriving 1.6s linear infinite;
+}
+.attachment-chip.incoming[data-state="error"] { background: var(--danger-soft); color: var(--danger); }
+@keyframes attachment-arriving { from { background-position: 100% 0; } to { background-position: 0 0; } }
+:root[data-motion="reduced"] .attachment-chip.incoming { animation: none; }
+@media (prefers-reduced-motion: reduce) { :root[data-motion="auto"] .attachment-chip.incoming { animation: none; } }
 #promptInput {
   width: 100%; min-height: 44px; max-height: 168px; padding: 10px 10px 4px; border: 0; resize: none;
   background: transparent; color: var(--text); font-size: 16px; line-height: 1.45;

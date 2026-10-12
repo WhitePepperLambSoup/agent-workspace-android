@@ -1,5 +1,93 @@
 # Changelog
 
+## 1.6.0 — 2026-10-13
+
+手机操控版：在任何应用里从悬浮球呼出小窗，直接告诉 AI 要做什么，它替你看屏幕、点按、滑动和输入；读屏更小更快、能按名字打开应用、能输入文字，新增托管模式和“实时画面”；照片和文件选好就进当前对话，大图自动压缩。Phone control release: open a small window from the floating bubble in any app and tell the agent what to do there; it looks at the screen, taps, swipes and types for you. Smaller, faster screen reading, apps opened by name, working text input, a hosted mode and a live screen; picked photos and files go straight into the conversation and large pictures are shrunk.
+
+### 中文
+
+**随时让 AI 操作手机（新）**
+- 点悬浮球，新增的「操作手机」会在当前应用上方弹出一个小窗：输入要做的事，AI 通过无障碍服务替你看屏幕、点按、滑动和输入，小窗里实时显示它在做哪一步（例如“点按「搜索」”），做完显示结果。需要先在「设备与工具」里开启无障碍服务。
+- 小窗不挡 AI：AI 截图时它瞬间让开，点按时手指穿过它落到应用上，也不会出现在 AI 读到的界面里。顶部的拖动条可以把小窗挪开；输入时按返回键关闭小窗。
+- 需要确认的操作在小窗里询问：允许、拒绝、本次都允许，或「一直允许（托管）」——之后在小窗里交给 AI 的手机操作都直接执行，输入框下方的开关随时可以关掉。密码框始终不读不点，删除文件仍会询问。
+- 卡住或读错屏幕时，点 ↻ 让 AI 重新看屏幕再继续；点 ■ 停止；没完成可以点「重试」，AI 会先看清当前屏幕再接着做；「继续说」在同一个对话里追加要求；「打开对话」查看完整过程。
+- 系统设置等页面会隐藏其他应用的悬浮窗（包括悬浮球），但小窗打开后在这些页面上也一直可用：在别处呼出小窗，让 AI 打开设置去做即可。
+- 对话、桌面小部件和通知里显示的是你输入的原话；给 AI 的操作说明由应用另外附上。
+
+**手机操控更好用**
+- AI 按应用名打开应用（例如「计算器」），不用知道各家手机的包名。
+- 修复 AI 无法输入文字：此前 AI 每次输入都会失败（例如在设置里搜索）。需要确认时，确认卡片里能看到 AI 要输入的内容。
+- AI 读到的屏幕内容精简为每个控件一行：同一屏从约 85 KB 降到约 10 KB，每一步更快、更省钱，长任务也不容易把上下文撑满。截图改为 1280 像素的 JPEG，大小约为原来的十分之一。
+- 屏幕上内容在动（时钟跳秒、视频、加载动画）时也能操作：只有窗口真的变了（打开了别的应用或弹窗、转屏）才需要重新看屏幕。动作执行前核对目标本身：按控件操作时必须还是同一个控件；按坐标点时手指下面的控件必须和看到的一样，否则拒绝并给出新画面，不会点错。倒计时按钮（“重新发送(59)”）数字变了照样能点。
+- 滑动后等列表停稳再读屏幕；没有文字的整行（例如设置项）按行里的文字识别，行换成别的内容时不会点错。
+- 列表下方屏幕外的控件，AI 点它时会先自动滚到可见位置；文字本身不可点时，会点它所在的那一行。
+- 动作在执行前被拒绝（应用名不对、控件已变）不再让自动化暂停；真的暂停时，AI 会停下来告诉你，在小窗里提交新要求或点「重试」就会恢复。
+- 系统限制的“每秒一张截图”会自动等待重试；第一次读取界面更快（Android 13 及以上），读取超时从 3 秒放宽到 10 秒。
+
+**实时画面（新）**
+- 「设备与工具」新增「实时画面」开关：经系统录屏授权后，在后台保持一路缩小的屏幕画面，AI 截图直接取最新一帧：每张约 0.1 秒，不受“每秒一张”的限制，画面静止时也有帧可取，Android 10 及以下也能截图。
+- 开启时状态栏有系统的录屏标志，通知栏可以一键关闭，半小时没用会自动关闭。画面只留在手机上，供 AI 截图使用。
+
+**选好就进对话（修复）**
+- 在输入框里点回形针选「拍照」「照片」「选择文件」后，文件直接添加到当前对话。此前文件先进「附件收件箱」，还要再点「添加到草稿」，很多人以为一直在“等待导入”。
+- 输入框里先显示“接收中 / 导入中”，完成后变成正式附件；失败的显示为红色，可以重试或移除，并提示原因。附件还在导入时点发送，会提示稍等，不会把图片漏掉。
+- 图片附件在输入框里显示缩略图。
+- 附件菜单新增「照片」：使用系统照片选择器（最多 4 张，不需要存储权限）；没有系统照片选择器的手机会打开只显示图片的文件选择器。
+- 修复部分手机（如中兴 Android 12）从「下载」里选的文件丢失原文件名（显示成 file-日期时间）。
+
+**大图自动压缩（修复）**
+- 超过 4 MB、约 500 万像素以上、HEIC 等模型不支持的格式、或带旋转标记的照片，导入时自动转成方向正确的 JPEG（有透明背景的保持 PNG），长宽按比例缩到约 2560 × 1920。此前超过 4 MB 的图片能导入，但发送时报错。
+- 已经在草稿里、超过 4 MB 的旧图片，发送前会提示“移除后重新添加，应用会自动压缩”。
+
+**附件收件箱**
+- 从别的应用分享进来的文件仍在收件箱里，由你选择放到哪个对话；目标默认是当前对话（标注“当前对话”）。
+- 按钮改名为「添加到对话」；完成后提示“已添加到「某对话」”或几个失败，不再一直停在“正在添加到目标会话...”。
+
+**升级**
+- 覆盖安装或在应用内更新即可，数据会保留。
+
+### English
+
+**Let the agent use your phone, from any app (new)**
+- Tap the floating bubble and the new Operate phone opens a small window over the app you are in: type what you want done and the agent looks at the screen, taps, swipes and types through the accessibility service, showing each step (such as “Tap ‘Search’”) and the result. Turn on the accessibility service in Device & tools first.
+- The window keeps out of the agent's way: it steps aside for every screenshot, lets taps through to the app and never appears in what the agent reads. Drag its grip to move it; Back closes it while typing.
+- Approvals appear in the window: allow, deny, allow for this task, or “Always allow” (hosted), after which phone tasks given in the window run without asking; a switch under the input turns it off. Password fields are never read or touched, and deleting files still asks.
+- If it gets stuck or misreads the screen, tap ↻ to have it look again; ■ stops it; Retry starts again from a fresh look at the screen; Follow up continues in the same conversation; Open chat shows everything it did.
+- Screens such as system Settings hide other apps' overlays, the bubble included, but the window stays up over them once open: open it elsewhere and ask the agent to go to Settings.
+- The conversation, widget and notifications show the words you typed; the instructions for the agent are attached separately.
+
+**Better phone control**
+- The agent opens apps by name (such as Calculator) without knowing each phone maker's package names.
+- Fixed text input: every attempt by the agent to type failed before (for example searching in Settings). When typing needs approval, the approval shows the text.
+- The agent reads the screen as one short line per control: the same screen went from about 85 KB to about 10 KB, so each step is faster and cheaper and long tasks fill the context more slowly. Screenshots are 1280-pixel JPEGs, about a tenth of the previous size.
+- Lively screens (a ticking clock, a video, a loading animation) can be operated: only a real window change (another app or dialog, rotation) asks for a new look. Actions check their own target: a control acted on by reference must still be the same control, and for a tap by coordinates the control under the finger must be the one the agent saw; otherwise the action is refused with a fresh look instead of hitting the wrong thing. A countdown button ("Resend (59)") can be tapped while its number changes.
+- After a swipe the screen is read once the list has stopped, and a row without words of its own (such as a settings entry) is recognised by the words inside it, so a tap does not land on a neighbouring entry.
+- A control below the visible part of a list is scrolled into view before it is tapped; text that is not clickable itself is tapped through its row.
+- An action refused before it runs (a wrong app name, a control that changed) no longer pauses automation; when automation is paused, the agent stops and tells you, and a new request or Retry in the window resumes it.
+- Android's one-screenshot-per-second limit is waited out automatically; the first look at a screen is faster on Android 13 and later, and the read timeout went from 3 to 10 seconds.
+
+**Live screen (new)**
+- Device & tools → Live screen: with Android's screen recording consent, a reduced copy of the screen keeps running and the agent's screenshots use its newest frame: about 0.1 s each, not limited to one per second, available on a static screen and on Android 10 and older.
+- Android's recording sign shows while it is on, the notification turns it off, and it turns itself off after half an hour unused. The picture stays on the phone, for the agent's screenshots.
+
+**Picked files go straight into the conversation (fix)**
+- Camera, Photos and Choose files in the paperclip menu add the files to the open conversation. Before, they waited in the attachment inbox for a second "Add to draft" tap, which looked like a file stuck in "waiting to import".
+- The message box shows "Receiving" / "Adding" until a file becomes an attachment; a failed file turns red with retry and remove buttons and the reason. Sending while a file is still being added asks you to wait instead of leaving it out.
+- Picture attachments show a thumbnail in the message box.
+- New "Photos" entry: the system photo picker (up to 4 at a time, no storage permission); phones without it get the file picker limited to pictures.
+- Fixed files picked from Downloads losing their names (shown as file-date-time) on some phones, such as ZTE with Android 12.
+
+**Large pictures are shrunk (fix)**
+- Pictures over 4 MB, over about 5 megapixels, in formats models refuse such as HEIC, or turned by an EXIF tag are re-encoded upright as JPEG (PNG when they have transparency) at about 2560 × 1920. Before, pictures over 4 MB were imported but failed when sent.
+- An older draft picture over 4 MB explains that removing and adding it again shrinks it.
+
+**Attachment inbox**
+- Files shared from other apps still wait in the inbox for you to pick a conversation; the target defaults to the open conversation (marked "current").
+- The button is now "Add to conversation", and the page reports when the files were added (or how many failed) instead of staying on "Adding to the target conversation...".
+
+**Upgrading**
+- Install over the existing app or update in the app; your data is kept.
+
 ## 1.5.0 — 2026-10-12
 
 动效与速度版：全面重做的动画、点一下展开的悬浮球、带“拉满”特效的思考程度面板；更多服务商的缓存省钱模式；扫描版 PDF 和网页可以进知识库；启动和删除对话快了很多。Motion and speed release: reworked animations, a floating bubble that fans out on tap, a reasoning-effort sheet with a full-power effect; prompt caching for more providers; scanned PDFs and web pages in the knowledge base; much faster start and conversation deletion.

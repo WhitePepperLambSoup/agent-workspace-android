@@ -70,6 +70,7 @@ class NativeJsBridge(
     private val shareInboxDiscard: (String) -> String = { unavailableShareInbox() },
     private val shareInboxAcknowledgement: (String) -> String = { unavailableShareInbox() },
     private val shareInboxFilePicker: () -> String = { unavailableShareInbox() },
+    private val shareInboxPhotoPicker: () -> String = { unavailableShareInbox() },
     private val shareInboxCameraCapture: () -> String = { unavailableShareInbox() },
     private val systemBarsAction: (Boolean, Int) -> Unit = { _, _ -> },
     private val requestTileAction: (() -> String)? = null,
@@ -213,6 +214,10 @@ class NativeJsBridge(
 
     @JavascriptInterface
     fun pickShareInboxFiles(): String = shareInboxFilePicker()
+
+    /** Choose pictures with the system photo picker (newest first, no storage permission). */
+    @JavascriptInterface
+    fun pickShareInboxPhotos(): String = shareInboxPhotoPicker()
 
     /** Take a photo with the camera app and add it to the share inbox. */
     @JavascriptInterface
@@ -382,6 +387,13 @@ class NativeJsBridge(
 
     @JavascriptInterface
     fun openAccessibilitySettings() { Handler(Looper.getMainLooper()).post { AndroidSystemBridge.openAccessibilitySettings(context) } }
+
+    /** The live screen (Device & tools): screen capture consent for the agent's screenshots. */
+    @JavascriptInterface
+    fun startLiveScreen() { Handler(Looper.getMainLooper()).post { AndroidSystemBridge.startLiveScreen(context) } }
+
+    @JavascriptInterface
+    fun stopLiveScreen() { AndroidSystemBridge.stopLiveScreen(context) }
 
     @JavascriptInterface
     fun setSystemPaused(paused: Boolean): String = AndroidSystemBridge.setPaused(context, paused)

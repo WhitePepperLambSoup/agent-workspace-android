@@ -26,7 +26,7 @@
 
 `tap` 与 `type_text` 需要语义 selector：`resource_id`、精确 `text`、精确 `content_description`，可另加 `class_name` 和 `package`。保存 ref、snapshot_version 或坐标会被拒绝。目标必须唯一、可见、启用、在当前 application window 且不受保护；文本输入还要求 editable。隐藏、敏感、重名、其他窗口或被截断的树不会派发动作。审批等待后再次观察和选择新 ref。
 
-其他 action 是 `launch_app`（`package_name`）、`back` 和 `home`。每步需要非空 `preconditions` 与 `postconditions`，断言字段为 `package`、`text_contains`、`resource_id`。最多 100 步，`timeout_ms` 为 100–5000（包含审批/执行/验证），`max_retries` 为 0–2。重试只处理明确 `executed:false` 且 code 为 `stale_snapshot` 的结果，使用新树重选并计入持久化预算。
+其他 action 是 `launch_app`（`package_name`）、`back` 和 `home`。每步需要非空 `preconditions` 与 `postconditions`，断言字段为 `package`、`text_contains`、`resource_id`。最多 100 步，`timeout_ms` 为 100–5000（包含审批/执行/验证），`max_retries` 为 0–2。重试只处理明确 `executed:false` 且 code 为 `stale_snapshot` 或 `target_changed` 的结果，使用新树重选并计入持久化预算。
 
 Python 管理接口供二级菜单使用：
 

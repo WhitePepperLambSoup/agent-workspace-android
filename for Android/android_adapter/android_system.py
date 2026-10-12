@@ -45,10 +45,13 @@ _ACTION_FIELDS = {
     "swipe": ("x", "y", "x2", "y2"),
     "ref": ("ref",),
     "type_text": ("ref", "text"),
-    "launch_app": ("package_name",),
+    "launch_app": ("package_name", "app_name"),
     "back": (),
     "home": (),
 }
+# launch_app takes either field (or both: the package first, the name if it is not installed).
+_ANY_OF_FIELDS = {"launch_app": ("package_name", "app_name")}
+_MAX_APP_NAME = 100
 _COMMON_ACTION_FIELDS = ("action", "snapshot_version", "expect", "timeout_ms")
 _ALLOWED_ACTIONS = frozenset(_ACTION_FIELDS)
 _EXPECT_SCHEMA = {
@@ -119,6 +122,7 @@ def get_android_system_status(bridge: Any | None = None) -> dict[str, Any]:
         "paused",
         "takeover_requested",
         "screenshot_supported",
+        "live_screen_active",
         "api_level",
         "reason",
         "settings_action",
@@ -213,6 +217,118 @@ def _sanitize_response(value: dict[str, Any]) -> dict[str, Any]:
     return cast(dict[str, Any], clean(value))
 
 
+_WINDOW_TYPES = {1: "app", 2: "keyboard", 3: "system", 4: "overlay", 5: "divider", 6: "magnifier"}
+_MAX_LINE_TEXT = 200
+# What the model reads of a screen, explained once in the tool descriptions instead of per line.
+_UI_FORMAT = (
+    "Its observation lists the screen as ui lines: `ref Class [left,top,right,bottom] flags "
+    '"text" desc="..." hint="..." id=...`, indented under their container, grouped by window. '
+    "Flags: click, edit, focused, disabled, offscreen (a ref action scrolls it into view), "
+    "protected (never read or touched). Layout-only containers are left out."
+)
+
+
+def _quoted(value: Any) -> str:
+    text = " ".join(str(value).split())
+    if len(text) > _MAX_LINE_TEXT:
+        text = text[:_MAX_LINE_TEXT] + "…"
+    return json.dumps(text, ensure_ascii=False)
+
+
+def _ui_lines(observation: dict[str, Any]) -> list[str]:
+    """The nodes as one short line each, keeping the controls a person could read or touch."""
+    nodes = [node for node in observation.get("nodes") or [] if isinstance(node, dict)]
+    parents = {node.get("ref"): node.get("parent_ref") for node in nodes}
+
+    def protected(node: dict[str, Any]) -> bool:
+        return bool(node.get("password") or node.get("sensitive"))
+
+    def kept(node: dict[str, Any]) -> bool:
+        labelled = bool(node.get("text") or node.get("description") or node.get("hint"))
+        if node.get("visible") is False:
+            return labelled
+        return labelled or protected(node) or any(
+            node.get(flag) for flag in ("clickable", "editable", "focused")
+        )
+
+    keep = {node.get("ref") for node in nodes if kept(node)}
+    windows = {
+        window.get("id"): window
+        for window in observation.get("windows") or []
+        if isinstance(window, dict)
+    }
+    lines: list[str] = []
+    current_window: Any = object()
+    for node in nodes:
+        ref = node.get("ref")
+        if ref not in keep:
+            continue
+        if node.get("window_id") != current_window and node.get("window_id") is not None:
+            current_window = node.get("window_id")
+            window = windows.get(current_window, {})
+            header = f"window {current_window} {_WINDOW_TYPES.get(window.get('type'), 'window')}"
+            if window.get("package_name"):
+                header += f" {window['package_name']}"
+            if window.get("title"):
+                header += f" {_quoted(window['title'])}"
+            if window.get("active"):
+                header += " active"
+            lines.append(header)
+        depth, parent, seen = 0, parents.get(ref), set()
+        while parent and parent not in seen:
+            seen.add(parent)
+            depth += parent in keep
+            parent = parents.get(parent)
+        bounds = node.get("bounds") or {}
+        line = (
+            f"{'  ' * (depth + 1)}{ref} {str(node.get('class_name') or 'View').rsplit('.', 1)[-1]} "
+            f"[{bounds.get('left')},{bounds.get('top')},{bounds.get('right')},{bounds.get('bottom')}]"
+        )
+        flags = [
+            name
+            for name, on in (
+                ("click", node.get("clickable")),
+                ("edit", node.get("editable")),
+                ("focused", node.get("focused")),
+                ("disabled", node.get("enabled") is False),
+                ("offscreen", node.get("visible") is False),
+                ("protected", protected(node)),
+            )
+            if on
+        ]
+        if flags:
+            line += " " + " ".join(flags)
+        text, description = node.get("text"), node.get("description")
+        if text:
+            line += f" {_quoted(text)}"
+        if description and description != text:
+            line += f" desc={_quoted(description)}"
+        if node.get("hint") and node.get("hint") not in (text, description):
+            line += f" hint={_quoted(node['hint'])}"
+        if node.get("view_id"):
+            line += f" id={str(node['view_id']).rsplit('/', 1)[-1]}"
+        lines.append(line)
+    return lines
+
+
+def _for_model(response: dict[str, Any]) -> dict[str, Any]:
+    """A bridge response as the model reads it: the screen as short lines instead of every field of
+    every node (about a tenth of the size, and each later request carries it again)."""
+    observation = response.get("observation")
+    if not isinstance(observation, dict) or not isinstance(observation.get("nodes"), list):
+        return response
+    compact = {
+        key: observation[key]
+        for key in ("package_name", "activity_name", "snapshot_version", "screen", "stable")
+        if key in observation
+    }
+    for flag in ("truncated", "content_changing", "sensitive_content_redacted"):
+        if observation.get(flag):
+            compact[flag] = True
+    compact["ui"] = _ui_lines(observation)
+    return {**response, "observation": compact}
+
+
 def _string(arguments: dict[str, Any], key: str, *, maximum: int = _MAX_TEXT) -> str:
     value = arguments.get(key)
     if not isinstance(value, str) or not value or len(value) > maximum or "\0" in value:
@@ -251,7 +367,7 @@ class _BridgeTool:
         raise NotImplementedError
 
     async def execute(self, arguments: dict[str, Any]) -> str:
-        return json_result(await asyncio.to_thread(self._run, arguments))
+        return json_result(_for_model(await asyncio.to_thread(self._run, arguments)))
 
     def _run(self, arguments: dict[str, Any]) -> dict[str, Any]:
         raise NotImplementedError
@@ -261,7 +377,8 @@ class AndroidObserveTool(_BridgeTool):
     _SPEC = ToolSpec(
         name="android_observe",
         description=(
-            "Observe the current Android app, window, bounded accessibility UI tree, and screen."
+            "Observe the current Android app, window, bounded accessibility UI tree, and screen. "
+            + _UI_FORMAT
         ),
         input_schema={
             "type": "object",
@@ -303,7 +420,12 @@ class AndroidObserveTool(_BridgeTool):
 class AndroidScreenshotTool(_BridgeTool):
     _SPEC = ToolSpec(
         name="android_screenshot",
-        description="Capture the Android display into the private workspace and attach the image.",
+        description=(
+            "Capture the Android display into the private workspace and attach the image, with "
+            "an observation of the same screen (ui lines as in android_observe). Its "
+            "snapshot_version works for android_action; screen coordinates are image pixels "
+            "times pixel_to_screen_x/y."
+        ),
         input_schema={"type": "object", "additionalProperties": False},
         side_effect="read",
         capability=Capability.WORKSPACE_READ,
@@ -384,17 +506,20 @@ class AndroidScreenshotTool(_BridgeTool):
             screenshot["sha256"] = digest
             screenshot["bytes"] = len(data)
             response["screenshot"] = screenshot
-        return json_result(response)
+        return json_result(_for_model(response))
 
 
 class AndroidActionTool(_BridgeTool):
     _SPEC = ToolSpec(
         name="android_action",
         description=(
-            "Perform one Android action using snapshot_version from the latest android_observe. "
-            "Required action parameters: tap x,y; swipe x,y,x2,y2; ref ref; "
-            "type_text ref,text; launch_app package_name. back/home require only "
-            "action,snapshot_version. Supply only fields belonging to the chosen action."
+            "Perform one Android action using snapshot_version from a recent android_observe or "
+            "android_screenshot. A snapshot stays valid while the same window is shown, even if "
+            "content in it keeps moving; if the target changed, the result says target_changed "
+            "with a fresh observation. Required action parameters: tap x,y; swipe x,y,x2,y2; "
+            "ref ref; type_text ref,text; launch_app app_name (the name under the app's icon) or "
+            "package_name. back/home require only action,snapshot_version. Supply only fields "
+            "belonging to the chosen action."
         ),
         input_schema={
             "type": "object",
@@ -429,6 +554,13 @@ class AndroidActionTool(_BridgeTool):
                     "maxLength": 255,
                     "pattern": _PACKAGE_RE.pattern,
                 },
+                "app_name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": _MAX_APP_NAME,
+                    "pattern": _STRING_PATTERN,
+                    "description": "The app's name under its icon, such as Calculator or 微信.",
+                },
                 "expect": _EXPECT_SCHEMA,
                 "timeout_ms": {"type": "integer", "minimum": 100, "maximum": _MAX_TIMEOUT_MS},
             },
@@ -437,7 +569,11 @@ class AndroidActionTool(_BridgeTool):
                 {
                     "if": {"properties": {"action": {"const": action}}, "required": ["action"]},
                     "then": {
-                        "required": list(fields),
+                        **(
+                            {"anyOf": [{"required": [name]} for name in _ANY_OF_FIELDS[action]]}
+                            if action in _ANY_OF_FIELDS
+                            else {"required": list(fields)}
+                        ),
                         "propertyNames": {"enum": [*_COMMON_ACTION_FIELDS, *fields]},
                     },
                 }
@@ -474,35 +610,16 @@ class AndroidActionTool(_BridgeTool):
                 correlation_id=context.correlation_id,
             )
         )
-        return json_result(response)
+        return json_result(_for_model(response))
 
     @staticmethod
     def prepare_for_approval(arguments: dict[str, Any]) -> dict[str, Any]:
+        """The action exactly as it will run: the runner executes what was approved, so this keeps
+        every field of the chosen action (the text to type too, which the person approving should
+        see) and drops nothing else of use."""
         action = arguments.get("action")
-        prepared = {
-            "action": action,
-            "snapshot_version": arguments.get("snapshot_version"),
-        }
-        if action == "tap":
-            prepared.update(x=arguments.get("x"), y=arguments.get("y"))
-        elif action == "swipe":
-            prepared.update(
-                x=arguments.get("x"),
-                y=arguments.get("y"),
-                x2=arguments.get("x2"),
-                y2=arguments.get("y2"),
-            )
-        elif action == "ref":
-            prepared["ref"] = arguments.get("ref")
-        elif action == "type_text":
-            prepared.update(
-                ref=arguments.get("ref"), text_length=len(str(arguments.get("text", "")))
-            )
-        elif action == "launch_app":
-            prepared["package_name"] = arguments.get("package_name")
-        if "expect" in arguments:
-            prepared["expect"] = arguments["expect"]
-        return prepared
+        permitted = (*_COMMON_ACTION_FIELDS, *_ACTION_FIELDS.get(str(action), ()))
+        return {name: arguments[name] for name in permitted if name in arguments}
 
     def _run(self, arguments: dict[str, Any]) -> dict[str, Any]:
         validate_tool_arguments(self.spec, arguments)
@@ -531,10 +648,15 @@ class AndroidActionTool(_BridgeTool):
         elif action == "type_text":
             payload.update(ref=_ref(arguments), text=_string(arguments, "text"))
         elif action == "launch_app":
-            package = _string(arguments, "package_name", maximum=255)
-            if not _PACKAGE_RE.fullmatch(package):
-                raise ToolArgumentError("'package_name' is not a valid Android package")
-            payload["package_name"] = package
+            if "package_name" not in arguments and "app_name" not in arguments:
+                raise ToolArgumentError("launch_app requires app_name or package_name")
+            if "package_name" in arguments:
+                package = _string(arguments, "package_name", maximum=255)
+                if not _PACKAGE_RE.fullmatch(package):
+                    raise ToolArgumentError("'package_name' is not a valid Android package")
+                payload["package_name"] = package
+            if "app_name" in arguments:
+                payload["app_name"] = _string(arguments, "app_name", maximum=_MAX_APP_NAME)
         if "expect" in arguments:
             expect = arguments["expect"]
             if not isinstance(expect, dict) or not expect or len(expect) > 5:
@@ -632,7 +754,8 @@ def register_android_system_tools(registry: Any, bridge: Any | None = None) -> d
             registry.register(screenshot_tool)
     else:
         unavailable["android_screenshot"] = (
-            "Android screenshots require Android 11 (API 30) or newer and enabled Accessibility"
+            "Android screenshots require enabled Accessibility and Android 11 (API 30) or newer, "
+            "or the live screen (Device & tools)"
         )
     previous = dict(getattr(registry, "_android_unavailable", {}))
     # Capability refresh owns only these native tools.  Other adapters may use

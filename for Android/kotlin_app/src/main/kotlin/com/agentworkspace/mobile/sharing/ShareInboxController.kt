@@ -66,14 +66,15 @@ class ShareInboxController private constructor(private val context: Context) {
                 require(uris.isNotEmpty() || text != null) { "分享内容不可读取" }
                 val sources = mutableListOf<InboxSource>()
                 text?.let { sources.add(InboxSource("分享的文字.txt", text = it)) }
-                uris.distinct().forEach { uri -> sources.add(source(uri, defaultType)) }
+                uris.distinct().forEachIndexed { index, uri -> sources.add(source(uri, defaultType, index)) }
                 val added = store.capture(batchId, sources)
                 captureFailure = warning
                 changed()
                 added.filter { it.kind == "file" }.forEach { item ->
                     try {
                         val staged = stage(item)
-                        store.update(item.id) { it.copy(state = "pending", size = staged.size, sha256 = staged.sha256, error = null) }
+                        store.update(item.id) { it.copy(state = "pending", size = staged.size, sha256 = staged.sha256,
+                            name = staged.name ?: it.name, mediaType = staged.mediaType ?: it.mediaType, error = null) }
                     } catch (_: Exception) {
                         rememberFailure(item.id, "无法接收或保存此文件，请检查存储空间后重试", false)
                     }
@@ -123,7 +124,8 @@ class ShareInboxController private constructor(private val context: Context) {
             uploader.validateTarget(selected.workspaceId!!, selected.sessionId!!)
             val ready = if (selected.kind == "file") {
                 val staged = stage(selected)
-                store.update(id) { it.copy(size = staged.size, sha256 = staged.sha256) } ?: return
+                store.update(id) { it.copy(size = staged.size, sha256 = staged.sha256,
+                    name = staged.name ?: it.name, mediaType = staged.mediaType ?: it.mediaType) } ?: return
             } else selected
             val attachment = if (ready.kind == "file") {
                 val receipt = uploader.upload(ready, store.file(id))
@@ -159,8 +161,13 @@ class ShareInboxController private constructor(private val context: Context) {
                 }
             }
             val sha = ShareInboxUpload.hex(digest.digest())
-            check((item.sha256.isEmpty() || sha == item.sha256) && (item.sourceSize < 0 || size == item.sourceSize))
-            return StagedShareFile(file, size, sha)
+            if (item.sha256.isNotEmpty()) {
+                check(sha == item.sha256)
+                return StagedShareFile(file, size, sha)
+            }
+            // Copied, or re-encoded, before its record was saved.
+            if (item.sourceSize < 0 || size == item.sourceSize) return fitImage(item, StagedShareFile(file, size, sha))
+            check(item.sourceUri != null && file.delete())
         }
         val partial = store.partial(item.id)
         if (Files.exists(partial.toPath(), LinkOption.NOFOLLOW_LINKS)) {
@@ -169,29 +176,59 @@ class ShareInboxController private constructor(private val context: Context) {
         val uri = Uri.parse(item.sourceUri ?: error("需要重新分享此文件"))
         require(uri.scheme == "content")
         val stream = context.contentResolver.openInputStream(uri) ?: error("无法读取分享文件")
-        return stream.use { ShareInboxFiles.copy(store.root, item.id, it, item.sourceSize) }
+        return fitImage(item, stream.use { ShareInboxFiles.copy(store.root, item.id, it, item.sourceSize) })
     }
 
-    private fun source(uri: Uri, defaultType: String?): InboxSource {
+    /** Pictures too large or in a format models refuse are re-encoded (ShareInboxImages). */
+    private fun fitImage(item: InboxItem, copied: StagedShareFile): StagedShareFile =
+        ShareInboxImages.fit(copied, item.name, item.mediaType, store.partial(item.id)) ?: copied
+
+    private fun source(uri: Uri, defaultType: String?, index: Int = 0): InboxSource {
         require(uri.scheme == "content")
-        var name = uri.lastPathSegment ?: "shared-file"
+        var name: String? = null
         var size = -1L
-        runCatching {
-            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val nameColumn = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    val sizeColumn = cursor.getColumnIndex(OpenableColumns.SIZE)
-                    if (nameColumn >= 0 && !cursor.isNull(nameColumn)) name = cursor.getString(nameColumn)
-                    if (sizeColumn >= 0 && !cursor.isNull(sizeColumn)) size = cursor.getLong(sizeColumn).coerceAtLeast(-1L)
+        // The system photo picker hides real file names ("25.jpg"); its pictures are named below.
+        val picker = uri.authority == "media" && uri.pathSegments.any { it.startsWith("picker") }
+        // Some providers reject a projection they do not list.
+        for (projection in listOf(arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null)) {
+            runCatching {
+                context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val nameColumn = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        val sizeColumn = cursor.getColumnIndex(OpenableColumns.SIZE)
+                        if (nameColumn >= 0 && !cursor.isNull(nameColumn)) name = cursor.getString(nameColumn)
+                        if (sizeColumn >= 0 && !cursor.isNull(sizeColumn)) size = cursor.getLong(sizeColumn).coerceAtLeast(-1L)
+                    }
                 }
             }
+            if (name != null) break
+        }
+        // Some phones' Downloads provider fails every query for a file it lists from the media store
+        // (ZTE, Android 12: "You must pass a valid uri and observer"), so picked files lost their names.
+        // The opened file still knows where it lives.
+        if (name == null && !picker) opened(uri)?.let { (path, length) ->
+            name = path.substringAfterLast('/').takeIf { it.isNotBlank() }
+            if (size < 0) size = length
         }
         val supplied = runCatching { context.contentResolver.getType(uri) }.getOrNull() ?: defaultType
         val mime = supplied?.lowercase(java.util.Locale.ROOT)?.takeIf {
             it.length <= 128 && it.matches(Regex("[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+"))
         } ?: "application/octet-stream"
-        return InboxSource(ShareInboxFiles.safeName(name), uri.toString(), mime, size)
+        // Without a name, a picture is called after the moment it arrived, like a camera photo.
+        val fallback = (if (mime.startsWith("image/")) "photo-" else "file-") +
+            java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(java.util.Date()) +
+            (if (index > 0) "-${index + 1}" else "") +
+            (android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)?.let { ".$it" } ?: "")
+        val chosen = name?.takeIf { it.isNotBlank() && !picker } ?: fallback
+        return InboxSource(ShareInboxFiles.safeName(chosen), uri.toString(), mime, size)
     }
+
+    /** The path and size of the file behind [uri], read from its open descriptor; null for streams. */
+    private fun opened(uri: Uri): Pair<String, Long>? = runCatching {
+        context.contentResolver.openFileDescriptor(uri, "r")?.use { descriptor ->
+            android.system.Os.readlink("/proc/self/fd/${descriptor.fd}") to descriptor.statSize
+        }
+    }.getOrNull()?.takeIf { (path, _) -> path.startsWith("/") && !path.startsWith("/dev/") }
 
     private fun changed() { mainHandler.post { listeners.forEach { runCatching { it() } } } }
 

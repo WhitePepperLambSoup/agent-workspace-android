@@ -11,7 +11,9 @@ import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 import java.util.Locale
 
-data class StagedShareFile(val file: File, val size: Long, val sha256: String)
+/** [name] and [mediaType] are set when the picture was re-encoded (ShareInboxImages). */
+data class StagedShareFile(val file: File, val size: Long, val sha256: String,
+    val name: String? = null, val mediaType: String? = null)
 
 /** Bounded stream staging used before the user chooses a workspace and session. */
 object ShareInboxFiles {

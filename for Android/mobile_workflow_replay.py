@@ -432,8 +432,10 @@ class MobileWorkflowReplay:
                                 "Android did not confirm execution; "
                                 "unknown action must not be repeated"
                             )
+                        # Both codes mean Android refused before acting, so a retry on a
+                        # fresh tree cannot repeat the action.
                         if (
-                            checkpoint["error_code"] != "stale_snapshot"
+                            checkpoint["error_code"] not in {"stale_snapshot", "target_changed"}
                             or checkpoint["attempts"] > step["max_retries"]
                         ):
                             raise ValueError(
@@ -447,7 +449,7 @@ class MobileWorkflowReplay:
                                 "run_id": run_id,
                                 "step_id": step["step_id"],
                                 "attempts": checkpoint["attempts"],
-                                "reason": "stale_snapshot; confirmed unexecuted",
+                                "reason": f"{checkpoint['error_code']}; confirmed unexecuted",
                             },
                         )
                     if checkpoint["action_outcome"] != "executed":

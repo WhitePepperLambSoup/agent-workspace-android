@@ -148,6 +148,19 @@
             <intent-filter><action android:name="android.accessibilityservice.AccessibilityService" /></intent-filter>
             <meta-data android:name="android.accessibilityservice" android:resource="@xml/android_system_accessibility" />
         </service>
+        <!-- The bubble's "operate the phone" opens the accessibility service's panel in :engine. -->
+        <receiver android:name=".automation.PhoneControlReceiver" android:exported="false" android:process=":engine" />
+        <!-- Live screen for the agent's screenshots: in :engine next to the accessibility service. -->
+        <service
+            android:name=".automation.LiveScreenService"
+            android:exported="false"
+            android:process=":engine"
+            android:foregroundServiceType="mediaProjection" />
+        <activity
+            android:name=".automation.LiveScreenConsentActivity"
+            android:exported="false"
+            android:theme="@style/Theme.AgentWorkspace.ScreenAsk"
+            android:excludeFromRecents="true" />
         <receiver android:name=".embedded.ScheduleWakeReceiver" android:exported="false">
             <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED" /><action android:name="android.intent.action.MY_PACKAGE_REPLACED" /></intent-filter>
         </receiver>
