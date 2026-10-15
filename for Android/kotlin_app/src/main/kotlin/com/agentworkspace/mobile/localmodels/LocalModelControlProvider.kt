@@ -22,6 +22,9 @@ class LocalModelControlProvider : ContentProvider() {
             when (method) {
                 "start" -> LocalModelBenchmark.start(application, options)
                 "cancel" -> LocalModelBenchmark.cancel(application)
+                "set_accelerator" -> JSONObject().put("ok", true)
+                    .put("accelerator", LocalModelBridge.setAccelerator(options.getString("mode")))
+                "retry_gpu" -> JSONObject().put("ok", true).put("accelerator", LocalModelBridge.retryGpu())
                 "status" -> {
                     val model = options.optString("model_id")
                     val configured = LocalModelPerformance.integer(options, "context_tokens", 262144)
@@ -34,6 +37,7 @@ class LocalModelControlProvider : ContentProvider() {
                             .put("timeout_seconds", LocalModelPerformance.timeoutSeconds(0, recommended,
                                 JSONObject(LocalModelBridge.status()).optJSONObject("last_generation"))))
                         .put("benchmark", LocalModelBenchmark.status(application))
+                        .put("accelerator", LocalModelBridge.acceleratorStatus())
                 }
                 else -> throw IllegalArgumentException("Unknown local model control operation")
             }

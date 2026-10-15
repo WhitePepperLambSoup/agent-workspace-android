@@ -450,7 +450,7 @@ strong { font-weight: 600; }
 .edit-banner > span:nth-child(2) { flex: 1; min-width: 0; }
 :root[data-style="glass"] .edit-banner { -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); background: var(--glass-control, var(--accent-soft)); }
 /* A long provider error must not cover the composer; the full text stays scrollable. */
-#noticeText { max-height: 6.2em; overflow-y: auto; overscroll-behavior: contain; }
+#noticeText { max-height: 6.2em; overflow-y: auto; overscroll-behavior: contain; cursor: pointer; }
 /* Over a wallpaper the soft tints are translucent: frost what is behind so the notice stays legible. */
 :root[data-style="glass"] #noticeText {
   -webkit-backdrop-filter: blur(14px) saturate(160%); backdrop-filter: blur(14px) saturate(160%);
@@ -481,7 +481,8 @@ strong { font-weight: 600; }
 }
 .link-clip[hidden] { display: none; }
 .link-clip > [data-icon] svg { width: 15px; height: 15px; }
-.link-clip > #linkClipText { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.link-clip > #linkClipText, .link-clip > #backgroundNoticeText { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.background-notice .text-action { flex: none; white-space: nowrap; }
 .link-clip .icon-button { width: 36px; height: 36px; color: inherit; }
 .link-clip .icon-button svg { width: 15px; height: 15px; }
 :root[data-style="glass"] .link-clip { -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); background: var(--glass-control, var(--accent-soft)); }
@@ -681,7 +682,41 @@ strong { font-weight: 600; }
 .model-sheet-icon svg { width: 20px; height: 20px; }
 .model-sheet-heading { display: grid; flex: 1 1 auto; min-width: 0; }
 .model-sheet-heading h2 { margin: 0; font-size: 16px; font-weight: 650; line-height: 1.35; }
-#modelSheetModel { overflow: hidden; color: var(--text-2); font: 12.5px/1.45 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+#modelSheetModel {
+  overflow: hidden; justify-self: start; max-width: 100%; margin: 0; padding: 0; border: 0; background: none;
+  color: var(--text-2); font: 12.5px/1.45 var(--font-mono); text-align: left; text-overflow: ellipsis; white-space: nowrap;
+}
+#modelSheetModel::after { content: " ▾"; color: var(--text-3); }
+#modelSheetModel[aria-expanded="true"]::after { content: " ▴"; }
+/* The provider's models: search, then pick; the list scrolls on its own, not the sheet. */
+.model-sheet-picker { display: grid; gap: 8px; }
+.blocked-app-picker { display: grid; gap: 8px; margin-top: 8px; }
+.blocked-app-picker input {
+  min-height: 40px; padding: 8px 12px; border: 1px solid var(--border-strong);
+  border-radius: 12px; background: var(--field); color: var(--text); font-size: 14.5px;
+}
+.blocked-app-choices { max-height: 320px; overflow-y: auto; }
+.model-sheet-search { display: flex; align-items: center; gap: 8px; }
+.model-sheet-search input {
+  flex: 1 1 auto; min-width: 0; min-height: 40px; padding: 8px 12px; border: 1px solid var(--border-strong);
+  border-radius: 12px; background: var(--field); color: var(--text); font-size: 14.5px;
+  transition: border-color .15s, box-shadow .15s;
+}
+.model-sheet-search input:focus { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
+.model-sheet-list {
+  display: grid; max-height: min(42vh, 340px); overflow-y: auto; overscroll-behavior: contain; touch-action: pan-y;
+  border: 1px solid var(--border); border-radius: 14px; background: var(--surface-2);
+}
+.model-option {
+  display: grid; gap: 2px; width: 100%; padding: 9px 14px; border: 0; border-bottom: 1px solid var(--border);
+  background: none; color: var(--text); text-align: left;
+}
+.model-option:last-child { border-bottom: 0; }
+.model-option strong { overflow: hidden; font: 13px/1.4 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.model-option small { overflow: hidden; color: var(--text-3); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+.model-option[aria-selected="true"] { background: var(--accent-soft); }
+.model-option[aria-selected="true"] strong { color: var(--accent-soft-text); }
+.model-option:disabled { opacity: .5; }
 #btnModelSheetMore { flex: 0 0 auto; }
 .model-sheet-profiles { display: flex; gap: 8px; margin: 0 -18px; padding: 2px 18px 4px; overflow-x: auto; scrollbar-width: none; touch-action: auto; }
 .model-sheet-profiles::-webkit-scrollbar { display: none; }
@@ -894,6 +929,13 @@ strong { font-weight: 600; }
 .management-list > :last-child, .task-center-list > :last-child, .search-results > :last-child, .workspace-files-list > :last-child,
 .import-list > :last-child, .usage-models-list > :last-child { border-bottom: 0; }
 .management-row-body { display: grid; flex: 1 1 160px; gap: 4px; min-width: 0; }
+/* A skill inside the pack row above it. */
+.management-row-child { margin-left: 18px; }
+.management-row-child strong { font-weight: 560; }
+/* Skill descriptions can run to a page; three lines tell what each is for. */
+.management-row-child small, #skillsPreviewList small {
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
 /* Saved model profiles: name and model, then switch / delete. */
 .profile-row { flex-wrap: nowrap; }
 .profile-row .management-row-body { flex: 1 1 auto; }
@@ -1694,3 +1736,161 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
   background: rgba(255, 255, 255, .45); border: 1px solid rgba(255, 255, 255, .6);
   -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
 }
+
+/* Memory page: search and topic chips above the list. */
+.memory-browse { display: grid; gap: 8px; margin: 4px 0 10px; }
+.memory-browse[hidden], .memory-topics[hidden] { display: none; }
+#memorySearch { width: 100%; min-height: 40px; padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font: inherit; }
+.memory-topics { display: flex; flex-wrap: wrap; gap: 6px; }
+.memory-topic { min-height: 32px; padding: 4px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text-2); font: inherit; font-size: 13px; }
+.memory-topic[aria-pressed="true"] { border-color: transparent; background: var(--accent-soft); color: var(--accent-soft-text); font-weight: 600; }
+#memoryTopic { min-height: 36px; margin-left: auto; padding: 4px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font: inherit; font-size: 13px; }
+
+/* ===== 2.0 conversation ===================================================================== */
+/* Replies read as the page itself, without a name over each one (the label stays for screen readers). */
+.message-card.assistant > .role-badge {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+}
+.message-card.assistant { position: relative; }
+/* Your messages: a clean bubble; copy and edit sit under it, not inside. */
+.message-card.user { position: relative; margin-bottom: 22px; padding: 10px 15px; border-radius: 20px 20px 6px 20px; }
+.message-card.user .card-action-bar { position: absolute; right: 2px; bottom: -34px; margin: 0; }
+.message-card.user .btn-card-action { width: 30px; height: 30px; min-width: 30px; min-height: 30px; opacity: .6; }
+/* Reply actions: small and quiet until needed. */
+.card-action-bar { gap: 2px; margin: 2px 0 0 -8px; }
+.btn-card-action { width: 34px; height: 34px; min-width: 34px; min-height: 34px; border-radius: 10px; opacity: .72; }
+.btn-card-action svg { width: 16px; height: 16px; }
+.btn-card-action:active { opacity: 1; background: var(--surface-2); }
+/* Reasoning: a quiet line that opens to the full text. */
+.reasoning-box summary { min-height: 28px; padding: 2px 10px 2px 8px; background: transparent; color: var(--text-3); font-size: 12.5px; }
+.reasoning-box[open] summary { color: var(--text-2); }
+/* Tool calls: a compact list of steps in plain words, joined by a thin line. */
+.message-card.tool {
+  position: relative; border: 0; border-radius: 12px; background: transparent; box-shadow: none; color: var(--text-2); font-size: 13px;
+}
+.message-card.tool summary { min-height: 32px; padding: 4px 6px 4px 4px; gap: 10px; color: var(--text-2); }
+.message-card.tool summary::before { flex: 0 0 8px; width: 8px; height: 8px; margin: 0 2px 0 8px; box-shadow: 0 0 0 3px var(--bg, transparent); }
+.message-card.tool[data-state="running"] summary::before { flex-basis: 12px; width: 12px; height: 12px; margin: 0 0 0 6px; }
+.message-card.tool summary::after { opacity: .5; }
+.tool-name { font-family: var(--font-sans); font-size: 13px; font-weight: 500; color: var(--text-2); }
+.message-card.tool[data-state="running"] .tool-name { color: var(--text); }
+.message-card.tool[data-state="done"] .tool-state { display: none; }
+.message-card.tool[open] { background: var(--surface); box-shadow: var(--shadow-1); }
+#timelineList > .message-card.tool + .message-card.tool { margin-top: -14px; }
+#timelineList > .message-card.tool + .message-card.tool::before {
+  content: ""; position: absolute; left: 15px; top: -6px; width: 1.5px; height: 14px; border-radius: 1px; background: var(--border-strong);
+}
+/* Notices above the composer: text on its own line, the action below it on the right. */
+.background-notice { flex-wrap: wrap; row-gap: 0; padding: 8px 4px 4px 12px; border-radius: 14px; }
+.background-notice > #backgroundNoticeText { flex: 1 1 calc(100% - 60px); }
+.background-notice > #btnBackgroundFix { margin-left: auto; }
+/* The composer floats a little above the page. */
+.composer { border-radius: 26px; box-shadow: 0 6px 24px rgba(15, 23, 22, .08), 0 1px 3px rgba(15, 23, 22, .06); }
+:root[data-theme="dark"] .composer { box-shadow: 0 6px 24px rgba(0, 0, 0, .35); }
+/* A new conversation: a larger greeting. */
+.empty-state > strong { font-size: 22px; letter-spacing: .01em; }
+.empty-state-icon { width: 56px; height: 56px; border-radius: 18px; }
+/* Drawer (2.0): groups by date, tag filter, tags under titles, a quiet ⋯ for the actions. */
+.drawer-group { margin: 14px 12px 4px; color: var(--text-3); font-size: 11.5px; font-weight: 650; letter-spacing: .04em; }
+.drawer-tag-filter { display: flex; gap: 6px; margin: 4px 8px 6px; overflow-x: auto; scrollbar-width: none; }
+.drawer-tag-filter::-webkit-scrollbar { display: none; }
+.drawer-tag-filter .memory-topic { flex: none; min-height: 28px; padding: 2px 11px; font-size: 12px; }
+.drawer-session-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.drawer-session-tags > span { padding: 0 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-soft-text); font-size: 10.5px; line-height: 18px; }
+.drawer-session-action[data-session-more] { opacity: .55; }
+/* Action sheet: a panel from the bottom over a dimmed page. */
+.action-sheet { position: fixed; inset: 0; z-index: 80; display: flex; align-items: flex-end; justify-content: center; background: rgba(8, 12, 11, .38); }
+.action-sheet[hidden] { display: none; }
+.action-sheet-panel {
+  width: min(560px, 100%); max-height: 82vh; overflow-y: auto; padding: 18px 12px calc(14px + env(safe-area-inset-bottom));
+  border-radius: 24px 24px 0 0; background: var(--surface); box-shadow: 0 -8px 32px rgba(0, 0, 0, .18);
+}
+.action-sheet-panel > strong { display: block; margin: 0 8px 10px; overflow: hidden; color: var(--text); font-size: 15px; text-overflow: ellipsis; white-space: nowrap; }
+.action-sheet-list { display: grid; gap: 2px; }
+.action-sheet-item {
+  display: flex; align-items: center; gap: 14px; min-height: 50px; padding: 0 12px; border: 0; border-radius: 14px;
+  background: transparent; color: var(--text); font: inherit; font-size: 15px; text-align: left;
+}
+.action-sheet-item:active { background: var(--surface-2); }
+.action-sheet-item:disabled { opacity: .45; }
+.action-sheet-item svg { width: 20px; height: 20px; color: var(--accent); }
+.session-tags-editor { display: grid; gap: 10px; margin: 10px 8px 0; }
+.session-tag-input { display: flex; gap: 8px; }
+.session-tag-input > input { flex: 1; min-width: 0; min-height: 40px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--text); font: inherit; }
+/* Plan mode: an icon chip that says 计划 while on; the approval under a finished plan. */
+.plan-chip { padding: 0 10px; }
+.plan-chip .plan-chip-label { display: none; }
+.plan-chip.active { border-color: transparent; background: var(--accent-soft); color: var(--accent-soft-text); }
+.plan-chip.active .plan-chip-label { display: inline; }
+.plan-approve { display: inline-flex; align-items: center; gap: 6px; margin-top: 12px; min-height: 40px; padding: 0 18px; border-radius: 999px; }
+.plan-approve svg { width: 16px; height: 16px; }
+/* A note between steps needs no copy/share row; the reply that ends the turn keeps it. (Older
+   WebViews without :has() simply keep every row.) */
+.message-card.assistant:has(+ .message-card.tool, + .message-card.assistant) > .card-action-bar { display: none; }
+.message-card.assistant:has(+ .message-card.tool, + .message-card.assistant) { margin-bottom: -6px; }
+/* @ files and / commands: a list right above the composer. */
+.mention-popup {
+  display: grid; gap: 2px; max-height: 42vh; margin-bottom: 8px; padding: 6px; overflow-y: auto; overscroll-behavior: contain;
+  border: 1px solid var(--border); border-radius: 18px; background: var(--surface); box-shadow: 0 8px 28px rgba(15, 23, 22, .12);
+}
+.mention-popup[hidden] { display: none; }
+.mention-row {
+  display: flex; align-items: center; gap: 12px; min-height: 46px; padding: 6px 10px; border: 0; border-radius: 12px;
+  background: transparent; color: var(--text); font: inherit; text-align: left;
+}
+.mention-row:active { background: var(--surface-2); }
+.mention-row > svg { flex: none; width: 18px; height: 18px; color: var(--accent); }
+.mention-row > span { display: grid; min-width: 0; }
+.mention-row strong { overflow: hidden; font-size: 14px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+.mention-row small { overflow: hidden; color: var(--text-3); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Shortcuts (2.0): name and steps, then run / schedule / edit; the editor opens under its row. */
+.shortcut-row { flex-wrap: nowrap; }
+.shortcut-row .management-row-body { flex: 1 1 auto; }
+.shortcut-row .management-row-body small { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.shortcut-editor, .shortcut-schedule { margin: 4px 0 12px; animation: rise-in 240ms var(--ease-out) both; }
+.shortcut-steps { display: grid; gap: 8px; margin: 4px 0; padding: 0; list-style: none; counter-reset: shortcut-step; }
+.shortcut-steps > li {
+  display: grid; gap: 6px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg);
+  counter-increment: shortcut-step;
+}
+.shortcut-step-head { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.shortcut-step-head > span { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-size: 13.5px; }
+.shortcut-step-head > span::before { content: counter(shortcut-step) ". "; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.shortcut-step-head .icon-button { flex: none; width: 34px; height: 34px; }
+.shortcut-step-head .icon-button svg { width: 16px; height: 16px; }
+.shortcut-offer { display: inline-flex; align-items: center; gap: 6px; margin-top: 12px; min-height: 38px; padding: 0 16px; border-radius: 999px; }
+.shortcut-offer svg { width: 16px; height: 16px; color: var(--accent); }
+/* Interactive cards (2.0): ```card blocks in replies. */
+.agent-card {
+  display: grid; gap: 10px; margin: 12px 0; padding: 14px 16px; border: 1px solid var(--border); border-radius: 18px;
+  background: var(--surface); box-shadow: 0 6px 22px rgba(15, 23, 22, .06);
+}
+.agent-card-title { font-size: 15px; font-weight: 620; }
+.agent-card p { margin: 0; }
+.agent-card small { color: var(--text-3); }
+.agent-card-list { display: grid; gap: 6px; }
+.agent-card-check { display: flex; align-items: center; gap: 10px; min-height: 38px; cursor: pointer; }
+.agent-card-check input { width: 20px; height: 20px; flex: none; accent-color: var(--accent); }
+.agent-card-check.done span { color: var(--text-3); text-decoration: line-through; }
+.agent-card table { margin: 0; }
+.agent-card tr.highlight td { background: color-mix(in srgb, var(--accent) 10%, transparent); font-weight: 600; }
+.agent-card-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.agent-card .card-action { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 38px; padding: 0 14px; border-radius: 999px; }
+.agent-card .card-action svg { width: 16px; height: 16px; flex: none; }
+.agent-card-list .card-action { justify-content: flex-start; }
+pre.card-pending { max-height: 3.2em; overflow: hidden; opacity: .55; }
+/* Step replay (2.0): the phone after each action of a task, side by side. */
+.step-replay {
+  position: fixed; inset: 0; z-index: 80; display: flex; flex-direction: column; gap: 12px; padding: max(16px, env(safe-area-inset-top)) 0 max(16px, env(safe-area-inset-bottom));
+  background: rgba(8, 12, 11, .92); color: #fff; animation: rise-in 220ms var(--ease-out) both;
+}
+.step-replay-head { display: flex; align-items: center; justify-content: space-between; padding: 0 16px; }
+.step-replay-head .icon-button { color: #fff; }
+.step-replay-strip { display: flex; flex: 1; gap: 14px; min-height: 0; padding: 0 16px; overflow-x: auto; scroll-snap-type: x mandatory; overscroll-behavior: contain; }
+.step-replay figure { display: flex; flex: 0 0 72%; max-width: 320px; flex-direction: column; gap: 8px; margin: 0; scroll-snap-align: center; }
+.step-replay img { width: 100%; min-height: 0; flex: 1; object-fit: contain; border-radius: 14px; background: #111; }
+.step-replay figcaption { font-size: 13.5px; line-height: 1.4; }
+.step-replay > small { padding: 0 16px; color: rgba(255, 255, 255, .6); }
+.step-replay-offer { display: inline-flex; align-items: center; gap: 6px; margin-top: 12px; margin-inline-start: 8px; min-height: 38px; padding: 0 16px; border-radius: 999px; }
+.step-replay-offer svg { width: 16px; height: 16px; }

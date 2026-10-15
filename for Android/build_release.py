@@ -18,6 +18,12 @@ KOTLIN_ROOT = ROOT / "kotlin_app"
 LLAMA_REVISION = "7fe450e19305b828c199d602c23a8337aaa1f03b"
 LLAMA_SHA256 = "a6861d549427f814dc591c439e08206f67ffaba0248344d421589abf18199e67"
 LLAMA_URL = f"https://codeload.github.com/ggml-org/llama.cpp/tar.gz/{LLAMA_REVISION}"
+# Compile-time headers for the GPU engine library (src/main/cpp/CMakeLists.txt).
+OPENCL_HEADERS_TAG = "v2024.10.24"
+OPENCL_HEADERS_SHA256 = "159f2a550592bae49859fee83d372acd152328fdf95c0dcd8b9409f8fad5db93"
+OPENCL_HEADERS_URL = (
+    f"https://codeload.github.com/KhronosGroup/OpenCL-Headers/tar.gz/refs/tags/{OPENCL_HEADERS_TAG}"
+)
 WRAPPER_SHA256 = "2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046"
 LICENSE_INPUTS = {
     "Chaquopy-17.0.0": {
@@ -135,6 +141,37 @@ def prepare_native_source():
     return target
 
 
+def prepare_opencl_headers():
+    target = KOTLIN_ROOT / f"build/tooling/OpenCL-Headers-{OPENCL_HEADERS_TAG}.tar.gz"
+    if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != OPENCL_HEADERS_SHA256:
+        with urllib.request.urlopen(OPENCL_HEADERS_URL, timeout=60) as response:
+            data = response.read(8 * 1024 * 1024 + 1)
+        if len(data) > 8 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != OPENCL_HEADERS_SHA256:
+            raise ValueError("pinned OpenCL headers failed their SHA256 or size limit")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        temporary.write_bytes(data)
+        temporary.replace(target)
+    with tarfile.open(target, "r:gz") as archive:
+        license_entry = next(
+            (
+                item
+                for item in archive
+                if item.isfile() and item.name.endswith("/LICENSE") and item.name.count("/") == 1
+            ),
+            None,
+        )
+        if license_entry is None or license_entry.size > 1024 * 1024:
+            raise ValueError("pinned OpenCL headers have no bounded upstream license")
+        stream = archive.extractfile(license_entry)
+        if stream is None:
+            raise ValueError("cannot read the OpenCL headers license")
+        assets = KOTLIN_ROOT / "src/main/assets/licenses"
+        assets.mkdir(parents=True, exist_ok=True)
+        (assets / "OpenCL-Headers-Apache-2.0.txt").write_bytes(stream.read())
+    return target
+
+
 def prepare_license_assets():
     verified = []
     for component, metadata in LICENSE_INPUTS.items():
@@ -212,6 +249,7 @@ def main():
     prepare()
     prepare_speech()
     native_source = prepare_native_source()
+    opencl_headers = prepare_opencl_headers()
     prepare_license_assets()
     subprocess.run(
         [sys.executable, str(ROOT / "package_apk_assets.py"), "--runtime", "chaquopy"],
@@ -225,6 +263,7 @@ def main():
         **os.environ,
         "AGENT_WORKSPACE_BUILD_PYTHON": sys.executable,
         "AGENT_LLAMA_ARCHIVE": str(native_source),
+        "AGENT_OPENCL_HEADERS_ARCHIVE": str(opencl_headers),
     }
     subprocess.run(
         gradle_command(KOTLIN_ROOT, signed=arguments.signed),

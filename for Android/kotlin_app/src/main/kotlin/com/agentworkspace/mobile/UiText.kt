@@ -10,7 +10,8 @@ import java.util.Locale
 object UiText {
     private const val PREFERENCES = "agent_ui"
     private const val LANGUAGE = "language"
-    private val choices = setOf("auto", "zh", "en")
+    // Native text has no Traditional Chinese copy yet: "zh-Hant" shows the Chinese wording.
+    private val choices = setOf("auto", "zh", "zh-Hant", "en")
 
     fun setPreference(context: Context, value: String) {
         if (value !in choices) return
@@ -21,7 +22,7 @@ object UiText {
         val preference = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).getString(LANGUAGE, "auto")
         return when (preference) {
             "en" -> true
-            "zh" -> false
+            "zh", "zh-Hant" -> false
             else -> Locale.getDefault().language != Locale.CHINESE.language
         }
     }

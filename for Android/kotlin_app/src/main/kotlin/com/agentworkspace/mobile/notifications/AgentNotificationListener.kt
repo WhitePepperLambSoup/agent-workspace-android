@@ -38,6 +38,41 @@ class AgentNotificationListener : NotificationListenerService() {
         val flags = notification.notification.flags
         if (flags and Notification.FLAG_ONGOING_EVENT != 0 || flags and Notification.FLAG_GROUP_SUMMARY != 0) return
         scope.launch { runCatching { forward(notification) } }
+        scope.launch { runCatching { keep(notification) } }
+    }
+
+    /** The notification digest (off by default): every notification kept on the phone, codes hidden. */
+    private fun keep(posted: StatusBarNotification) {
+        if (!JournalSwitch.on(this)) return
+        // Apps the user keeps the agent away from stay out of it too.
+        if (com.agentworkspace.mobile.automation.BlockedApps.blocked(this, posted.packageName)) return
+        val extras = posted.notification.extras
+        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
+        val text = (extras.getCharSequence(Notification.EXTRA_BIG_TEXT) ?: extras.getCharSequence(Notification.EXTRA_TEXT))
+            ?.toString().orEmpty()
+        if (title.isBlank() && text.isBlank()) return
+        val label = runCatching {
+            packageManager.getApplicationLabel(packageManager.getApplicationInfo(posted.packageName, 0)).toString()
+        }.getOrDefault(posted.packageName)
+        EngineHttp.request(this, "POST", "/mobile/notification-journal/add", JSONObject()
+            .put("package", posted.packageName).put("app_label", label.take(80))
+            .put("title", title.take(200)).put("text", text.take(1000)), 10000)
+    }
+
+    /** Whether the digest is on; asked of the engine every 30 s. */
+    private object JournalSwitch {
+        @Volatile private var value = false
+        @Volatile private var fetchedAt = 0L
+
+        fun on(context: Context): Boolean {
+            val now = System.currentTimeMillis()
+            if (now - fetchedAt > 30_000) {
+                fetchedAt = now
+                value = runCatching { EngineHttp.request(context, "GET", "/mobile/notification-journal", readTimeoutMs = 5000) }
+                    .getOrNull()?.takeIf { it.ok }?.body?.optBoolean("enabled") ?: value
+            }
+            return value
+        }
     }
 
     override fun onDestroy() {

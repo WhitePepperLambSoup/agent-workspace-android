@@ -32,6 +32,7 @@ import com.agentworkspace.mobile.UiText
 import com.agentworkspace.mobile.WebUiActivity
 import com.agentworkspace.mobile.embedded.EngineHttp
 import com.agentworkspace.mobile.embedded.MobileProviderSettings
+import com.agentworkspace.mobile.embedded.ProviderModelCatalog
 import com.agentworkspace.mobile.embedded.TaskNotificationPublisher
 import com.agentworkspace.mobile.embedded.TermuxDaemonService
 import kotlinx.coroutines.CoroutineScope
@@ -69,6 +70,7 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
         private const val DANGER = 0xFFB42318.toInt()
         private const val POLL_MS = 600L
         private const val MAX_STEPS = 6
+        internal const val STOPPED_BY_USER = "stopped by the user"
     }
 
     private enum class Stage { COMPOSE, WORKING, APPROVAL, DONE }
@@ -100,11 +102,54 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
     private var lastRequest: String? = null
     private var hiddenDepth = 0
     @Volatile private var shown = false
+    // Shrunk to a pill in a corner so the screen stays in view (a video, a feed); an approval brings
+    // the panel back, a tap on the pill too.
+    private var collapsed = false
+    // Opened only to show a repeat started from a chat; it goes away once the repeat ends.
+    private var openedForRepeat = false
+    private var repeatState: AgentAccessibilityService.RepeatStatus? = null
+    private var chooserOpen = false
+    // The provider in use, from the engine: what the model and effort choices offer.
+    private var provider: JSONObject? = null
     private val preferences = service.getSharedPreferences("phone-control", android.content.Context.MODE_PRIVATE)
     /** "Always allow": phone tasks from this panel run without asking (the user can turn it off here). */
     private var alwaysAllow: Boolean
         get() = preferences.getBoolean("always_allow", false)
         set(value) { preferences.edit().putBoolean("always_allow", value).apply() }
+    /** Send the words on the screen (and the app's name) with each request, so the agent starts knowing what is shown. */
+    private var sendScreen: Boolean
+        get() = preferences.getBoolean("send_screen", false)
+        set(value) { preferences.edit().putBoolean("send_screen", value).apply() }
+    /** Shrink to the pill as soon as a task starts. */
+    private var autoCollapse: Boolean
+        get() = preferences.getBoolean("auto_collapse", false)
+        set(value) { preferences.edit().putBoolean("auto_collapse", value).apply() }
+    /** The model and reasoning effort this panel's tasks use; empty: the app's own setting. */
+    private var panelModel: String
+        get() = preferences.getString("model", "").orEmpty()
+        set(value) { preferences.edit().putString("model", value).apply() }
+    private var panelEffort: String
+        get() = preferences.getString("effort", "").orEmpty()
+        set(value) { preferences.edit().putString("effort", value).apply() }
+    private var shrinkAfterApproval = false
+    private var bubbleHidden = false
+    // Paused: the task finishes its current step and waits; the user may add to the request meanwhile.
+    private var paused = false
+    private var pausing = false
+    private var addition = ""
+    // The task's conversation and steps, shown in the panel without opening the app.
+    private var contextOpen = false
+    private val contextItems = ArrayList<Pair<String, String>>()
+    private var listening: com.agentworkspace.mobile.voice.OfflineVoiceSession? = null
+    // This task's steps in words (remembered for the app when it succeeds) and as actions (a shortcut).
+    private val taskSteps = ArrayList<String>()
+    private var recorded: List<JSONObject> = emptyList()
+    private var savedShortcut = false
+    private var replaying: PhoneMemory.Shortcut? = null
+    private var confirmDelete: String? = null
+    private var modelsFetching = false
+    /** The provider last asked for its models, so a failing one is not asked on every redraw. */
+    private var modelsTried = ""
 
     val isOpen: Boolean get() = root != null
     /** Waiting for the user's request, with no task running. */
@@ -128,16 +173,40 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
             targetPackage = packageName
             targetLabel = label
             if (!addWindow()) { announceClosed(); return }
-            service.sendBroadcast(Intent(ACTION_PANEL_OPENED).setPackage(service.packageName))
+            bubbleAside(true)
         } else if (stage == Stage.DONE) {
             targetPackage = packageName ?: targetPackage
             targetLabel = label ?: targetLabel
         }
+        collapsed = false
+        openedForRepeat = false
+        loadProvider()
         if (stage == Stage.DONE || (stage == Stage.COMPOSE && taskId == null)) setStage(Stage.COMPOSE)
         else render()
     }
 
+    /** The provider in use, as the engine runs it (settings saved in the app process may be newer here). */
+    private fun loadProvider() {
+        scope.launch {
+            val reply = withContext(Dispatchers.IO) {
+                runCatching { EngineHttp.request(service, "GET", "/mobile/settings", null, 3000) }.getOrNull()
+            }
+            provider = reply?.takeIf { it.ok }?.body ?: withContext(Dispatchers.IO) {
+                runCatching { JSONObject(MobileProviderSettings.load(service).toPublicJson()) }.getOrNull()
+            }
+            if (stage == Stage.COMPOSE) render()
+        }
+    }
+
     fun close() {
+        // A repeat keeps going after its task: the panel shrinks to its pill instead, so it can be stopped.
+        if (repeatState?.running == true && root != null) {
+            if (stage == Stage.COMPOSE || stage == Stage.APPROVAL) stage = Stage.DONE
+            hideKeyboard()
+            collapsed = true
+            render()
+            return
+        }
         val view = root ?: return
         poller?.cancel()
         poller = null
@@ -152,11 +221,41 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
         sessionId = null; taskId = null; sequence = 0; result = null; failed = false; stopping = false
         approval = null; steps.clear(); stepCount = 0; draft = ""; answer = StringBuilder()
         stage = Stage.COMPOSE
+        collapsed = false; openedForRepeat = false; chooserOpen = false; shrinkAfterApproval = false
+        paused = false; addition = ""; contextOpen = false; contextItems.clear()
+        listening?.cancel(); listening = null
         announceClosed()
     }
 
+    /** A repeat started or moved on (from the service, main thread): shown in the panel, or as a pill. */
+    fun repeatChanged(status: AgentAccessibilityService.RepeatStatus) {
+        repeatState = status
+        if (root == null) {
+            if (!status.running) return
+            targetPackage = null; targetLabel = null
+            if (!addWindow()) return
+            openedForRepeat = true
+            collapsed = true
+            stage = Stage.DONE
+            result = null
+        }
+        render()
+        // Opened only for it: the pill shows how it ended for a moment, then goes.
+        if (!status.running && openedForRepeat && taskId == null) {
+            main.postDelayed({ if (openedForRepeat && repeatState?.running != true) close() }, 5000)
+        }
+    }
+
     private fun announceClosed() {
+        bubbleHidden = false
         service.sendBroadcast(Intent(ACTION_PANEL_CLOSED).setPackage(service.packageName))
+    }
+
+    /** Hides the floating bubble while the panel stands in for it, or brings it back. */
+    private fun bubbleAside(hide: Boolean) {
+        if (hide == bubbleHidden) return
+        bubbleHidden = hide
+        service.sendBroadcast(Intent(if (hide) ACTION_PANEL_OPENED else ACTION_PANEL_CLOSED).setPackage(service.packageName))
     }
 
     private fun addWindow(): Boolean {
@@ -169,6 +268,22 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
                     return true
                 }
                 return super.dispatchKeyEvent(event)
+            }
+
+            // Android 16 (predictive back) no longer sends the Back key to windows: the same, as a callback.
+            private val backCallback: Any? = if (android.os.Build.VERSION.SDK_INT >= 33)
+                android.window.OnBackInvokedCallback { if (stage == Stage.COMPOSE) close() } else null
+
+            override fun onAttachedToWindow() {
+                super.onAttachedToWindow()
+                if (android.os.Build.VERSION.SDK_INT >= 33) findOnBackInvokedDispatcher()?.registerOnBackInvokedCallback(
+                    android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, backCallback as android.window.OnBackInvokedCallback)
+            }
+
+            override fun onDetachedFromWindow() {
+                if (android.os.Build.VERSION.SDK_INT >= 33) findOnBackInvokedDispatcher()
+                    ?.unregisterOnBackInvokedCallback(backCallback as android.window.OnBackInvokedCallback)
+                super.onDetachedFromWindow()
             }
         }.apply { setPadding(dp(8), dp(4), dp(8), dp(10)); clipToPadding = false }
         val box = LinearLayout(service).apply {
@@ -248,11 +363,12 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
     fun step(description: String) {
         if (!shown) return
         main.post {
-            if (root == null || taskId == null) return@post
+            if (root == null || (taskId == null && replaying == null)) return@post
             stepCount += 1
             status = description
             steps.addLast(description)
             while (steps.size > MAX_STEPS) steps.removeFirst()
+            if (taskSteps.size < 30) taskSteps.add(description)
             if (stage == Stage.WORKING) render()
         }
     }
@@ -263,8 +379,10 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
         stage = next
         val view = root ?: return
         params?.let {
-            // Only the input takes the keyboard; while the agent works the app keeps its focus.
-            it.flags = if (next == Stage.COMPOSE) it.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+            // Only the input takes the keyboard; while the agent works the app keeps its focus
+            // (paused, the agent does nothing: the user may type what to add).
+            val typing = next == Stage.COMPOSE || (next == Stage.WORKING && paused)
+            it.flags = if (typing) it.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
                 else it.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
             it.softInputMode = if (next == Stage.COMPOSE) WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE or
                 WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING else WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
@@ -278,6 +396,13 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
     private fun render() {
         val box = card ?: return
         box.removeAllViews()
+        // Whenever the agent has a task, the user can shrink the panel to the pill and open it again.
+        val pill = collapsed && stage != Stage.COMPOSE
+        // A finished task's pill leaves the bubble free for the next request; while the agent works,
+        // the bubble stays out of its way.
+        bubbleAside(!(pill && stage == Stage.DONE && taskId == null))
+        shape(pill)
+        if (pill) { renderPill(box); return }
         box.addView(grip(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(16)))
         when (stage) {
             Stage.COMPOSE -> renderCompose(box)
@@ -285,6 +410,84 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
             Stage.APPROVAL -> renderApproval(box)
             Stage.DONE -> renderDone(box)
         }
+        if (stage == Stage.WORKING || stage == Stage.DONE) renderRepeat(box)
+    }
+
+    /** The whole panel across the top, or the pill in the top corner. */
+    private fun shape(pill: Boolean) {
+        val layout = params ?: return
+        val view = root ?: return
+        val width = if (pill) WindowManager.LayoutParams.WRAP_CONTENT else WindowManager.LayoutParams.MATCH_PARENT
+        val gravity = Gravity.TOP or (if (pill) Gravity.END else Gravity.CENTER_HORIZONTAL)
+        card?.let { box ->
+            if (pill) box.setPadding(dp(10), dp(4), dp(6), dp(4)) else box.setPadding(dp(14), dp(2), dp(14), dp(12))
+            (box.layoutParams as? FrameLayout.LayoutParams)?.let { it.width = width; box.layoutParams = it }
+        }
+        if (layout.width == width && layout.gravity == gravity) return
+        layout.width = width
+        layout.gravity = gravity
+        layout.x = 0
+        runCatching { windowManager.updateViewLayout(view, layout) }
+    }
+
+    /** Collapsed: what is going on in a few words; tap to open the panel again. */
+    private fun renderPill(box: LinearLayout) {
+        val repeat = repeatState
+        val running = taskId != null || repeat?.running == true
+        val line = row().apply {
+            setOnClickListener { collapsed = false; render() }
+            contentDescription = text("展开操控小窗", "Open the phone control panel")
+        }
+        if (running) line.addView(pulse(), LinearLayout.LayoutParams(dp(18), dp(18)))
+        val waiting = stage == Stage.APPROVAL
+        val words = when {
+            // Shrunk while a decision waits: the pill says so, and the task waits until it is opened.
+            waiting -> text("待你确认 · 点开", "Needs you · tap")
+            stage == Stage.WORKING && paused -> text("已暂停 · 点开", "Paused · tap")
+            stage == Stage.WORKING -> if (stepCount > 0) text("第 $stepCount 步", "Step $stepCount") else text("思考中", "Thinking")
+            repeat?.running == true -> "⟳ ${repeat.done}" + (repeat.times?.let { "/$it" } ?: "")
+            repeat != null && openedForRepeat -> text("定时重复已结束", "Repeat ended")
+            failed -> text("没有完成", "Not finished")
+            else -> text("完成了", "Done")
+        }
+        line.addView(label(words, 13f, when {
+            waiting -> accent()
+            failed && !running -> DANGER
+            else -> primaryText()
+        }, bold = true, single = true), gap(if (running) 8 else 2))
+        if (repeat?.running == true) {
+            line.addView(iconButton(R.drawable.ic_panel_stop, DANGER, text("停止定时重复", "Stop the repeat")) {
+                service.stopRepeat(STOPPED_BY_USER)
+            }, gap(2))
+        }
+        box.addView(line)
+    }
+
+    /** A repeat the phone runs on its own: what it does, how far it got, and a way to stop it. */
+    private fun renderRepeat(box: LinearLayout) {
+        val repeat = repeatState ?: return
+        val count = "${repeat.done}" + (repeat.times?.let { "/$it" } ?: "")
+        val line = row()
+        line.addView(label(if (repeat.running) text("定时重复：${repeat.description} · 已执行 $count 次", "Repeating: ${repeat.description} · $count done")
+            else text("定时重复已结束（$count 次）：${repeatReason(repeat.reason)}", "Repeat ended ($count): ${repeatReason(repeat.reason)}"),
+            12.5f, if (repeat.running) accent() else secondaryText()),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        if (repeat.running) line.addView(button(text("停止", "Stop"), DANGER, filled = false) { service.stopRepeat(STOPPED_BY_USER) }, gap(8))
+        box.addView(line, spaced(10))
+    }
+
+    private fun repeatReason(reason: String?): String = when {
+        reason == null || reason == "finished" -> text("全部完成", "all done")
+        reason == STOPPED_BY_USER -> text("你停止了它", "you stopped it")
+        reason == "stopped by the agent" -> text("AI 停止了它", "the agent stopped it")
+        reason == "the screen went off" -> text("屏幕熄灭了", "the screen went off")
+        reason == "automation was paused" -> text("自动化已暂停", "automation was paused")
+        reason.startsWith("the user left") -> text("离开了原来的应用", "you left the app")
+        reason == "reached the four-hour limit" -> text("已到 4 小时上限", "it reached the four-hour limit")
+        reason == "replaced by a new repeat" -> text("换成了新的定时重复", "a new repeat replaced it")
+        reason.startsWith("none of the steps could be done") ->
+            text("连续几轮都点不到目标", "its steps could not be done several rounds in a row")
+        else -> reason
     }
 
     private fun renderCompose(box: LinearLayout) {
@@ -328,8 +531,36 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
         }
         val inputRow = row().apply { gravity = Gravity.BOTTOM }
         inputRow.addView(input, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        // Speak the request instead of typing it (offline, once the speech model is installed).
+        micButton { spoken -> draft = spoken; input.setText(spoken); input.setSelection(spoken.length) }
+            ?.let { inputRow.addView(it, LinearLayout.LayoutParams(dp(40), dp(42)).apply { marginStart = dp(4) }) }
         inputRow.addView(send, LinearLayout.LayoutParams(dp(42), dp(42)).apply { marginStart = dp(8); bottomMargin = dp(1) })
         box.addView(inputRow, spaced(10))
+        renderShortcuts(box)
+        // The model and reasoning effort for tasks from here; the app's own setting until one is picked.
+        box.addView(modelRow(), spaced(8))
+        if (chooserOpen) box.addView(chooser(), spaced(6))
+        // Shrink while it works, so a video or a feed stays in view; approvals still come up.
+        val shrink = row()
+        shrink.addView(label(text("运行时收起成小圆点（不挡屏幕）", "Shrink while it works (keeps the screen clear)"), 12.5f,
+            secondaryText()), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        shrink.addView(android.widget.Switch(service).apply {
+            isChecked = autoCollapse
+            contentDescription = text("运行时收起", "Shrink while it works")
+            setOnCheckedChangeListener { _, checked -> autoCollapse = checked }
+        })
+        box.addView(shrink, spaced(4))
+        // Auto context: off unless the user turns it on; when on, it says what is sent.
+        val context = row()
+        context.addView(label(if (sendScreen) text("提问时附带「${targetLabel ?: text("当前应用", "this app")}」的名字和屏幕上的文字",
+                "Questions carry the app's name and the words on the screen") else text("提问时附带屏幕上的文字", "Send the words on the screen with questions"),
+            12.5f, if (sendScreen) accent() else secondaryText(), bold = sendScreen), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        context.addView(android.widget.Switch(service).apply {
+            isChecked = sendScreen
+            contentDescription = text("附带屏幕文字", "Send screen text")
+            setOnCheckedChangeListener { _, checked -> sendScreen = checked; render() }
+        })
+        box.addView(context, spaced(4))
         // Hosted mode: the agent operates without asking; shown here so it is easy to turn off.
         val hosted = row()
         hosted.addView(label(if (alwaysAllow) text("托管中：点按、滑动和输入不再询问", "Hosted: taps, swipes and typing are not asked")
@@ -353,32 +584,315 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
         main.postDelayed({ if (stage == Stage.COMPOSE) showKeyboard(input) }, 180)
     }
 
+    private fun effortLabel(value: String): String = when (value) {
+        "auto" -> text("自动", "Auto")
+        "none" -> text("关闭", "Off")
+        "low" -> text("低", "Low")
+        "medium" -> text("中", "Medium")
+        "high" -> text("高", "High")
+        "xhigh" -> text("很高", "Very high")
+        "max" -> text("最高", "Max")
+        else -> value
+    }
+
+    /** The panel's own model choice applies only while the provider it was made for is in use. */
+    private fun chosenModel(): String {
+        val base = provider?.optString("base_url") ?: return panelModel
+        return panelModel.takeIf { preferences.getString("model_base", "") == base }.orEmpty()
+    }
+
+    /** The panel's effort, while the model in use offers it. */
+    private fun chosenEffort(): String {
+        if (panelEffort.isEmpty() || (chosenModel().isEmpty() && panelModel.isNotEmpty())) return ""
+        val info = provider ?: return panelEffort
+        val model = chosenModel().ifEmpty { info.optString("model") }
+        return panelEffort.takeIf {
+            it in MobileProviderSettings.reasoningEfforts(info.optString("protocol"), info.optString("base_url"), model)
+        }.orEmpty()
+    }
+
+    /** The provider's model list, read once a day when the chooser opens (the app's settings read it too). */
+    private fun refreshModels(protocol: String, base: String) {
+        val listing = runCatching { ProviderModelCatalog.cached(service, protocol, base) }.getOrNull()
+        if (modelsFetching || modelsTried == "$protocol $base" ||
+            (listing != null && System.currentTimeMillis() - listing.fetchedAt < 24 * 3600_000L)) return
+        if (base == MobileProviderSettings.EMBEDDED_QWEN_BASE_URL) return
+        modelsFetching = true
+        modelsTried = "$protocol $base"
+        scope.launch {
+            withContext(Dispatchers.IO) { runCatching { ProviderModelCatalog.fetch(service, protocol, base, null) } }
+            modelsFetching = false
+            if (stage == Stage.COMPOSE && chooserOpen) render()
+        }
+    }
+
+    private fun modelRow(): View {
+        val appModel = provider?.optString("model").orEmpty()
+        val model = chosenModel().ifEmpty { appModel }.ifEmpty { text("读取中…", "Loading…") }
+        val effort = chosenEffort().ifEmpty { provider?.optString("reasoning_effort").orEmpty().ifEmpty { "auto" } }
+        val line = row().apply {
+            background = GradientDrawable().apply { cornerRadius = dp(12).toFloat(); setColor(field()) }
+            setPadding(dp(12), dp(8), dp(10), dp(8))
+            setOnClickListener { chooserOpen = !chooserOpen; render() }
+            contentDescription = text("选择模型和思考程度", "Choose the model and reasoning effort")
+        }
+        line.addView(label(model, 13f, primaryText(), bold = true, single = true),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        line.addView(label(text("思考：", "Thinking: ") + effortLabel(effort) + if (chooserOpen) "  ▴" else "  ▾", 12.5f, secondaryText(), single = true), gap(8))
+        return line
+    }
+
+    /** The provider's models (its own list when it was read, otherwise the known names) and efforts. */
+    private fun chooser(): View {
+        val column = LinearLayout(service).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply { cornerRadius = dp(12).toFloat(); setColor(field()) }
+            setPadding(dp(4), dp(4), dp(4), dp(8))
+        }
+        val info = provider ?: return column.apply { addView(label(text("正在读取模型…", "Reading the models…"), 12.5f, secondaryText())) }
+        val protocol = info.optString("protocol")
+        val base = info.optString("base_url")
+        val appModel = info.optString("model")
+        refreshModels(protocol, base)
+        // Without the provider's own list, only a known provider's names: a custom address has none.
+        val listed = runCatching { ProviderModelCatalog.cached(service, protocol, base)?.models?.map { it.id } }.getOrNull()
+            ?: MobileProviderSettings.providerPresets.firstOrNull {
+                it.protocol == protocol && it.baseUrl?.trimEnd('/').equals(base.trimEnd('/'), ignoreCase = true)
+            }?.models.orEmpty()
+        val models = listOf("") + (listOf(appModel) + listed).filter { it.isNotBlank() }.distinct().take(200)
+        if (modelsFetching) column.addView(label(text("正在获取模型列表…", "Getting the model list…"), 12f,
+            secondaryText()).apply { setPadding(dp(10), dp(6), 0, dp(2)) })
+        val list = LinearLayout(service).apply { orientation = LinearLayout.VERTICAL }
+        val chosen = chosenModel()
+        models.forEach { id ->
+            val selected = id == chosen
+            list.addView(label(if (id.isEmpty()) text("跟随应用设置（$appModel）", "App setting ($appModel)") else id, 13.5f,
+                if (selected) accent() else primaryText(), bold = selected, single = true).apply {
+                setPadding(dp(10), dp(8), dp(10), dp(8))
+                setOnClickListener {
+                    panelModel = id
+                    preferences.edit().putString("model_base", base).apply()
+                    val efforts = MobileProviderSettings.reasoningEfforts(protocol, base, id.ifEmpty { appModel })
+                    if (panelEffort !in efforts) panelEffort = ""
+                    render()
+                }
+            })
+        }
+        val scroll = ScrollView(service).apply { addView(list) }
+        column.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        scroll.post { if (scroll.height > dp(176)) scroll.layoutParams = scroll.layoutParams.apply { height = dp(176) } }
+        val efforts = MobileProviderSettings.reasoningEfforts(protocol, base, chosen.ifEmpty { appModel })
+        val chips = row()
+        (listOf("") + efforts).distinct().forEach { value ->
+            val selected = value == chosenEffort()
+            chips.addView(label(if (value.isEmpty()) text("应用设置", "App setting") else effortLabel(value), 12.5f,
+                if (selected) accent() else primaryText(), bold = selected, single = true).apply {
+                setPadding(dp(10), dp(6), dp(10), dp(6))
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(14).toFloat(); setStroke(dp(1), if (selected) accent() else (if (dark()) 0x33FFFFFF else 0x22000000))
+                }
+                setOnClickListener {
+                    panelEffort = value
+                    if (chosenModel().isEmpty() && panelModel.isNotEmpty()) panelModel = ""
+                    render()
+                }
+            }, gap(6))
+        }
+        column.addView(label(text("思考程度", "Reasoning effort"), 12f, secondaryText()).apply { setPadding(dp(10), dp(8), 0, dp(4)) })
+        column.addView(android.widget.HorizontalScrollView(service).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(chips)
+        })
+        if (efforts.size <= 1) column.addView(label(text("这个模型自己决定思考程度", "This model decides its own effort"), 11.5f,
+            secondaryText()).apply { setPadding(dp(10), dp(4), 0, 0) })
+        return column
+    }
+
     private fun renderWorking(box: LinearLayout) {
         val line = row()
-        line.addView(pulse(), LinearLayout.LayoutParams(dp(22), dp(22)))
+        if (paused) line.addView(icon(R.drawable.ic_panel_pause, accent(), 22), LinearLayout.LayoutParams(dp(22), dp(22)))
+        else line.addView(pulse(), LinearLayout.LayoutParams(dp(22), dp(22)))
         val texts = LinearLayout(service).apply {
             orientation = LinearLayout.VERTICAL
-            setOnClickListener { stepsOpen = !stepsOpen; render() }
+            setOnClickListener { contextOpen = !contextOpen; render() }
         }
-        texts.addView(label(if (stopping) text("正在停止…", "Stopping…") else status.ifBlank { text("正在准备…", "Getting ready…") },
-            14.5f, primaryText(), bold = true, single = true))
-        texts.addView(label(if (stepCount > 0) text("第 $stepCount 步 · 点这里看过程", "Step $stepCount · tap for details")
-            else text("AI 正在思考", "The agent is thinking"), 12f, secondaryText(), single = true))
+        texts.addView(label(when {
+            stopping -> text("正在停止…", "Stopping…")
+            paused -> text("已暂停", "Paused")
+            else -> status.ifBlank { text("正在准备…", "Getting ready…") }
+        }, 14.5f, primaryText(), bold = true, single = true))
+        texts.addView(label(when {
+            paused -> text("做完这一步就停住；可以补充要求，再点继续", "Holds after this step; add to the request, then go on")
+            stepCount > 0 -> text("第 $stepCount 步 · 点这里看过程", "Step $stepCount · tap for details")
+            else -> text("AI 正在思考 · 点这里看过程", "The agent is thinking · tap for details")
+        }, 12f, secondaryText(), single = true))
         line.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(12) })
+        // Out of the way while it works (a video, a feed): a small pill keeps the progress.
+        line.addView(iconButton(R.drawable.ic_panel_collapse, secondaryText(), text("收起", "Shrink")) { collapsed = true; render() })
+        if (replaying != null) {
+            // A shortcut runs without the agent: it can only be stopped.
+            line.addView(iconButton(R.drawable.ic_panel_stop, DANGER, text("停止", "Stop")) { stop() })
+            box.addView(line)
+            return
+        }
         // Stuck or misread the screen: have it look again and carry on.
-        line.addView(iconButton(R.drawable.ic_panel_refresh, accent(), text("让 AI 重新看屏幕", "Have the agent look again")) { refresh() })
+        if (!paused) line.addView(iconButton(R.drawable.ic_panel_refresh, accent(), text("让 AI 重新看屏幕", "Have the agent look again")) { refresh() })
+        // Pause, not stop: the task keeps its place and goes on when the user says so.
+        line.addView(iconButton(if (paused) R.drawable.ic_panel_play else R.drawable.ic_panel_pause, accent(),
+            if (paused) text("继续", "Go on") else text("暂停", "Pause")) { setPaused(!paused) })
         line.addView(iconButton(R.drawable.ic_panel_stop, DANGER, text("停止", "Stop")) { stop() })
         box.addView(line)
-        if (stepsOpen && steps.isNotEmpty()) {
-            val list = LinearLayout(service).apply { orientation = LinearLayout.VERTICAL }
-            steps.forEach { list.addView(label("• $it", 12.5f, secondaryText(), single = true)) }
-            box.addView(list, spaced(8))
+        if (paused) renderAddition(box)
+        if (contextOpen) renderContext(box)
+    }
+
+    /** While paused: what the user adds to the request (typed or spoken), and the way on. */
+    private fun renderAddition(box: LinearLayout) {
+        val input = EditText(service).apply {
+            setText(addition)
+            setSelection(addition.length)
+            hint = text("补充要求，比如「改成第二个」", "Add to the request, such as “the second one instead”")
+            setHintTextColor(secondaryText())
+            setTextColor(primaryText())
+            textSize = 14.5f
+            maxLines = 3
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            background = GradientDrawable().apply { cornerRadius = dp(14).toFloat(); setColor(field()) }
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                override fun afterTextChanged(s: android.text.Editable?) { addition = s?.toString().orEmpty() }
+            })
+        }
+        val inputRow = row().apply { gravity = Gravity.CENTER_VERTICAL }
+        inputRow.addView(input, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        micButton { spoken -> addition = spoken; input.setText(spoken); input.setSelection(spoken.length) }
+            ?.let { inputRow.addView(it, gap(4)) }
+        box.addView(inputRow, spaced(10))
+        val buttons = row().apply { gravity = Gravity.END }
+        buttons.addView(button(text("补充", "Add"), accent(), filled = false) { addToRequest(input.text.toString(), goOn = false) })
+        buttons.addView(button(text("补充并继续", "Add and go on"), accent(), filled = true) {
+            val words = input.text.toString()
+            if (words.isBlank()) setPaused(false) else addToRequest(words, goOn = true)
+        }, gap(8))
+        box.addView(buttons, spaced(8))
+    }
+
+    /** The task so far: the request, the agent's words, each tool it used and how it went. */
+    private fun renderContext(box: LinearLayout) {
+        val list = LinearLayout(service).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(10), dp(6), dp(10), dp(8)) }
+        if (contextItems.isEmpty()) list.addView(label(text("还没有内容", "Nothing yet"), 12.5f, secondaryText()))
+        contextItems.forEach { (kind, words) ->
+            val (prefix, color) = when (kind) {
+                "user" -> text("你：", "You: ") to accent()
+                "ai" -> "AI：" to primaryText()
+                "tool" -> "› " to secondaryText()
+                "error" -> "✗ " to DANGER
+                "approval" -> text("待确认：", "Approval: ") to accent()
+                else -> "  " to secondaryText()
+            }
+            list.addView(label(prefix + words, if (kind == "ai" || kind == "user") 13f else 12f, color).apply {
+                setPadding(0, dp(3), 0, dp(3))
+                setTextIsSelectable(false)
+            })
+        }
+        val scroll = ScrollView(service).apply {
+            isVerticalScrollBarEnabled = true
+            background = GradientDrawable().apply { cornerRadius = dp(12).toFloat(); setColor(field()) }
+            addView(list)
+        }
+        box.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
+        val limit = (service.resources.displayMetrics.heightPixels * 0.42f).toInt()
+        scroll.post {
+            if (scroll.height > limit) scroll.layoutParams = scroll.layoutParams.apply { height = limit }
+            scroll.fullScroll(View.FOCUS_DOWN)
+        }
+    }
+
+    private fun setPaused(value: Boolean) {
+        val id = taskId?.takeIf { it != "pending" } ?: return
+        if (pausing) return
+        pausing = true
+        scope.launch {
+            val reply = withContext(Dispatchers.IO) {
+                runCatching { EngineHttp.request(service, "POST", "/mobile/tasks/${Uri.encode(id)}/${if (value) "pause" else "unpause"}",
+                    JSONObject(), 15000) }.getOrNull()
+            }
+            pausing = false
+            if (reply?.ok == true) {
+                paused = reply.body.optBoolean("paused", value)
+                contextItems.add("note" to if (paused) text("已暂停", "Paused") else text("继续", "Going on"))
+            } else status = if (value) text("暂停没有送达，可以直接停止", "The pause did not arrive; you can stop instead")
+                else text("继续没有送达，请再点一次", "Going on did not arrive; tap again")
+            // The window takes the keyboard while paused and gives it back when the task goes on.
+            if (stage == Stage.WORKING) setStage(Stage.WORKING) else render()
+        }
+    }
+
+    /** Adds the user's words to the running task (read before its next step), then maybe goes on. */
+    private fun addToRequest(words: String, goOn: Boolean) {
+        val id = taskId?.takeIf { it != "pending" } ?: return
+        val request = words.trim()
+        if (request.isEmpty()) return
+        scope.launch {
+            val reply = withContext(Dispatchers.IO) {
+                runCatching { EngineHttp.request(service, "POST", "/mobile/tasks/${Uri.encode(id)}/steer",
+                    JSONObject().put("prompt", request).put("input_id", "addition-${UUID.randomUUID()}"), 15000) }.getOrNull()
+            }
+            if (reply?.ok == true) {
+                addition = ""
+                contextItems.add("user" to request)
+                if (goOn) setPaused(false) else render()
+            } else {
+                status = text("补充没有送达，请再试一次", "That did not arrive; try again")
+                render()
+            }
+        }
+    }
+
+    /** A microphone for offline speech, when its model is installed and the app may use the microphone. */
+    private fun micButton(onText: (String) -> Unit): View? {
+        val ready = com.agentworkspace.mobile.voice.OfflineSpeech.status(service).optBoolean("available") &&
+            service.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!ready) return null
+        val active = listening != null
+        return iconButton(R.drawable.ic_bubble_mic, if (active) DANGER else accent(),
+            if (active) text("说完了", "Done speaking") else text("说话输入", "Speak")) {
+            listening?.let { it.finish(); return@iconButton }
+            val session = com.agentworkspace.mobile.voice.OfflineVoiceSession(service, object : com.agentworkspace.mobile.voice.OfflineVoiceSession.Listener {
+                override fun onLevel(level: Float) {}
+                override fun onText(text: String) { onText(text) }
+                override fun onRecognizing() {}
+                override fun onFinished(text: String, heardSpeech: Boolean) {
+                    listening = null
+                    if (text.isNotBlank()) onText(text)
+                    render()
+                }
+                override fun onError(message: String) {
+                    listening = null
+                    status = message
+                    render()
+                }
+            })
+            listening = session
+            session.start()
+            render()
         }
     }
 
     private fun renderApproval(box: LinearLayout) {
         val request = approval ?: run { setStage(Stage.WORKING); return }
-        box.addView(label(text("需要你确认", "Needs your approval"), 15f, primaryText(), bold = true))
+        val header = row()
+        header.addView(label(text("需要你确认", "Needs your approval"), 15f, primaryText(), bold = true),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        // Look at the screen first, then decide: the pill keeps the question waiting.
+        header.addView(iconButton(R.drawable.ic_panel_collapse, secondaryText(), text("收起", "Shrink")) {
+            shrinkAfterApproval = false
+            collapsed = true
+            render()
+        })
+        box.addView(header)
         box.addView(label(describeApproval(request), 14f, primaryText()), spaced(6))
         val buttons = row().apply { gravity = Gravity.END }
         buttons.addView(button(text("拒绝", "Deny"), DANGER, filled = false) { resolve(false, "once") })
@@ -397,11 +911,25 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
     }
 
     private fun renderDone(box: LinearLayout) {
+        if (openedForRepeat && result == null) {
+            // Shown only for a repeat started from a chat: the repeat row below says it all.
+            val header = row()
+            header.addView(label(text("定时重复", "Repeat"), 15f, accent(), bold = true),
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            header.addView(iconButton(R.drawable.ic_panel_collapse, secondaryText(), text("收起", "Shrink")) { collapsed = true; render() })
+            header.addView(iconButton(R.drawable.ic_bubble_close, secondaryText(), text("关闭", "Close")) { close() })
+            box.addView(header)
+            return
+        }
         val header = row()
         header.addView(label(if (failed) text("没有完成", "Not finished") else text("完成了", "Done"), 15f,
             if (failed) DANGER else accent(), bold = true), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        header.addView(iconButton(R.drawable.ic_panel_context, if (contextOpen) accent() else secondaryText(),
+            text("看过程", "Show the steps")) { contextOpen = !contextOpen; render() })
+        header.addView(iconButton(R.drawable.ic_panel_collapse, secondaryText(), text("收起", "Shrink")) { collapsed = true; render() })
         header.addView(iconButton(R.drawable.ic_bubble_close, secondaryText(), text("关闭", "Close")) { close() })
         box.addView(header)
+        if (contextOpen) renderContext(box)
         val scroll = ScrollView(service).apply { isVerticalScrollBarEnabled = true }
         scroll.addView(label(result?.ifBlank { null }?.let(::plainText) ?: text("（没有文字结果）", "(No written result)"), 14f, primaryText()))
         box.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
@@ -409,13 +937,105 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
         })
         scroll.post { if (scroll.height > dp(200)) scroll.layoutParams = scroll.layoutParams.apply { height = dp(200) } }
         val buttons = row().apply { gravity = Gravity.END }
-        buttons.addView(button(text("打开对话", "Open chat"), accent(), filled = false) { openConversation() })
+        if (sessionId != null) buttons.addView(button(text("打开对话", "Open chat"), accent(), filled = false) { openConversation() })
         // Did not get there (or misread the screen): try again, looking at the screen afresh.
         lastRequest?.let { request ->
             buttons.addView(button(text("重试", "Retry"), accent(), filled = failed) { submit(request, retry = true) }, gap(8))
         }
         buttons.addView(button(text("继续说", "Follow up"), accent(), filled = !failed) { setStage(Stage.COMPOSE) }, gap(8))
         box.addView(buttons, spaced(12))
+        // Done this way once: the same steps again later with one tap, without the model.
+        if (savedShortcut) {
+            box.addView(label(text("已存为快捷操作：下次打开这个面板，点它就能直接做", "Saved as a shortcut: next time, tap it in this panel"),
+                12f, accent()), spaced(8))
+        } else if (recorded.isNotEmpty() && !failed) {
+            val save = row().apply { gravity = Gravity.END }
+            save.addView(button(text("存为快捷操作（不用 AI 再做一遍）", "Save as a shortcut (no AI next time)"), accent(), filled = false) {
+                val name = (lastRequest ?: text("快捷操作", "Shortcut")).take(24)
+                val steps = recorded
+                scope.launch {
+                    withContext(Dispatchers.IO) { runCatching { PhoneMemory.saveShortcut(service, name, targetPackage, targetLabel, steps) } }
+                    savedShortcut = true
+                    render()
+                }
+            })
+            box.addView(save, spaced(8))
+        }
+        // Done well: let the AI write it up as a skill (general steps it can follow on a changed
+        // screen), unlike a shortcut, which replays the exact taps.
+        if (!failed && sessionId != null) {
+            val skill = row().apply { gravity = Gravity.END }
+            skill.addView(button(text("存为技能（AI 以后照着做）", "Save as a skill (the AI follows it later)"), accent(), filled = false) {
+                setStage(Stage.COMPOSE)
+                submit(text("把刚才这次操作整理成一个技能保存下来（用 save_skill），写成以后在类似请求里能照着做的通用步骤，然后告诉我技能名。",
+                    "Save what you just did as a skill (save_skill): general steps to follow for similar requests later, then tell me its name."))
+            })
+            box.addView(skill, spaced(8))
+        }
+    }
+
+    // ---- Shortcuts -----------------------------------------------------------------------------
+
+    /** Saved shortcuts for the app in front (and those that open their own app first), as chips. */
+    private fun renderShortcuts(box: LinearLayout) {
+        val all = runCatching { PhoneMemory.shortcuts(service) }.getOrDefault(emptyList())
+        val fitting = all.filter { shortcut ->
+            val first = shortcut.steps.optJSONObject(0)?.optString("kind")
+            shortcut.app == null || shortcut.app == targetPackage || first == "launch" || first == "page"
+        }.take(8)
+        if (fitting.isEmpty()) return
+        box.addView(label(text("快捷操作（点一下直接做，长按删除）", "Shortcuts (tap to run, hold to delete)"), 12f, secondaryText()), spaced(10))
+        val chips = LinearLayout(service).apply { orientation = LinearLayout.HORIZONTAL }
+        fitting.forEach { shortcut ->
+            chips.addView(label(shortcut.name, 13f, accent(), bold = true, single = true).apply {
+                setPadding(dp(12), dp(7), dp(12), dp(7))
+                background = GradientDrawable().apply { cornerRadius = dp(16).toFloat(); setStroke(dp(1), accent()) }
+                setOnClickListener { runShortcut(shortcut) }
+                setOnLongClickListener { confirmDelete = shortcut.id; render(); true }
+            }, gap(6))
+        }
+        box.addView(android.widget.HorizontalScrollView(service).apply { isHorizontalScrollBarEnabled = false; addView(chips) }, spaced(6))
+        fitting.firstOrNull { it.id == confirmDelete }?.let { shortcut ->
+            val confirm = row().apply { gravity = Gravity.CENTER_VERTICAL }
+            confirm.addView(label(text("删除「${shortcut.name}」？", "Delete “${shortcut.name}”?"), 12.5f, primaryText()),
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            confirm.addView(button(text("取消", "Cancel"), accent(), filled = false) { confirmDelete = null; render() })
+            confirm.addView(button(text("删除", "Delete"), DANGER, filled = false) {
+                confirmDelete = null
+                scope.launch {
+                    withContext(Dispatchers.IO) { runCatching { PhoneMemory.deleteShortcut(service, shortcut.id) } }
+                    render()
+                }
+            }, gap(6))
+            box.addView(confirm, spaced(6))
+        }
+    }
+
+    /** Runs a saved shortcut: each step finds its control on the screen again; no model involved. */
+    private fun runShortcut(shortcut: PhoneMemory.Shortcut) {
+        if (stage != Stage.COMPOSE || taskId != null || replaying != null) return
+        replaying = shortcut
+        result = null; failed = false; stopping = false
+        status = text("快捷操作：${shortcut.name}", "Shortcut: ${shortcut.name}")
+        stepCount = 0; steps.clear(); taskSteps.clear()
+        collapsed = autoCollapse
+        hideKeyboard()
+        setStage(Stage.WORKING)
+        scope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                runCatching { service.replay(shortcut.steps) }.getOrElse { it.message ?: text("出错了", "Something went wrong") }
+            }
+            replaying = null
+            lastRequest = null
+            recorded = emptyList()
+            savedShortcut = false
+            result = if (outcome == null) text("快捷操作「${shortcut.name}」做完了（${shortcut.steps.length()} 步）",
+                "Shortcut “${shortcut.name}” done (${shortcut.steps.length()} steps)")
+                else text("快捷操作「${shortcut.name}」停在这里：$outcome", "Shortcut “${shortcut.name}” stopped: $outcome")
+            failed = outcome != null
+            collapsed = false
+            if (root != null) setStage(Stage.DONE)
+        }
     }
 
     // ---- The task ----------------------------------------------------------------------------
@@ -428,6 +1048,20 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
         result = null; failed = false; stopping = false; approval = null; resolving = false
         status = ""; stepCount = 0; steps.clear(); answer = StringBuilder()
         taskId = "pending"
+        chooserOpen = false
+        openedForRepeat = false
+        if (repeatState?.running != true) repeatState = null
+        collapsed = autoCollapse
+        shrinkAfterApproval = false
+        paused = false
+        addition = ""
+        // A follow-up continues the same conversation: its context goes on from what is shown.
+        if (!retry && sessionId == null) contextItems.clear()
+        taskSteps.clear()
+        recorded = emptyList()
+        savedShortcut = false
+        confirmDelete = null
+        service.startRecording()
         setStage(Stage.WORKING)
         scope.launch {
             try {
@@ -481,6 +1115,12 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
             targetLabel?.let { name -> put("phone_app", (targetPackage?.let { "$name ($it)" } ?: name).take(200)) }
             if (retry) put("phone_retry", true)
             if (alwaysAllow) put("auto_approve", true)
+            // How earlier requests in this app were done: fewer steps spent finding the way.
+            runCatching { PhoneMemory.tips(service, targetPackage) }.getOrNull()?.let { put("phone_tips", it) }
+            if (sendScreen) runCatching { service.screenWords(2000) }.getOrNull()?.takeIf { it.isNotBlank() }?.let { put("phone_screen", it) }
+            // The panel's own choice, for this task only; the app's setting stays as it is.
+            chosenModel().takeIf { it.isNotEmpty() }?.let { put("model", it) }
+            chosenEffort().takeIf { it.isNotEmpty() }?.let { put("reasoning_effort", it) }
         }
         .put("request_id", "phone-${UUID.randomUUID()}")
 
@@ -525,14 +1165,25 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
                 if (!snapshot.ok) throw IllegalStateException(snapshot.error)
                 misses = 0
                 val pending = snapshot.body.optJSONArray("approvals")?.optJSONObject(0)
+                snapshot.body.optJSONObject("task")?.let { task ->
+                    if (!pausing && task.has("paused") && task.optBoolean("paused") != paused) {
+                        paused = task.optBoolean("paused")
+                        if (stage == Stage.WORKING) setStage(Stage.WORKING) else render()
+                    }
+                }
                 if (pending != null && !resolving) {
                     if (approval?.optString("request_id") != pending.optString("request_id")) {
+                        contextItems.add("approval" to describeApproval(pending))
                         approval = pending
+                        // An approval needs the user: a shrunk panel opens again for it, and shrinks back after.
+                        shrinkAfterApproval = shrinkAfterApproval || collapsed
+                        collapsed = false
                         setStage(Stage.APPROVAL)
                         root?.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                     }
                 } else if (pending == null && stage == Stage.APPROVAL && !resolving) {
                     approval = null
+                    shrinkBack()
                     setStage(Stage.WORKING)
                 }
                 val task = snapshot.body.optJSONObject("task")
@@ -564,7 +1215,9 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
         sequence = number
         val envelope = event.optJSONObject("payload") ?: JSONObject()
         val payload = envelope.optJSONObject("data") ?: envelope
-        when (event.optString("event_type")) {
+        val type = event.optString("event_type")
+        noteContext(type, payload)
+        when (type) {
             "assistant.delta" -> if (payload.optString("kind") != "reasoning") answer.append(payload.optString("text"))
             "runtime.message.created" -> if (payload.optString("role") == "assistant") {
                 // Each model turn starts its text afresh; the last one is the reply.
@@ -583,6 +1236,51 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
         }
     }
 
+    /** One line of the context view for an event of the task, if it says something to the user. */
+    private fun noteContext(type: String, payload: JSONObject) {
+        val entry: Pair<String, String>? = when {
+            type == "runtime.message.created" -> {
+                val content = plainText(payload.optString("content")).trim()
+                when {
+                    content.isEmpty() || content.startsWith("[Phone control]") -> null
+                    payload.optString("role") == "user" -> "user" to content.substringBefore("\n\n[Phone control]").take(600)
+                    payload.optString("role") == "assistant" -> "ai" to content.take(1200)
+                    else -> null
+                }
+            }
+            type == "runtime.tool.proposed" -> {
+                val name = payload.optString("name").ifBlank { payload.optString("tool_name") }
+                val arguments = payload.optJSONObject("arguments")
+                "tool" to if (name == "android_action" && arguments != null) {
+                    // In words, as the approval prompt says it.
+                    runCatching { service.describeAction(arguments) }.getOrDefault(name)
+                } else toolWords(name, arguments)
+            }
+            type == "runtime.tool.settled" -> {
+                val outcome = payload.opt("result")?.toString().orEmpty()
+                val error = runCatching { JSONObject(outcome).optJSONObject("error") }.getOrNull()
+                if (error != null) "error" to "${error.optString("code")}：${error.optString("message").take(160)}" else null
+            }
+            type == "runtime.image.attached" -> "note" to text("截了一张图", "Took a screenshot")
+            type.endsWith("input.received") -> null  // shown when sent from here
+            else -> null
+        }
+        entry?.let {
+            // What the user added from here comes back as the task's own message: once is enough.
+            if (it.first == "user" && contextItems.any { item -> item == it }) return
+            contextItems.add(it)
+            while (contextItems.size > 200) contextItems.removeAt(0)
+            if (contextOpen && stage != Stage.COMPOSE) render()
+        }
+    }
+
+    private fun toolWords(name: String, arguments: JSONObject?): String = when (name) {
+        "android_observe" -> if (arguments?.has("until_text") == true || arguments?.has("until_gone") == true)
+            text("等待屏幕变化", "Waiting for the screen") else text("查看屏幕", "Looked at the screen")
+        "android_screenshot" -> text("截图看屏幕", "Took a screenshot")
+        else -> name + (arguments?.optString("path")?.takeIf { it.isNotEmpty() }?.let { " $it" } ?: "")
+    }
+
     private fun resolve(allowed: Boolean, scope: String) {
         val request = approval ?: return
         if (resolving) return
@@ -598,6 +1296,7 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
             if (reply?.ok == true) {
                 approval = null
                 status = if (allowed) text("已允许，继续操作…", "Allowed; carrying on…") else text("已拒绝", "Denied")
+                shrinkBack()
                 setStage(Stage.WORKING)
             } else {
                 status = text("确认没有送达，请再试一次", "The answer did not arrive; try again")
@@ -628,6 +1327,12 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
     }
 
     private fun stop() {
+        if (replaying != null) {
+            service.stopReplay()
+            stopping = true
+            render()
+            return
+        }
         val id = taskId ?: return
         if (stopping) return
         // Not submitted yet: the submission cancels what it creates once it sees this.
@@ -641,6 +1346,12 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
         }
     }
 
+    /** A panel shrunk before an approval opened it shrinks again once it is answered. */
+    private fun shrinkBack() {
+        if (shrinkAfterApproval) collapsed = true
+        shrinkAfterApproval = false
+    }
+
     private fun finish(message: String, failure: Boolean) {
         poller?.cancel()
         poller = null
@@ -649,6 +1360,21 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
         stopping = false
         approval = null
         taskId = null
+        // What worked, kept for this app (the agent reads it next time) and as a possible shortcut.
+        val actions = service.takeRecording()
+        recorded = if (failure) emptyList() else actions
+        if (!failure && taskSteps.isNotEmpty()) {
+            val app = targetPackage
+            val request = lastRequest
+            val words = taskSteps.toList()
+            scope.launch(Dispatchers.IO) { runCatching { PhoneMemory.rememberTip(service, app, request, words) } }
+        }
+        // The reply shows in full, unless a repeat it started is still running over the screen.
+        shrinkAfterApproval = false
+        paused = false
+        listening?.cancel()
+        listening = null
+        collapsed = collapsed && repeatState?.running == true
         if (root == null) return
         setStage(Stage.DONE)
         root?.performHapticFeedback(if (failure) HapticFeedbackConstants.REJECT else HapticFeedbackConstants.CONFIRM)

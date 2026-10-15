@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildSync } from "../node_modules/esbuild/lib/main.js";
@@ -35,6 +35,17 @@ buildSync({
   target: "es2020",
   legalComments: "inline",
 });
+// create_pdf typesets with KaTeX's HTML output, which needs its stylesheet and fonts (woff2 only:
+// every Chromium WebView reads it).
+const katexDist = path.join(dependencies, "katex/dist");
+const pdfFonts = path.join(root, "pdf/fonts");
+await mkdir(pdfFonts, { recursive: true });
+const css = (await readFile(path.join(katexDist, "katex.min.css"), "utf8"))
+  .replace(/,url\(fonts\/[^)]+\.woff\) format\("woff"\)|,url\(fonts\/[^)]+\.ttf\) format\("truetype"\)/g, "");
+await writeFile(path.join(root, "pdf/katex.min.css"), css);
+for (const name of await readdir(path.join(katexDist, "fonts"))) {
+  if (name.endsWith(".woff2")) await copyFile(path.join(katexDist, "fonts", name), path.join(pdfFonts, name));
+}
 const packages = ["unified", "remark-parse", "remark-gfm", "remark-math", "remark-rehype", "rehype-sanitize", "rehype-katex", "katex", "hast-util-to-html", "lucide-react", "mermaid"];
 const licenses = await Promise.all(packages.map(async (name) => {
   const packageRoot = path.join(dependencies, name);

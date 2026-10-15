@@ -1,0 +1,6 @@
+{
+  "id": "agent-workspace-official",
+  "name": "Agent Workspace 官方技能",
+  "version": "1.0.0",
+  "description": "随应用发布、经过真机测试的技能：手机操控（签到、体检、通知、快递、比价等）和日常写作、文档、学习、出行等。"
+}

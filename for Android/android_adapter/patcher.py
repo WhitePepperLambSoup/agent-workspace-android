@@ -93,3 +93,8 @@ def apply_android_patches() -> None:
     # 5. 设置针对 Termux 优化过的环境变量默认值
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
     os.environ.setdefault("NO_COLOR", "0")
+
+    # 6. Custom request headers and backup API keys for the model provider (kept in the keystore).
+    from .provider_transport import patch_providers
+
+    patch_providers()

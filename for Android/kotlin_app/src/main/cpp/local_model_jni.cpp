@@ -7,12 +7,18 @@
 
 #include "prompt_cache.h"
 
+#ifdef AGENT_GPU_BACKEND
+#define CL_TARGET_OPENCL_VERSION 200
+#include <CL/cl.h>
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <fcntl.h>
 #include <memory>
@@ -60,6 +66,67 @@ std::unique_ptr<llama_model, decltype(&llama_model_free)> vocabulary_model{nullp
 std::string vocabulary_id;
 struct stat vocabulary_stat{};
 
+// Layers the loaded model keeps on the GPU (0 = CPU only). Only agent_qwen_opencl has a GPU
+// backend (CMakeLists.txt); the CPU libraries refuse GPU requests.
+#ifdef AGENT_GPU_BACKEND
+constexpr bool GPU_BUILD = true;
+#else
+constexpr bool GPU_BUILD = false;
+#endif
+int loaded_gpu_layers = 0;
+// An empty device list keeps a model on the CPU without creating a GPU context or kernels.
+ggml_backend_dev_t no_gpu_devices[] = { nullptr };
+// Written when ggml ends the process (a GPU driver error ends in GGML_ASSERT, and a failed GPU
+// kernel compile in exit(1)); the app then starts with a CPU library. Set once before the first
+// GPU use and read without a lock.
+char gpu_abort_file[4096] = "";
+// True while a generation uses the GPU, so an exit() then is recorded as a GPU failure.
+std::atomic<bool> gpu_work{false};
+// The last ggml error line, for the failure record.
+char last_engine_error[512] = "";
+
+/** OpenCL versions of the phone's GPUs; newer Adreno drivers name the model only here. */
+std::vector<std::string> opencl_gpu_versions() {
+    std::vector<std::string> versions;
+#ifdef AGENT_GPU_BACKEND
+    cl_platform_id platforms[8];
+    cl_uint n_platforms = 0;
+    if (clGetPlatformIDs(8, platforms, &n_platforms) != CL_SUCCESS) return versions;
+    for (cl_uint p = 0; p < std::min<cl_uint>(n_platforms, 8); ++p) {
+        cl_device_id devices[8];
+        cl_uint n_devices = 0;
+        if (clGetDeviceIDs(platforms[p], CL_DEVICE_TYPE_GPU, 8, devices, &n_devices) != CL_SUCCESS) continue;
+        for (cl_uint d = 0; d < std::min<cl_uint>(n_devices, 8); ++d) {
+            char version[256]{};
+            if (clGetDeviceInfo(devices[d], CL_DEVICE_VERSION, sizeof(version) - 1, version, nullptr) == CL_SUCCESS)
+                versions.emplace_back(version);
+        }
+    }
+#endif
+    return versions;
+}
+
+void record_abort(const char * message) {
+    if (gpu_abort_file[0]) {
+        const int fd = open(gpu_abort_file, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (fd >= 0) {
+            const size_t length = message ? strnlen(message, 2048) : 0;
+            if (length) (void) !write(fd, message, length);
+            close(fd);
+        }
+    }
+    if (message) __android_log_write(ANDROID_LOG_ERROR, "AgentQwen", message);
+}
+
+/** Android apps never exit() normally; during GPU work it is ggml giving up on the driver. */
+void record_exit() {
+    if (!gpu_work.load()) return;
+    char message[640];
+    snprintf(message, sizeof(message), "GPU engine stopped: %s",
+        last_engine_error[0] ? last_engine_error : "the GPU driver failed");
+    record_abort(message);
+}
+
 // The last text context stays allocated between requests (guarded by engine_mutex)
 // so the next agent step only evaluates its new tokens; see prompt_cache.h.
 constexpr int MIN_MEASURED_PROMPT_TOKENS = 256;
@@ -100,7 +167,17 @@ json failure(const char * code, const char * message) {
 }
 
 void quiet_log(ggml_log_level level, const char * text, void *) {
-    if (level == GGML_LOG_LEVEL_ERROR) __android_log_write(ANDROID_LOG_ERROR, "AgentQwen", text);
+    if (level != GGML_LOG_LEVEL_ERROR || !text) return;
+    __android_log_write(ANDROID_LOG_ERROR, "AgentQwen", text);
+    // Keep the first line with content (ggml splits some messages over several calls).
+    const char * start = text;
+    while (*start == '\n' || *start == ' ') ++start;
+    if (*start) {
+        size_t length = strcspn(start, "\n");
+        length = std::min(length, sizeof(last_engine_error) - 1);
+        std::memcpy(last_engine_error, start, length);
+        last_engine_error[length] = '\0';
+    }
 }
 
 struct Budget {
@@ -185,9 +262,10 @@ std::string prefix_file(const std::string & id, const struct stat & weights,
         if (mkdir(directory.c_str(), 0700) != 0 || lstat(directory.c_str(), &existing) != 0) return "";
     }
     if (!S_ISDIR(existing.st_mode)) return "";
-    // Different weights or engine builds never read each other's states.
+    // Different weights, engine builds or processors never read each other's states.
     const std::string identity = id + ":" + std::to_string(weights.st_size) + ":" +
-        std::to_string(static_cast<long long>(weights.st_mtime)) + ":" + AGENT_LLAMA_REVISION;
+        std::to_string(static_cast<long long>(weights.st_mtime)) + ":" + AGENT_LLAMA_REVISION +
+        (loaded_gpu_layers > 0 ? ":gpu" : "");
     return directory + "/" + agent_prompt_cache::prefix_file_name(identity, tokens, n_tokens);
 }
 
@@ -225,6 +303,7 @@ void free_model() {
     std::lock_guard<std::mutex> lock(state_mutex);
     loaded_id.clear();
     loaded_stat = {};
+    loaded_gpu_layers = 0;
 }
 
 std::string required_text(const json & request, const char * key, size_t limit) {
@@ -361,6 +440,9 @@ json generate(const std::string & raw, const std::vector<std::string> & rgb_imag
             throw RequestFailure("invalid_request", "Invalid native prompt reuse flag");
         const std::string tool_grammar = request.contains("tool_grammar")
             ? required_text(request, "tool_grammar", MAX_TOOL_GRAMMAR_BYTES) : "";
+        const int gpu_layers = request.contains("gpu_layers") ? required_int(request, "gpu_layers", 0, 999) : 0;
+        if (gpu_layers > 0 && !GPU_BUILD)
+            throw RequestFailure("gpu_unavailable", "This engine library has no GPU backend");
         // Benchmarks measure full evaluation and images use their own context.
         const bool reuse = request.value("reuse_prompt", false) && rgb_images.empty();
         if (!reuse) drop_prompt_cache();
@@ -368,6 +450,10 @@ json generate(const std::string & raw, const std::vector<std::string> & rgb_imag
         const auto started = Clock::now();
         Budget budget{started + std::chrono::milliseconds(timeout)};
         RunState state(request_id, n_context);
+        struct GpuWork {
+            explicit GpuWork(bool active) { gpu_work.store(active); }
+            ~GpuWork() { gpu_work.store(false); }
+        } gpu_guard(gpu_layers > 0);
         int n_prompt = 0;
         int generated = 0;
         int64_t first_token_ms = -1;
@@ -376,7 +462,7 @@ json generate(const std::string & raw, const std::vector<std::string> & rgb_imag
             {"model_id", id}, {"request_id", request_id}, {"context_size", n_context},
             {"actual_context_size", nullptr}, {"threads", n_threads}, {"memory_mode", memory_mode},
             {"generation_timeout_ms", timeout}, {"image_count", rgb_images.size()},
-            {"image_tokens", 0}, {"projection_id", nullptr}
+            {"image_tokens", 0}, {"projection_id", nullptr}, {"gpu_layers", gpu_layers}
         };
         const auto interrupt = [&]() {
             return interrupted(text, n_prompt, generated, generation_metadata, first_token_ms,
@@ -387,10 +473,11 @@ json generate(const std::string & raw, const std::vector<std::string> & rgb_imag
         std::unique_ptr<FILE, decltype(&fclose)> file(open_private_model(id, path, info), fclose);
         if (!model || loaded_id != id || loaded_stat.st_dev != info.st_dev ||
             loaded_stat.st_ino != info.st_ino || loaded_stat.st_size != info.st_size ||
-            loaded_stat.st_mtime != info.st_mtime) {
+            loaded_stat.st_mtime != info.st_mtime || loaded_gpu_layers != gpu_layers) {
             free_model();
             llama_model_params params = llama_model_default_params();
-            params.n_gpu_layers = 0;
+            params.n_gpu_layers = gpu_layers;
+            if (gpu_layers == 0) params.devices = no_gpu_devices;
             params.load_mode = LLAMA_LOAD_MODE_MMAP;
             params.progress_callback = progress_load;
             params.progress_callback_user_data = &budget;
@@ -408,6 +495,7 @@ json generate(const std::string & raw, const std::vector<std::string> & rgb_imag
             std::lock_guard<std::mutex> lock(state_mutex);
             loaded_id = id;
             loaded_stat = info;
+            loaded_gpu_layers = gpu_layers;
         }
         const int trained_context = llama_model_n_ctx_train(model.get());
         if (trained_context <= 0 || n_context > trained_context)
@@ -508,8 +596,9 @@ json generate(const std::string & raw, const std::vector<std::string> & rgb_imag
             params.type_k = GGML_TYPE_F16;
             params.type_v = GGML_TYPE_F16;
             params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
-            params.offload_kqv = false;
-            params.op_offload = false;
+            // On the GPU the attention cache and large-batch work follow the weights.
+            params.offload_kqv = gpu_layers > 0;
+            params.op_offload = gpu_layers > 0;
             params.abort_callback = abort_decode;
             params.abort_callback_data = &budget;
             set_generation_phase("allocating_context");
@@ -789,7 +878,95 @@ Java_com_agentworkspace_mobile_localmodels_LocalModelBridge_nativeStatus(JNIEnv 
         {"supports_vision", true}, {"max_images", MAX_IMAGES}, {"image_max_tokens", 256},
         {"generation_phase", generation_phase.empty() ? json(nullptr) : json(generation_phase)},
         {"last_generation", last_generation}, {"prompt_cache", prompt_cache_status},
+        {"gpu_build", GPU_BUILD}, {"loaded_gpu_layers", loaded_gpu_layers},
         {"last_error", last_error.empty() ? json(nullptr) : json(last_error)}});
+}
+
+/**
+ * Prepares the GPU backend before any model load: [abort_file] records a fatal engine error and
+ * compiled GPU programs are kept in [cache_dir]. With [list], also lists the GPUs; that asks the
+ * phone's OpenCL driver (as any model load does), so it waits for no generation.
+ */
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_com_agentworkspace_mobile_localmodels_LocalModelBridge_nativeGpuInfo(
+    JNIEnv * env, jobject, jbyteArray abort_file, jbyteArray cache_dir, jboolean list) {
+    try {
+        const std::string marker = bytes(env, abort_file, sizeof(gpu_abort_file) - 1);
+        const std::string cache = bytes(env, cache_dir, 4096);
+        if (!GPU_BUILD) return result(env, json{{"gpu_build", false}, {"devices", json::array()}});
+        std::unique_lock<std::mutex> lock(engine_mutex, std::try_to_lock);
+        if (!lock.owns_lock()) return result(env, failure("engine_busy", "A local generation is running"));
+        if (!gpu_abort_file[0] && !marker.empty()) {
+            std::memcpy(gpu_abort_file, marker.c_str(), marker.size() + 1);
+            ggml_set_abort_callback(record_abort);
+            atexit(record_exit);
+        }
+        // Read by ggml's OpenCL program cache when the first GPU buffer is created.
+        if (!cache.empty()) setenv("GGML_OPENCL_KERNEL_CACHE_DIR", cache.c_str(), 1);
+        if (!list) return result(env, json{{"gpu_build", true}});
+        json devices = json::array();
+        for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+            ggml_backend_dev_t device = ggml_backend_dev_get(i);
+            if (ggml_backend_dev_type(device) != GGML_BACKEND_DEVICE_TYPE_GPU) continue;
+            size_t free = 0, total = 0;
+            ggml_backend_dev_memory(device, &free, &total);
+            devices.push_back({{"name", ggml_backend_dev_name(device)},
+                {"description", ggml_backend_dev_description(device)}, {"memory_total_bytes", total}});
+        }
+        // ggml lists one OpenCL GPU on phones; give it the driver's version string.
+        const auto versions = opencl_gpu_versions();
+        if (devices.size() == 1 && !versions.empty()) devices[0]["version"] = versions.front();
+        return result(env, json{{"gpu_build", true}, {"devices", devices},
+            {"opencl_gpu_versions", versions}});
+    } catch (const std::exception &) {
+        return result(env, failure("gpu_unavailable", "The GPU backend could not list its devices"));
+    }
+}
+
+/**
+ * Runs in the separate GPU check process (LocalModelGpuCheckService) before the engine uses the
+ * GPU: creating the first GPU buffer makes ggml compile every OpenCL kernel, which an old driver
+ * can fail by ending the process. [abort_file] then records why; compiled kernels are kept in
+ * [cache_dir] for the engine.
+ */
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_com_agentworkspace_mobile_localmodels_LocalModelBridge_nativeGpuCheck(
+    JNIEnv * env, jobject, jbyteArray abort_file, jbyteArray cache_dir) {
+    try {
+        const std::string marker = bytes(env, abort_file, sizeof(gpu_abort_file) - 1);
+        const std::string cache = bytes(env, cache_dir, 4096);
+        if (!GPU_BUILD) return result(env, json{{"ok", false}, {"message", "This engine library has no GPU backend"}});
+        std::lock_guard<std::mutex> lock(engine_mutex);
+        std::call_once(backend_once, [] {
+            llama_log_set(quiet_log, nullptr);
+            mtmd_helper_log_set(quiet_log, nullptr);
+            llama_backend_init();
+        });
+        if (!gpu_abort_file[0] && !marker.empty()) {
+            std::memcpy(gpu_abort_file, marker.c_str(), marker.size() + 1);
+            ggml_set_abort_callback(record_abort);
+            atexit(record_exit);
+        }
+        if (!cache.empty()) setenv("GGML_OPENCL_KERNEL_CACHE_DIR", cache.c_str(), 1);
+        struct GpuWork {
+            GpuWork() { gpu_work.store(true); }
+            ~GpuWork() { gpu_work.store(false); }
+        } gpu_guard;
+        ggml_backend_dev_t gpu = nullptr;
+        for (size_t i = 0; i < ggml_backend_dev_count() && !gpu; ++i)
+            if (ggml_backend_dev_type(ggml_backend_dev_get(i)) == GGML_BACKEND_DEVICE_TYPE_GPU) gpu = ggml_backend_dev_get(i);
+        if (!gpu) return result(env, json{{"ok", false}, {"message", "The OpenCL driver lists no supported GPU"}});
+        const auto started = Clock::now();
+        ggml_backend_buffer_t buffer = ggml_backend_buft_alloc_buffer(ggml_backend_dev_buffer_type(gpu), 4096);
+        if (!buffer) return result(env, json{{"ok", false}, {"message", "The GPU could not allocate memory"}});
+        ggml_backend_buffer_free(buffer);
+        const auto versions = opencl_gpu_versions();
+        return result(env, json{{"ok", true}, {"description", ggml_backend_dev_description(gpu)},
+            {"version", versions.empty() ? json(nullptr) : json(versions.front())},
+            {"prepare_ms", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started).count()}});
+    } catch (const std::exception &) {
+        return result(env, json{{"ok", false}, {"message", "The GPU check failed"}});
+    }
 }
 
 extern "C" JNIEXPORT jbyteArray JNICALL
@@ -820,6 +997,7 @@ Java_com_agentworkspace_mobile_localmodels_LocalModelBridge_nativeCountPromptTok
                 auto params = llama_model_default_params();
                 params.vocab_only = true;
                 params.n_gpu_layers = 0;
+                params.devices = no_gpu_devices;
                 params.load_mode = LLAMA_LOAD_MODE_MMAP;
                 vocabulary_model.reset(llama_model_load_from_file_ptr(file.get(), params));
                 if (!vocabulary_model) return result(env, failure("tokenization_failed", "Could not load the installed GGUF vocabulary"));

@@ -114,6 +114,28 @@ object AndroidSystemBridge {
     @JvmStatic
     fun stopLiveScreen(context: Context) = LiveScreenService.stop(context)
 
+    /**
+     * Before a scheduled phone task: the phone must be unlocked (no app may unlock it) and the
+     * accessibility service connected; a dark screen is turned on for the task.
+     */
+    @JvmStatic
+    fun prepareUnattended(): String {
+        val context = applicationContext ?: return JSONObject().put("ok", false).put("reason", "not initialized").toString()
+        val keyguard = context.getSystemService(android.app.KeyguardManager::class.java)
+        if (keyguard?.isKeyguardLocked == true) return JSONObject().put("ok", false)
+            .put("reason", com.agentworkspace.mobile.UiText.of(context, "手机锁着屏，到点时没法操作", "The phone was locked at the time")).toString()
+        if (service == null) return JSONObject().put("ok", false)
+            .put("reason", com.agentworkspace.mobile.UiText.of(context, "无障碍服务没开", "The accessibility service is off")).toString()
+        val power = context.getSystemService(android.os.PowerManager::class.java)
+        if (power?.isInteractive == false) {
+            @Suppress("DEPRECATION")
+            power.newWakeLock(android.os.PowerManager.SCREEN_BRIGHT_WAKE_LOCK or android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                "agentworkspace:scheduled-phone-task").acquire(10_000)
+            Thread.sleep(800)
+        }
+        return JSONObject().put("ok", true).toString()
+    }
+
     @JvmStatic
     fun execute(requestJson: String): String {
         val request = try {
@@ -130,26 +152,82 @@ object AndroidSystemBridge {
         return connected.executeRequest(request).toString()
     }
 
-    internal fun validateRequest(request: JSONObject) {
+    /** Actions a batch may contain (one approval covers them all; no app launches or nested batches). */
+    private val batchActions = setOf("tap", "swipe", "ref", "type_text", "long_press", "scroll", "enter", "back", "tap_text")
+    /** Actions that read the screen as it is when they run: no earlier snapshot needed. */
+    private val freshActions = setOf("observe", "screenshot", "verify", "tap_text", "scroll_to_text", "wait_for", "open_page", "ocr",
+        "launch_app", "back", "home", "recents", "notifications")
+    private val pages = setOf("settings", "wifi", "bluetooth", "mobile_network", "data_usage", "airplane", "battery",
+        "display", "sound", "location", "storage", "date", "language", "accessibility", "security", "nfc", "vpn",
+        "developer", "apps", "notifications", "app_details", "url", "map", "web_search", "dial")
+    /** A repeat's steps: by coordinates, scroll direction or back; a changing feed has no lasting refs. */
+    private val repeatActions = setOf("tap", "swipe", "long_press", "scroll", "back")
+
+    internal fun validateRequest(request: JSONObject, inBatch: Boolean = false, inRepeat: Boolean = false) {
         val action = string(request, "action", 32)
+        val step = if (inBatch || inRepeat) emptySet() else setOf("snapshot_version", "expect", "timeout_ms")
+        if (inBatch) require(action in batchActions)
+        if (inRepeat) require(action in repeatActions && !request.has("ref"))
         val fields = when (action) {
-            "observe" -> setOf("max_nodes", "max_depth")
-            "screenshot" -> emptySet()
+            "observe" -> setOf("max_nodes", "max_depth", "wait_ms")
+            "screenshot" -> setOf("marks")
             "verify" -> setOf("expect", "timeout_ms", "snapshot_version")
-            "tap" -> setOf("snapshot_version", "x", "y", "expect", "timeout_ms")
-            "swipe" -> setOf("snapshot_version", "x", "y", "x2", "y2", "expect", "timeout_ms")
-            "ref" -> setOf("snapshot_version", "ref", "expect", "timeout_ms")
-            "type_text" -> setOf("snapshot_version", "ref", "text", "expect", "timeout_ms")
-            "launch_app" -> setOf("snapshot_version", "package_name", "app_name", "expect", "timeout_ms")
-            "back", "home" -> setOf("snapshot_version", "expect", "timeout_ms")
+            "tap" -> step + setOf("x", "y", "confirmed")
+            "swipe" -> step + setOf("x", "y", "x2", "y2")
+            "ref" -> step + setOf("ref", "confirmed")
+            "type_text" -> step + setOf("ref", "text")
+            "long_press" -> step + setOf("ref", "x", "y", "confirmed")
+            "scroll" -> step + setOf("ref", "direction")
+            "enter" -> step + setOf("ref")
+            "launch_app" -> step + setOf("package_name", "app_name")
+            "back", "home", "recents", "notifications" -> step
+            "batch" -> setOf("snapshot_version", "steps", "expect", "timeout_ms")
+            "repeat" -> setOf("snapshot_version", "steps", "every_ms", "times")
+            "stop_repeat" -> setOf("snapshot_version")
+            "tap_text" -> step + setOf("text", "nth", "confirmed")
+            "scroll_to_text" -> setOf("snapshot_version", "text", "direction", "ref", "max_scrolls", "tap", "confirmed")
+            "wait_for" -> setOf("snapshot_version", "text", "gone_text", "max_wait_ms")
+            "open_page" -> setOf("snapshot_version", "page", "package_name", "app_name", "url", "query", "number")
+            "ocr" -> setOf("snapshot_version")
             else -> error("Unsupported action")
         }
         require(request.keys().asSequence().all { it == "action" || it in fields })
-        if (action !in setOf("observe", "screenshot", "verify")) string(request, "snapshot_version", 128)
+        // The user said yes to pressing a control that deletes, clears or pays (see needs_confirmation).
+        if (request.has("confirmed")) require(request.get("confirmed") is Boolean)
+        if (!inBatch && !inRepeat && action !in freshActions) string(request, "snapshot_version", 128)
+        if (action == "tap_text") {
+            string(request, "text", 200)
+            if (request.has("nth")) integer(request, "nth", 1, 50)
+        }
+        if (action == "scroll_to_text") {
+            string(request, "text", 200)
+            if (request.has("direction")) require(string(request, "direction", 8) in setOf("up", "down", "left", "right"))
+            if (request.has("ref")) require(string(request, "ref", 160).matches(Regex("n[0-9]{1,4}")))
+            if (request.has("max_scrolls")) integer(request, "max_scrolls", 1, 40)
+            if (request.has("tap")) require(request.get("tap") is Boolean)
+        }
+        if (action == "wait_for") {
+            require(request.has("text") || request.has("gone_text"))
+            if (request.has("text")) string(request, "text", 200)
+            if (request.has("gone_text")) string(request, "gone_text", 200)
+            if (request.has("max_wait_ms")) integer(request, "max_wait_ms", 500, 120_000)
+        }
+        if (action == "open_page") {
+            val page = string(request, "page", 32)
+            require(page in pages)
+            if (request.has("package_name")) require(string(request, "package_name", 255)
+                .matches(Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)+")))
+            if (request.has("app_name")) string(request, "app_name", 100)
+            if (page == "url") require(string(request, "url", 2000).let { it.startsWith("https://") || it.startsWith("http://") })
+            if (page == "map" || page == "web_search") string(request, "query", 300)
+            if (page == "dial") require(string(request, "number", 40).matches(Regex("[0-9+*#() -]{1,40}")))
+        }
         if (request.has("snapshot_version")) string(request, "snapshot_version", 128)
         if (request.has("max_nodes")) integer(request, "max_nodes", 1, 400)
         if (request.has("max_depth")) integer(request, "max_depth", 1, 24)
-        if (action == "tap" || action == "swipe") {
+        if (request.has("wait_ms")) integer(request, "wait_ms", 0, 5000)
+        if (request.has("marks")) require(request.get("marks") is Boolean)
+        if (action == "tap" || action == "swipe" || (action == "long_press" && !request.has("ref"))) {
             integer(request, "x", 0, 10000)
             integer(request, "y", 0, 10000)
         }
@@ -157,8 +235,22 @@ object AndroidSystemBridge {
             integer(request, "x2", 0, 10000)
             integer(request, "y2", 0, 10000)
         }
-        if (action == "ref" || action == "type_text") {
-            require(string(request, "ref", 160).matches(Regex("n[0-9]{1,3}")))
+        if (action == "ref" || action == "type_text" || (action in setOf("long_press", "scroll", "enter") && request.has("ref"))) {
+            require(string(request, "ref", 160).matches(Regex("n[0-9]{1,4}")))
+        }
+        if (action == "long_press") require(request.has("ref") != (request.has("x") || request.has("y")))
+        if (action == "scroll") require(string(request, "direction", 8) in setOf("up", "down", "left", "right", "top", "bottom"))
+        if (action == "batch") {
+            val steps = request.getJSONArray("steps")
+            require(steps.length() in 1..12)
+            for (index in 0 until steps.length()) validateRequest(steps.getJSONObject(index), inBatch = true)
+        }
+        if (action == "repeat") {
+            val steps = request.getJSONArray("steps")
+            require(steps.length() in 1..4)
+            for (index in 0 until steps.length()) validateRequest(steps.getJSONObject(index), inRepeat = true)
+            integer(request, "every_ms", 300, 3_600_000)
+            if (request.has("times")) integer(request, "times", 1, 10_000)
         }
         if (action == "type_text") string(request, "text", 4096)
         if (action == "launch_app") {
@@ -199,4 +291,77 @@ object AndroidSystemBridge {
         JSONObject().put("ok", false).put("executed", false).put("verified", JSONObject.NULL)
             .put("error", JSONObject().put("code", code).put("message", message))
             .put("observation", observation ?: JSONObject.NULL)
+
+    // ---- Shortcuts: recorded phone tasks, run again without the model (mobile_shortcuts.py) -----
+
+    private fun outcome(ok: Boolean, reason: String?) = JSONObject().put("ok", ok).put("reason", reason ?: JSONObject.NULL)
+
+    @JvmStatic
+    fun shortcuts(): String {
+        val context = applicationContext ?: return "[]"
+        return JSONArray(PhoneMemory.shortcuts(context).map { it.json() }).toString()
+    }
+
+    /** Adds a shortcut or replaces one's name and steps: {"id"?, "name", "app"?, "app_label"?, "steps"}. */
+    @JvmStatic
+    fun saveShortcut(json: String): String = try {
+        val context = applicationContext ?: throw IllegalStateException("not initialized")
+        require(json.length <= 262_144) { "the shortcut is too large" }
+        val value = JSONObject(json)
+        fun words(key: String, limit: Int) = value.optString(key).takeUnless { value.isNull(key) || it.isBlank() }?.take(limit)
+        PhoneMemory.putShortcut(context, words("id", 64), value.optString("name"), words("app", 255), words("app_label", 80),
+            value.getJSONArray("steps")).json().put("ok", true).toString()
+    } catch (error: Exception) {
+        outcome(false, error.message ?: "invalid shortcut").toString()
+    }
+
+    @JvmStatic
+    fun deleteShortcut(id: String): String {
+        val context = applicationContext ?: return outcome(false, "not initialized").toString()
+        PhoneMemory.deleteShortcut(context, id)
+        return outcome(true, null).toString()
+    }
+
+    /**
+     * Runs a saved shortcut now, on a worker thread (it waits for each step). Steps that need the
+     * user's yes (deleting, paying) stop it.
+     */
+    @JvmStatic
+    fun runShortcut(id: String): String {
+        if (Looper.myLooper() == Looper.getMainLooper()) return outcome(false, "main thread").toString()
+        val context = applicationContext ?: return outcome(false, "not initialized").toString()
+        val connected = service ?: return outcome(false,
+            com.agentworkspace.mobile.UiText.of(context, "无障碍服务没开", "The accessibility service is off")).toString()
+        val shortcut = PhoneMemory.shortcuts(context).firstOrNull { it.id == id }
+            ?: return outcome(false, com.agentworkspace.mobile.UiText.of(context, "没有这个快捷操作", "No such shortcut")).toString()
+        val steps = JSONArray()
+        val first = shortcut.steps.optJSONObject(0)?.optString("kind")
+        // Recorded inside an app: open it first; recorded over the home screen: start from there.
+        if (first != "launch" && first != "page") steps.put(
+            if (shortcut.app != null) JSONObject().put("kind", "launch").put("package", shortcut.app)
+            else JSONObject().put("kind", "key").put("key", "home"))
+        for (index in 0 until shortcut.steps.length()) steps.put(shortcut.steps.get(index))
+        val stopped = connected.replay(steps)
+        val answer = outcome(stopped == null, stopped).put("steps", steps.length())
+        // Which of the shortcut's own steps it stopped at (the AI can take over from there).
+        if (stopped != null) answer.put("failed_step",
+            (connected.replayStoppedAt - (steps.length() - shortcut.steps.length())).coerceAtLeast(0))
+        return answer.toString()
+    }
+
+    @JvmStatic
+    fun stopShortcut() { service?.stopReplay() }
+
+    /** A phone-control task from the chat starts: what it does is kept (read with recordedSteps). */
+    @JvmStatic
+    fun beginRecording(taskId: String) {
+        service?.let { it.startRecording(); it.recordStartingPoint(); it.beginStepShots(taskId) }
+    }
+
+    /** The task ended: no more step pictures for it. */
+    @JvmStatic
+    fun endRecording() { service?.endStepShots() }
+
+    @JvmStatic
+    fun recordedSteps(): String = JSONArray(service?.peekRecording().orEmpty()).toString()
 }

@@ -20,4 +20,7 @@
     <string name="widget_task_analyze_title">Analyze data</string>
     <string name="widget_task_analyze_detail">Findings and a chart from a sheet or CSV</string>
     <string name="android_system_accessibility_description">Allow Agent Workspace to read the controls visible on screen and perform the actions you approve. In any app, tap Operate phone on the floating bubble to tell the agent what to do there. You can pause control or take over in Agent Workspace at any time.</string>
+    <string name="widget_card_label">AI card</string>
+    <string name="widget_card_description">The latest result of a scheduled task, such as the morning briefing</string>
+    <string name="widget_card_empty">In Scheduled tasks, tap Show on a home screen card for a task; its latest result appears here.</string>
 </resources>

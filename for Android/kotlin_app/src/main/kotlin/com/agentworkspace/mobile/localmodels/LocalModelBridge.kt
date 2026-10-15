@@ -2,6 +2,7 @@ package com.agentworkspace.mobile.localmodels
 
 import android.app.ActivityManager
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.os.PowerManager
 import com.agentworkspace.mobile.embedded.MobileProviderSettings
@@ -13,7 +14,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 
-/** A single private CPU inference engine. This bridge never starts an HTTP server. */
+/** A single private CPU or GPU inference engine. This bridge never starts an HTTP server. */
 object LocalModelBridge {
     const val ENGINE_REVISION = "7fe450e19305b828c199d602c23a8337aaa1f03b"
     private val supportedIds = setOf("qwen3-0.6b-q4-k-m", "qwen3-1.7b-q4-k-m",
@@ -25,6 +26,11 @@ object LocalModelBridge {
     @Volatile private var loadedLibrary: String? = null
     @Volatile private var initializationError: String? = null
     @Volatile private var runtimeSettings = LocalModelPerformance.Settings()
+    // GPU use (LocalModelGpu): the saved choice, why the GPU library is or is not loaded, and
+    // the GPU it found, which is read on first use because that asks the driver.
+    @Volatile private var accelerator = LocalModelGpu.Saved()
+    @Volatile private var gpuState = "not_loaded"
+    @Volatile private var gpuDevices: JSONObject? = null
 
     @JvmStatic fun configureRuntime(settingsJson: String) {
         runtimeSettings = LocalModelPerformance.settings(JSONObject(settingsJson))
@@ -48,19 +54,41 @@ object LocalModelBridge {
             if (!libraryLoaded) {
                 val cpuinfo = try { File("/proc/cpuinfo").readText(Charsets.US_ASCII) } catch (_: Exception) { null }
                 val preferred = LocalModelCpu.library(Build.SUPPORTED_ABIS.firstOrNull(), cpuinfo)
-                loadedLibrary = try {
-                    System.loadLibrary(preferred)
-                    preferred
-                } catch (_: LinkageError) {
-                    if (preferred == LocalModelCpu.BASELINE_LIBRARY) throw UnsatisfiedLinkError(preferred)
-                    System.loadLibrary(LocalModelCpu.BASELINE_LIBRARY)
-                    LocalModelCpu.BASELINE_LIBRARY
+                // A GPU failure in an earlier run of this install leaves a marker; use the CPU then.
+                val current = gpuIdentity(app)
+                var saved = LocalModelGpu.read(acceleratorFile(app))
+                val taken = LocalModelGpu.takeAbort(abortMarker(app), saved, current, System.currentTimeMillis())
+                if (taken != saved) {
+                    saved = taken
+                    runCatching { LocalModelGpu.write(acceleratorFile(app), saved) }
+                }
+                accelerator = saved
+                val failed = saved.failedFor(current)
+                val unsupported = saved.unsupportedFor(current)
+                // Loading the GPU library fails where Android offers this app no OpenCL driver.
+                val candidates = listOfNotNull(LocalModelGpu.LIBRARY.takeIf {
+                    LocalModelGpu.mayLoad(preferred, failed) && unsupported == null
+                }, preferred, LocalModelCpu.BASELINE_LIBRARY).distinct()
+                var loaded: String? = null
+                for (name in candidates) {
+                    try { System.loadLibrary(name); loaded = name; break } catch (_: LinkageError) {}
+                }
+                loadedLibrary = loaded ?: throw UnsatisfiedLinkError(preferred)
+                gpuState = when {
+                    loaded == LocalModelGpu.LIBRARY -> "loaded"
+                    preferred != LocalModelCpu.DOTPROD_LIBRARY -> "cpu_unsupported"
+                    failed -> "failed"
+                    unsupported != null -> unsupported
+                    else -> "driver_unavailable"
                 }
                 libraryLoaded = true
             }
             val result = JSONObject(nativeInitialize(root.path.toByteArray(Charsets.UTF_8))
                 .toString(Charsets.UTF_8))
             check(!result.has("error")) { "Native inference initialization failed" }
+            // Every model load asks the GPU driver for its devices, even for the CPU; an engine
+            // abort from then on must leave the marker that brings the next start back to the CPU.
+            if (loadedLibrary == LocalModelGpu.LIBRARY) prepareGpu(app, list = false)
             modelRoot = root
             applicationContext = app
             initializationError = null
@@ -85,8 +113,153 @@ object LocalModelBridge {
                 .toString()
         }
         return JSONObject(nativeStatus().toString(Charsets.UTF_8))
-            .put("cpu_build", if (loadedLibrary == LocalModelCpu.DOTPROD_LIBRARY) "armv8.2-dotprod" else "baseline")
+            .put("cpu_build", if (loadedLibrary == LocalModelCpu.BASELINE_LIBRARY) "baseline" else "armv8.2-dotprod")
+            .put("accelerator", acceleratorStatus(probe = false))
             .toString()
+    }
+
+    private fun acceleratorFile(context: Context) = File(context.filesDir, "local-model-accelerator.json")
+    private fun abortMarker(context: Context) = File(context.filesDir, "local-model-gpu-abort.txt")
+    internal fun gpuCheckFile(context: Context) = File(context.filesDir, "local-model-gpu-check.json")
+    private fun gpuCheckMarker(context: Context) = File(context.filesDir, "local-model-gpu-check-abort.txt")
+    private fun kernelCache(context: Context) = File(context.cacheDir, "opencl-kernels").apply { mkdirs() }
+
+    /**
+     * GPU failures and checks hold for this install and system image (and so GPU driver) only.
+     * Both change only with a new process, so it is read once.
+     */
+    @Volatile private var identity: String? = null
+    private fun gpuIdentity(context: Context): String = identity ?: run {
+        val installed = try {
+            context.packageManager.getPackageInfo(context.packageName, 0).lastUpdateTime
+        } catch (_: Exception) { 0L }
+        "$installed:${Build.FINGERPRINT}".also { identity = it }
+    }
+
+    /** In the check process (LocalModelGpuCheckService): load the GPU library and compile its kernels. */
+    internal fun runGpuCheck(context: Context): LocalModelGpu.Check {
+        val current = gpuIdentity(context)
+        return try {
+            System.loadLibrary(LocalModelGpu.LIBRARY)
+            val result = JSONObject(nativeGpuCheck(gpuCheckMarker(context).path.toByteArray(Charsets.UTF_8),
+                kernelCache(context).path.toByteArray(Charsets.UTF_8)).toString(Charsets.UTF_8))
+            LocalModelGpu.Check(current, result.optBoolean("ok"),
+                result.optString("message").takeIf { it.isNotEmpty() && !result.isNull("message") })
+        } catch (failure: Throwable) {
+            LocalModelGpu.Check(current, false, failure.message ?: "The GPU library could not load")
+        }
+    }
+
+    // When this engine process started the GPU check (LocalModelGpuCheckService); null: not yet.
+    @Volatile private var gpuCheckStartedAt: Long? = null
+
+    /** The GPU and whether it may run generations (LocalModelGpu.state); starts the check when due. */
+    private fun gpuReadiness(startCheck: Boolean, probe: Boolean = true): Pair<JSONObject?, String> {
+        if (gpuState != "loaded") return null to gpuState
+        val context = applicationContext ?: return null to "not_loaded"
+        if (!probe && gpuDevices == null) return null to "unknown"
+        val device = gpuDevice() ?: return null to (if (gpuDevices == null) "unknown" else "no_supported_gpu")
+        val current = gpuIdentity(context)
+        var state = LocalModelGpu.state(device, current,
+            LocalModelGpu.readCheck(gpuCheckFile(context), gpuCheckMarker(context), current),
+            gpuCheckStartedAt, System.currentTimeMillis())
+        if (state == "unchecked" && startCheck && accelerator.mode != "cpu") {
+            synchronized(this) {
+                if (gpuCheckStartedAt == null) {
+                    try {
+                        LocalModelGpu.startCheck(gpuCheckFile(context), gpuCheckMarker(context), current)
+                        context.startService(Intent(context, LocalModelGpuCheckService::class.java))
+                        gpuCheckStartedAt = System.currentTimeMillis()
+                        state = "checking"
+                    } catch (_: Exception) { /* Not allowed now (background start); asked again later. */ }
+                }
+            }
+        }
+        return device to state
+    }
+
+    /** The usable GPU, asking the driver on first use; null when the model can only use the CPU. */
+    private fun gpuDevice(): JSONObject? {
+        if (loadedLibrary != LocalModelGpu.LIBRARY) return null
+        val context = applicationContext ?: return null
+        val known = gpuDevices ?: synchronized(this) {
+            gpuDevices ?: try {
+                prepareGpu(context, list = true).takeUnless { it.has("error") }  // busy: ask later
+            } catch (_: Exception) {
+                JSONObject().put("devices", JSONArray())
+            }?.also {
+                gpuDevices = it
+                rememberGpu(context, it.optJSONArray("devices")?.optJSONObject(0))
+            }
+        }
+        return known?.optJSONArray("devices")?.optJSONObject(0)
+    }
+
+    /** Records what this install found, so phones without a supported GPU start on the CPU library. */
+    @Synchronized private fun rememberGpu(context: Context, device: JSONObject?) {
+        val found = LocalModelGpu.found(device, gpuIdentity(context))
+        if (accelerator.gpu?.toString() == found.toString()) return
+        val saved = accelerator.copy(gpu = found)
+        runCatching { LocalModelGpu.write(acceleratorFile(context), saved) }
+        accelerator = saved
+    }
+
+    private fun prepareGpu(context: Context, list: Boolean): JSONObject =
+        JSONObject(nativeGpuInfo(abortMarker(context).path.toByteArray(Charsets.UTF_8),
+            kernelCache(context).path.toByteArray(Charsets.UTF_8), list).toString(Charsets.UTF_8))
+
+    /**
+     * What the settings page shows. [probe] asks the driver for its GPU if nothing did yet and
+     * starts the GPU check when it is due; without it nothing new is asked.
+     */
+    @JvmStatic fun acceleratorStatus(probe: Boolean = true): JSONObject {
+        val saved = accelerator
+        val (device, state) = gpuReadiness(startCheck = probe, probe = probe)
+        val context = applicationContext
+        val current = context?.let { gpuIdentity(it) }
+        val failure = when {
+            context == null || current == null -> null
+            state == "check_failed" -> LocalModelGpu.readCheck(gpuCheckFile(context), gpuCheckMarker(context), current)
+                ?.takeIf { it.identity == current }?.message ?: "The GPU check did not finish"
+            saved.failedFor(current) -> saved.failure?.optString("message")
+            else -> null
+        }
+        // Without the GPU library loaded, the name is the one an earlier start of this install found.
+        val name = LocalModelGpu.displayName(device)
+            ?: saved.gpu?.takeIf { it.optString("identity") == current && !it.isNull("name") }?.optString("name")
+        return JSONObject().put("mode", saved.mode).put("modes", JSONArray(LocalModelGpu.modes))
+            .put("gpu_state", state)
+            .put("gpu", name ?: JSONObject.NULL)
+            .put("gpu_description", device?.optString("description") ?: JSONObject.NULL)
+            .put("gpu_version", device?.optString("version")?.takeIf { it.isNotEmpty() } ?: JSONObject.NULL)
+            .put("uses_gpu", LocalModelGpu.layers(saved.mode, state) > 0)
+            .put("failure", failure ?: JSONObject.NULL)
+            .put("library", loadedLibrary ?: JSONObject.NULL)
+    }
+
+    /** Saves "auto" or "cpu"; it applies to the next generation. */
+    @JvmStatic @Synchronized fun setAccelerator(mode: String): JSONObject {
+        require(mode in LocalModelGpu.modes) { "Invalid local model accelerator" }
+        val context = checkNotNull(applicationContext) { "Native inference has not been initialized" }
+        val saved = accelerator.copy(mode = mode)
+        LocalModelGpu.write(acceleratorFile(context), saved)
+        accelerator = saved
+        return acceleratorStatus()
+    }
+
+    /**
+     * Forgets GPU failures so the GPU is checked again. After an engine failure the GPU library
+     * was not loaded, so that needs the engine process to start again.
+     */
+    @JvmStatic @Synchronized fun retryGpu(): JSONObject {
+        val context = checkNotNull(applicationContext) { "Native inference has not been initialized" }
+        val saved = accelerator.copy(failure = null)
+        LocalModelGpu.write(acceleratorFile(context), saved)
+        accelerator = saved
+        gpuCheckFile(context).delete()
+        gpuCheckMarker(context).delete()
+        gpuCheckStartedAt = null
+        return acceleratorStatus().put("restart_required", gpuState == "failed")
     }
 
     private class RequestError(val code: String, message: String) : RuntimeException(message)
@@ -349,6 +522,14 @@ object LocalModelBridge {
             boundedInteger(request, "threads", 1, LocalModelPerformance.MAX_THREADS)
             if (!request.has("generation_timeout_ms")) request.put("generation_timeout_ms", 180000)
             boundedInteger(request, "generation_timeout_ms", 1, LocalModelPerformance.MAX_TIMEOUT_SECONDS * 1000)
+            // The device test may compare the CPU with the GPU; other requests follow the setting.
+            // Until the GPU is checked, and where it is not supported, the CPU runs them.
+            val chosen = if (request.has("accelerator")) request.remove("accelerator") else accelerator.mode
+            if (chosen !is String || chosen !in LocalModelGpu.modes)
+                throw RequestError("invalid_request", "Invalid local model accelerator")
+            val gpuLayers = if (chosen == "cpu") 0
+                else LocalModelGpu.layers(chosen, gpuReadiness(startCheck = !benchmark).second)
+            request.put("gpu_layers", gpuLayers)
             val prompt = request.opt("prompt")
             if (prompt !is String || prompt.isEmpty() ||
                 prompt.toByteArray(Charsets.UTF_8).size > LocalModelContext.MAX_PROMPT_BYTES)
@@ -401,7 +582,8 @@ object LocalModelBridge {
             // kept context is freed first so the memory reading below includes its memory.
             val cache = state.optJSONObject("prompt_cache")
             val reusable = !benchmark && imageCount == 0 && cache != null &&
-                cache.optString("model_id") == id && cache.optInt("context_size") == nContext
+                cache.optString("model_id") == id && cache.optInt("context_size") == nContext &&
+                state.optInt("loaded_gpu_layers") == gpuLayers
             if (cache != null && !reusable) nativeReleasePromptCache()
             request.put("reuse_prompt", !benchmark)
             val memory = ActivityManager.MemoryInfo()
@@ -409,8 +591,13 @@ object LocalModelBridge {
             val swap = if (memoryMode == "extended") availableSwapBytes() else 0L
             val physicalCompute = LocalModelMemory.TEXT_COMPUTE_RESERVE_BYTES +
                 if (imageCount > 0) LocalModelMemory.VISION_COMPUTE_RESERVE_BYTES else 0L
-            val estimateFeasible = reusable || LocalModelMemory.canLoad(memory.lowMemory, usableRamBytes(memory),
-                required, swap, memoryMode, physicalComputeReserveBytes = physicalCompute)
+            fun fits(extra: Long) = LocalModelMemory.canLoad(memory.lowMemory, usableRamBytes(memory),
+                required + extra, swap, memoryMode, physicalComputeReserveBytes = physicalCompute)
+            // The GPU needs room for ggml's own GPU buffers; when that is short the CPU runs this one.
+            if (gpuLayers > 0 && !reusable && !fits(LocalModelMemory.GPU_RESERVE_BYTES) && fits(0))
+                request.put("gpu_layers", 0)
+            val estimateFeasible = reusable ||
+                fits(if (request.getInt("gpu_layers") > 0) LocalModelMemory.GPU_RESERVE_BYTES else 0L)
             if (!LocalModelPerformance.mayAttemptAllocation(benchmark || runtimeSettings.contextTokens > 0, estimateFeasible))
                 throw RequestError("insufficient_memory", "Not enough available memory for this model and context; choose a smaller context or model")
             val images = try { LocalModelImages.prepare(request) }
@@ -460,4 +647,6 @@ object LocalModelBridge {
     private external fun nativeUnload()
     private external fun nativeReleasePromptCache(): Boolean
     private external fun nativeLimitThreads(threads: Int)
+    private external fun nativeGpuInfo(abortFile: ByteArray, cacheDir: ByteArray, list: Boolean): ByteArray
+    private external fun nativeGpuCheck(abortFile: ByteArray, cacheDir: ByteArray): ByteArray
 }

@@ -127,6 +127,7 @@ class ApplicationService:
         include_skills: bool = True,
         prefix_stable: bool = False,
         context_notes: tuple[str, ...] = (),
+        summary_model: str | None = None,
     ) -> RunResult:
         task = self._begin_run()
         try:
@@ -155,6 +156,7 @@ class ApplicationService:
                     reasoning_effort=reasoning_effort,
                     prefix_stable=prefix_stable,
                     context_notes=context_notes,
+                    summary_model=summary_model,
                 )
         finally:
             self._active_runs.discard(task)
@@ -178,6 +180,7 @@ class ApplicationService:
         include_instructions: bool = True,
         include_skills: bool = True,
         prefix_stable: bool = False,
+        summary_model: str | None = None,
     ) -> RunResult:
         task = self._begin_run()
         try:
@@ -206,6 +209,7 @@ class ApplicationService:
                     reasoning_effort=reasoning_effort,
                     summarize_history=summarize_history,
                     prefix_stable=prefix_stable,
+                    summary_model=summary_model,
                 )
         finally:
             self._active_runs.discard(task)

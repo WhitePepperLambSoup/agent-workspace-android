@@ -17,7 +17,32 @@ permissions:
   contents: read
 
 jobs:
+  # Quick checks that need no Android SDK and no test files: every Python source compiles, every
+  # page script parses, and the official skill pack passes the rules the app applies on install.
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12.10"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - name: Python sources compile
+        run: python -m compileall -q -x "/(training|third_party|\.cxx|build)/" "for Android" src
+      - name: Page scripts parse
+        run: |
+          for file in "for Android"/web_companion/static/*.js; do node --check "$file"; done
+          # /static/app.js is served as the parts in static/app joined in name order.
+          cat "for Android"/web_companion/static/app/*.js > "$RUNNER_TEMP/app.js"
+          node --check "$RUNNER_TEMP/app.js"
+      - name: Official skill pack is valid
+        run: python "for Android/publish_skills.py" build
+
   android:
+    needs: checks
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -39,7 +64,7 @@ jobs:
           # command-line tools reject; the pinned components are installed in the next step.
           packages: platform-tools
       - name: Install pinned Android SDK components
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.3.13750724" "cmake;3.22.1"
+        run: sdkmanager "platforms;android-36" "build-tools;35.0.0" "ndk;27.3.13750724" "cmake;3.22.1"
       - name: Install the pinned Python build environment
         run: uv sync --frozen --python 3.12.10
       - name: Verify wrapper and prepare pinned native inputs and assets

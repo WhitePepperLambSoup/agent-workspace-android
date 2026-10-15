@@ -12,6 +12,11 @@ object LocalModelMemory {
      */
     const val COMPUTE_BYTES_PER_TOKEN = 6L * 1024
     const val VISION_COMPUTE_RESERVE_BYTES = 256 * MIB
+    /**
+     * Extra for GPU generations: ggml's Adreno backend allocates 377 MiB of fixed scratch buffers
+     * when it starts (ggml_cl_init in the pinned llama.cpp) besides the weights and cache it moves.
+     */
+    const val GPU_RESERVE_BYTES = 448 * MIB
     private data class PinnedWeights(val bytes: Long, val sha256: String)
     private val hybridWeights = mutableMapOf(
         "qwen3.5-0.8b-q4-k-m" to PinnedWeights(532517120L,

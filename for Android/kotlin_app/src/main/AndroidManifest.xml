@@ -29,9 +29,34 @@
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
     <uses-permission android:name="android.permission.READ_CALENDAR" />
     <uses-permission android:name="android.permission.WRITE_CALENDAR" />
+    <!-- Asks the user to let the engine run in the background (BackgroundRunGuide); strict
+         phone makers otherwise freeze it and every reply crawls or fails. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Personal-info tools, each only after the user allows it in Device & tools. -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- System switches: read Wi-Fi/Bluetooth state; Do Not Disturb and brightness once granted by the user. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+    <!-- The optional app lock: the system fingerprint/face/screen-lock prompt. -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
 
     <queries>
+        <!-- Makers' app-launch (auto-start) pages, opened from BackgroundRunGuide. -->
+        <package android:name="com.hihonor.systemmanager" />
+        <package android:name="com.huawei.systemmanager" />
+        <package android:name="com.miui.securitycenter" />
+        <package android:name="com.coloros.safecenter" />
+        <package android:name="com.oppo.safe" />
+        <package android:name="com.oneplus.security" />
+        <package android:name="com.vivo.permissionmanager" />
+        <package android:name="com.iqoo.secure" />
         <intent><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent>
+        <!-- Home screens: a recorded shortcut that started on one begins from the home screen. -->
+        <intent><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.HOME" /></intent>
         <intent><action android:name="android.intent.action.SET_ALARM" /></intent>
         <intent><action android:name="android.intent.action.SET_TIMER" /></intent>
         <intent><action android:name="android.speech.action.RECOGNIZE_SPEECH" /></intent>
@@ -50,6 +75,9 @@
         android:networkSecurityConfig="@xml/network_security_config"
         android:usesCleartextTraffic="false"
         android:theme="@android:style/Theme.Material.NoActionBar">
+
+        <!-- The phone's GPU driver, used by the local model's GPU library when present. -->
+        <uses-native-library android:name="libOpenCL.so" android:required="false" />
 
         <!-- Embedded Python and trusted WebView launcher. -->
         <activity
@@ -81,11 +109,20 @@
             </intent-filter>
         </activity>
 
-        <!-- 方案 B：纯原生 Jetpack Compose 入口 (备用) -->
+
+        <!-- Tasks from other apps (Tasker, Shortcuts): asked about until the user allows them. -->
         <activity
-            android:name=".MainActivity"
-            android:exported="false"
-            android:windowSoftInputMode="adjustResize" />
+            android:name=".entry.ExternalTaskActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="com.agentworkspace.mobile.action.RUN_TASK" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
 
         <provider
             android:name=".workspace.WorkspaceFileProvider"
@@ -136,6 +173,9 @@
         <provider android:name=".localmodels.LocalModelControlProvider"
             android:authorities="${applicationId}.local-model-control"
             android:exported="false" android:process=":engine" />
+        <!-- Compiles the local model's GPU kernels apart from the engine (LocalModelGpu). -->
+        <service android:name=".localmodels.LocalModelGpuCheckService"
+            android:exported="false" android:process=":gpucheck" />
 
         <service
             android:name=".AgentService"
@@ -217,6 +257,11 @@
             android:label="@string/widget_tasks_label">
             <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
             <meta-data android:name="android.appwidget.provider" android:resource="@xml/agent_task_widget_info" />
+        </receiver>
+        <receiver android:name=".embedded.AgentCardWidgetProvider" android:exported="true"
+            android:label="@string/widget_card_label">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/agent_card_widget_info" />
         </receiver>
         <receiver android:name=".embedded.AgentQuickTasksWidgetProvider" android:exported="true"
             android:label="@string/widget_quick_tasks_label">

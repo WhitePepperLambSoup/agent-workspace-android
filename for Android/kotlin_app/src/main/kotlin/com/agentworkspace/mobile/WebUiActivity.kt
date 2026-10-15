@@ -40,6 +40,8 @@ import com.agentworkspace.mobile.entry.QuickEntry
 import com.agentworkspace.mobile.embedded.TermuxBootstrap
 import com.agentworkspace.mobile.embedded.TermuxDaemonService
 import com.agentworkspace.mobile.embedded.MobileProviderSettings
+import com.agentworkspace.mobile.embedded.ModelSuggestionAdapter
+import com.agentworkspace.mobile.embedded.ProviderModelCatalog
 import com.agentworkspace.mobile.embedded.ProviderChangeCoordinator
 import com.agentworkspace.mobile.embedded.ProviderSettingsChange
 import com.agentworkspace.mobile.embedded.TaskNotificationPublisher
@@ -102,6 +104,10 @@ class WebUiActivity : ComponentActivity() {
     private var pageDark = false
     private lateinit var webView: WebView
     private lateinit var loadingContainer: FrameLayout
+    private lateinit var startupAnimation: StartupAnimationView
+    private lateinit var startupInfo: LinearLayout
+    /** The console is opening over the start-up screen (a second page-finished must not restart it). */
+    private var revealing = false
     private lateinit var statusText: TextView
     private lateinit var retryButton: Button
     private lateinit var settingsButton: Button
@@ -455,6 +461,21 @@ class WebUiActivity : ComponentActivity() {
             com.agentworkspace.mobile.capabilities.AndroidClockCalendar.calendarAccess(this))
     }
 
+    // Contacts and location for the personal-info tools, each asked for when the user taps it.
+    private val personalPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+        if (result.values.none { it } && result.keys.none { shouldShowRequestPermissionRationale(it) }) openAppSettings()
+        dispatchPageEvent("agent-personal-access-changed", com.agentworkspace.mobile.capabilities.AndroidPersonalInfo.access(this))
+    }
+
+    private fun requestPersonalAccess(kind: String) {
+        if (isFinishing || isDestroyed) return
+        personalPermissionLauncher.launch(when (kind) {
+            "contacts" -> arrayOf(Manifest.permission.READ_CONTACTS)
+            "location" -> arrayOf(Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION)
+            else -> return
+        })
+    }
+
     private fun requestCalendarAccess() {
         if (isFinishing || isDestroyed) return
         calendarPermissionLauncher.launch(calendarPermissions)
@@ -595,17 +616,18 @@ class WebUiActivity : ComponentActivity() {
                 requestNotificationPermissionAction = { requestTaskNotificationPermissionOnce() },
                 notificationSettingsChangedAction = { dispatchNotificationSettingsChanged() },
                 requestVoiceInputAction = { launchVoiceInput() },
-                restartEngineAction = { initAndLaunchEngine(restart = true) },
+                restartEngineAction = { initAndLaunchEngine(restart = true, reason = "restart requested in the app") },
+                appLockAction = { enabled, minutes -> changeAppLock(enabled, minutes) },
                 reconnectEngineAction = { reconnectEngine() },
                 exportLogsAction = { appSupport.showLogExport() },
                 backupCreateAction = { web -> backups.create(web) },
                 backupRestoreAction = { backups.restore() },
                 checkUpdatesAction = { appSupport.checkNow() },
                 stopEngineAction = {
-                    startService(Intent(this@WebUiActivity, TermuxDaemonService::class.java).setAction(TermuxDaemonService.ACTION_STOP))
+                    startService(Intent(this@WebUiActivity, TermuxDaemonService::class.java).setAction(TermuxDaemonService.ACTION_STOP)
+                        .putExtra(TermuxDaemonService.EXTRA_REASON, "stopped by the user in the app"))
                     statusText.text = UiText.of(this@WebUiActivity, "引擎已停止", "Engine stopped")
-                    loadingContainer.visibility = View.VISIBLE
-                    webView.visibility = View.INVISIBLE
+                    showLoading()
                     showRetry()
                 },
                 importLocalModelAction = { requestModelImport(it) },
@@ -633,6 +655,7 @@ class WebUiActivity : ComponentActivity() {
                     }
                 },
                 requestCalendarAccessAction = { requestCalendarAccess() },
+                personalAccessAction = { requestPersonalAccess(it) },
             ), "AndroidBridge")
 
             webChromeClient = object : WebChromeClient() {
@@ -720,8 +743,7 @@ class WebUiActivity : ComponentActivity() {
                     super.onPageFinished(view, url)
                     trustedWorkspacePage = url != null && isTrustedConsoleUrl(url)
                     if (url != null && isLocalConsoleUrl(url)) {
-                        loadingContainer.visibility = View.GONE
-                        webView.visibility = View.VISIBLE
+                        revealConsole()
                         if (isTrustedConsoleUrl(url)) {
                             // Earlier consoles (from before an engine restart) carry expired tokens.
                             view?.clearHistory()
@@ -751,27 +773,51 @@ class WebUiActivity : ComponentActivity() {
         // 加载与过渡界面
         loadingContainer = FrameLayout(this).apply {
             layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-            val pb = ProgressBar(this@WebUiActivity).apply {
-                layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, android.view.Gravity.CENTER)
+            startupAnimation = StartupAnimationView(this@WebUiActivity, startupDark).apply {
+                layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            }
+            val density = resources.displayMetrics.density
+            val title = TextView(this@WebUiActivity).apply {
+                text = "Agent Workspace"
+                setTextColor(if (startupDark) Color.WHITE else Color.parseColor("#18201E"))
+                textSize = 19f
+                letterSpacing = 0.06f
+                typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+                gravity = android.view.Gravity.CENTER
             }
             statusText = TextView(this@WebUiActivity).apply {
                 text = UiText.of(this@WebUiActivity, "正在初始化运行环境...", "Initializing the runtime...")
-                setTextColor(if (startupDark) Color.WHITE else Color.parseColor("#18201E"))
-                textSize = 14f
+                setTextColor(Color.parseColor(if (startupDark) "#9AA9A6" else "#5B6866"))
+                textSize = 13f
                 gravity = android.view.Gravity.CENTER
                 maxLines = 4
-                layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, android.view.Gravity.CENTER).apply {
-                    topMargin = 140
-                    leftMargin = 48
-                    rightMargin = 48
-                }
+                setPadding(0, (8 * density).toInt(), 0, 0)
             }
-            retryButton = Button(this@WebUiActivity).apply {
+            // The name and the current step sit under the orbits, wherever the screen puts them.
+            startupInfo = LinearLayout(this@WebUiActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = android.view.Gravity.CENTER_HORIZONTAL
+                layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                    android.view.Gravity.TOP).apply { leftMargin = (32 * density).toInt(); rightMargin = (32 * density).toInt() }
+                addView(title)
+                addView(statusText)
+            }
+            addOnLayoutChangeListener { _, _, top, _, bottom, _, _, _, _ ->
+                startupInfo.translationY = (bottom - top) * StartupAnimationView.CENTER + 78 * density
+                retryButton.translationY = startupInfo.translationY + startupInfo.height + 20 * density
+            }
+            retryButton = Button(this@WebUiActivity, null, android.R.attr.borderlessButtonStyle).apply {
                 text = UiText.of(this@WebUiActivity, "重试连接", "Retry")
                 visibility = View.GONE
-                layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, android.view.Gravity.CENTER).apply {
-                    topMargin = 400
+                isAllCaps = false
+                setTextColor(Color.WHITE)
+                setPadding((24 * density).toInt(), 0, (24 * density).toInt(), 0)
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    cornerRadius = 22 * density
+                    setColor(Color.parseColor(if (startupDark) "#2A8F7E" else "#0F766E"))
                 }
+                layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, (44 * density).toInt(),
+                    android.view.Gravity.TOP or android.view.Gravity.CENTER_HORIZONTAL)
                 setOnClickListener {
                     visibility = View.GONE
                     statusText.text = UiText.of(this@WebUiActivity, "正在重新连接...", "Reconnecting...")
@@ -805,15 +851,18 @@ class WebUiActivity : ComponentActivity() {
                 addView(toolButton(UiText.of(this@WebUiActivity, "检查更新", "Updates")) { appSupport.checkNow() })
                 addView(settingsButton)
             }
-            addView(pb)
-            addView(statusText)
+            addView(startupAnimation)
+            addView(startupInfo)
             addView(retryButton)
             addView(startupTools)
         }
+        startupAnimation.start()
 
         rootLayout.addView(webView)
         rootLayout.addView(loadingContainer)
         setContentView(rootLayout)
+        // Locked from the start when the user turned the app lock on (onResume asks to unlock).
+        if (AppLock.enabled(this)) showLockCover()
         ViewCompat.requestApplyInsets(rootLayout)
         applySystemBars(startupDark, startupColor)
 
@@ -896,6 +945,8 @@ class WebUiActivity : ComponentActivity() {
         rootLayout.addView(ScrollView(this).apply { addView(content) },
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         setContentView(rootLayout)
+        // Locked from the start when the user turned the app lock on (onResume asks to unlock).
+        if (AppLock.enabled(this)) showLockCover()
         ViewCompat.requestApplyInsets(rootLayout)
         rootLayout.setBackgroundColor(background)
     }
@@ -972,8 +1023,66 @@ class WebUiActivity : ComponentActivity() {
         super.onSaveInstanceState(outState)
     }
 
+    // App lock (opt-in): the console is covered until the fingerprint, face or screen lock is given.
+    private var leftAt: Long? = null
+    private var lockCover: View? = null
+    private var unlocking = false
+
+    private fun showLockCover() {
+        val cover = lockCover ?: FrameLayout(this).apply {
+            val dark = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+            setBackgroundColor(Color.parseColor(if (dark) "#161C1B" else "#FFFFFF"))
+            isClickable = true
+            val density = resources.displayMetrics.density
+            addView(LinearLayout(this@WebUiActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = android.view.Gravity.CENTER_HORIZONTAL
+                addView(TextView(this@WebUiActivity).apply {
+                    text = UiText.of(this@WebUiActivity, "Agent Workspace 已锁定", "Agent Workspace is locked")
+                    textSize = 18f
+                    setTextColor(if (dark) Color.WHITE else Color.parseColor("#18201E"))
+                })
+                addView(Button(this@WebUiActivity, null, android.R.attr.borderlessButtonStyle).apply {
+                    text = UiText.of(this@WebUiActivity, "解锁", "Unlock")
+                    isAllCaps = false
+                    setTextColor(Color.parseColor(if (dark) "#5CC6B1" else "#0F766E"))
+                    setOnClickListener { unlock() }
+                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, (48 * density).toInt()).apply { topMargin = (16 * density).toInt() }
+                })
+            }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, android.view.Gravity.CENTER))
+            rootLayout.addView(this, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            lockCover = this
+        }
+        cover.visibility = View.VISIBLE
+        cover.bringToFront()
+        if (Build.VERSION.SDK_INT >= 33) setRecentsScreenshotEnabled(false)
+    }
+
+    private fun unlock() {
+        if (unlocking) return
+        unlocking = true
+        AppLock.authenticate(this) { ok ->
+            unlocking = false
+            if (ok) {
+                lockCover?.visibility = View.GONE
+                if (Build.VERSION.SDK_INT >= 33) setRecentsScreenshotEnabled(true)
+            }
+        }
+    }
+
+    /** From the page's settings: turning the lock on asks for the fingerprint or screen lock once first. */
+    private fun changeAppLock(enabled: Boolean, delayMinutes: Int) {
+        val done = { dispatchPageEvent("agent-app-lock-changed", JSONObject(AppLock.state(this))) }
+        if (!enabled) { AppLock.save(this, false, delayMinutes); done(); return }
+        if (!AppLock.available(this)) { done(); return }
+        AppLock.authenticate(this) { ok -> if (ok) AppLock.save(this, true, delayMinutes); done() }
+    }
+
     override fun onResume() {
         super.onResume()
+        if (lockCover?.visibility == View.VISIBLE) unlock()
+        else if (leftAt != null && AppLock.due(this, leftAt)) { showLockCover(); unlock() }
+        leftAt = null
         appSupport.onResume()
         if (::webView.isInitialized) {
             webView.onResume()
@@ -1000,6 +1109,7 @@ class WebUiActivity : ComponentActivity() {
         // Android stops a background app's microphone anyway; discard rather than deliver half a phrase.
         voiceDialog?.cancel()
         voiceDialog = null
+        if (!unlocking) leftAt = android.os.SystemClock.elapsedRealtime()
         super.onStop()
     }
 
@@ -1165,17 +1275,74 @@ class WebUiActivity : ComponentActivity() {
             setText(current.model)
             threshold = 0
             setCompoundDrawablesRelativeWithIntrinsicBounds(0, 0, android.R.drawable.arrow_down_float, 0)
-            setAdapter(ArrayAdapter(
-                this@WebUiActivity,
-                android.R.layout.simple_dropdown_item_1line,
-                presets[selectedPreset].models,
-            ))
             setOnClickListener {
                 (adapter as? android.widget.Filterable)?.filter?.filter(null) {
                     if (isAttachedToWindow) showDropDown()
                 }
             }
         }
+        val apiKey = EditText(this).apply {
+            hint = if (current.apiKey.isNullOrBlank()) "API Key" else UiText.of(this@WebUiActivity, "API Key（留空则保留）", "API key (leave blank to keep)")
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        // The provider's own model list, read once the address and key are in (as mainstream chat
+        // apps do); the built-in names are only a fallback for services without a list.
+        val modelStatus = TextView(this).apply { textSize = 12f; alpha = 0.75f }
+        val fetchModels = Button(this, null, android.R.attr.borderlessButtonStyle).apply {
+            text = UiText.of(this@WebUiActivity, "获取模型列表", "Get model list")
+            isAllCaps = false
+        }
+        val modelRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            addView(modelStatus, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addView(fetchModels)
+        }
+        fun showModels(protocol: String, base: String) {
+            val listing = runCatching { ProviderModelCatalog.cached(this@WebUiActivity, protocol, base.trimEnd('/')) }.getOrNull()
+            val models = listing?.models ?: presets[provider.selectedItemPosition].models.map { ProviderModelCatalog.Model(it) }
+            model.setAdapter(ModelSuggestionAdapter(this@WebUiActivity, models))
+            modelStatus.text = when {
+                listing != null -> UiText.of(this@WebUiActivity, "${models.size} 个模型（来自服务商），点模型名称选择",
+                    "${models.size} models from the provider; tap the model name to choose")
+                else -> UiText.of(this@WebUiActivity, "填好地址和 API Key 后会自动获取模型列表",
+                    "The model list is read once the address and API key are in")
+            }
+        }
+        var fetchJob: Job? = null
+        fun readModelList(userAsked: Boolean) {
+            val protocol = presets[provider.selectedItemPosition].protocol
+            val base = baseUrl.text.toString().trim()
+            val typedKey = apiKey.text.toString().trim().ifEmpty { null }
+            if (base.trimEnd('/') == MobileProviderSettings.EMBEDDED_QWEN_BASE_URL) return
+            if (!userAsked && typedKey == null && protocol != "ollama" &&
+                runCatching { MobileProviderSettings.apiKeyFor(this@WebUiActivity, protocol, base.trimEnd('/')) }.getOrNull().isNullOrBlank()) return
+            fetchJob?.cancel()
+            modelStatus.text = UiText.of(this@WebUiActivity, "正在获取模型列表…", "Reading the model list…")
+            fetchJob = activityScope.launch {
+                try {
+                    val models = withContext(Dispatchers.IO) {
+                        ProviderModelCatalog.fetch(this@WebUiActivity, protocol, base, typedKey)
+                    }
+                    model.setAdapter(ModelSuggestionAdapter(this@WebUiActivity, models))
+                    modelStatus.text = UiText.of(this@WebUiActivity, "已获取 ${models.size} 个模型，点模型名称选择",
+                        "${models.size} models; tap the model name to choose")
+                    if (userAsked && model.isAttachedToWindow) {
+                        (model.adapter as? android.widget.Filterable)?.filter?.filter(null) { model.showDropDown() }
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    modelStatus.text = error.message ?: UiText.of(this@WebUiActivity, "无法获取模型列表", "Could not read the model list")
+                }
+            }
+        }
+        fetchModels.setOnClickListener { readModelList(userAsked = true) }
+        // Typing an address or a key reads the list a moment after the typing stops.
+        val listHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        val listLater = Runnable { readModelList(userAsked = false) }
+        fun readModelListSoon() { listHandler.removeCallbacks(listLater); listHandler.postDelayed(listLater, 900) }
         var effortOptions = MobileProviderSettings.reasoningEfforts(current.protocol, current.baseUrl, current.model)
         fun effortLabel(value: String) = when (value) {
             "auto" -> UiText.of(this@WebUiActivity, "自动", "Auto")
@@ -1218,35 +1385,43 @@ class WebUiActivity : ComponentActivity() {
                     model.setText(preset.models.firstOrNull().orEmpty(), false)
                 }
                 selectedPreset = position
-                model.setAdapter(ArrayAdapter(this@WebUiActivity,
-                    android.R.layout.simple_dropdown_item_1line, preset.models))
+                showModels(preset.protocol, baseUrl.text.toString().trim())
                 refreshEffortOptions()
+                readModelListSoon()
             }
         }
+        val listWatcher = object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(s: Editable?) = readModelListSoon()
+        }
+        baseUrl.addTextChangedListener(listWatcher)
+        apiKey.addTextChangedListener(listWatcher)
+        showModels(current.protocol, current.baseUrl)
+        // A list read more than a day ago is read again (models come and go).
+        val listed = runCatching { ProviderModelCatalog.cached(this, current.protocol, current.baseUrl) }.getOrNull()
+        if (listed == null || System.currentTimeMillis() - listed.fetchedAt > 24 * 60 * 60 * 1000L) readModelList(userAsked = false)
         val modeLabels = listOf(UiText.of(this@WebUiActivity, "工作区", "Workspace"), "YOLO", UiText.of(this@WebUiActivity, "完全访问", "Full access"))
         val autonomy = Spinner(this).apply {
             contentDescription = UiText.of(this@WebUiActivity, "执行模式", "Execution mode")
             adapter = ArrayAdapter(this@WebUiActivity, android.R.layout.simple_spinner_dropdown_item, modeLabels)
             setSelection(MobileProviderSettings.autonomies.indexOf(current.autonomy).coerceAtLeast(0))
         }
-        val apiKey = EditText(this).apply {
-            hint = if (current.apiKey.isNullOrBlank()) "API Key" else UiText.of(this@WebUiActivity, "API Key（留空则保留）", "API key (leave blank to keep)")
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or
-                android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
-        }
         val removeKey = CheckBox(this).apply {
             text = UiText.of(this@WebUiActivity, "删除已有 API Key", "Delete saved API key")
             visibility = if (current.apiKey.isNullOrBlank()) View.GONE else View.VISIBLE
         }
+        // The key comes before the model: the model list is read with it.
         fields.addView(provider)
         fields.addView(baseUrl)
+        fields.addView(apiKey)
+        fields.addView(removeKey)
         fields.addView(model)
+        fields.addView(modelRow)
         fields.addView(TextView(this).apply { text = UiText.of(this@WebUiActivity, "思考程度", "Reasoning effort") })
         fields.addView(effort)
         fields.addView(TextView(this).apply { text = UiText.of(this@WebUiActivity, "执行模式", "Execution mode") })
         fields.addView(autonomy)
-        fields.addView(apiKey)
-        fields.addView(removeKey)
         val scroll = ScrollView(this).apply { addView(fields) }
         val dialog = AlertDialog.Builder(this)
             .setTitle(UiText.of(this@WebUiActivity, "模型设置", "Model settings"))
@@ -1254,6 +1429,7 @@ class WebUiActivity : ComponentActivity() {
             .setNegativeButton(UiText.of(this@WebUiActivity, "取消", "Cancel"), null)
             .setPositiveButton(UiText.of(this@WebUiActivity, "保存", "Save"), null)
             .create()
+        dialog.setOnDismissListener { listHandler.removeCallbacks(listLater); fetchJob?.cancel() }
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val selectedProtocol = presets[provider.selectedItemPosition].protocol
@@ -1294,6 +1470,52 @@ class WebUiActivity : ComponentActivity() {
         dialog.show()
     }
 
+    /** The start-up screen, from the lines drawing in, over a hidden console. */
+    private fun showLoading() {
+        loadingContainer.animate().cancel()
+        revealing = false
+        loadingContainer.alpha = 1f
+        startupInfo.alpha = 1f
+        val again = loadingContainer.visibility != View.VISIBLE
+        loadingContainer.visibility = View.VISIBLE
+        webView.visibility = View.INVISIBLE
+        if (again || !startupAnimation.isShown) startupAnimation.start()
+    }
+
+    /**
+     * The console is ready: it opens from the centre while the orbits fly outwards, then the
+     * start-up screen goes. Without a laid-out console (or with animations off) it simply shows.
+     */
+    private fun revealConsole() {
+        if (loadingContainer.visibility != View.VISIBLE) { webView.visibility = View.VISIBLE; return }
+        if (revealing) return
+        revealing = true
+        webView.visibility = View.VISIBLE
+        startupTools.visibility = View.GONE
+        retryButton.visibility = View.GONE
+        startupInfo.animate().alpha(0f).setDuration(180).start()
+        val duration = (StartupAnimationView.EXIT_SECONDS * 1000).toLong()
+        if (webView.isAttachedToWindow && webView.width > 0 && webView.height > 0) {
+            val centerX = webView.width / 2
+            val centerY = (webView.height * StartupAnimationView.CENTER).toInt()
+            val radius = kotlin.math.hypot(webView.width.toDouble(), webView.height.toDouble()).toFloat()
+            runCatching {
+                android.view.ViewAnimationUtils.createCircularReveal(webView, centerX, centerY, 24 * resources.displayMetrics.density, radius).apply {
+                    this.duration = duration
+                    interpolator = android.view.animation.PathInterpolator(0.2f, 0f, 0f, 1f)
+                    start()
+                }
+            }
+        }
+        startupAnimation.finish {
+            loadingContainer.animate().alpha(0f).setDuration(120).withEndAction {
+                loadingContainer.visibility = View.GONE
+                loadingContainer.alpha = 1f
+                revealing = false
+            }.start()
+        }
+    }
+
     /** Retry, plus the logs/updates/model settings help, once start-up failed or stopped. */
     private fun showRetry() {
         retryButton.visibility = View.VISIBLE
@@ -1309,15 +1531,15 @@ class WebUiActivity : ComponentActivity() {
         }, STARTUP_HELP_DELAY_MS)
     }
 
-    private fun initAndLaunchEngine(restart: Boolean = false, previousEngineToken: String? = null) {
+    private fun initAndLaunchEngine(restart: Boolean = false, previousEngineToken: String? = null, reason: String? = null) {
         initializationJob?.cancel()
-        loadingContainer.visibility = View.VISIBLE
-        webView.visibility = View.INVISIBLE
+        showLoading()
         retryButton.visibility = View.GONE
         revealStartupToolsLater()
         initializationJob = activityScope.launch {
             try {
                 var restartEngine = restart
+                var restartReason = reason ?: "restart requested"
                 if (!TermuxBootstrap.isInstalled(this@WebUiActivity)) {
                     statusText.text = UiText.of(this@WebUiActivity, "正在准备本地服务...", "Preparing the local service...")
                     withContext(Dispatchers.IO) {
@@ -1328,6 +1550,7 @@ class WebUiActivity : ComponentActivity() {
                     // After an update the engine may already be running the previous sources (started
                     // by the recovery worker before the app was opened); restart it on the new ones.
                     restartEngine = true
+                    restartReason = "the app was updated; engine restarted on the new sources"
                 }
 
                 statusText.text = UiText.of(this@WebUiActivity, "正在启动本地 Agent 守护引擎...", "Starting the local Agent engine...")
@@ -1338,7 +1561,10 @@ class WebUiActivity : ComponentActivity() {
                 }
                 val daemonIntent = Intent(this@WebUiActivity, TermuxDaemonService::class.java).apply {
                     putExtra(TermuxDaemonService.EXTRA_PROVIDER_CONFIGURATION, provider)
-                    if (restartEngine) action = TermuxDaemonService.ACTION_RESTART
+                    if (restartEngine) {
+                        action = TermuxDaemonService.ACTION_RESTART
+                        putExtra(TermuxDaemonService.EXTRA_REASON, restartReason)
+                    }
                 }
                 TermuxDaemonService.start(this@WebUiActivity, daemonIntent)
 

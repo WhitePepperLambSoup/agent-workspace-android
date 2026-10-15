@@ -271,6 +271,7 @@ class AgentRunner:
         reasoning_effort: str | None = None,
         prefix_stable: bool = False,
         context_notes: tuple[str, ...] = (),
+        summary_model: str | None = None,
     ) -> RunResult:
         """Run one turn.
 
@@ -279,6 +280,8 @@ class AgentRunner:
         passages are stored with the user message, assistant messages keep the trust they will
         have when the history is reloaded, and compaction moves in large deterministic steps.
         ``context_notes`` are trusted application notes stored with the user message.
+        ``summary_model`` writes the summary of dropped history (a cheaper model of the same
+        provider); the turn's own model when it is not given.
         """
         lock = self._store.session_lock(session.id)
         async with lock:
@@ -300,6 +303,7 @@ class AgentRunner:
                 reasoning_effort=reasoning_effort,
                 prefix_stable=prefix_stable,
                 context_notes=context_notes,
+                summary_model=summary_model,
             )
 
     async def _run_locked(
@@ -322,6 +326,7 @@ class AgentRunner:
         reasoning_effort: str | None = None,
         prefix_stable: bool = False,
         context_notes: tuple[str, ...] = (),
+        summary_model: str | None = None,
     ) -> RunResult:
         if user_input is None and images:
             raise ValueError("images can only accompany a user message")
@@ -650,7 +655,7 @@ class AgentRunner:
                     else:
                         summary_result = await self._summarize_dropped_context(
                             session,
-                            model,
+                            summary_model or model,
                             compaction,
                             task_budget,
                             correlation_id=correlation_id,

@@ -48,6 +48,12 @@ else:
     apply_android_patches()
 
 
+def app_script(web_root: Path) -> bytes:
+    """/static/app.js: the page script, kept as parts by area in static/app and joined in name
+    order, so they share one scope like the single file they were split from."""
+    return b"".join(part.read_bytes() for part in sorted((web_root / "static" / "app").glob("*.js")))
+
+
 def _load_mobile_assets(token: str) -> tuple[str, dict[str, tuple[str, bytes]]]:
     web_root = THIS_DIR / "web_companion"
     encoded_token = quote(token, safe="")
@@ -74,6 +80,10 @@ def _load_mobile_assets(token: str) -> tuple[str, dict[str, tuple[str, bytes]]]:
         f'src="/static/management.js?token={encoded_token}"',
     )
     console_html = console_html.replace(
+        'src="/static/i18n-zh-hant.js"',
+        f'src="/static/i18n-zh-hant.js?token={encoded_token}"',
+    )
+    console_html = console_html.replace(
         'src="/static/i18n.js"', f'src="/static/i18n.js?token={encoded_token}"'
     )
     console_html = console_html.replace(
@@ -93,7 +103,7 @@ def _load_mobile_assets(token: str) -> tuple[str, dict[str, tuple[str, bytes]]]:
         ),
         "/static/app.js": (
             "application/javascript; charset=utf-8",
-            (web_root / "static" / "app.js").read_bytes(),
+            app_script(web_root),
         ),
         "/static/compat.js": (
             "application/javascript; charset=utf-8",
@@ -111,6 +121,10 @@ def _load_mobile_assets(token: str) -> tuple[str, dict[str, tuple[str, bytes]]]:
         "/static/management.js": (
             "application/javascript; charset=utf-8",
             (web_root / "static" / "management.js").read_bytes(),
+        ),
+        "/static/i18n-zh-hant.js": (
+            "application/javascript; charset=utf-8",
+            (web_root / "static" / "i18n-zh-hant.js").read_bytes(),
         ),
         "/static/i18n.js": (
             "application/javascript; charset=utf-8",

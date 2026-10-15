@@ -146,16 +146,43 @@ _startup_dump = None
 
 
 _RUN_STARTED = 0.0
+_LAST_STEP = 0.0
+_RUNS = 0
+_STOP_REASON = ""
+# A step this long after the previous one is a slow start worth explaining.
+_SLOW_STEP_SECONDS = 5.0
+
+
+def _slow_details(files_dir: str) -> str:
+    """What explains a slow step: free memory, database size, and whether Python had just started."""
+    details = [f"run {_RUNS} in this process" + (" (cold)" if _RUNS <= 1 else "")]
+    with contextlib.suppress(OSError, ValueError):
+        meminfo = Path("/proc/meminfo").read_text(encoding="ascii", errors="replace")
+        values = {
+            line.split(":")[0]: int(line.split()[1]) // 1024 for line in meminfo.splitlines() if line.split()[1:2]
+        }
+        details.append(f"memory available {values.get('MemAvailable', 0)} of {values.get('MemTotal', 0)} MB")
+    with contextlib.suppress(OSError):
+        data = Path(files_dir) / "agent-data"
+        size = sum(item.stat().st_size for item in data.glob("*.db*") if item.is_file())
+        details.append(f"databases {size // (1024 * 1024)} MB")
+    return "; ".join(details)
 
 
 def _startup_log(files_dir: str, message: str) -> None:
     """One line per start-up step in agent-data/logs/engine-startup.log, so a hang shows where.
 
     Also printed with the time since run() began, which the Android log shows as python.stdout.
+    A step that took long gets the facts that explain a slow start on the same line.
     """
     import time
 
-    elapsed = int((time.monotonic() - _RUN_STARTED) * 1000) if _RUN_STARTED else 0
+    global _LAST_STEP
+    now = time.monotonic()
+    elapsed = int((now - _RUN_STARTED) * 1000) if _RUN_STARTED else 0
+    if _RUN_STARTED and _LAST_STEP and now - _LAST_STEP >= _SLOW_STEP_SECONDS:
+        message += f" (slow: {now - _LAST_STEP:.1f} s since the previous step; {_slow_details(files_dir)})"
+    _LAST_STEP = now
     print(f"[engine +{elapsed} ms] {message}", flush=True)
     with contextlib.suppress(OSError):
         log = Path(files_dir) / "agent-data" / "logs" / "engine-startup.log"
@@ -185,7 +212,8 @@ def _arm_startup_dump(files_dir: str) -> None:
 
 def run(files_dir: str, provider_json: str = "{}") -> None:
     """Run until stopped; the caller must use a background Java thread."""
-    global _running, _stop_requested, _loop, _server_task, _startup_dump, _RUN_STARTED
+    global _running, _stop_requested, _loop, _server_task, _startup_dump, _RUN_STARTED, _LAST_STEP, _RUNS
+    global _STOP_REASON
     import time
 
     with _state_lock:
@@ -193,7 +221,9 @@ def run(files_dir: str, provider_json: str = "{}") -> None:
             raise RuntimeError("the embedded Python service is already running")
         _running = True
         _stop_requested = False
-    _RUN_STARTED = time.monotonic()
+        _STOP_REASON = ""
+    _RUN_STARTED = _LAST_STEP = time.monotonic()
+    _RUNS += 1
 
     loop: asyncio.AbstractEventLoop | None = None
     _startup_log(files_dir, "engine starting")
@@ -227,7 +257,7 @@ def run(files_dir: str, provider_json: str = "{}") -> None:
             loop.call_soon(task.cancel)
         with contextlib.suppress(asyncio.CancelledError):
             loop.run_until_complete(task)
-        _startup_log(files_dir, "engine stopped")
+        _startup_log(files_dir, f"engine stopped: {_STOP_REASON or 'the server ended by itself'}")
     except BaseException as exc:
         _startup_log(files_dir, f"engine failed: {type(exc).__name__}: {str(exc)[:500]}")
         raise
@@ -255,13 +285,17 @@ def run(files_dir: str, provider_json: str = "{}") -> None:
             _running = False
 
 
-def stop() -> None:
-    """Cancel the server task so its existing finally block closes the runtime."""
-    global _stop_requested
+def stop(reason: str = "") -> None:
+    """Cancel the server task so its existing finally block closes the runtime.
+
+    The reason (the user, a settings change, an update, Android) goes into the start-up log.
+    """
+    global _stop_requested, _STOP_REASON
     with _state_lock:
         if not _running or _stop_requested:
             return
         _stop_requested = True
+        _STOP_REASON = " ".join(str(reason or "").split())[:200]
         loop, task = _loop, _server_task
     if loop is not None and task is not None:
         with contextlib.suppress(RuntimeError):

@@ -26,6 +26,7 @@ object DiagnosticReport {
         "engine-startup.log.1", "engine-startup.log",
         "engine-restarts.log", "engine-stalls.log", "engine-stalls.log.1",
         "gateway-errors.log", "gateway-errors.log.1",
+        ProcessExits.NAME,
     )
 
     fun write(context: Context): File {
@@ -36,6 +37,8 @@ object DiagnosticReport {
             appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
             appendLine("WebView: ${runCatching { WebView.getCurrentWebViewPackage()?.versionName }.getOrNull() ?: "unknown"}")
             section("Engine and background status") { EngineRecovery.status(context) }
+            // Pauses of the engine process show a phone maker's power manager holding it.
+            section("Background running (maker steps, engine pauses)") { BackgroundRunGuide.state(context).toString(2) }
             val logs = File(context.filesDir, "agent-data/logs")
             for (name in ENGINE_LOGS) {
                 val file = File(logs, name)
@@ -92,8 +95,16 @@ object DiagnosticReport {
             appendLine("App: ${appVersion(context)}")
             appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
             appendLine("WebView: ${runCatching { WebView.getCurrentWebViewPackage()?.versionName }.getOrNull() ?: "unknown"}")
+            runCatching {
+                val background = BackgroundRunGuide.state(context)
+                val pauses = background.getJSONArray("pauses")
+                val onScreen = (0 until pauses.length()).map { pauses.getJSONObject(it) }.filter { it.optBoolean("screen_on") }
+                appendLine("Background: battery optimization exempt=${background.optBoolean("battery_optimization_exempt")}, " +
+                    "engine pauses=${pauses.length()} (screen on: ${onScreen.size}, longest ${onScreen.maxOfOrNull { it.optLong("seconds") } ?: 0} s)")
+            }
             appendLine("```")
-            for ((name, lines) in listOf("engine-startup.log" to 30, "engine-restarts.log" to 10, "engine-stalls.log" to 40, "gateway-errors.log" to 10)) {
+            for ((name, lines) in listOf("engine-startup.log" to 30, "engine-restarts.log" to 10, ProcessExits.NAME to 10,
+                    "engine-stalls.log" to 40, "gateway-errors.log" to 10)) {
                 val file = File(logs, name)
                 if (!file.isFile) continue
                 val text = runCatching { tail(file, 16 * 1024) }.getOrNull()?.lines()?.filter { it.isNotBlank() }?.takeLast(lines) ?: continue
@@ -151,10 +162,42 @@ object DiagnosticReport {
 
     /** Android only lets an app read its own log lines, which covers both app processes and Python's stderr. */
     private fun systemLog(): String {
-        val process = ProcessBuilder("logcat", "-d", "-v", "time", "-t", "3000").redirectErrorStream(true).start()
-        val text = process.inputStream.bufferedReader().use { it.readText() }
+        val process = ProcessBuilder("logcat", "-d", "-v", "time", "-t", "30000").redirectErrorStream(true).start()
+        val text = process.inputStream.bufferedReader().useLines { quiet(it) }
         process.waitFor()
         return if (text.length > SYSTEM_LOG_BYTES) "… (earlier lines omitted)\n" + text.takeLast(SYSTEM_LOG_BYTES) else text
+    }
+
+    /** Drawing chatter some phones log many times a second (one report was 92% setRequestedFrameRate). */
+    private val NOISE = Regex(
+        "setRequestedFrameRate|^\\S+ \\S+ [VD]/(View|ViewRootImpl[^(]*|Choreographer|InsetsController|ImeTracker|" +
+            "BLASTBufferQueue[^(]*|SurfaceView[^(]*|HWUI|OpenGLRenderer|AdrenoGLES[^(]*|Gralloc4|gralloc4|" +
+            "BufferQueueProducer|FrameTracker|VRI\\[[^(]*|SurfaceComposerClient|qdgralloc|IInputConnectionWrapper)\\s*\\("
+    )
+
+    /**
+     * The log without drawing chatter, and a run of the same line said once with its count, so the
+     * report covers a long stretch of time instead of the last half minute.
+     */
+    internal fun quiet(lines: Sequence<String>): String {
+        val out = StringBuilder()
+        var last: String? = null
+        var repeats = 0
+        fun flush() {
+            if (repeats > 0) out.append("    (the line above repeated $repeats more times)\n")
+            repeats = 0
+        }
+        for (line in lines) {
+            if (NOISE.containsMatchIn(line)) continue
+            // "10-16 03:20:00.123 W/Tag( 123): message": the same message again, apart from the time.
+            val body = line.split(' ', limit = 3).getOrNull(2) ?: line
+            if (body == last) { repeats++; continue }
+            flush()
+            out.append(line).append('\n')
+            last = body
+        }
+        flush()
+        return out.toString()
     }
 
     private fun appVersion(context: Context): String = runCatching {

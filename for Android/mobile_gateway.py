@@ -643,10 +643,12 @@ class _Handler(BaseHTTPRequestHandler):
             except KeyError:
                 self._reply(404, {"error": "unknown task"})
                 return
+            from mobile_pause import paused
+
             self._reply(
                 200,
                 {
-                    "task": task.to_dict(),
+                    "task": {**task.to_dict(), "paused": paused(task.task_id)},
                     "approvals": self._api.controller.pending_approvals(task.task_id),
                 },
             )
@@ -829,6 +831,12 @@ class _Handler(BaseHTTPRequestHandler):
         if parts == ["mobile", "knowledge", "upload"]:
             self._upload_knowledge()
             return
+        if parts == ["mobile", "skills", "upload"]:
+            if not self._authorized("approval"):
+                self._reject_request(401, {"error": "approval scope is required"})
+                return
+            self._upload_skills()
+            return
         payload = self._read_json(
             _MAX_ATTACHMENT_JSON_BYTES if parts == ["mobile", "attachments"] else _MAX_BODY_BYTES
         )
@@ -839,11 +847,27 @@ class _Handler(BaseHTTPRequestHandler):
                 "/mobile/extensions/",
                 "/mobile/android-system",
                 "/mobile/provider/",
+                # Which model each kind of task runs on (and so what it costs).
+                "/mobile/model-roles",
+                # Triggers start tasks on their own later.
+                "/mobile/triggers",
+                # Shortcuts operate the phone without asking.
+                "/mobile/shortcuts",
+                # How far unattended phone work may go.
+                "/mobile/hosted-limits",
+                # Notifications kept for digests.
+                "/mobile/notification-journal",
+                # What the home-screen AI card shows.
+                "/mobile/widget-card",
                 "/mobile/services/",
                 "/mobile/browser/",
                 "/mobile/notification-rules",
+                # Skills become instructions to the agent.
+                "/mobile/skills/",
             )
-        ) and not self._authorized("approval"):
+        ) and path != "/mobile/triggers/fire" and not self._authorized("approval"):
+        # (Firing only starts triggers the user set up with approval; the app reports phone events
+        # with its own token.)
             self._reply(401, {"error": "approval scope is required"})
             return
         if parts == ["mobile", "provider", "apply"]:
@@ -1118,6 +1142,15 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._reply(202, {"task": task.to_dict()})
             return
+        if len(parts) == 4 and parts[:2] == ["mobile", "tasks"] and parts[3] in ("pause", "unpause"):
+            # Holds the task before its next model request or phone action; it stays running.
+            try:
+                self._reply(200, self._api.pause_mobile_task(parts[2], parts[3] == "pause"))
+            except KeyError:
+                self._reply(404, {"error": "unknown task"})
+            except RuntimeError as exc:
+                self._reply(409, {"error": str(exc), "code": str(exc)})
+            return
         if len(parts) == 4 and parts[:2] == ["mobile", "tasks"] and parts[3] == "steer":
             prompt = payload.get("prompt")
             input_id = payload.get("input_id")
@@ -1286,6 +1319,49 @@ class _Handler(BaseHTTPRequestHandler):
             self._reject_request(500, {"error": "could not save the document"})
         else:
             self._reply(201, document)
+        finally:
+            self.connection.settimeout(previous_timeout)
+            if not consumed:
+                self.close_connection = True
+
+    def _upload_skills(self) -> None:
+        """A skill pack file (zip, tar.gz or SKILL.md) as the raw body; answers with its preview."""
+        from mobile_skills import MAX_ARCHIVE_BYTES, SkillError, get_skill_store
+
+        query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+        consumed = False
+        previous_timeout = self.connection.gettimeout()
+        self.connection.settimeout(60)
+        try:
+            if any(len(values) != 1 for values in query.values()):
+                raise ValueError("upload parameters may not repeat")
+            body, length = self._upload_body()
+            if length is not None and length > MAX_ARCHIVE_BYTES:
+                raise ValueError("the file is larger than 20 MB")
+            if length is None:
+                parts, total = [], 0
+                while part := body.read(64 * 1024):
+                    total += len(part)
+                    if total > MAX_ARCHIVE_BYTES:
+                        raise ValueError("the file is larger than 20 MB")
+                    parts.append(part)
+                data = b"".join(parts)
+            else:
+                data = body.read(length)
+            consumed = True
+            management = self._api.management
+            store = management.skills() if management is not None else get_skill_store()
+            preview = store.preview_file(query.get("filename", [""])[0], data)
+        except SkillError as error:
+            self._reply(400, {"error": str(error)[:2000]})
+        except (ValueError, TypeError) as error:
+            self._reject_request(400, {"error": " ".join(str(error).split())[:2000]})
+        except TimeoutError:
+            self._reply(408, {"error": "upload timed out; retry this file"})
+        except OSError:
+            self._reject_request(500, {"error": "could not read the skill pack"})
+        else:
+            self._reply(201, preview)
         finally:
             self.connection.settimeout(previous_timeout)
             if not consumed:
@@ -2354,6 +2430,20 @@ class MobileGateway:
 
     def resume_mobile_task(self, task_id: str):
         return self._run_coro(self.controller.resume(task_id), _MOBILE_OPERATION_TIMEOUT_SECONDS)
+
+    def pause_mobile_task(self, task_id: str, pause: bool) -> dict[str, Any]:
+        task = self.controller.get(task_id)
+        if str(task.state) not in {"running", "waiting_approval"}:
+            raise RuntimeError("turn_not_active")
+
+        async def change() -> dict[str, Any]:
+            # On the engine's loop: its asyncio events are not thread-safe.
+            import mobile_pause
+
+            (mobile_pause.pause if pause else mobile_pause.unpause)(task_id)
+            return {"task_id": task_id, "paused": mobile_pause.paused(task_id)}
+
+        return self._run_coro(change(), _MOBILE_OPERATION_TIMEOUT_SECONDS)
 
     def steer_mobile_task(self, task_id: str, prompt: str, *, input_id: str | None = None) -> dict[str, Any]:
         steer = getattr(self.controller, "steer", None)

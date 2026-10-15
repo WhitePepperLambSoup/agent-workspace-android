@@ -196,11 +196,13 @@ object AgentWidgets {
         refresh(context, AgentWidgetProvider::class.java)
         refresh(context, AgentTaskWidgetProvider::class.java)
         refresh(context, AgentQuickTasksWidgetProvider::class.java)
+        refresh(context, AgentCardWidgetProvider::class.java)
     }
 
     fun views(context: Context, provider: Class<out AppWidgetProvider>, id: Int): RemoteViews = when (provider) {
         AgentTaskWidgetProvider::class.java -> taskViews(context, id)
         AgentQuickTasksWidgetProvider::class.java -> quickTaskViews(context, id)
+        AgentCardWidgetProvider::class.java -> cardViews(context, id)
         else -> quickAskViews(context, id)
     }
 
@@ -295,6 +297,53 @@ object AgentWidgets {
         return view
     }
 
+    // ---- The AI card: the latest reply in the conversation of a schedule the user chose ----------
+
+    @Volatile private var attached: Context? = null
+
+    /** The engine service registers its context, so the engine can publish the card. */
+    fun attach(context: Context) { attached = context.applicationContext }
+
+    private fun cardFile(context: Context) = File(context.filesDir, "widget-card.json")
+
+    /** From the engine (mobile_widget_card.py): {"title", "text", "session_id", "at" (ms)}. */
+    @JvmStatic
+    fun publishCard(json: String): Boolean {
+        val context = attached ?: return false
+        return runCatching {
+            val card = JSONObject(json)
+            cardFile(context).writeText(JSONObject()
+                .put("title", card.optString("title").take(80))
+                .put("text", card.optString("text").take(600))
+                .put("session_id", card.optString("session_id").take(64))
+                .put("at", card.optLong("at", System.currentTimeMillis())).toString())
+            refresh(context, AgentCardWidgetProvider::class.java)
+            true
+        }.getOrDefault(false)
+    }
+
+    private fun cardViews(context: Context, id: Int): RemoteViews {
+        val view = RemoteViews(context.packageName, R.layout.agent_card_widget)
+        if (glass(context)) background(view, R.drawable.widget_glass_panel, android.R.id.background)
+        val card = runCatching { JSONObject(cardFile(context).readText()) }.getOrNull()
+        val session = card?.optString("session_id").orEmpty()
+        if (card == null || card.optString("text").isBlank()) {
+            view.setTextViewText(R.id.card_title, UiText.of(context, "AI 卡片", "AI card"))
+            view.setTextViewText(R.id.card_time, "")
+            view.setTextViewText(R.id.card_body, context.getString(R.string.widget_card_empty))
+        } else {
+            view.setTextViewText(R.id.card_title, card.optString("title").ifBlank { UiText.of(context, "AI 卡片", "AI card") })
+            view.setTextViewText(R.id.card_time, timeLabel(context, card.optLong("at")))
+            view.setTextViewText(R.id.card_body, card.optString("text"))
+        }
+        // Tapping opens that conversation.
+        val open = if (session.isBlank()) QuickEntry.intent(context, "text")
+            else TaskNotificationPublisher.navigationIntent(context, TaskNotificationSnapshot("", session, "succeeded", "", null, null, 0))
+        view.setOnClickPendingIntent(android.R.id.background, PendingIntent.getActivity(context, id * 16 + 5, open,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
+        return view
+    }
+
     /**
      * Colours come from the layout, where the launcher resolves them for its light or dark mode; a
      * colour set from code is fixed in the app's configuration. So each colour is its own view.
@@ -357,6 +406,7 @@ object AgentWidgets {
             "tasks" -> AgentTaskWidgetProvider::class.java
             "quick_tasks" -> AgentQuickTasksWidgetProvider::class.java
             "ask" -> AgentWidgetProvider::class.java
+            "card" -> AgentCardWidgetProvider::class.java
             else -> return false
         }
         val manager = AppWidgetManager.getInstance(context) ?: return false
@@ -389,6 +439,13 @@ class AgentWidgetProvider : AppWidgetProvider() {
 class AgentTaskWidgetProvider : AppWidgetProvider() {
     override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) {
         ids.forEach { manager.updateAppWidget(it, AgentWidgets.views(context, AgentTaskWidgetProvider::class.java, it)) }
+    }
+}
+
+/** The AI card: the latest reply in the conversation of the schedule the user chose. */
+class AgentCardWidgetProvider : AppWidgetProvider() {
+    override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) {
+        ids.forEach { manager.updateAppWidget(it, AgentWidgets.views(context, AgentCardWidgetProvider::class.java, it)) }
     }
 }
 

@@ -46,7 +46,8 @@ data class MobileProviderSettings(
         if (!apiKey.isNullOrBlank()) put("api_key", apiKey)
     }.toString()
 
-    fun toPublicJson(): String = JSONObject().apply {
+    /** [catalog]: the provider's own model list read earlier (ProviderModelCatalog), when there is one. */
+    fun toPublicJson(catalog: ProviderModelCatalog.Listing? = null): String = JSONObject().apply {
         put("protocol", protocol)
         put("base_url", baseUrl)
         put("model", model)
@@ -65,8 +66,13 @@ data class MobileProviderSettings(
         put("local_context_options", JSONArray(localContextOptions))
         put("local_memory_modes", JSONArray(localMemoryModes))
         put("has_api_key", !apiKey.isNullOrBlank())
-        val models = (providerPresets[presetIndex(protocol, baseUrl)].models + model).distinct()
+        val fetched = catalog?.models.orEmpty()
+        val models = ((fetched.map { it.id }.ifEmpty { providerPresets[presetIndex(protocol, baseUrl)].models }) + model).distinct()
         put("models", JSONArray(models))
+        if (catalog != null) {
+            put("model_catalog", JSONArray().apply { fetched.forEach { put(it.json()) } })
+            put("model_catalog_fetched_at", catalog.fetchedAt)
+        }
         put("model_efforts", JSONObject().apply {
             models.forEach { put(it, JSONArray(reasoningEfforts(protocol, baseUrl, it))) }
         })
@@ -170,6 +176,10 @@ data class MobileProviderSettings(
             MobileProviderPreset("MiniMax", "openai-compatible", "https://api.minimax.io/v1", miniMaxModels),
             MobileProviderPreset("Mistral", "openai-compatible", "https://api.mistral.ai/v1", mistralModels),
             MobileProviderPreset("Cohere", "openai-compatible", "https://api.cohere.ai/compatibility/v1", cohereModels),
+            // Their models change too often to list here: the model list is read once the key is in.
+            MobileProviderPreset("OpenRouter", "openai-compatible", "https://openrouter.ai/api/v1", emptyList()),
+            MobileProviderPreset("硅基流动 SiliconFlow", "openai-compatible", "https://api.siliconflow.cn/v1", emptyList()),
+            MobileProviderPreset("火山方舟 Volcengine Ark", "openai-compatible", "https://ark.cn-beijing.volces.com/api/v3", emptyList()),
             MobileProviderPreset("Ollama", "ollama", "http://127.0.0.1:11434", ollamaModels),
             MobileProviderPreset("本机 Qwen", "openai-compatible", EMBEDDED_QWEN_BASE_URL, embeddedQwenModels),
         ) + protocols.map { protocol ->

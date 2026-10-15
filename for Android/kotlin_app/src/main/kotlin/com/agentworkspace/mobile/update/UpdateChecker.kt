@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import androidx.core.content.FileProvider
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
@@ -71,9 +72,30 @@ object UpdateChecker {
         .put("releasesPage", RELEASES_PAGE)
         .toString()
 
-    /** The newest non-draft, non-prerelease release. Network call: never on the main thread. */
+    /** App releases are tagged vX.Y.Z; the same repository's skill pack releases are skills-vX.Y.Z. */
+    private val APP_TAG = Regex("^[vV]?\\d+(\\.\\d+){1,3}$")
+
+    /**
+     * The newest published app release in a GitHub release list: tagged vX.Y.Z, not a draft or
+     * pre-release, carrying an APK. Other releases of the repository (the official skill packs)
+     * are skipped, whichever of them GitHub marks as latest.
+     */
+    fun pickAppRelease(releases: JSONArray): JSONObject? {
+        var best: JSONObject? = null
+        for (index in 0 until releases.length()) {
+            val release = releases.optJSONObject(index) ?: continue
+            val tag = release.optString("tag_name")
+            if (release.optBoolean("draft") || release.optBoolean("prerelease") || !APP_TAG.matches(tag)) continue
+            val assets = release.optJSONArray("assets") ?: continue
+            if ((0 until assets.length()).none { assets.optJSONObject(it)?.optString("name")?.endsWith(".apk", true) == true }) continue
+            if (best == null || isNewer(tag, best.optString("tag_name"))) best = release
+        }
+        return best
+    }
+
+    /** The newest app release (see pickAppRelease). Network call: never on the main thread. */
     fun fetchLatest(): ReleaseInfo {
-        val connection = URL("https://api.github.com/repos/$REPOSITORY/releases/latest").openConnection() as HttpURLConnection
+        val connection = URL("https://api.github.com/repos/$REPOSITORY/releases?per_page=30").openConnection() as HttpURLConnection
         val body = try {
             connection.connectTimeout = 15000
             connection.readTimeout = 20000
@@ -88,7 +110,7 @@ object UpdateChecker {
         } finally {
             connection.disconnect()
         }
-        val release = JSONObject(body)
+        val release = pickAppRelease(JSONArray(body)) ?: throw IOException("no published release")
         val notes = release.optString("body")
         val assets = release.optJSONArray("assets")
         var apk: JSONObject? = null

@@ -3,7 +3,6 @@ import java.io.File
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
-    alias(libs.plugins.kotlin.compose)
     id("com.chaquo.python") version "17.0.0"
 }
 
@@ -16,16 +15,16 @@ require(externalSigning.all { it == null } || externalSigning.all { !it.isNullOr
 
 android {
     namespace = "com.agentworkspace.mobile"
-    compileSdk = 35
+    compileSdk = 36
     buildToolsVersion = "35.0.0"
     ndkVersion = "27.3.13750724"
 
     defaultConfig {
         applicationId = "com.agentworkspace.mobile"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 10600
-        versionName = "1.6.0"
+        targetSdk = 36
+        versionCode = 20000
+        versionName = "2.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Local test builds can inspect the console page over adb (chrome://inspect) while keeping
@@ -40,11 +39,17 @@ android {
         }
         externalNativeBuild {
             cmake {
-                targets += listOf("agent_qwen", "agent_qwen_dotprod")
+                targets += listOf("agent_qwen", "agent_qwen_dotprod", "agent_qwen_opencl")
                 val archive = providers.environmentVariable("AGENT_LLAMA_ARCHIVE").orNull
                     ?: file("build/tooling/llama.cpp-7fe450e19305b828c199d602c23a8337aaa1f03b.tar.gz")
                         .absolutePath
                 arguments += "-DAGENT_LLAMA_ARCHIVE=${archive.replace(File.separatorChar, '/')}"
+                val headers = providers.environmentVariable("AGENT_OPENCL_HEADERS_ARCHIVE").orNull
+                    ?: file("build/tooling/OpenCL-Headers-v2024.10.24.tar.gz").absolutePath
+                arguments += "-DAGENT_OPENCL_HEADERS_ARCHIVE=${headers.replace(File.separatorChar, '/')}"
+                providers.environmentVariable("AGENT_WORKSPACE_BUILD_PYTHON").orNull?.let {
+                    arguments += "-DPython3_EXECUTABLE=${it.replace(File.separatorChar, '/')}"
+                }
             }
         }
     }
@@ -61,13 +66,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
-    buildFeatures {
-        compose = true
-    }
 
     androidResources {
         ignoreAssetsPatterns += listOf(
@@ -92,8 +90,10 @@ android {
             keepDebugSymbols += setOf("**/libagent_proot.so", "**/libagent_proot_loader.so",
                 "**/libtalloc.so", "**/libandroid-shmem.so")
             pickFirsts += "**/libsqlite3_python.so"
-            // The dot-product engine build exists for arm64 only (src/main/cpp/CMakeLists.txt).
-            excludes += "lib/x86_64/libagent_qwen_dotprod.so"
+            // The dot-product and GPU engine builds exist for arm64 only (src/main/cpp/CMakeLists.txt).
+            excludes += setOf("lib/x86_64/libagent_qwen_dotprod.so", "lib/x86_64/libagent_qwen_opencl.so")
+            // The GPU build links a stand-in libOpenCL.so; the phone's own driver must be the one loaded.
+            excludes += "lib/*/libOpenCL.so"
         }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -201,19 +201,23 @@ dependencies {
     embeddedSqlite("mil.nga:sqlite-android:3500400@aar")
     // AndroidPlatform preloads sqlite3_python through ART, which calls the library's JNI_OnLoad.
     implementation(files(layout.buildDirectory.file("sqlite/classes/classes.jar")).builtBy(prepareEmbeddedSqliteClasses))
-    implementation(platform(libs.androidx.compose.bom))
-    implementation(libs.androidx.ui)
-    implementation(libs.androidx.ui.graphics)
-    implementation(libs.androidx.ui.tooling.preview)
-    implementation(libs.androidx.material3)
+    implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
-    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.activity.ktx)
     implementation(libs.androidx.webkit)
     implementation(libs.kotlinx.coroutines.android)
     implementation("androidx.work:work-runtime-ktx:2.10.1")
     implementation(libs.shizuku.api)
     // Pure-logic tests (memory planning) run on the JVM without a device.
     testImplementation("junit:junit:4.13.2")
+    // Android's org.json is a stub on the JVM; parsing tests need the real one.
+    testImplementation("org.json:json:20240303")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.2")
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
 }

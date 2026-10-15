@@ -4,7 +4,9 @@
 
 | 组件 | 固定来源/版本 | 许可与分发材料 |
 |---|---|---|
-| llama.cpp / ggml CPU | `ggml-org/llama.cpp` commit `7fe450e19305b828c199d602c23a8337aaa1f03b` | MIT；`build_release.py` 从固定 SHA256 源码 archive 提取上游 LICENSE 到 APK `assets/licenses/`，并记录来源/revision/digest |
+| llama.cpp / ggml CPU 与 OpenCL（Adreno GPU）后端 | `ggml-org/llama.cpp` commit `7fe450e19305b828c199d602c23a8337aaa1f03b` | MIT；`build_release.py` 从固定 SHA256 源码 archive 提取上游 LICENSE 到 APK `assets/licenses/`，并记录来源/revision/digest |
+| Khronos OpenCL-Headers v2024.10.24 | 仅编译 GPU 引擎库时使用的头文件，`build_release.py` 下载固定 SHA256 archive（`159f2a550592bae49859fee83d372acd152328fdf95c0dcd8b9409f8fad5db93`） | Apache-2.0；上游 LICENSE 复制到 APK `assets/licenses/OpenCL-Headers-Apache-2.0.txt`。APK 不带 OpenCL 库，运行时使用手机自带的 `libOpenCL.so` |
+| Google ML Kit 中文文字识别 16.0.1 | `com.google.mlkit:text-recognition-chinese`（模型随 APK，离线识别屏幕文字） | 按 Google ML Kit 服务条款使用（非开源）。识别在手机上进行，截图不上传；据 Google 说明，ML Kit 可能向 Google 发送 API 使用与性能指标 |
 | nlohmann/json 3.12.0 | 上述 llama.cpp 的 JNI JSON 头文件，许可来自官方 `v3.12.0/LICENSE.MIT` | MIT；完整文本及固定 SHA256 保存于 `licenses/nlohmann-json-3.12.0-LICENSE.txt`，准备时校验并复制到 APK |
 | sherpa-onnx 1.13.8（离线语音识别 JNI，仅 arm64） | 官方 `v1.13.8` 发布包 `sherpa-onnx-v1.13.8-android-static-link-onnxruntime.tar.bz2`（35,101,751 字节，SHA256 `7583ca385ae7d981e65468455c2ea2c9f2da383921dccfc5658d0dc19d309e6f`），由 `prepare_speech_runtime.py` 校验后取出 `libsherpa-onnx-jni.so`；Kotlin 封装在 `com/k2fsa/sherpa/onnx/` | Apache-2.0；完整文本在 `licenses/sherpa-onnx-1.13.8-LICENSE.txt`，准备时复制到 APK |
 | ONNX Runtime 1.28.2 | 静态链接在上述 sherpa-onnx JNI 库中 | MIT；完整文本在 `licenses/onnxruntime-1.28.2-LICENSE.txt` |
@@ -22,7 +24,7 @@
 | libandroid-shmem 0.7 | 固定 Termux 官方 .deb 和源码 archive | BSD-3-Clause；完整许可随对应源码 archive 提供 |
 | 可选 Alpine 3.22.6 工具环境 | `mobile_toolchain_catalog.json` arm64/x86_64 的根文件系统与全部依赖 | 按每组件许可，不用单一“Alpine 许可”覆盖：包括 Git GPL-2.0-only、Python PSF-2.0、Node MIT、Pyright 1.1.414 MIT，以及目录中每个库/工具的来源和许可 |
 
-llama.cpp 源码 archive 为 `https://codeload.github.com/ggml-org/llama.cpp/tar.gz/7fe450e19305b828c199d602c23a8337aaa1f03b`，SHA256 `a6861d549427f814dc591c439e08206f67ffaba0248344d421589abf18199e67`。CPU 后端、mtmd 图片运行时、界定的 JNI 入口和文本/工具/图片适配进入 APK；未包含 llama.cpp 服务器或 GPU 后端。mtmd 及其 vendored 依赖的完整对应源码位于随包固定 llama.cpp archive，保留其中许可与版权。
+llama.cpp 源码 archive 为 `https://codeload.github.com/ggml-org/llama.cpp/tar.gz/7fe450e19305b828c199d602c23a8337aaa1f03b`，SHA256 `a6861d549427f814dc591c439e08206f67ffaba0248344d421589abf18199e67`。CPU 后端、mtmd 图片运行时、界定的 JNI 入口和文本/工具/图片适配进入 APK；arm64 另有一份同源编译的库加入 ggml OpenCL 后端（Adreno GPU 内核嵌入库中，由手机的 OpenCL 驱动在运行时编译）。未包含 llama.cpp 服务器或其他 GPU 后端。mtmd 及其 vendored 依赖的完整对应源码位于随包固定 llama.cpp archive，保留其中许可与版权。
 
 ## PRoot 二进制、对应源码和修改
 

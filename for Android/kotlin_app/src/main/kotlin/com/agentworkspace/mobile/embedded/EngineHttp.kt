@@ -8,6 +8,21 @@ import java.net.URL
 
 /** Calls to the local engine that need its status code and error message (LocalEngineClient drops both). */
 object EngineHttp {
+    /** Starts the engine when it does not answer and waits up to 40 s for it (a worker thread only). */
+    fun ensureEngine(context: Context): Boolean {
+        fun healthy() = runCatching { request(context, "GET", "/health", null, 2000).ok }.getOrDefault(false)
+        if (healthy()) return true
+        runCatching {
+            TermuxDaemonService.start(context, android.content.Intent(context, TermuxDaemonService::class.java)
+                .putExtra(TermuxDaemonService.EXTRA_PROVIDER_CONFIGURATION, MobileProviderSettings.load(context).toJson()))
+        }
+        repeat(80) {
+            android.os.SystemClock.sleep(500)
+            if (healthy()) return true
+        }
+        return false
+    }
+
     data class Reply(val code: Int, val body: JSONObject) {
         val ok get() = code in 200..299
         val error get() = body.optString("error").ifBlank { "The local engine answered $code" }

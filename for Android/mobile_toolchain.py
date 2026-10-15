@@ -24,6 +24,16 @@ from typing import Any
 _MAX_EXTRACTED_BYTES = 700 * 1024 * 1024
 _MAX_MEMBERS = 60000
 _ACTIVE = {"downloading", "extracting", "probing", "cancelling"}
+# How each executable shows that it runs: arguments, accepted exit codes, words its output must hold.
+# Others run with --version and must exit 0. scp, sftp and ssh-keygen have no version flag: their
+# usage message (exit code 1) proves they start.
+_PROBES = {
+    "tmux": (["-V"], {0}, "tmux"),
+    "ssh": (["-V"], {0}, "OpenSSH"),
+    "scp": ([], {1}, "usage: scp"),
+    "sftp": ([], {1}, "usage: sftp"),
+    "ssh-keygen": (["-?"], {1}, "usage: ssh-keygen"),
+}
 
 
 class ToolchainError(RuntimeError):
@@ -613,10 +623,11 @@ class MobileToolchainManager:
                     or _sha256(path) != record["sha256"]
                 ):
                     raise ToolchainError(f"The installed {name} executable changed")
+                probe, accepted, expected = _PROBES.get(name, (["--version"], {0}, ""))
                 arguments = (
                     [str(path), "-c", "printf agent-toolchain-shell"]
                     if name == "shell"
-                    else [str(path), "--version"]
+                    else [str(path), *probe]
                 )
                 if name == "pyright":
                     arguments = [
@@ -626,19 +637,20 @@ class MobileToolchainManager:
                     ]
                 argv, environment = self._wrap(arguments, self.workspace)
                 response = runner(argv, str(self.workspace), 15, "", self._cancelled, environment)
+                output = "\n".join(
+                    value
+                    for value in (
+                        str(response.get("stdout") or ""),
+                        str(response.get("stderr") or ""),
+                    )
+                    if value
+                )
                 if (
-                    response.get("returncode") != 0
+                    response.get("returncode") not in accepted
+                    or (expected and expected not in output)
                     or response.get("timed_out")
                     or response.get("truncated")
                 ):
-                    output = "\n".join(
-                        value
-                        for value in (
-                            str(response.get("stdout") or ""),
-                            str(response.get("stderr") or ""),
-                        )
-                        if value
-                    )
                     failure = {
                         "executable": name,
                         "exit_code": response.get("returncode"),
@@ -655,7 +667,8 @@ class MobileToolchainManager:
                 found[name] = {
                     "path": str(path.resolve()),
                     "sha256": record["sha256"],
-                    "version": str(response.get("stdout", "")).strip().split("\n")[0][:200],
+                    # ssh -V writes its version to stderr.
+                    "version": (str(response.get("stdout") or "").strip() or output.strip()).split("\n")[0][:200],
                     "runtime": "proot",
                 }
             self._executables = found

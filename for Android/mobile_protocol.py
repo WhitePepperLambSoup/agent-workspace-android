@@ -149,6 +149,13 @@ class MobileTaskRequest:
     # The engine adds its phone instructions as a note, so the prompt is the user's own words.
     phone_app: str | None = None
     phone_retry: bool = False
+    # Phone tasks: how earlier requests in the same app were done (the panel remembers them).
+    phone_tips: str | None = None
+    # Phone tasks with "send the words on the screen" on: what the screen showed when asked.
+    phone_screen: str | None = None
+    # Plan mode: look around read-only and answer with a plan; nothing is changed until the user
+    # approves it (the next message carries it out).
+    plan_mode: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.image_refs, tuple) or any(
@@ -186,6 +193,9 @@ class MobileTaskRequest:
             **({"auto_approve": True} if self.auto_approve else {}),
             **({"phone_app": self.phone_app} if self.phone_app else {}),
             **({"phone_retry": True} if self.phone_retry else {}),
+            **({"phone_tips": self.phone_tips} if self.phone_tips else {}),
+            **({"phone_screen": self.phone_screen} if self.phone_screen else {}),
+            **({"plan_mode": True} if self.plan_mode else {}),
         }
 
 
@@ -228,6 +238,21 @@ def parse_mobile_task_request(payload: Mapping[str, Any]) -> MobileTaskRequest:
         raise ValueError("phone_retry must be true or false")
     if (phone_app is not None or phone_retry) and not phone_control:
         raise ValueError("phone_app and phone_retry are only for phone_control tasks")
+    phone_tips = payload.get("phone_tips")
+    if phone_tips is not None:
+        phone_tips = _required_text(phone_tips, "phone_tips", max_length=2000)
+        if not phone_control:
+            raise ValueError("phone_tips are only for phone_control tasks")
+    phone_screen = payload.get("phone_screen")
+    if phone_screen is not None:
+        phone_screen = _required_text(phone_screen, "phone_screen", max_length=4000)
+        if not phone_control:
+            raise ValueError("phone_screen is only for phone_control tasks")
+    plan_mode = payload.get("plan_mode", False)
+    if not isinstance(plan_mode, bool):
+        raise ValueError("plan_mode must be true or false")
+    if plan_mode and auto_approve:
+        raise ValueError("a plan_mode task changes nothing, so it has nothing to approve")
     return MobileTaskRequest(
         session_id=session_id,
         prompt=prompt,
@@ -240,6 +265,9 @@ def parse_mobile_task_request(payload: Mapping[str, Any]) -> MobileTaskRequest:
         auto_approve=auto_approve,
         phone_app=phone_app,
         phone_retry=phone_retry,
+        phone_tips=phone_tips,
+        phone_screen=phone_screen,
+        plan_mode=plan_mode,
     )
 
 

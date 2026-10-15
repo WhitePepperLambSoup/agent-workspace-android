@@ -23,6 +23,7 @@ import com.agentworkspace.mobile.embedded.EngineRecovery
 import com.agentworkspace.mobile.embedded.ProviderChangeCoordinator
 import com.agentworkspace.mobile.embedded.ProviderSettingsChange
 import com.agentworkspace.mobile.embedded.ProviderProfiles
+import com.agentworkspace.mobile.embedded.ProviderModelCatalog
 import com.agentworkspace.mobile.automation.AndroidSystemBridge
 import com.agentworkspace.mobile.entry.FloatingBallService
 import com.agentworkspace.mobile.entry.QuickEntry
@@ -76,7 +77,13 @@ class NativeJsBridge(
     private val requestTileAction: (() -> String)? = null,
     private val keepScreenOnAction: (Boolean) -> Unit = {},
     private val requestCalendarAccessAction: () -> Unit = {},
+    private val appLockAction: (Boolean, Int) -> Unit = { _, _ -> },
+    private val personalAccessAction: (String) -> Unit = {},
 ) {
+    // The provider model list being read in the background (refreshProviderModels).
+    private val modelListLock = Any()
+    private var modelListState = JSONObject().put("ok", true).put("state", "idle")
+
     /** Whether the agent may read and add calendar events (Settings → Device & tools). */
     @JavascriptInterface
     fun getCalendarAccess(): String = com.agentworkspace.mobile.capabilities.AndroidClockCalendar
@@ -98,7 +105,7 @@ class NativeJsBridge(
         return getVoiceInputSettings()
     }
 
-    /** The web UI's language choice ("auto", "zh" or "en") for native dialogs, notifications and toasts. */
+    /** The web UI's language choice ("auto", "zh", "zh-Hant" or "en") for native dialogs, notifications and toasts. */
     @JavascriptInterface
     fun setUiLanguage(value: String) {
         val wasEnglish = com.agentworkspace.mobile.UiText.isEnglish(context)
@@ -255,6 +262,29 @@ class NativeJsBridge(
     @JavascriptInterface
     fun getBackgroundStatus(): String = EngineRecovery.status(context)
 
+    /** The phone maker's steps for background running, battery optimization, recent engine pauses. */
+    @JavascriptInterface
+    fun getBackgroundRunState(): String =
+        com.agentworkspace.mobile.embedded.BackgroundRunGuide.state(context).toString()
+
+    /** Asks Android to let the engine run in the background (a system dialog). */
+    @JavascriptInterface
+    fun requestBackgroundRun(): String {
+        Handler(Looper.getMainLooper()).post {
+            com.agentworkspace.mobile.embedded.BackgroundRunGuide.requestBatteryExemption(context)
+        }
+        return "{\"ok\":true}"
+    }
+
+    /** Opens the phone maker's auto-start / app-launch page (or the app's settings page). */
+    @JavascriptInterface
+    fun openAutoStartSettings(): String {
+        Handler(Looper.getMainLooper()).post {
+            com.agentworkspace.mobile.embedded.BackgroundRunGuide.openAutoStart(context)
+        }
+        return "{\"ok\":true}"
+    }
+
     /** Build the diagnostics file off the UI thread, then open the share sheet. Returns at once. */
     @JavascriptInterface
     fun shareDiagnostics(): String {
@@ -388,6 +418,42 @@ class NativeJsBridge(
     @JavascriptInterface
     fun openAccessibilitySettings() { Handler(Looper.getMainLooper()).post { AndroidSystemBridge.openAccessibilitySettings(context) } }
 
+    /** The apps on the home screen (Device & tools: apps the agent may not use), by name. */
+    @JavascriptInterface
+    fun listLauncherApps(): String {
+        val manager = context.packageManager
+        val apps = manager.queryIntentActivities(android.content.Intent(android.content.Intent.ACTION_MAIN)
+            .addCategory(android.content.Intent.CATEGORY_LAUNCHER), 0)
+            .map { it.activityInfo.packageName to it.loadLabel(manager).toString().trim() }
+            .filter { (name, _) -> name != context.packageName }
+            .distinctBy { it.first }
+            .sortedBy { it.second.lowercase() }
+        return org.json.JSONArray().apply {
+            apps.forEach { (name, label) -> put(JSONObject().put("package", name).put("label", label)) }
+        }.toString()
+    }
+
+    /** Apps the agent may not read or operate, with their names. */
+    @JavascriptInterface
+    fun getBlockedApps(): String {
+        val manager = context.packageManager
+        return org.json.JSONArray().apply {
+            com.agentworkspace.mobile.automation.BlockedApps.packages(context).sorted().forEach { name ->
+                val label = runCatching { manager.getApplicationLabel(manager.getApplicationInfo(name, 0)).toString() }.getOrDefault(name)
+                put(JSONObject().put("package", name).put("label", label))
+            }
+        }.toString()
+    }
+
+    @JavascriptInterface
+    fun setBlockedApps(packagesJson: String): String {
+        val list = runCatching { org.json.JSONArray(packagesJson) }.getOrNull() ?: return getBlockedApps()
+        val packages = (0 until minOf(list.length(), 200)).map { list.optString(it) }
+            .filter { it.matches(Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)+")) && it != context.packageName }
+        com.agentworkspace.mobile.automation.BlockedApps.save(context, packages)
+        return getBlockedApps()
+    }
+
     /** The live screen (Device & tools): screen capture consent for the agent's screenshots. */
     @JavascriptInterface
     fun startLiveScreen() { Handler(Looper.getMainLooper()).post { AndroidSystemBridge.startLiveScreen(context) } }
@@ -420,7 +486,36 @@ class NativeJsBridge(
     }
 
     @JavascriptInterface
-    fun getProviderSettings(): String = MobileProviderSettings.load(context).toPublicJson()
+    fun getProviderSettings(): String = MobileProviderSettings.load(context).let {
+        it.toPublicJson(ProviderModelCatalog.cached(context, it.protocol, it.baseUrl))
+    }
+
+    /**
+     * Reads the current provider's model list in the background (it can take seconds); the page
+     * asks [getProviderModelsStatus] until it is done, then reloads the settings with the list.
+     */
+    @JavascriptInterface
+    fun refreshProviderModels(): String {
+        synchronized(modelListLock) {
+            if (modelListState.optString("state") == "fetching") return modelListState.toString()
+            modelListState = JSONObject().put("ok", true).put("state", "fetching")
+        }
+        val current = MobileProviderSettings.load(context)
+        Thread({
+            val result = try {
+                val models = ProviderModelCatalog.fetch(context, current.protocol, current.baseUrl, null)
+                JSONObject().put("ok", true).put("state", "done").put("count", models.size)
+            } catch (failure: Exception) {
+                JSONObject().put("ok", false).put("state", "error")
+                    .put("error", failure.message ?: "无法获取模型列表")
+            }
+            synchronized(modelListLock) { modelListState = result }
+        }, "provider-models").start()
+        return JSONObject().put("ok", true).put("state", "fetching").toString()
+    }
+
+    @JavascriptInterface
+    fun getProviderModelsStatus(): String = synchronized(modelListLock) { modelListState.toString() }
 
     private fun localModelControl(method: String, settings: String = "{}"): String = try {
         require(settings.length <= 4096)
@@ -434,6 +529,10 @@ class NativeJsBridge(
     @JavascriptInterface fun getLocalModelDeviceStatus(settings: String): String = localModelControl("status", settings)
     @JavascriptInterface fun startLocalModelBenchmark(settings: String): String = localModelControl("start", settings)
     @JavascriptInterface fun cancelLocalModelBenchmark(): String = localModelControl("cancel")
+    /** "auto", "gpu" or "cpu" for the on-device model; applies to its next generation. */
+    @JavascriptInterface fun setLocalModelAccelerator(mode: String): String =
+        localModelControl("set_accelerator", JSONObject().put("mode", mode).toString())
+    @JavascriptInterface fun retryLocalModelGpu(): String = localModelControl("retry_gpu")
 
     @JavascriptInterface
     fun applyRuntimeSettings(settingsJson: String): String {
@@ -525,6 +624,39 @@ class NativeJsBridge(
         showToast(com.agentworkspace.mobile.UiText.of(context, "已复制到剪贴板", "Copied to clipboard"))
     }
 
+    /** Apps on the home screen (name and package), for choosing one in an automatic trigger. */
+    @JavascriptInterface
+    fun getLauncherApps(): String = runCatching {
+        val manager = context.packageManager
+        val launcher = android.content.Intent(android.content.Intent.ACTION_MAIN).addCategory(android.content.Intent.CATEGORY_LAUNCHER)
+        org.json.JSONArray(manager.queryIntentActivities(launcher, 0).map { it.activityInfo }
+            .distinctBy { it.packageName }.filter { it.packageName != context.packageName }
+            .map { org.json.JSONObject().put("label", it.loadLabel(manager).toString()).put("package", it.packageName) }
+            .sortedBy { it.optString("label") }).toString()
+    }.getOrDefault("[]")
+
+    /** Contacts and location for the personal-info tools: what is allowed, and asking for one. */
+    @JavascriptInterface
+    fun getPersonalAccess(): String = com.agentworkspace.mobile.capabilities.AndroidPersonalInfo.access(context).toString()
+
+    @JavascriptInterface
+    fun requestPersonalAccess(kind: String) { Handler(Looper.getMainLooper()).post { personalAccessAction(kind) } }
+
+    /** Whether other apps (Tasker, Shortcuts) may start tasks without being asked each time. */
+    @JavascriptInterface
+    fun getExternalEntry(): Boolean = com.agentworkspace.mobile.entry.ExternalTaskActivity.enabled(context)
+
+    @JavascriptInterface
+    fun setExternalEntry(enabled: Boolean) = com.agentworkspace.mobile.entry.ExternalTaskActivity.setEnabled(context, enabled)
+
+    /** The app lock: whether this phone can use it, whether it is on, after how many minutes away. */
+    @JavascriptInterface
+    fun getAppLock(): String = com.agentworkspace.mobile.AppLock.state(context)
+
+    /** Turning it on asks for the fingerprint or screen lock first; the page hears agent-app-lock-changed. */
+    @JavascriptInterface
+    fun setAppLock(enabled: Boolean, delayMinutes: Int) { Handler(Looper.getMainLooper()).post { appLockAction(enabled, delayMinutes) } }
+
     @JavascriptInterface
     fun shareText(title: String, content: String) {
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
@@ -536,6 +668,37 @@ class NativeJsBridge(
         context.startActivity(Intent.createChooser(shareIntent, title).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK
         })
+    }
+
+    /**
+     * An event card's "add to calendar": the calendar app's new-event screen, filled in; the user
+     * saves it there (no calendar permission needed). {"title", "start", "end" (ms), "location", "notes"}.
+     */
+    @JavascriptInterface
+    fun addCalendarEvent(json: String): String = try {
+        val event = JSONObject(json)
+        val intent = Intent(Intent.ACTION_INSERT, android.provider.CalendarContract.Events.CONTENT_URI)
+            .putExtra(android.provider.CalendarContract.Events.TITLE, event.optString("title").take(200))
+            .putExtra(android.provider.CalendarContract.EXTRA_EVENT_BEGIN_TIME, event.getLong("start"))
+            .putExtra(android.provider.CalendarContract.EXTRA_EVENT_END_TIME, event.optLong("end", event.getLong("start") + 3_600_000))
+            .putExtra(android.provider.CalendarContract.Events.EVENT_LOCATION, event.optString("location").take(300))
+            .putExtra(android.provider.CalendarContract.Events.DESCRIPTION, event.optString("notes").take(2000))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(intent)
+        JSONObject().put("ok", true).toString()
+    } catch (e: Exception) {
+        JSONObject().put("ok", false).put("error", e.message ?: "no calendar app").toString()
+    }
+
+    /** A place card's "navigate": the map app the user picks, searching for the address. */
+    @JavascriptInterface
+    fun openMap(query: String): String = try {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=" + Uri.encode(query.take(300))))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(intent)
+        JSONObject().put("ok", true).toString()
+    } catch (e: Exception) {
+        JSONObject().put("ok", false).put("error", e.message ?: "no map app").toString()
     }
 
     @JavascriptInterface

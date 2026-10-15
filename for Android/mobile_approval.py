@@ -57,6 +57,8 @@ class MobileApprovalBroker:
         self._active_session_id: str | None = None
         self._trusted_task_id: str | None = None
         self._phone_task_id: str | None = None
+        # A task that read instructions in outside content (mobile_injection): nothing is covered.
+        self._distrusted: tuple[str, str] | None = None
         self._pending: dict[str, _PendingApproval] = {}
 
     def set_active_task(self, task_id: str, session_id: str) -> None:
@@ -66,6 +68,8 @@ class MobileApprovalBroker:
             self._trusted_task_id = None
         if task_id != self._phone_task_id:
             self._phone_task_id = None
+        if self._distrusted and self._distrusted[0] != task_id:
+            self._distrusted = None
         self._active_task_id = task_id
         self._active_session_id = session_id
 
@@ -76,6 +80,20 @@ class MobileApprovalBroker:
         self._active_session_id = None
         self._trusted_task_id = None
         self._phone_task_id = None
+        self._distrusted = None
+
+    def distrust(self, task_id: str, reason: str) -> bool:
+        """The running task read what looks like instructions to the agent in outside content (a web
+        page, a file, a message, the screen): from now on a task-wide or hosted approval covers none of
+        its tool calls, each asks the user with the reason, and "allow for this task" acts as once.
+        Requests to the model provider stay as approved: they carry no action."""
+        if not task_id or task_id != self._active_task_id:
+            return False
+        self._distrusted = (task_id, reason[:300])
+        return True
+
+    def distrusted(self, task_id: str) -> str | None:
+        return self._distrusted[1] if self._distrusted and self._distrusted[0] == task_id else None
 
     def mark_phone_control(self, task_id: str) -> bool:
         """The running task operates the phone for the user (started from the phone control panel)."""
@@ -115,7 +133,12 @@ class MobileApprovalBroker:
             return False
         if scope not in APPROVAL_SCOPES:
             raise ValueError("scope must be once, session or task")
-        if allowed and scope == "task" and pending.task_id == self._active_task_id:
+        if (
+            allowed
+            and scope == "task"
+            and pending.task_id == self._active_task_id
+            and not self.distrusted(pending.task_id)
+        ):
             self._trusted_task_id = pending.task_id
         self.event_store.append(
             Event(
@@ -165,7 +188,10 @@ class MobileApprovalBroker:
         covered = tool not in _ALWAYS_ASK_TOOLS or (
             tool in _PHONE_CONTROL_TOOLS and self._phone_task_id == self._active_task_id
         )
-        if self._trusted_task_id == self._active_task_id and covered:
+        untrusted = self.distrusted(self._active_task_id) if kind == "tool" else None
+        if untrusted:
+            details = {**details, "untrusted_content": untrusted}
+        elif self._trusted_task_id == self._active_task_id and covered:
             # Covered by the user's "allow for this task"; recorded for the audit trail.
             self.event_store.append(
                 Event(

@@ -147,11 +147,57 @@
     status("doctorStatus", android.reason || "");
     let background = {};
     try { background = JSON.parse(native?.getBackgroundStatus?.() || "{}"); } catch {}
-    terms("backgroundSummary", [[t("电池优化"), background.battery_optimization_exempt ? t("已豁免") : t("系统默认")], [t("恢复状态"), background.engine?.requires_user_launch ? t("需要手动启动") : background.engine?.state || t("按系统条件恢复")], [t("后台限制"), background.background_restricted ? t("已限制") : t("未限制")], [t("完成通知"), background.notifications_enabled ? t("已开启") : t("未开启或未授权")]]);
+    const run = backgroundRunState();
+    const pauses = (run?.pauses || []).filter((pause) => pause.screen_on);
+    terms("backgroundSummary", [[t("电池优化"), background.battery_optimization_exempt ? t("已豁免") : t("系统默认")], [t("恢复状态"), background.engine?.requires_user_launch ? t("需要手动启动") : background.engine?.state || t("按系统条件恢复")], [t("后台限制"), background.background_restricted ? t("已限制") : t("未限制")], [t("完成通知"), background.notifications_enabled ? t("已开启") : t("未开启或未授权")],
+      ...(run ? [[t("引擎被系统暂停（亮屏时）"), pauses.length ? t("{0} 次，最长 {1} 秒", pauses.length, Math.max(...pauses.map((pause) => pause.seconds || 0))) : t("没有记录")]] : [])]);
     $("btnBatterySettings").disabled = typeof native?.openBatteryOptimizationSettings !== "function";
     $("btnBackgroundSettings").disabled = typeof native?.openAppBackgroundSettings !== "function";
+    $("backgroundSteps").hidden = !run?.steps;
+    $("backgroundSteps").textContent = run?.steps ? t("{0}：{1}", run.maker, run.steps) : "";
+    $("btnAllowBackground").hidden = !run || run.battery_optimization_exempt;
+    $("btnAllowBackground").disabled = typeof native?.requestBackgroundRun !== "function";
+    $("btnAutoStartSettings").hidden = !run?.strict_maker;
+    $("autoStartLabel").textContent = run?.strict_maker ? t("{0}：应用启动管理 / 自启动", run.maker) : t("应用启动管理");
+    $("btnAutoStartSettings").disabled = typeof native?.openAutoStartSettings !== "function";
     calendarAccess();
+    blockedApps();
     await toolchain(isCurrent);
+  }
+  // Apps the agent may not read or use (a bank, a payment app); the list stays on the phone.
+  let launcherApps = null;
+  function parsed(raw) { try { const value = JSON.parse(raw || "[]"); return Array.isArray(value) ? value : []; } catch { return []; } }
+  function blockedApps(list) {
+    const supported = typeof native?.getBlockedApps === "function" && typeof native?.setBlockedApps === "function";
+    $("blockedAppsSection").hidden = !supported;
+    if (!supported) return;
+    const apps = list || parsed(native.getBlockedApps());
+    const container = $("blockedAppsList");
+    container.replaceChildren();
+    if (!apps.length) container.append(row(t("还没有"), t("AI 可以操作所有应用")));
+    for (const app of apps) {
+      const line = row(app.label || app.package, app.package);
+      action(line, "x", t("移除"), () => blockedApps(parsed(native.setBlockedApps(JSON.stringify(apps.map((item) => item.package).filter((name) => name !== app.package))))));
+      container.append(line);
+    }
+    if (!$("blockedAppPicker").hidden) blockedAppChoices();
+  }
+  function blockedAppChoices() {
+    const blocked = new Set(parsed(native.getBlockedApps()).map((app) => app.package));
+    const query = $("blockedAppSearch").value.trim().toLowerCase();
+    const choices = (launcherApps || []).filter((app) => !blocked.has(app.package) &&
+      (!query || app.label.toLowerCase().includes(query) || app.package.toLowerCase().includes(query))).slice(0, 60);
+    const container = $("blockedAppChoices");
+    container.replaceChildren();
+    for (const app of choices) {
+      const line = row(app.label, app.package);
+      action(line, "plus", t("添加"), () => {
+        blockedApps(parsed(native.setBlockedApps(JSON.stringify([...blocked, app.package]))));
+        $("blockedAppPicker").hidden = true;
+      });
+      container.append(line);
+    }
+    if (!choices.length) container.append(row(t("没有找到应用"), ""));
   }
   // Alarms need no permission; reading and adding calendar events need the calendar one.
   function calendarAccess() {
@@ -201,6 +247,152 @@
     window.clearTimeout(toolchainPoll);
     if (active) toolchainPoll = window.setTimeout(() => { if (!closed && !$("settingsDoctor").hidden && !$("settingsOverlay").hidden) toolchain(isCurrent); }, 2500);
   }
+  // Skills page: packs from GitHub or a file; shown to the user before they are installed.
+  let skillsPreview = null;
+  // The engine explains skill problems in English with names and numbers in them.
+  const skillErrorsZh = [
+    [/^no skills found: a skill is a folder with a SKILL\.md file(.*)$/s, "没有找到技能：技能是一个含 SKILL.md 文件的文件夹$1"], // i18n-ignore: engine message
+    [/^enter a GitHub repository as owner\/repo or its (?:github\.com )?link$/, "请输入 GitHub 仓库：owner/repo 或 github.com 链接"], // i18n-ignore: engine message
+    [/^could not reach GitHub \((.*)\); check the network or try again$/, "连不上 GitHub（$1），请检查网络后重试"], // i18n-ignore: engine message
+    [/^GitHub limited requests from this network for now; try again in an hour$/, "GitHub 暂时限制了这个网络的请求，请一小时后再试"], // i18n-ignore: engine message
+    [/^GitHub answered HTTP (\d+)$/, "GitHub 返回了错误 $1"], // i18n-ignore: engine message
+    [/^GitHub has no public repository (.+)$/, "GitHub 上没有公开仓库 $1"], // i18n-ignore: engine message
+    [/^(.+) has no release (.+)$/, "$1 没有 Release $2"], // i18n-ignore: engine message
+    [/^(.+) has no branch (.+)$/, "$1 没有分支 $2"], // i18n-ignore: engine message
+    [/^the (?:download|file) is larger than (\d+) MB$/, "文件超过 $1 MB"], // i18n-ignore: engine message
+    [/^the pack is larger than 64 MB unpacked$/, "技能包解压后超过 64 MB"], // i18n-ignore: engine message
+    [/^the archive holds more than (\d+) files$/, "压缩包里的文件超过 $1 个"], // i18n-ignore: engine message
+    [/^not a zip or tar\.gz archive$/, "不是 zip 或 tar.gz 压缩包"], // i18n-ignore: engine message
+    [/^another skill download is still running$/, "还有一个技能包正在下载"], // i18n-ignore: engine message
+    [/^that preview (?:expired|is not valid any more); fetch the pack again$/, "预览已失效，请重新获取"], // i18n-ignore: engine message
+    [/^at most (\d+) skill packs can be installed$/, "最多安装 $1 个技能包"], // i18n-ignore: engine message
+    [/^the repository has no releases any more$/, "仓库已经没有 Release 了"], // i18n-ignore: engine message
+    [/^the new version names a different pack; remove this one and import it$/, "新版本是另一个技能包：请删除这个后重新导入"], // i18n-ignore: engine message
+    [/^only packs from GitHub can be updated; import the new file instead$/, "只有来自 GitHub 的技能包能在线更新；请重新导入新文件"], // i18n-ignore: engine message
+    [/^(.+): front matter needs a (name|description)$/, "$1：SKILL.md 开头缺少 $2"], // i18n-ignore: engine message
+    [/^SKILL\.md must start with front matter.*$/s, "SKILL.md 必须以 --- 包住的 name、description 开头"], // i18n-ignore: engine message
+    [/^the official skills have no release yet$/, "官方技能还没有发布"], // i18n-ignore: engine message
+  ];
+  function skillError(message) {
+    const text = localizeError(message) || "";
+    if (t("技能") === "Skills") return text;
+    for (const [pattern, chinese] of skillErrorsZh) if (pattern.test(text)) return text.replace(pattern, chinese);
+    return text;
+  }
+  function skillVersion(version) { return /^[0-9a-f]{40}$/.test(version || "") ? version.slice(0, 7) : version || ""; }
+  function skillSource(source) {
+    if (!source) return "";
+    if (source.kind === "github") {
+      const where = source.channel === "release" ? t("Release {0}", source.tag) : t("分支 {0} · {1}", source.branch, skillVersion(source.revision));
+      return `github.com/${source.repo} · ${where}${source.subpath ? ` · ${source.subpath}` : ""}`;
+    }
+    return t("文件 {0}", source.file || "");
+  }
+  async function skillsJob(job, message) {
+    if (message) status("skillsStatus", message);
+    for (let attempt = 0; attempt < 300 && !closed; attempt++) {
+      await new Promise((resolve) => window.setTimeout(resolve, 700));
+      const value = await ui.apiJson(`/mobile/skills/job?id=${encodeURIComponent(job.job)}`);
+      if (value.state === "running") continue;
+      if (value.state === "failed") throw new Error(skillError(value.error) || t("操作失败"));
+      return value.result;
+    }
+    throw new Error(t("等待超时，请稍后刷新"));
+  }
+  function showSkillsPreview(preview) {
+    skillsPreview = preview;
+    $("skillsPreview").hidden = !preview;
+    if (!preview) return;
+    $("skillsPreviewTitle").textContent = preview.replaces
+      ? t("更新「{0}」：{1} → {2}", preview.name, skillVersion(preview.replaces.version), skillVersion(preview.version))
+      : t("安装「{0}」{1}（{2} 个技能）", preview.name, skillVersion(preview.version), preview.skills.length);
+    $("skillsPreviewSource").textContent = [preview.official ? "" : t("非官方技能，没有经过本项目测试。请确认来源可信、每个技能的用途都符合预期再安装。"),
+      skillSource(preview.source), preview.description].filter(Boolean).join("\n");
+    $("skillsPreviewList").replaceChildren(...preview.skills.map((skill) => row(skill.name, skill.description)));
+    $("skillsPreview").scrollIntoView({ block: "nearest" });
+  }
+  let skillsOfficialAsked = false;
+  function renderOfficial(info, repo) {
+    const button = $("btnSkillsOfficial");
+    button.hidden = true;
+    if (!info) { status("skillsOfficialStatus", t("读取中...")); return; }
+    $("skillsOfficialList").replaceChildren(...(info.skills || []).map((skill) => {
+      const element = row(skill.name, skill.description); element.classList.add("management-row-child"); return element;
+    }));
+    if (!info.available) {
+      status("skillsOfficialStatus", info.installed_version
+        ? t("已装 {0}（随应用预装），有新版本时会在这里更新", skillVersion(info.installed_version))
+        : t("官方技能包还在准备中（github.com/{0} 还没有发布）", info.repo || repo));
+      return;
+    }
+    const count = (info.skills || []).length;
+    status("skillsOfficialStatus", info.installed_version
+      ? info.update_available ? t("已安装 {0}，有新版本 {1}", info.installed_version, info.version) : t("已安装 {0}，是最新版本", info.installed_version)
+      : count ? t("最新版本 {0}，共 {1} 个技能，都经过真机测试", info.version, count) : t("最新版本 {0}", info.version));
+    button.hidden = !!info.installed_version && !info.update_available;
+    $("skillsOfficialAction").textContent = info.installed_version ? t("更新到 {0}", info.version) : t("安装官方技能");
+  }
+  async function refreshOfficial(isCurrent, refresh) {
+    try {
+      const info = await skillsJob(await post("/mobile/skills/official", { refresh }), "");
+      if (isCurrent()) renderOfficial(info);
+    } catch (error) { if (isCurrent()) status("skillsOfficialStatus", t("读取官方技能失败：{0}", skillError(error.message)), true); }
+  }
+  async function skills(isCurrent = () => true, value = null) {
+    value = value || await ui.apiJson("/mobile/skills");
+    if (!isCurrent()) return;
+    renderOfficial(value.official, value.official_repo);
+    if (!skillsOfficialAsked && !(value.jobs || []).some((job) => job.state === "running")) {
+      skillsOfficialAsked = true;
+      void refreshOfficial(isCurrent, false);
+    }
+    $("skillsList").replaceChildren();
+    for (const pack of value.packs || []) {
+      const update = pack.update?.available ? t("\n有新版本 {0}", skillVersion(pack.update.version)) : pack.update?.error ? t("\n检查更新失败：{0}", skillError(pack.update.error)) : "";
+      const mine = pack.source?.kind === "local";
+      const origin = pack.official ? t("官方") : mine ? t("AI 按你的要求保存的技能，只在这台手机上") : t("非官方 · 未经测试");
+      const item = row(mine ? pack.name : `${pack.name} ${skillVersion(pack.version)}`,
+        mine ? origin : `${origin} · ${skillSource(pack.source)}${update}`);
+      const toggle = document.createElement("input"); toggle.type = "checkbox"; toggle.checked = pack.enabled !== false; toggle.setAttribute("aria-label", t("启用 {0}", pack.name));
+      toggle.addEventListener("change", async () => {
+        toggle.disabled = true;
+        try { await skills(isCurrent, await post("/mobile/skills/enable", { pack_id: pack.id, enabled: toggle.checked })); }
+        catch (error) { toggle.checked = !toggle.checked; status("skillsStatus", skillError(error.message), true); }
+        finally { if (toggle.isConnected) toggle.disabled = false; }
+      });
+      item.append(toggle);
+      if (pack.update?.available) action(item, "download", t("更新到 {0}", skillVersion(pack.update.version)), async () => {
+        const record = await skillsJob(await post("/mobile/skills/update", { pack_id: pack.id }), t("正在下载新版本…"));
+        await skills(isCurrent);
+        status("skillsStatus", t("已更新到 {0}", skillVersion(record?.version)));
+      });
+      action(item, "trash-2", t("删除技能包"), async () => {
+        if (!window.confirm(t("删除技能包「{0}」？", pack.name))) return;
+        await skills(isCurrent, await post("/mobile/skills/remove", { pack_id: pack.id }));
+      });
+      $("skillsList").append(item);
+      const disabled = new Set(pack.disabled_skills || []);
+      for (const skill of pack.skills || []) {
+        const child = row(skill.name, skill.description);
+        child.classList.add("management-row-child");
+        const box = document.createElement("input"); box.type = "checkbox"; box.checked = !disabled.has(skill.id); box.disabled = pack.enabled === false;
+        box.setAttribute("aria-label", t("启用 {0}", skill.name));
+        box.addEventListener("change", async () => {
+          box.disabled = true;
+          try { await skills(isCurrent, await post("/mobile/skills/enable", { pack_id: pack.id, skill_id: skill.id, enabled: box.checked })); }
+          catch (error) { box.checked = !box.checked; status("skillsStatus", skillError(error.message), true); }
+        });
+        child.append(box);
+        if (mine) action(child, "trash-2", t("删除技能"), async () => {
+          if (!window.confirm(t("删除技能「{0}」？", skill.name))) return;
+          await skills(isCurrent, await post("/mobile/skills/delete-skill", { skill_id: skill.id }));
+        });
+        $("skillsList").append(child);
+      }
+    }
+    const running = (value.jobs || []).some((job) => job.state === "running");
+    if (!running) status("skillsStatus", (value.packs || []).length ? t("已安装 {0} 个技能包，{1} 个技能启用中", value.packs.length, (value.catalog || []).length) : t("还没有安装技能包"));
+  }
   async function extensions(isCurrent = () => true) {
     const sessionId = ui.context().sessionId;
     if (!sessionId) throw new Error(t("请先选择会话"));
@@ -239,9 +431,24 @@
   function stopMemoryEdit() {
     memoryEditing = null;
     $("memoryContent").value = "";
+    $("memoryTopic").value = "";
     $("memoryFormLabel").textContent = t("添加一条记忆");
     $("memorySubmitLabel").textContent = t("添加");
     $("btnCancelMemoryEdit").hidden = true;
+  }
+  // The Memory page: what the user is looking for, and the last list it showed.
+  const memoryFilter = { query: "", topic: "" };
+  let memoryValue = null;
+  const memoryTopicNames = { profile: "个人信息", preferences: "偏好习惯", work: "工作", life: "生活", people: "家人朋友", projects: "项目", other: "其他" }; // i18n-ignore: keys for t()
+  function memoryTopicLabel(topic) { return t(memoryTopicNames[topic] || memoryTopicNames.other); }
+  // Like the engine's search: each word, and two-character pieces of Chinese words.
+  function memoryMatches(item, query) {
+    const fold = (text) => String(text || "").normalize("NFKC").toLowerCase().replace(/[\s\p{P}]/gu, "");
+    const words = String(query || "").split(/\s+/).map(fold).filter(Boolean);
+    if (!words.length) return true;
+    const text = fold(item.content) + fold(memoryTopicLabel(item.topic));
+    return words.some((word) => text.includes(word)
+      || (/[\u4e00-\u9fff]/.test(word) && word.length > 2 && [...word].slice(0, -1).some((_, index) => text.includes(word.slice(index, index + 2)))));
   }
   async function memory(isCurrent = () => true, value = null) {
     value = value || await ui.apiJson("/mobile/memory");
@@ -251,17 +458,35 @@
     $("memoryAutoToggle").checked = value.auto !== false;
     $("memoryAutoToggle").disabled = value.enabled === false;
     $("memoryContent").maxLength = memoryLimits.max_chars;
-    $("memoryHint").textContent = t("最多 {0} 条，每条不超过 {1} 字。对话时只带上最新的记忆（约 {2} 字以内），控制 Token 用量；AI 每次任务最多自动记 {3} 条，相似的内容不会重复记。", memoryLimits.max_items, memoryLimits.max_chars, memoryLimits.prompt_budget_chars, memoryLimits.auto_saves_per_task);
+    $("memoryHint").textContent = t("最多 {0} 条，每条不超过 {1} 字，按主题分类。对话时只带上最新的记忆（约 {2} 字以内），更早的由 AI 按需搜索；AI 每次任务最多自动记 {3} 条，相似的内容不会重复记，密码、验证码、证件和卡号一律不记。", memoryLimits.max_items, memoryLimits.max_chars, memoryLimits.prompt_budget_chars, memoryLimits.auto_saves_per_task);
     const items = Array.isArray(value.items) ? value.items : [];
+    memoryValue = value;
     $("memoryCounter").textContent = `${items.length}/${memoryLimits.max_items}`;
+    // Topic chips with counts; the chosen one (and the search words) narrow the list.
+    const counts = value.topics || {};
+    if (memoryFilter.topic && !counts[memoryFilter.topic]) memoryFilter.topic = "";
+    $("memoryTopics").replaceChildren(...[["", t("全部"), items.length], ...Object.entries(counts).map(([key, count]) => [key, memoryTopicLabel(key), count])]
+      .map(([key, label, count]) => {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "memory-topic";
+        chip.textContent = `${label} ${count}`;
+        chip.setAttribute("aria-pressed", String(memoryFilter.topic === key));
+        chip.addEventListener("click", () => { memoryFilter.topic = key; memory(undefined, memoryValue); });
+        return chip;
+      }));
+    $("memoryTopics").hidden = items.length < 2;
+    $("memorySearch").parentElement.hidden = items.length < 2;
+    const shown = items.filter((item) => (!memoryFilter.topic || item.topic === memoryFilter.topic) && memoryMatches(item, memoryFilter.query));
     $("memoryList").replaceChildren();
-    for (const item of items) {
+    for (const item of shown) {
       const when = item.updated_at ? new Date(item.updated_at).toLocaleString() : "";
-      const element = row(item.content, `${item.source === "auto" ? t("AI 记的") : t("你添加的")}${when ? ` · ${when}` : ""}`);
+      const element = row(item.content, `${memoryTopicLabel(item.topic)} · ${item.source === "auto" ? t("AI 记的") : t("你添加的")}${when ? ` · ${when}` : ""}`);
       element.classList.add("memory-row");
       action(element, "pencil", t("编辑"), () => {
         memoryEditing = item.id;
         $("memoryContent").value = item.content;
+        $("memoryTopic").value = item.topic || "";
         $("memoryFormLabel").textContent = t("修改记忆");
         $("memorySubmitLabel").textContent = t("保存修改");
         $("btnCancelMemoryEdit").hidden = false;
@@ -278,6 +503,8 @@
     if (!items.length) {
       $("memoryList").append(row(t("还没有记忆"), value.enabled !== false && value.auto !== false
         ? t("聊天时 AI 会记下对以后有用的信息，你也可以在上面自己添加。") : t("你可以在上面自己添加。")));
+    } else if (!shown.length) {
+      $("memoryList").append(row(t("没有找到相关记忆"), t("换个说法，或者选「全部」看看。")));
     }
     $("btnClearMemory").disabled = !items.length;
     status("memoryStatus", value.enabled === false ? t("记忆已关闭：对话中不会使用，AI 也不会保存") : "");
@@ -866,14 +1093,15 @@
   const scheduleStates = {
     scheduled: t("等待运行"), disabled: t("已暂停"), dispatching: t("正在提交"), submitted: t("已运行"),
     interrupted: t("提交被中断"), missed: t("错过了运行时间"), mode_required: t("当前模式不能运行"),
-    skipped_busy: t("上一次还在运行，本次已跳过"), failed: t("运行失败"),
+    skipped_busy: t("上一次还在运行，本次已跳过"), skipped_locked: t("手机锁着，本次已跳过"), failed: t("运行失败"),
+    completed: t("已做完"),
   };
   const scheduleRepeats = { 3600: t("每小时"), 86400: t("每天"), 604800: t("每周") };
 
   function scheduleSummary(schedule) {
     const due = new Date(schedule.next_due_at || schedule.due_at);
     const when = Number.isNaN(due.getTime()) ? (schedule.next_due_at || schedule.due_at) : due.toLocaleString(i18n?.locale || "zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
-    const repeat = scheduleRepeats[schedule.repeat_seconds] ? ` · ${scheduleRepeats[schedule.repeat_seconds]}` : "";
+    const repeat = (scheduleRepeats[schedule.repeat_seconds] ? ` · ${scheduleRepeats[schedule.repeat_seconds]}` : "") + (schedule.shortcut_id ? ` · ${t("快捷操作")}` : schedule.phone_control ? ` · ${t("操作手机")}` : "");
     const state = scheduleStates[schedule.last_status] || schedule.last_status || "";
     return `${schedule.enabled ? t("下次 {0}", when) : t("暂停")}${repeat}\n${state}${schedule.last_error ? ` · ${schedule.last_error}` : ""}`;
   }
@@ -886,6 +1114,14 @@
       const toggle = document.createElement("input"); toggle.type = "checkbox"; toggle.checked = schedule.enabled; toggle.setAttribute("aria-label", t("启用 {0}", schedule.title));
       toggle.addEventListener("change", async () => { toggle.disabled = true; try { await post("/mobile/schedules/update", { schedule_id: schedule.schedule_id, enabled: toggle.checked }); await schedules(); } catch (error) { toggle.checked = !toggle.checked; status("schedulesStatus", error.message, true); } finally { toggle.disabled = false; } });
       item.append(toggle);
+      // The AI card widget shows this schedule's latest result on the home screen.
+      action(item, "app-window", t("显示在桌面卡片"), async () => {
+        await post("/mobile/widget-card", { session_id: schedule.session_id, title: schedule.title });
+        let pinned = false;
+        try { pinned = JSON.parse(native?.requestPinWidget?.("card") || "{}").ok === true; } catch { pinned = false; }
+        status("schedulesStatus", pinned ? t("已设置：在弹出的窗口里把「AI 卡片」加到桌面，以后「{0}」的结果会显示在上面", schedule.title)
+          : t("已设置：长按桌面空白处，从“小组件”里添加 Agent 的「AI 卡片」，以后「{0}」的结果会显示在上面", schedule.title));
+      });
       action(item, "trash-2", t("删除定时任务"), async () => { if (!window.confirm(t("删除 {0}？", schedule.title))) return; await post("/mobile/schedules/delete", { schedule_id: schedule.schedule_id }); await schedules(); });
       $("schedulesList").append(item);
     }
@@ -1037,6 +1273,31 @@
       || models.find(model => model.installed) || models[0];
     if (selected) selector.value = selected.model_id;
   }
+  function acceleratorText(value) {
+    const gpu = value.gpu || "GPU";
+    const cpuOnly = value.mode === "cpu";
+    switch (value.gpu_state) {
+      case "available": return cpuOnly ? t("已选仅 CPU；这台手机的 {0} 也能运行本机模型。", gpu) : t("本机模型在 {0} 上运行（GPU 加速为测试功能；遇到问题可改用「仅 CPU」并反馈）。", gpu);
+      case "checking": return t("正在检查 {0} 能否运行本机模型（第一次约需一两分钟），完成前使用 CPU。", gpu);
+      case "unchecked": return cpuOnly ? t("已选仅 CPU。选择「自动」后会先检查 {0} 能否运行本机模型。", gpu) : t("将检查 {0} 能否运行本机模型，完成前使用 CPU。", gpu);
+      case "unknown": return t("本机模型运行中，结束后显示 GPU 信息。");
+      case "unsupported_gpu": return t("这台手机的 {0} 驱动较旧，不能运行本机模型，使用 CPU。GPU 加速支持 Adreno 7xx/8xx（如骁龙 8 Gen 1 及更新）。", gpu);
+      case "no_supported_gpu": return t("这台手机的 GPU 暂不支持（GPU 加速支持高通骁龙 Adreno 7xx/8xx），使用 CPU。");
+      case "check_failed": return t("{0} 没有通过检查，使用 CPU：{1}", gpu, value.failure || t("检查没有完成"));
+      case "driver_unavailable": return t("这台手机没有向应用开放 GPU 驱动，使用 CPU。");
+      case "cpu_unsupported": return t("这台手机的处理器较旧，只使用 CPU。");
+      case "failed": return t("GPU 曾出错，已改用 CPU：{0}", value.failure || t("引擎意外停止"));
+      default: return t("本机引擎尚未就绪");
+    }
+  }
+  function renderAccelerator(value) {
+    const selector = $("localAcceleratorSelector");
+    const supported = typeof native?.setLocalModelAccelerator === "function";
+    selector.disabled = !supported || !value;
+    if (value?.mode) selector.value = value.mode;
+    status("localAcceleratorStatus", !supported ? t("当前客户端不支持选择推理设备，请更新 APK") : value ? acceleratorText(value) : "");
+    $("btnRetryLocalGpu").hidden = !(["failed", "check_failed"].includes(value?.gpu_state) && typeof native?.retryLocalModelGpu === "function");
+  }
   function deviceStatus() {
     if (closed) return;
     window.clearTimeout(devicePoll);
@@ -1051,6 +1312,7 @@
     if (unavailable) { deviceRecommendation = null; terms("localDeviceRecommendation", []); status("localDeviceStatus", unavailable); return; }
     try {
       const value = nativeResult("getLocalModelDeviceStatus", JSON.stringify(options));
+      renderAccelerator(value.accelerator);
       deviceRecommendation = value.recommendation || null;
       const recommended = deviceRecommendation;
       const planError = value.context_plan?.error;
@@ -1079,6 +1341,7 @@
       setUnavailable($("btnUseLocalRecommendation"), busyReason || modelReason || planReason || (!recommended?.context_tokens ? t("当前可用内存无法给出推荐值") : typeof native?.applyRuntimeSettings !== "function" ? t("请在 Android 应用中调整设置") : ""));
       const display = Number.isFinite(run.prompt_tokens) || run.state && run.state !== "idle";
       terms("localDeviceBenchmark", display ? [[t("测试状态"), { queued: t("准备中"), running: t("运行中"), cancelling: t("正在取消"), cancelled: t("已取消"), completed: t("已完成"), failed: t("未完成"), interrupted: t("已中断") }[run.state] || run.state],
+        ...(run.accelerator ? [[t("推理设备"), run.accelerator === "gpu" ? `GPU · ${run.gpu || ""}`.replace(/ · $/, "") : "CPU"]] : []),
         ...(run.planned_context_tokens > 0 ? [[t("尝试的上下文"), `${run.planned_context_tokens} Token`]] : []),
         [t("分配的上下文"), Number.isInteger(run.actual_context_size) && run.actual_context_size > 0 ? `${run.actual_context_size} Token` : t("未分配")],
         [t("实际测试输入"), run.prompt_tokens == null ? t("未测量") : `${run.prompt_tokens} Token`],
@@ -1092,6 +1355,7 @@
       status("localDeviceStatus", run.recovery_required ? t("测试预留已过期或释放状态未知，请重启引擎后继续") : run.error || busyReason || planReason || modelReason, !!run.error || !!run.recovery_required || !!planReason);
       if (running) devicePoll = window.setTimeout(deviceStatus, 750);
     } catch (error) {
+      renderAccelerator(null);
       deviceRecommendation = null; terms("localDeviceRecommendation", []);
       setUnavailable($("btnUseLocalRecommendation"), error.message);
       setUnavailable($("btnStartLocalBenchmark"), error.message);
@@ -1185,7 +1449,7 @@
     catch (error) { status("offlineVoiceStatus", error.message || t("操作失败"), true); }
   });
   const pages = {
-    About: ["about", about, "updateStatus"], Memory: ["memory", memory, "memoryStatus"], Knowledge: ["knowledge", knowledge, "knowledgeStatus"], Services: ["services", services, "servicesStatus"], GlobalEntry: ["globalEntry", globalEntry, "globalEntryStatus"], NotificationRules: ["notificationRules", notificationRules, "notificationRulesStatus"], Backup: ["backup", backup, "backupStatus"], Doctor: ["doctor", doctor, "doctorStatus"], Extensions: ["extensions", extensions, "extensionsStatus"], Schedules: ["schedules", schedules, "schedulesStatus"], Connections: ["connections", connections, "connectionsStatus"], Outbox: ["outbox", outbox, "outboxStatus"], Workflows: ["workflows", workflows, "workflowsStatus"], Evaluations: ["evaluations", evaluations, "evaluationsStatus"], LocalModels: ["localModels", localModels, "localModelsStatus"],
+    About: ["about", about, "updateStatus"], Memory: ["memory", memory, "memoryStatus"], Knowledge: ["knowledge", knowledge, "knowledgeStatus"], Services: ["services", services, "servicesStatus"], GlobalEntry: ["globalEntry", globalEntry, "globalEntryStatus"], NotificationRules: ["notificationRules", notificationRules, "notificationRulesStatus"], Backup: ["backup", backup, "backupStatus"], Doctor: ["doctor", doctor, "doctorStatus"], Extensions: ["extensions", extensions, "extensionsStatus"], Skills: ["skills", skills, "skillsStatus"], Schedules: ["schedules", schedules, "schedulesStatus"], Connections: ["connections", connections, "connectionsStatus"], Outbox: ["outbox", outbox, "outboxStatus"], Workflows: ["workflows", workflows, "workflowsStatus"], Evaluations: ["evaluations", evaluations, "evaluationsStatus"], LocalModels: ["localModels", localModels, "localModelsStatus"],
   };
   for (const [name, [route, loader, statusId]] of Object.entries(pages)) on(`btn${name}Page`, "click", () => page(route, loader, statusId), statusId);
 
@@ -1277,16 +1541,18 @@
   on("memoryForm", "submit", async () => {
     const content = $("memoryContent").value.trim();
     if (!content) return;
+    const topic = $("memoryTopic").value || undefined;
     let value;
     try {
       value = memoryEditing
-        ? await post("/mobile/memory/update", { id: memoryEditing, content })
-        : await post("/mobile/memory", { content });
+        ? await post("/mobile/memory/update", { id: memoryEditing, content, topic })
+        : await post("/mobile/memory", { content, topic });
     } catch (error) { throw new Error(memoryMessage(error)); }
     stopMemoryEdit();
     await memory(undefined, value);
   }, "memoryStatus");
   on("btnCancelMemoryEdit", "click", () => stopMemoryEdit(), "memoryStatus");
+  $("memorySearch").addEventListener("input", () => { memoryFilter.query = $("memorySearch").value; if (memoryValue) memory(undefined, memoryValue); });
   for (const [id, key] of [["memoryEnabledToggle", "enabled"], ["memoryAutoToggle", "auto"]]) {
     on(id, "change", async () => {
       try { await memory(undefined, await post("/mobile/memory/settings", { [key]: $(id).checked })); }
@@ -1318,6 +1584,7 @@
     linkClip = text;
     window.clearTimeout(linkClipTimer);
     $("linkClipText").textContent = t("分享的网页可以存入知识库");
+    $("btnLinkClipSkills").hidden = true;
     $("btnLinkClipSave").hidden = false;
     $("btnLinkClipSave").disabled = false;
     const notice = $("linkClipNotice");
@@ -1325,6 +1592,70 @@
     else notice.hidden = false;
   });
   $("btnLinkClipDismiss").addEventListener("click", hideLinkClip);
+  // Background running: phone makers that freeze unknown apps make every reply crawl or fail,
+  // whichever model is used. Ask once on such phones, and whenever the engine was just paused.
+  const backgroundKey = "agent-background-notice";
+  let backgroundStep = "";
+  let backgroundLatestPause = 0;
+  let backgroundLatestKill = 0;
+  function backgroundSeen() { try { return JSON.parse(localStorage.getItem(backgroundKey) || "{}") || {}; } catch { return {}; } }
+  function rememberBackground(change) { try { localStorage.setItem(backgroundKey, JSON.stringify({ ...backgroundSeen(), ...change })); } catch { /* per-viewer only */ } }
+  function backgroundRunState() {
+    if (typeof native?.getBackgroundRunState !== "function") return null;
+    try { return JSON.parse(native.getBackgroundRunState()); } catch { return null; }
+  }
+  function checkBackgroundRun() {
+    if (closed || document.hidden) return;
+    const value = backgroundRunState();
+    if (!value) return;
+    const seen = backgroundSeen();
+    const now = Date.now();
+    const pauses = (value.pauses || []).filter((pause) => pause.screen_on && now - pause.at_ms < 15 * 60 * 1000
+      && pause.at_ms > (seen.acknowledged_pause || 0));
+    const recent = pauses[pauses.length - 1];
+    // The engine process ended by Android or the phone maker (not the user or an update) in the last day.
+    const kills = (value.recent_engine_kills || []).filter((exit) => exit.timestamp > (seen.acknowledged_kill || 0));
+    backgroundLatestPause = Math.max(0, ...(value.pauses || []).map((pause) => pause.at_ms || 0));
+    backgroundLatestKill = Math.max(0, ...(value.recent_engine_kills || []).map((exit) => exit.timestamp || 0));
+    let text = "";
+    backgroundStep = "";
+    if (recent) {
+      text = t("系统刚才把 Agent 引擎暂停了 {0} 秒，回复会因此变慢或失败。", recent.seconds);
+      backgroundStep = value.battery_optimization_exempt ? "autostart" : "battery";
+    } else if (kills.length && !(value.battery_optimization_exempt && seen.autostart_opened)) {
+      text = t("最近一天 Agent 引擎被系统结束了 {0} 次，正在进行的任务会因此中断。", kills.length);
+      backgroundStep = value.battery_optimization_exempt ? "autostart" : "battery";
+    } else if (value.strict_maker && now - (seen.dismissed_at || 0) > 7 * 24 * 60 * 60 * 1000) {
+      if (!value.battery_optimization_exempt) {
+        text = t("{0}手机会限制应用在后台运行，AI 回复可能很慢或失败。", value.maker);
+        backgroundStep = "battery";
+      } else if (!seen.autostart_opened && value.steps) {
+        text = t("还差一步：{0}", value.steps);
+        backgroundStep = "autostart";
+      }
+    }
+    const notice = $("backgroundNotice");
+    if (!backgroundStep) { notice.hidden = true; return; }
+    $("backgroundNoticeText").textContent = text;
+    $("btnBackgroundFix").textContent = backgroundStep === "battery" ? t("允许后台运行") : t("打开设置");
+    if (notice.hidden) {
+      if (window.MobileMotion) window.MobileMotion.enter(notice, { transform: "translateY(10px) scale(.96)" }, { spring: "bouncy" });
+      else notice.hidden = false;
+    }
+  }
+  $("btnBackgroundFix").addEventListener("click", () => {
+    if (backgroundStep === "battery") native?.requestBackgroundRun?.();
+    else { native?.openAutoStartSettings?.(); rememberBackground({ autostart_opened: true }); }
+    rememberBackground({ acknowledged_pause: backgroundLatestPause, acknowledged_kill: backgroundLatestKill });
+    $("backgroundNotice").hidden = true;
+  });
+  $("btnBackgroundDismiss").addEventListener("click", () => {
+    rememberBackground({ dismissed_at: Date.now(), acknowledged_pause: backgroundLatestPause, acknowledged_kill: backgroundLatestKill });
+    $("backgroundNotice").hidden = true;
+  });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) window.setTimeout(checkBackgroundRun, 600); });
+  window.setTimeout(checkBackgroundRun, 1500);
+  const backgroundPoll = window.setInterval(() => { if (closed) window.clearInterval(backgroundPoll); else checkBackgroundRun(); }, 15000);
   $("btnLinkClipSave").addEventListener("click", async () => {
     const button = $("btnLinkClipSave");
     button.disabled = true;
@@ -1483,6 +1814,16 @@
     await memory(undefined, await post("/mobile/memory/clear", {}));
   }, "memoryStatus");
   on("btnAccessibilitySettings", "click", () => native?.openAccessibilitySettings?.(), "doctorStatus");
+  on("btnAddBlockedApp", "click", () => {
+    const picker = $("blockedAppPicker");
+    picker.hidden = !picker.hidden;
+    if (picker.hidden) return;
+    if (!launcherApps) launcherApps = parsed(native?.listLauncherApps?.());
+    $("blockedAppSearch").value = "";
+    blockedAppChoices();
+    $("blockedAppSearch").focus();
+  }, "doctorStatus");
+  on("blockedAppSearch", "input", () => blockedAppChoices(), "doctorStatus");
   on("systemPaused", "change", async () => { native?.setSystemPaused?.($("systemPaused").checked); await doctor(); }, "doctorStatus");
   // Turning the live screen on goes through Android's consent dialog; the page follows its outcome.
   let livePoll = null;
@@ -1503,6 +1844,71 @@
   on("btnObserveScreen", "click", async () => { const response = await post("/mobile/android-system", { action: "observe" }); $("systemObservation").hidden = false; $("systemObservation").textContent = JSON.stringify(response.observation || response, null, 2); }, "doctorStatus");
   on("btnBatterySettings", "click", () => native?.openBatteryOptimizationSettings?.(), "doctorStatus");
   on("btnBackgroundSettings", "click", () => native?.openAppBackgroundSettings?.(), "doctorStatus");
+  on("btnAllowBackground", "click", () => native?.requestBackgroundRun?.(), "doctorStatus");
+  async function skillCall(work) { try { return await work(); } catch (error) { throw new Error(skillError(error.message)); } }
+  on("skillsImportForm", "submit", () => skillCall(async () => {
+    const spec = $("skillsGithubInput").value.trim();
+    if (!spec) throw new Error(t("请输入 GitHub 仓库，例如 owner/repo"));
+    showSkillsPreview(null);
+    showSkillsPreview(await skillsJob(await post("/mobile/skills/preview", { github: spec }), t("正在从 GitHub 获取…")));
+    status("skillsStatus", t("请确认要安装的技能"));
+  }), "skillsStatus");
+  on("btnSkillsFile", "click", () => $("skillsFileInput").click(), "skillsStatus");
+  $("skillsFileInput").addEventListener("change", async () => {
+    const file = $("skillsFileInput").files?.[0];
+    $("skillsFileInput").value = "";
+    if (!file) return;
+    showSkillsPreview(null);
+    status("skillsStatus", t("正在读取 {0}…", file.name));
+    try {
+      showSkillsPreview(await ui.apiJson(`/mobile/skills/upload?filename=${encodeURIComponent(file.name)}`, {
+        method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file,
+      }));
+      status("skillsStatus", t("请确认要安装的技能"));
+    } catch (error) { status("skillsStatus", skillError(error.message) || t("操作失败"), true); }
+  });
+  on("btnSkillsInstall", "click", () => skillCall(async () => {
+    if (!skillsPreview) return;
+    const preview = skillsPreview;
+    showSkillsPreview(null);
+    await skills(undefined, await post("/mobile/skills/install", { token: preview.token }));
+    $("skillsGithubInput").value = "";
+    status("skillsStatus", t("已安装「{0}」，新对话里 AI 会按需使用这些技能", preview.name));
+  }), "skillsStatus");
+  on("btnSkillsCancel", "click", () => { showSkillsPreview(null); status("skillsStatus", ""); }, "skillsStatus");
+  on("btnSkillsOfficial", "click", () => skillCall(async () => {
+    const record = await skillsJob(await post("/mobile/skills/install-official", {}), t("正在下载官方技能…"));
+    await skills();
+    await refreshOfficial(() => !closed, false);
+    status("skillsStatus", t("官方技能 {0} 已安装", skillVersion(record?.version)));
+  }), "skillsStatus");
+  on("btnSkillsCheckUpdates", "click", () => skillCall(async () => {
+    await refreshOfficial(() => !closed, true);
+    const packs = await skillsJob(await post("/mobile/skills/check-updates", {}), t("正在检查更新…"));
+    await skills();
+    const available = (packs || []).filter((pack) => pack.update?.available).length;
+    status("skillsStatus", available ? t("{0} 个技能包有新版本", available) : t("技能包都是最新的"));
+  }), "skillsStatus");
+  // Quick import: a GitHub repository shared into the app opens the Skills page with it filled in.
+  window.addEventListener("agent-shared-text", (event) => {
+    const text = typeof event.detail === "string" ? event.detail : "";
+    const match = text.match(/https?:\/\/github\.com\/[A-Za-z0-9-]+\/[A-Za-z0-9._-]+(?:\/(?:tree|releases\/tag)\/[^\s]+)?/);
+    if (closed || !match) return;
+    $("skillsGithubInput").value = match[0];
+    $("linkClipText").textContent = t("这是 GitHub 仓库，可以作为技能包导入");
+    $("btnLinkClipSave").hidden = true;
+    const button = $("btnLinkClipSkills");
+    button.hidden = false;
+    const notice = $("linkClipNotice");
+    if (notice.hidden) { if (window.MobileMotion) window.MobileMotion.enter(notice, { transform: "translateY(10px) scale(.96)" }, { spring: "bouncy" }); else notice.hidden = false; }
+  });
+  $("btnLinkClipSkills").addEventListener("click", () => {
+    hideLinkClip();
+    if ($("settingsOverlay").hidden) ui.openMenu?.();
+    $("skillsImportSection").open = true;
+    page("skills", skills, "skillsStatus");
+  });
+  on("btnAutoStartSettings", "click", () => { native?.openAutoStartSettings?.(); rememberBackground({ autostart_opened: true }); }, "doctorStatus");
   on("btnCalendarAccess", "click", () => native?.requestCalendarAccess?.(), "doctorStatus");
   on("btnShareDiagnostics", "click", () => {
     if (typeof native?.exportDiagnostics === "function") { native.exportDiagnostics(); status("diagnosticsStatus", t("请选择分享、保存到手机或提交到 GitHub")); return; }
@@ -1517,8 +1923,21 @@
   on("scheduleForm", "submit", async () => {
     const context = ui.context(); const date = new Date($("scheduleDue").value);
     if (!Number.isFinite(date.getTime())) throw new Error(t("请选择执行时间"));
-    await post("/mobile/schedules", { title: $("scheduleTitle").value.trim(), prompt: $("schedulePrompt").value.trim(), session_id: context.sessionId, model: context.settings.model, reasoning_effort: context.settings.reasoning_effort, due_at: date.toISOString(), repeat_seconds: $("scheduleRepeat").value ? Number($("scheduleRepeat").value) : null, enabled: true });
+    await post("/mobile/schedules", { title: $("scheduleTitle").value.trim(), prompt: $("schedulePrompt").value.trim(), session_id: context.sessionId, model: context.settings.model, reasoning_effort: context.settings.reasoning_effort, due_at: date.toISOString(), repeat_seconds: $("scheduleRepeat").value ? Number($("scheduleRepeat").value) : null, enabled: true, ...($("schedulePhoneControl").checked ? { phone_control: true } : {}) });
     $("scheduleForm").reset(); await schedules();
+  }, "schedulesStatus");
+  // The morning briefing (2.0): a daily 8:00 task in a conversation of its own. It reads what needs
+  // no screen (calendar, memory, the workspace, the web), so a locked phone does not skip it.
+  on("btnBriefingPreset", "click", async () => {
+    const context = ui.context();
+    const session = await post("/sessions", { title: t("每日早报") });
+    const due = new Date(); due.setHours(8, 0, 0, 0);
+    if (due <= new Date()) due.setDate(due.getDate() + 1);
+    await post("/mobile/schedules", { title: t("每日早报"), session_id: session.id, model: context.settings.model, reasoning_effort: context.settings.reasoning_effort,
+      due_at: due.toISOString(), repeat_seconds: 86400, enabled: true,
+      prompt: t("早上好，请给我做今天的早报，简短（不超过 250 字），没有内容的部分直接跳过：\n1. 今天和明天的日程（用日历工具查；没有日历权限就跳过）；\n2. 如果记忆里有我所在的城市，查一下今天的天气，说要不要带伞；\n3. 工作区里昨天的录音速记纪要（文件名含「录音速记」或「纪要」）的要点；\n4. 记忆里我提过的待办或近期要做的事。\n最后用一句话说今天最该先做的一件事。不要读取或复述任何验证码。") });
+    await schedules();
+    status("schedulesStatus", t("已添加：每天 8:00 在「每日早报」对话里给你简报，可以在上面暂停或删除"));
   }, "schedulesStatus");
   on("connectionForm", "submit", async () => {
     await post("/mobile/connections", { name: $("connectionName").value.trim(), url: $("connectionUrl").value.trim(), token: $("connectionToken").value, allow_lan: $("connectionAllowLan").checked });
@@ -1566,6 +1985,14 @@
     deviceStatus();
   }, "localDeviceStatus");
   on("btnCancelLocalBenchmark", "click", () => { nativeResult("cancelLocalModelBenchmark"); deviceStatus(); }, "localDeviceStatus");
+  on("localAcceleratorSelector", "change", () => {
+    renderAccelerator(nativeResult("setLocalModelAccelerator", $("localAcceleratorSelector").value).accelerator);
+  }, "localDeviceStatus");
+  on("btnRetryLocalGpu", "click", () => {
+    const value = nativeResult("retryLocalModelGpu").accelerator;
+    renderAccelerator(value);
+    status("localAcceleratorStatus", value?.restart_required ? t("下次启动引擎时会重新检查 GPU。") : acceleratorText(value));
+  }, "localDeviceStatus");
   on("btnUseLocalRecommendation", "click", () => {
     if (!deviceRecommendation || deviceModelBusy) return;
     ui.setLocalContextDraft(deviceRecommendation.context_tokens);

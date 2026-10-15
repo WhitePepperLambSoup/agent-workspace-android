@@ -14,6 +14,9 @@ from typing import Any
 from agent_workspace.core.models import Capability, ToolSpec
 from agent_workspace.tools.base import ToolArgumentError, ToolError, json_result, optional_int
 
+# The same topics as mobile_memory.TOPICS (kept here so the schema needs no store import).
+_TOPICS = ("profile", "preferences", "work", "life", "people", "projects", "other")
+
 
 def _store():
     from mobile_memory import get_memory_store
@@ -26,13 +29,14 @@ class MobileMemorySearchTool:
         name="memory_search",
         description=(
             "Search the user's saved memories on this phone (short notes about the user and their "
-            "preferences). The newest memories are already listed in the system prompt; search "
-            "only for older ones that are not shown there."
+            "preferences) by words, a topic, or both. The newest memories are already listed in the "
+            "system prompt; search only for older ones that are not shown there."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "query": {"type": "string", "maxLength": 512},
+                "topic": {"type": "string", "enum": list(_TOPICS)},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50},
             },
             "additionalProperties": False,
@@ -53,7 +57,10 @@ class MobileMemorySearchTool:
         if not isinstance(query, str) or len(query) > 512:
             raise ToolArgumentError("'query' must be a string of at most 512 characters")
         limit = optional_int(arguments, "limit", 20, minimum=1, maximum=50)
-        return json_result({"memories": store.search(query, limit)})
+        topic = arguments.get("topic")
+        if topic is not None and topic not in _TOPICS:
+            raise ToolArgumentError(f"'topic' must be one of {', '.join(_TOPICS)}")
+        return json_result({"memories": store.search(query, limit, topic)})
 
     async def execute_with_context(self, arguments: dict[str, Any], _context: Any) -> str:
         return await self.execute(arguments)
@@ -65,8 +72,8 @@ class MobileMemoryWriteTool:
         description=(
             "Save, update or delete one short memory about the user on this phone. upsert with "
             "content adds a memory, or replaces the memory whose id you pass; delete removes one "
-            "by id. One fact per memory, at most 200 characters. Follow the memory rules in the "
-            "system prompt."
+            "by id. One fact per memory, at most 200 characters, with its topic. Follow the memory "
+            "rules in the system prompt."
         ),
         input_schema={
             "type": "object",
@@ -74,6 +81,7 @@ class MobileMemoryWriteTool:
                 "action": {"type": "string", "enum": ["upsert", "delete"]},
                 "id": {"type": "string", "minLength": 1, "maxLength": 64},
                 "content": {"type": "string", "minLength": 1, "maxLength": 400},
+                "topic": {"type": "string", "enum": list(_TOPICS)},
             },
             "required": ["action"],
             "additionalProperties": False,
@@ -128,10 +136,11 @@ class MobileMemoryWriteTool:
             if action != "upsert":
                 raise ToolArgumentError("action must be upsert or delete")
             self._count_save(context)
+            topic = arguments.get("topic")
             if memory_id:
-                item = store.update(memory_id, arguments.get("content"), source="auto")
+                item = store.update(memory_id, arguments.get("content"), source="auto", topic=topic)
                 return json_result({"updated": item})
-            item = store.add(arguments.get("content"), source="auto")
+            item = store.add(arguments.get("content"), source="auto", topic=topic)
             return json_result({"saved": item})
         except KeyError:
             raise ToolError(f"no memory has the id {memory_id}") from None

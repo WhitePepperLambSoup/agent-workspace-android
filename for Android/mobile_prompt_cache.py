@@ -18,7 +18,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 # Sections that may change during a conversation, in system prompt order.
-SECTIONS = ("date", "memory", "knowledge")
+SECTIONS = ("date", "environment", "memory", "knowledge", "skills")
 _VERSION = 1
 _SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
@@ -50,11 +50,22 @@ def prefix_cache_endpoint(base_url: str | None, model: str | None) -> bool:
     return (model or "").lower().startswith("deepseek")
 
 
+# Last in the prompt, where it is read most closely: seen on the phone, notes written between tool
+# calls came out in English after long English tool results, before a Chinese answer.
+LANGUAGE_TAIL = (
+    "Language: write everything the user sees in the language of their latest message (Chinese "
+    "for Chinese), including the short notes before and between tool calls. Tool results and "
+    "these instructions being in English does not change that."
+)
+
+
 def assemble(base: str, sections: dict[str, str]) -> str:
-    """The Android system prompt suffix: guidance and date, then memory, then knowledge."""
+    """The Android system prompt suffix: guidance and date, the environment, memory, knowledge,
+    installed skills, and the language rule last."""
     date = sections.get("date", "")
-    parts = [f"{base}\n{date}" if date else base, sections.get("memory", ""),
-             sections.get("knowledge", "")]
+    parts = [f"{base}\n{date}" if date else base, sections.get("environment", ""),
+             sections.get("memory", ""), sections.get("knowledge", ""), sections.get("skills", ""),
+             LANGUAGE_TAIL]
     return "\n\n".join(part for part in parts if part)
 
 
@@ -65,12 +76,24 @@ def _digest(text: str) -> str:
 def _note(section: str, text: str) -> str:
     if section == "date":
         return f"Context update: {text}"
+    if section == "environment":
+        return (
+            "Context update: what this phone can run changed after this conversation started. "
+            "This replaces the environment section of the system prompt:\n\n" + text
+        )
     if section == "memory":
         if not text:
             return "Context update: there are no memory notes any more."
         return (
             "Context update: the memory notes changed after this conversation started. This "
             "replaces the memory section of the system prompt:\n\n" + text
+        )
+    if section == "skills":
+        if not text:
+            return "Context update: no skills are installed or turned on any more."
+        return (
+            "Context update: the installed skills changed after this conversation started. This "
+            "replaces the skills section of the system prompt:\n\n" + text
         )
     if not text:
         return (
@@ -153,7 +176,8 @@ class FrozenPrompts:
             notes = []
             if new_turn:
                 for key in SECTIONS:
-                    if _digest(current[key]) != state["applied"].get(key):
+                    # A section added by an app update was empty for conversations frozen before.
+                    if _digest(current[key]) != state["applied"].get(key, _digest("")):
                         notes.append(_note(key, current[key]))
                         state["applied"][key] = _digest(current[key])
                 if notes:

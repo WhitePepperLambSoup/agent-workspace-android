@@ -57,8 +57,8 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * A small bubble over other apps. Tap: four actions spring out around it (new chat, ask by voice,
- * circle to ask, voice note); tap again or outside to fold them back. Drag to move it; it settles
+ * A small bubble over other apps. Tap: five actions spring out around it (operate phone, new chat,
+ * ask by voice, circle to ask, voice note); tap again or outside to fold them back. Drag to move it; it settles
  * against the nearest side. Dragging shows a target at the bottom: drop the bubble there to hide it.
  * Needs "display over other apps"; the user turns it on in Settings → Global entry.
  */
@@ -68,7 +68,9 @@ class FloatingBallService : Service() {
         private const val ACCENT = 0xFF0F766E.toInt()
         private const val ACCENT_DARK = 0xFF5CC6B1.toInt()
         private const val IDLE_ALPHA = 0.82f
-        private val SCREENSHOT_PATH = Regex("automation/screenshots/screen-[0-9a-fA-F-]{36}\\.png")
+        // The engine writes JPEG since 1.6.0 (PNG before); a .png-only check sent every circle to ask
+        // through the screen capture permission prompt.
+        private val SCREENSHOT_PATH = Regex("automation/screenshots/screen-[0-9a-fA-F-]{36}\\.(png|jpg)")
         // Main thread only. Cleared in onDestroy, so it never outlives the service.
         @SuppressLint("StaticFieldLeak")
         private var current: FloatingBallService? = null
@@ -699,7 +701,8 @@ class FloatingBallService : Service() {
     private fun captureScreen(): Shot {
         repeat(3) { attempt ->
             val reply = try {
-                EngineHttp.request(this, "POST", "/mobile/android-system", JSONObject().put("action", "screenshot"), 20000)
+                // A clean picture: the numbered control marks are for the model, not for circling.
+                EngineHttp.request(this, "POST", "/mobile/android-system", JSONObject().put("action", "screenshot").put("marks", false), 20000)
             } catch (_: Exception) {
                 return Shot.Unavailable
             }
@@ -707,7 +710,7 @@ class FloatingBallService : Service() {
             val path = shot?.optString("path").orEmpty()
             if (reply.ok && shot != null && SCREENSHOT_PATH.matches(path)) {
                 val source = File(filesDir, "workspace/$path")
-                val target = File(ScreenCaptureService.folder(this), "screen-${System.currentTimeMillis()}.png")
+                val target = File(ScreenCaptureService.folder(this), "screen-${System.currentTimeMillis()}.${path.substringAfterLast('.')}")
                 source.copyTo(target, overwrite = true)
                 return Shot.Taken(target)
             }

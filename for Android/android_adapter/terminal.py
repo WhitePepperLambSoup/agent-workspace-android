@@ -313,6 +313,19 @@ async def run_bounded_command(
             lease.end_process()
 
 
+def _missing_program_answer(paths: WorkspacePaths, argv: Any) -> dict[str, Any] | None:
+    """Looking for or running what the phone lacks is answered instead of run (see probe_guard)."""
+    from .probe_guard import missing_program_answer
+
+    try:
+        from .capabilities import discover_runnable_executables
+
+        available = list(discover_runnable_executables(paths.root))
+    except Exception:
+        available = []
+    return missing_program_answer(argv, available)
+
+
 class AndroidRunTerminalTool:
     hard_cancellable = False
     _SPEC = ToolSpec(
@@ -373,6 +386,9 @@ class AndroidRunTerminalTool:
         timeout = optional_int(
             arguments, "timeout_seconds", 60, minimum=1, maximum=MAX_TERMINAL_SECONDS
         )
+        answer = _missing_program_answer(self.paths, argv)
+        if answer is not None:
+            return json_result(answer)
         return json_result(
             await run_bounded_command(
                 self.paths,

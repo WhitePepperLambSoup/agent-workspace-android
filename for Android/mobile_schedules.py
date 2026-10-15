@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+import mobile_shortcuts
 from mobile_protocol import TaskState, parse_mobile_task_request
 from mobile_runtime_controller import MobileRuntimeController
 
@@ -32,7 +33,13 @@ _CONFIG_FIELDS = {
     "due_at",
     "repeat_seconds",
     "enabled",
+    # Operates the phone (the android_* tools) when due; needs the phone unlocked then.
+    "phone_control",
+    # Runs a recorded shortcut (mobile_shortcuts) instead of a model task; needs the phone unlocked.
+    "shortcut_id",
 }
+# Fields that schedules saved by earlier versions do not have.
+_LATER_FIELDS = {"phone_control": False, "shortcut_id": None}
 _STATUSES = {
     "scheduled",
     "disabled",
@@ -42,8 +49,22 @@ _STATUSES = {
     "missed",
     "mode_required",
     "skipped_busy",
+    "skipped_locked",
     "failed",
+    "completed",  # a shortcut ran through
 }
+
+
+def _phone_not_ready() -> str | None:
+    """Why a phone-control schedule cannot run now (locked, or accessibility off), else None.
+    A dark but unlocked screen is turned on."""
+    try:
+        from java import jclass  # type: ignore[import-not-found]
+
+        answer = json.loads(str(jclass("com.agentworkspace.mobile.automation.AndroidSystemBridge").prepareUnattended()))
+    except Exception:  # pragma: no cover - only on the phone
+        return "the phone's controls are unavailable"
+    return None if answer.get("ok") else str(answer.get("reason") or "the phone is not ready")
 
 
 def _instant(value: object, field: str) -> datetime:
@@ -103,7 +124,8 @@ class MobileScheduleManager:
 
     def create(self, payload: Mapping[str, object]) -> dict[str, object]:
         config = self._config(payload)
-        self._require_unattended(config["session_id"])
+        if not config["shortcut_id"]:
+            self._require_unattended(config["session_id"])
         with self._lock:
             if len(self._items) >= _MAX_SCHEDULES:
                 raise ValueError("too many mobile schedules")
@@ -126,7 +148,8 @@ class MobileScheduleManager:
             item = self._get(schedule_id)
             config = self._config(payload, existing=item)
             if config["enabled"]:
-                self._require_unattended(config["session_id"])
+                if not config["shortcut_id"]:
+                    self._require_unattended(config["session_id"])
                 if item["last_occurrence"] == config["due_at"]:
                     raise ValueError(
                         "this occurrence was already handled; choose a new due_at "
@@ -174,8 +197,10 @@ class MobileScheduleManager:
                     due = _instant(item["next_due_at"], "next_due_at")
                     if due > current:
                         continue
+                    shortcut = item.get("shortcut_id")
                     try:
-                        self._require_unattended(item["session_id"])
+                        if not shortcut:
+                            self._require_unattended(item["session_id"])
                     except (KeyError, ValueError) as error:
                         item.update(
                             enabled=False, last_status="mode_required", last_error=str(error)
@@ -210,6 +235,20 @@ class MobileScheduleManager:
                     if item["last_occurrence"] == occurrence:
                         self._save()
                         continue
+                    if item.get("phone_control") or shortcut:
+                        # Android lets no app unlock the phone: a locked phone skips this time.
+                        problem = _phone_not_ready()
+                        if problem:
+                            item.update(last_occurrence=occurrence, last_run=current.isoformat(),
+                                        last_status="skipped_locked", last_error=problem)
+                            self._save()
+                            continue
+                    if shortcut and self.controller.status().get("active_task_id"):
+                        # A task is operating the phone; a shortcut would get in its way.
+                        item.update(last_occurrence=occurrence, last_run=current.isoformat(),
+                                    last_status="skipped_busy", last_error=None)
+                        self._save()
+                        continue
                     item.update(
                         last_occurrence=occurrence,
                         last_run=current.isoformat(),
@@ -218,7 +257,21 @@ class MobileScheduleManager:
                     )
                     self._save()
                     schedule_id = item["schedule_id"]
-                    request = parse_mobile_task_request(item)
+                    request = parse_mobile_task_request(
+                        {**item, "phone_control": bool(item.get("phone_control"))}
+                    )
+                if shortcut:
+                    result = await asyncio.to_thread(mobile_shortcuts.run, shortcut)
+                    ok = result.get("ok") is True
+                    with self._lock:
+                        if schedule_id in self._items:
+                            self._items[schedule_id].update(
+                                last_status="completed" if ok else "skipped_locked" if result.get("not_ready") else "failed",
+                                last_error=None if ok else str(result.get("reason") or "the shortcut stopped")[:512],
+                            )
+                            self._save()
+                            submitted.append(copy.deepcopy(self._items[schedule_id]))
+                    continue
                 try:
                     # Creating the schedule is the user's approval for its network requests
                     # and tool calls; deleting files, memory changes and operating other apps
@@ -273,7 +326,8 @@ class MobileScheduleManager:
         if not isinstance(payload, Mapping) or set(payload) - _CONFIG_FIELDS:
             raise ValueError("invalid schedule fields")
         config = (
-            {field: existing[field] for field in _CONFIG_FIELDS}
+            {field: existing.get(field, _LATER_FIELDS[field]) if field in _LATER_FIELDS else existing[field]
+             for field in _CONFIG_FIELDS}
             if existing
             else {
                 "title": "Scheduled task",
@@ -281,6 +335,7 @@ class MobileScheduleManager:
                 "reasoning_effort": self.controller.default_reasoning_effort,
                 "repeat_seconds": None,
                 "enabled": True,
+                **_LATER_FIELDS,
             }
         )
         config.update(payload)
@@ -309,6 +364,11 @@ class MobileScheduleManager:
             or not 900 <= repeat <= 31_536_000
         ):
             raise ValueError("repeat_seconds must be an integer from 900 to 31536000")
+        if not isinstance(config.get("phone_control", False), bool):
+            raise ValueError("phone_control must be a boolean")
+        shortcut = config.get("shortcut_id")
+        if shortcut is not None and (not isinstance(shortcut, str) or not 1 <= len(shortcut) <= 64):
+            raise ValueError("shortcut_id must be a shortcut's id")
         return {
             "title": title.strip(),
             "session_id": request.session_id,
@@ -318,6 +378,8 @@ class MobileScheduleManager:
             "due_at": _instant(config.get("due_at"), "due_at").isoformat(),
             "repeat_seconds": repeat,
             "enabled": enabled,
+            "phone_control": bool(config.get("phone_control", False)),
+            "shortcut_id": shortcut,
         }
 
     def _load(self) -> dict[str, dict[str, object]]:
@@ -351,12 +413,12 @@ class MobileScheduleManager:
                     "last_occurrence",
                     "last_error",
                 }
-                if set(item) != required:
+                if not required <= set(item) <= required | set(_LATER_FIELDS):
                     raise ValueError
                 identifier = item["schedule_id"]
                 if not isinstance(identifier, str) or not identifier or identifier in result:
                     raise ValueError
-                self._config({field: item[field] for field in _CONFIG_FIELDS})
+                self._config({field: item.get(field, _LATER_FIELDS.get(field)) for field in _CONFIG_FIELDS})
                 _instant(item["next_due_at"], "next_due_at")
                 if item["last_status"] not in _STATUSES:
                     raise ValueError

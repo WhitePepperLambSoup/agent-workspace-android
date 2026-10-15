@@ -62,6 +62,9 @@ class ScreenAskActivity : Activity() {
     private var selection: SelectionView? = null
     private var askButton: TextView? = null
     private var sending = false
+    // Circle to act: what can be done with the circled words, shown once they are read.
+    private var actionRow: LinearLayout? = null
+    private var reading: ScreenRegion? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -73,6 +76,11 @@ class ScreenAskActivity : Activity() {
             given != null && given.parentFile?.canonicalPath == ScreenCaptureService.folder(this).canonicalPath -> show(given)
             savedInstanceState == null -> requestCapture()
             else -> finish()
+        }
+        // This is the root of its own task, which Back would only send to the background (the bubble
+        // stays hidden, the screenshot stays): finish it. From Android 16 Back comes only as this callback.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT) { finish() }
         }
     }
 
@@ -142,7 +150,10 @@ class ScreenAskActivity : Activity() {
         screenshot = file
         image = bitmap
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
-        val view = SelectionView(this, bitmap) { selected -> askButton?.isEnabled = selected; askButton?.alpha = if (selected) 1f else 0.45f }
+        val view = SelectionView(this, bitmap) { selected ->
+            askButton?.isEnabled = selected; askButton?.alpha = if (selected) 1f else 0.45f
+            if (selected) selection?.region?.let(::readSelection) else showActions(emptyList(), null)
+        }
         selection = view
         root.addView(view, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         root.addView(pill(UiText.of(this, "圈出想问的部分", "Circle what you want to ask about"), primary = false).apply { isClickable = false },
@@ -160,6 +171,13 @@ class ScreenAskActivity : Activity() {
         add(askButton!!)
         root.addView(bar, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT,
             Gravity.BOTTOM).apply { bottomMargin = dp(36) })
+        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(10), 0, dp(10), 0) }
+        actionRow = actions
+        root.addView(android.widget.HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(actions)
+        }, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(96) })
         setContentView(root)
         // After setContentView: before it the window has no decor view to hide the bars of.
         fullScreen()
@@ -199,8 +217,82 @@ class ScreenAskActivity : Activity() {
         elevation = dp(4).toFloat()
     }
 
+    /** Reads the circled words on the phone (offline), then offers what can be done with them. */
+    private fun readSelection(region: ScreenRegion) {
+        val bitmap = image ?: return
+        reading = region
+        showActions(emptyList(), UiText.of(this, "正在识别圈中的文字…", "Reading the circled words…"))
+        thread(name = "agent-screen-act") {
+            val words = runCatching {
+                val part = Bitmap.createBitmap(bitmap, region.left, region.top, region.width, region.height)
+                try {
+                    com.agentworkspace.mobile.automation.ScreenText.recognize(this, part, 1f, 1f).joinToString("\n") { it.first }
+                } finally { if (part !== bitmap) part.recycle() }
+            }.getOrDefault("")
+            runOnUiThread {
+                if (isFinishing || isDestroyed || reading != region || sending) return@runOnUiThread
+                showActions(ScreenActions.actions(words), null)
+            }
+        }
+    }
+
+    private fun showActions(actions: List<ScreenActions.Action>, status: String?) {
+        val row = actionRow ?: return
+        row.removeAllViews()
+        fun chip(label: String, onClick: (() -> Unit)?) = row.addView(pill(label, primary = false).apply {
+            textSize = 14f
+            if (onClick == null) isClickable = false else setOnClickListener { onClick() }
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            marginStart = dp(4); marginEnd = dp(4)
+        })
+        if (status != null) { chip(status, null); return }
+        for (action in actions) {
+            val value = action.value
+            when (action.kind) {
+                "url" -> chip(UiText.of(this, "打开链接", "Open link")) {
+                    open(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(if (value.startsWith("www.", true)) "https://$value" else value)))
+                }
+                "dial" -> chip(UiText.of(this, "拨打 $value", "Call $value")) {
+                    open(Intent(Intent.ACTION_DIAL, android.net.Uri.parse("tel:" + value.filter { it.isDigit() })))
+                }
+                "map" -> chip(UiText.of(this, "导航", "Navigate")) {
+                    open(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("geo:0,0?q=" + android.net.Uri.encode(value))))
+                }
+                "calendar" -> chip(UiText.of(this, "加到日历", "Add to calendar")) {
+                    selection?.region?.let { send(it, UiText.of(this, "把图里的这个日程加到日历，先告诉我你理解的时间和地点：\n$value",
+                        "Add this to my calendar; first tell me the time and place you read:\n$value")) }
+                }
+                "compare" -> chip(UiText.of(this, "比价", "Compare prices")) {
+                    selection?.region?.let { send(it, UiText.of(this, "帮我比一下图里这个商品在各个平台的价格：\n$value",
+                        "Compare the price of this product across shops:\n$value")) }
+                }
+                "translate" -> chip(UiText.of(this, "翻译", "Translate")) {
+                    selection?.region?.let { send(it, UiText.of(this, "把图里的文字翻译成中文：\n$value", "Translate the text in the picture into English:\n$value")) }
+                }
+                "keep" -> chip(UiText.of(this, "存进知识库", "Save to knowledge base")) {
+                    selection?.region?.let { send(it, UiText.of(this, "把图里这段内容存进知识库，方便以后问：\n$value",
+                        "Save this to my knowledge base so I can ask about it later:\n$value")) }
+                }
+                "copy" -> chip(UiText.of(this, "复制文字", "Copy text")) {
+                    getSystemService(android.content.ClipboardManager::class.java)
+                        ?.setPrimaryClip(android.content.ClipData.newPlainText("text", value))
+                    Toast.makeText(this, UiText.of(this, "已复制", "Copied"), Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    private fun open(intent: Intent) {
+        try {
+            startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            finish()
+        } catch (_: ActivityNotFoundException) {
+            Toast.makeText(this, UiText.of(this, "没有能打开它的应用", "No app can open this"), Toast.LENGTH_SHORT).show()
+        }
+    }
+
     /** The circled part, or the whole screen for null, into the inbox; then a new conversation. */
-    private fun send(region: ScreenRegion?) {
+    private fun send(region: ScreenRegion?, prompt: String? = null) {
         val source = screenshot ?: return
         val bitmap = image ?: return
         if (sending) return
@@ -222,7 +314,8 @@ class ScreenAskActivity : Activity() {
                 result.onSuccess { target ->
                     val batch = UUID.randomUUID().toString()
                     ShareInboxController.get(this).captureFiles(listOf(FileProvider.getUriForFile(this, "$packageName.camera", target)), batch)
-                    startActivity(QuickEntry.intent(this, "screen", batch))
+                    // An action's request is filled into the input; the user sends it.
+                    startActivity(QuickEntry.intent(this, "screen", batch).apply { if (prompt != null) putExtra(Intent.EXTRA_TEXT, prompt) })
                     finish()
                 }.onFailure {
                     sending = false

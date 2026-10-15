@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import secrets
+import threading
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -64,6 +65,8 @@ class MobileManagement:
     def start(self):
         with suppress(Exception):
             self.knowledge()  # resumes documents whose indexing an engine stop interrupted
+        # The official skills shipped in this app version (first start, or newer than installed).
+        threading.Thread(target=self._install_bundled_skills, name="bundled-skills", daemon=True).start()
         self._job = asyncio.create_task(self._run(), name="mobile-management")
 
     async def _run(self):
@@ -243,6 +246,101 @@ class MobileManagement:
             raise ValueError("toolchain storage is unavailable")
         return manager
 
+    async def _triggers_post(self, path, payload):
+        """Automatic triggers: kept by mobile_triggers; /fire (from the Android app) starts the
+        matching prompts and workflows like a schedule does (the user set them up, so their tool
+        calls are allowed; deleting, memory changes and other apps still ask)."""
+        import mobile_triggers
+
+        try:
+            changed = None
+            if path == "/mobile/triggers":
+                changed = 201, mobile_triggers.add(payload)
+            elif path == "/mobile/triggers/delete":
+                mobile_triggers.delete(str(payload.get("trigger_id") or ""))
+                changed = 200, mobile_triggers.snapshot()
+            elif path == "/mobile/triggers/enable":
+                changed = 200, mobile_triggers.set_enabled(str(payload.get("trigger_id") or ""), payload.get("enabled"))
+            if changed is not None:
+                # The accessibility service keeps the apps to watch for a minute; read them again now.
+                with suppress(Exception):
+                    from java import jclass
+
+                    jclass("com.agentworkspace.mobile.embedded.TriggerEvents").invalidate()
+                return changed
+        except KeyError:
+            return 404, {"error": "no such trigger"}
+        except ValueError as error:
+            return 400, {"error": str(error)}
+        if path != "/mobile/triggers/fire":
+            return 404, {"error": "unknown trigger route"}
+        from mobile_protocol import parse_mobile_task_request
+
+        started = []
+        for item in mobile_triggers.fire(str(payload.get("kind") or ""), str(payload.get("value") or "")):
+            try:
+                if item.get("shortcut_id"):
+                    self._start_shortcut(item["shortcut_id"])
+                    result = {"shortcut_id": item["shortcut_id"]}
+                elif item.get("workflow_id"):
+                    result = await self.workflows.start(item["workflow_id"], {"session_id": item["session_id"]}, self.controller, self.system)
+                else:
+                    request = parse_mobile_task_request({
+                        "session_id": item["session_id"], "prompt": item["prompt"],
+                        "phone_control": bool(item.get("phone_control")),
+                    })
+                    result = (await self.controller.submit(request, preauthorized=True)).to_dict()
+                started.append({"trigger_id": item["trigger_id"], "result": result})
+            except Exception as error:  # one trigger failing must not stop the others
+                started.append({"trigger_id": item["trigger_id"], "error": str(error)[:300]})
+        return 200, {"started": started}
+
+    def _start_shortcut(self, shortcut_id):
+        """Runs a shortcut in the background (mobile_shortcuts.run waits for every step); one at a
+        time, and not while a task is running, since both would operate the phone."""
+        import mobile_shortcuts
+
+        if not isinstance(shortcut_id, str) or not shortcut_id:
+            raise ValueError("shortcut id is required")
+        if self.controller.status().get("active_task_id"):
+            raise ValueError("wait for the current task to finish")
+        if mobile_shortcuts.running():
+            raise ValueError("another shortcut is running")
+        job = asyncio.create_task(asyncio.to_thread(mobile_shortcuts.run, shortcut_id), name="shortcut")
+        self._maintenance_jobs.add(job)
+        job.add_done_callback(self._maintenance_jobs.discard)
+
+    async def _shortcuts_post(self, path, payload):
+        """Shortcuts (mobile_shortcuts): recorded phone tasks, edited here and run without the model."""
+        import mobile_shortcuts
+
+        try:
+            if path == "/mobile/shortcuts":
+                return 201, await asyncio.to_thread(mobile_shortcuts.save, payload)
+            if path == "/mobile/shortcuts/delete":
+                await asyncio.to_thread(mobile_shortcuts.delete, str(payload.get("id") or ""))
+                return 200, {"ok": True}
+            if path == "/mobile/shortcuts/keep":
+                # A finished phone-control task's steps, saved under a name the user chose.
+                name = str(payload.get("name") or "").strip()[:40]
+                return 201, await asyncio.to_thread(mobile_shortcuts.keep, str(payload.get("task_id") or ""), name)
+            if path == "/mobile/shortcuts/heal":
+                # The AI finished a stuck shortcut: its steps replace those from the stuck one on.
+                return 200, await asyncio.to_thread(
+                    mobile_shortcuts.heal, str(payload.get("task_id") or ""), str(payload.get("id") or ""), payload.get("from_step")
+                )
+            if path == "/mobile/shortcuts/run":
+                self._start_shortcut(payload.get("id"))
+                return 202, {"started": True}
+            if path == "/mobile/shortcuts/stop":
+                await asyncio.to_thread(mobile_shortcuts.stop)
+                return 200, {"ok": True}
+        except KeyError:
+            return 404, {"error": "no such shortcut or recorded task"}
+        except ValueError as error:
+            return 400, {"error": str(error)}
+        return 404, {"error": "unknown shortcut route"}
+
     async def _session_controller(self, session_id):
         if session_id is None:
             return self.controller
@@ -328,6 +426,63 @@ class MobileManagement:
             return 200, (await self.toolchain()).snapshot()
         if path == "/mobile/memory":
             return 200, self.memory().snapshot()
+        if path == "/mobile/session-meta":
+            import mobile_session_meta
+
+            return 200, mobile_session_meta.snapshot()
+        if path == "/mobile/triggers":
+            import mobile_triggers
+
+            return 200, mobile_triggers.snapshot()
+        if path == "/mobile/shortcuts":
+            import mobile_shortcuts
+
+            return 200, {
+                "shortcuts": await asyncio.to_thread(mobile_shortcuts.list_shortcuts),
+                "available": mobile_shortcuts.available(),
+                "running": mobile_shortcuts.running(),
+                "last_run": mobile_shortcuts.last_run(),
+            }
+        if path == "/mobile/hosted-limits":
+            import mobile_hosted_limits
+
+            return 200, mobile_hosted_limits.get()
+        if path == "/mobile/notification-journal":
+            import mobile_notification_journal
+
+            return 200, mobile_notification_journal.status()
+        if path == "/mobile/widget-card":
+            import mobile_widget_card
+
+            return 200, {"source": mobile_widget_card.source()}
+        if path == "/mobile/step-shots":
+            # Step replay: what the phone looked like after each action of a task.
+            import mobile_step_shots
+
+            return 200, {"steps": await asyncio.to_thread(mobile_step_shots.steps, query.get("task_id", [""])[0])}
+        if path == "/mobile/shortcuts/pending":
+            import mobile_shortcuts
+
+            return 200, {"steps": mobile_shortcuts.pending(query.get("task_id", [""])[0])}
+        if path == "/mobile/speech/status":
+            import json as _json
+
+            from java import jclass
+
+            speech = jclass("com.agentworkspace.mobile.capabilities.AndroidTextToSpeech")
+            return 200, _json.loads(str(speech.getUtteranceStatus(query.get("id", [""])[0])))
+        if path == "/mobile/provider/extras":
+            from android_adapter.provider_transport import describe
+
+            return 200, await asyncio.to_thread(describe, os.getenv("AGENT_WORKSPACE_BASE_URL") or "")
+        if path == "/mobile/model-roles":
+            from mobile_model_roles import get_roles
+
+            return 200, {"roles": get_roles()}
+        if path == "/mobile/skills":
+            return 200, await asyncio.to_thread(self.skills().snapshot)
+        if path == "/mobile/skills/job":
+            return 200, self.skills().job(query.get("id", [""])[0])
         if path == "/mobile/knowledge":
             return 200, await asyncio.to_thread(self.knowledge().snapshot)
         if path == "/mobile/knowledge/session":
@@ -435,6 +590,55 @@ class MobileManagement:
 
         return get_memory_store(self.data)
 
+    def skills(self):
+        from mobile_skills import get_skill_store
+
+        return get_skill_store(self.data)
+
+    def _install_bundled_skills(self):
+        try:
+            self.skills().install_bundled()
+        except Exception:  # a damaged copy in the app never stops the engine
+            import logging
+
+            logging.getLogger(__name__).exception("bundled skills were not installed")
+
+    async def _skills_post(self, action, payload):
+        """Skills page: fetch a pack from GitHub (a background job), install a fetched or uploaded
+        pack after the user saw it, turn packs and skills on or off, remove, check and update."""
+        store = self.skills()
+        if action == "official":
+            # What the project's skills repository offers now (cached for a few hours).
+            refresh = payload.get("refresh") is True
+            return 202, store.start_job("official", lambda: store.official(refresh=refresh))
+        if action == "install-official":
+            return 202, store.start_job("install", store.install_official)
+        if action == "preview":
+            spec = payload.get("github")
+            if not isinstance(spec, str) or not spec.strip() or len(spec) > 300:
+                raise ValueError("enter a GitHub repository as owner/repo or its link")
+            return 202, store.start_job("preview", lambda: store.preview_github(spec))
+        if action == "install":
+            await asyncio.to_thread(store.install, payload.get("token"))
+            return 200, await asyncio.to_thread(store.snapshot)
+        if action == "remove":
+            await asyncio.to_thread(store.remove, payload.get("pack_id"))
+            return 200, await asyncio.to_thread(store.snapshot)
+        if action == "enable":
+            await asyncio.to_thread(
+                store.set_enabled, payload.get("pack_id"), payload.get("enabled"), payload.get("skill_id")
+            )
+            return 200, await asyncio.to_thread(store.snapshot)
+        if action == "delete-skill":
+            await asyncio.to_thread(store.delete_user_skill, payload.get("skill_id"))
+            return 200, await asyncio.to_thread(store.snapshot)
+        if action == "check-updates":
+            return 202, store.start_job("check", store.check_updates)
+        if action == "update":
+            pack_id = payload.get("pack_id")
+            return 202, store.start_job("update", lambda: store.update(pack_id))
+        raise KeyError(action)
+
     def knowledge(self):
         from mobile_knowledge import get_knowledge_store
 
@@ -527,13 +731,89 @@ class MobileManagement:
                 archive = self._app_file(payload.get("path"))
                 staged = await asyncio.to_thread(stage_restore, self.data.parent, archive)
             return 200, {**staged, "restart_required": True}
+        if path.startswith("/mobile/triggers"):
+            return await self._triggers_post(path, payload)
+        if path.startswith("/mobile/shortcuts"):
+            return await self._shortcuts_post(path, payload)
+        if path == "/mobile/hosted-limits":
+            import mobile_hosted_limits
+
+            return 200, mobile_hosted_limits.set_limits(payload)
+        if path == "/mobile/widget-card":
+            # Which conversation the AI card widget follows (mobile_widget_card).
+            import mobile_widget_card
+
+            return 200, await asyncio.to_thread(mobile_widget_card.set_source, payload)
+        if path.startswith("/mobile/notification-journal"):
+            # Notifications kept on the phone for digests (mobile_notification_journal).
+            import mobile_notification_journal as journal
+
+            if path == "/mobile/notification-journal":
+                return 200, journal.set_enabled(payload.get("enabled"))
+            if path == "/mobile/notification-journal/add":
+                return 200, {"kept": await asyncio.to_thread(journal.add, payload)}
+            if path == "/mobile/notification-journal/clear":
+                return 200, journal.clear()
+            return 404, {"error": "unknown notification journal route"}
+        if path in ("/mobile/speech/speak", "/mobile/speech/stop"):
+            # Read a reply aloud with the phone's text-to-speech (the console's read-aloud button and
+            # voice conversations); the same engine as the speak_text tool.
+            import json as _json
+            import uuid as _uuid
+
+            from java import jclass
+
+            speech = jclass("com.agentworkspace.mobile.capabilities.AndroidTextToSpeech")
+            if path.endswith("/stop"):
+                await asyncio.to_thread(speech.stop, str(payload.get("request_id") or ""))
+                return 200, {"stopped": True}
+            text = " ".join(str(payload.get("text") or "").split())[:4000]
+            if not text:
+                return 400, {"error": "nothing to read"}
+            request_id = str(_uuid.uuid4())
+            return 200, {"request_id": request_id, **_json.loads(str(await asyncio.to_thread(speech.startSpeak, request_id, text)))}
+        if path == "/mobile/provider/extras":
+            from android_adapter.provider_transport import save_extras
+
+            try:
+                return 200, await asyncio.to_thread(
+                    save_extras, os.getenv("AGENT_WORKSPACE_BASE_URL") or "", payload.get("headers") or {}, payload.get("keys") or []
+                )
+            except ValueError as error:
+                return 400, {"error": str(error)}
+        if path == "/mobile/sessions/export":
+            from mobile_conversation_export import FORMATS, export_conversation
+
+            session_id, fmt = payload.get("session_id"), payload.get("format")
+            if not isinstance(session_id, str) or fmt not in FORMATS:
+                return 400, {"error": f"session_id and a format ({', '.join(FORMATS)}) are required"}
+            session = self.runtime.service.get_session(session_id)
+            events = await asyncio.to_thread(self.runtime.store.list_events, session_id)
+            title = str(payload.get("title") or "")[:120] or "Agent Workspace"
+            return 200, await export_conversation(session.workspace, title, events, fmt)
+        if path in ("/mobile/session-meta/tags", "/mobile/session-meta/pin"):
+            import mobile_session_meta
+
+            try:
+                if path.endswith("/tags"):
+                    return 200, mobile_session_meta.set_tags(payload.get("session_id"), payload.get("tags"))
+                return 200, mobile_session_meta.set_pinned(payload.get("session_id"), payload.get("pinned"))
+            except ValueError as error:
+                return 400, {"error": str(error)}
+        if path == "/mobile/model-roles":
+            from mobile_model_roles import set_roles
+
+            try:
+                return 200, {"roles": set_roles(payload.get("roles") or {})}
+            except ValueError as error:
+                return 400, {"error": str(error)}
         if path.startswith("/mobile/memory"):
             store = self.memory()
             if path == "/mobile/memory":
-                store.add(payload.get("content"), source="user")
+                store.add(payload.get("content"), source="user", topic=payload.get("topic"))
                 return 201, store.snapshot()
             if path == "/mobile/memory/update":
-                store.update(payload.get("id"), payload.get("content"), source="user")
+                store.update(payload.get("id"), payload.get("content"), source="user", topic=payload.get("topic"))
                 return 200, store.snapshot()
             if path == "/mobile/memory/delete":
                 store.delete(payload.get("id"))
@@ -547,6 +827,8 @@ class MobileManagement:
                 )
         if path.startswith("/mobile/knowledge/"):
             return await self._knowledge_post(path[len("/mobile/knowledge/"):], payload)
+        if path.startswith("/mobile/skills/"):
+            return await self._skills_post(path[len("/mobile/skills/"):], payload)
         if path == "/mobile/notification-rules" or path.startswith("/mobile/notification-rules/"):
             return await self._notification_rules_post(path[len("/mobile/notification-rules/"):], payload)
         if path.startswith("/mobile/browser/"):

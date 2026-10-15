@@ -111,6 +111,7 @@ object ProviderSettingsChange {
             val configuration = MobileProviderSettings.load(application).toJson()
             TermuxDaemonService.start(application, Intent(application, TermuxDaemonService::class.java).apply {
                 action = TermuxDaemonService.ACTION_RESTART
+                putExtra(TermuxDaemonService.EXTRA_REASON, "provider settings changed (model, key or local engine)")
                 putExtra(TermuxDaemonService.EXTRA_PROVIDER_CONFIGURATION, configuration)
                 putExtra(TermuxDaemonService.EXTRA_EXPECTED_ENGINE_TOKEN, token)
             })

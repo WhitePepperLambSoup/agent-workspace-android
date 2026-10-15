@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import os
 import stat
+import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -26,6 +27,10 @@ from agent_workspace.tools.paths import WorkspacePathError, WorkspacePaths
 _MAX_SCAN_ENTRIES = 20_000
 _MAX_SCAN_FILES = 10_000
 _MAX_HASH_TOTAL_BYTES = 64 * 1024 * 1024
+# Every task scans its workspace before and after it runs. A workspace in shared storage (FUSE)
+# with 15,000 files took about 3 s per scan on a Snapdragon 888; a whole phone's storage takes
+# far longer. A scan that runs out of time is incomplete, like one over the entry limits.
+_SCAN_SECONDS = 1.0
 _MAX_ARTIFACTS = 2_000
 _COORDINATORS: WeakKeyDictionary[asyncio.AbstractEventLoop, WeakValueDictionary] = (
     WeakKeyDictionary()
@@ -69,7 +74,10 @@ def _inspect_file(paths: WorkspacePaths, relative: str, hash_budget: int) -> tup
 
 
 def snapshot_task_workspace(
-    workspace: str | Path, *, excluded_paths: tuple[str, ...] = ()
+    workspace: str | Path,
+    *,
+    excluded_paths: tuple[str, ...] = (),
+    time_budget: float = _SCAN_SECONDS,
 ) -> dict[str, Any]:
     paths = WorkspacePaths(workspace)
     excluded = {os.path.normcase(str(Path(path).absolute())) for path in excluded_paths}
@@ -79,6 +87,7 @@ def snapshot_task_workspace(
     hash_budget = _MAX_HASH_TOTAL_BYTES
     truncated = False
     inspection_error = False
+    deadline = time.monotonic() + time_budget
     while pending and not truncated:
         directory = pending.pop()
         try:
@@ -87,7 +96,11 @@ def snapshot_task_workspace(
             with os.scandir(directory) as entries:
                 for entry in entries:
                     scanned += 1
-                    if scanned > _MAX_SCAN_ENTRIES or len(files) >= _MAX_SCAN_FILES:
+                    if (
+                        scanned > _MAX_SCAN_ENTRIES
+                        or len(files) >= _MAX_SCAN_FILES
+                        or (scanned % 64 == 0 and time.monotonic() > deadline)
+                    ):
                         truncated = True
                         break
                     relative = Path(entry.path).relative_to(paths.root).as_posix()
@@ -136,7 +149,10 @@ def collect_task_artifacts(
     attributed_files: dict[str, Any] | None = None,
     attribution_error: str | None = None,
     warn_unattributed: bool = False,
+    written_files: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """[written_files]: version receipts of files the task's tools wrote; they keep those files
+    listed when a scan was incomplete (a large or slow workspace)."""
     if baseline.get("error") or baseline.get("version") != 1:
         return {
             "artifacts": [],
@@ -154,15 +170,26 @@ def collect_task_artifacts(
     artifacts = []
     unattributed = False
     truncated = baseline["truncated"] or current["truncated"]
-    for relative, record in sorted(current["files"].items()):
+    files = dict(current["files"])
+    written = written_files or {}
+    if current["truncated"] and written:
+        # The scan stopped early; files the task's own tools wrote are still looked at.
+        paths = WorkspacePaths(workspace)
+        for relative in sorted(written)[:_MAX_ARTIFACTS]:
+            if relative in files:
+                continue
+            with suppress(OSError, ValueError, RuntimeError, WorkspacePathError):
+                files[relative], _ = _inspect_file(paths, relative, _MAX_HASH_BYTES)
+    for relative, record in sorted(files.items()):
         previous = before.get(relative)
         if previous is not None:
             if previous["signature"] == record["signature"]:
                 continue
             if previous["sha256"] is not None and previous["sha256"] == record["sha256"]:
                 continue
-        elif baseline["truncated"]:
-            # An incomplete baseline cannot prove that an unseen path was created by this task.
+        elif baseline["truncated"] and not _matches_attributed_file(record, written.get(relative)):
+            # An incomplete baseline cannot prove that an unseen path was created by this task,
+            # unless the task's own tool reported writing exactly this file.
             continue
         if attributed_files is not None and not _matches_attributed_file(
             record, attributed_files.get(relative)
@@ -189,7 +216,7 @@ def collect_task_artifacts(
         if relative in merged:
             merged[relative]["state"] = artifact["state"]
         else:
-            record = current["files"].get(relative)
+            record = files.get(relative)
             if record and _matches_checkpoint_file(record, artifact, prior_checkpoint, relative):
                 merged[relative] = artifact
     artifacts = [merged[path] for path in sorted(merged)]
@@ -208,9 +235,7 @@ def collect_task_artifacts(
             if unattributed and warn_unattributed
             else None
         ),
-        "signatures": {
-            item["path"]: current["files"][item["path"]]["signature"] for item in artifacts
-        },
+        "signatures": {item["path"]: files[item["path"]]["signature"] for item in artifacts},
     }
 
 

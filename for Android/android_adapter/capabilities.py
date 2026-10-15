@@ -252,6 +252,10 @@ def configure_android_registry(
 
     if clock_available():
         factories.update(clock_calendar_tools())
+    from .personal_tools import personal_tools, personal_tools_available
+
+    if personal_tools_available():
+        factories.update(personal_tools())
     from .speech_tools import TranscribeAudioTool, speech_runtime_status
 
     speech = speech_runtime_status()
@@ -273,6 +277,11 @@ def configure_android_registry(
 
         factories["knowledge_search"] = KnowledgeSearchTool
         factories["knowledge_use"] = KnowledgeUseTool
+        # Installed skill packs (Skills page): instructions the agent loads when a job matches.
+        from .skill_tools import SaveSkillTool, UseSkillTool
+
+        factories["use_skill"] = UseSkillTool
+        factories["save_skill"] = SaveSkillTool
         if workspace is not None:
             factories["knowledge_add"] = lambda: KnowledgeAddTool(workspace)
     documents = document_status()
@@ -294,6 +303,11 @@ def configure_android_registry(
                 unavailable[name] = str(documents.get("reason") or "Native PDF tool is unavailable")
         factories["run_terminal"] = lambda: AndroidRunTerminalTool(workspace)
         factories["run_diagnostics"] = lambda: AndroidLspDiagnosticsTool(workspace)
+        # Word and Excel files without Office: plain Office Open XML written in Python.
+        from .office_files import CreateDocxTool, CreateXlsxTool
+
+        factories["create_docx"] = lambda: CreateDocxTool(workspace)
+        factories["create_xlsx"] = lambda: CreateXlsxTool(workspace)
         if os.getenv("AGENT_WORKSPACE_DATA_DIR"):
             from .service_tools import (
                 ListServicesTool,

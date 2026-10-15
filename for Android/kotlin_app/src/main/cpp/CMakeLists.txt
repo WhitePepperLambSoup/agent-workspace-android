@@ -13,8 +13,13 @@ set(AGENT_LLAMA_ARCHIVE
     "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/${AGENT_LLAMA_REVISION}"
     CACHE STRING "Pinned llama.cpp source archive or local copy of that archive")
 
-# Only the portable CPU library is included. No server, subprocess, network,
-# optional GPU library, or runtime-selected backend is built into this APK.
+set(AGENT_OPENCL_HEADERS_ARCHIVE
+    "https://codeload.github.com/KhronosGroup/OpenCL-Headers/tar.gz/refs/tags/v2024.10.24"
+    CACHE STRING "Pinned Khronos OpenCL-Headers archive or local copy of that archive")
+
+# CPU libraries plus, on arm64, one library that can also use an Adreno GPU through the
+# phone's own OpenCL driver (agent_qwen_opencl below). No server, subprocess, network or
+# dynamically loaded backend is built into this APK.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(AGENT_LLAMA_OPTIONS
     BUILD_SHARED_LIBS LLAMA_BUILD_IS_DEV LLAMA_BUILD_COMMON LLAMA_BUILD_TOOLS LLAMA_BUILD_TESTS
@@ -86,8 +91,74 @@ if(ANDROID_ABI STREQUAL "arm64-v8a")
         "${llama_cpp_SOURCE_DIR}/tools/mtmd")
     target_link_libraries(agent_qwen_dotprod PRIVATE
         -Wl,--start-group ${dotprod_libraries} -Wl,--end-group log android m)
+
+    # The dot-product build plus ggml's OpenCL backend for Adreno GPUs. It links against
+    # opencl_stub.c, so Android resolves libOpenCL.so to the phone's GPU driver when the
+    # library loads; LocalModelBridge falls back to the CPU libraries when it cannot.
+    # OpenCL 2.0 is the newest API that Adreno 6xx drivers export (no
+    # clCreateBufferWithProperties or clGetKernelSubGroupInfo there).
+    FetchContent_Declare(opencl_headers
+        URL "${AGENT_OPENCL_HEADERS_ARCHIVE}"
+        URL_HASH SHA256=159f2a550592bae49859fee83d372acd152328fdf95c0dcd8b9409f8fad5db93
+    )
+    FetchContent_GetProperties(opencl_headers)
+    if(NOT opencl_headers_POPULATED)
+        FetchContent_Populate(opencl_headers)  # headers only; its own CMake project is not needed
+    endif()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)  # ggml embeds its OpenCL kernels with Python
+
+    set(opencl_stub_dir "${CMAKE_CURRENT_BINARY_DIR}/opencl-stub")
+    add_library(OpenCL SHARED opencl_stub.c)
+    # Outside the library directory Gradle packages; the phone supplies the real library.
+    set_target_properties(OpenCL PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${opencl_stub_dir}")
+
+    set(opencl_dir "${CMAKE_CURRENT_BINARY_DIR}/llama-opencl")
+    set(opencl_libraries
+        "${opencl_dir}/tools/mtmd/libmtmd.a"
+        "${opencl_dir}/src/libllama.a"
+        "${opencl_dir}/ggml/src/libggml.a"
+        "${opencl_dir}/ggml/src/libggml-cpu.a"
+        "${opencl_dir}/ggml/src/ggml-opencl/libggml-opencl.a"
+        "${opencl_dir}/ggml/src/libggml-base.a"
+        "${opencl_dir}/vendor/hash/libvendor-hash.a")
+    ExternalProject_Add(llama_opencl
+        SOURCE_DIR "${llama_cpp_SOURCE_DIR}"
+        BINARY_DIR "${opencl_dir}"
+        DEPENDS OpenCL
+        CMAKE_ARGS
+            "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}"
+            "-DANDROID_ABI=${ANDROID_ABI}"
+            "-DANDROID_PLATFORM=${ANDROID_PLATFORM}"
+            "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
+            "-DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
+            "-DCMAKE_PROJECT_INCLUDE=${CMAKE_CURRENT_SOURCE_DIR}/optimize.cmake"
+            ${AGENT_LLAMA_ARGUMENTS}
+            "-DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+fp16"
+            "-DGGML_OPENCL=ON"
+            "-DGGML_OPENCL_EMBED_KERNELS=ON"
+            "-DGGML_OPENCL_USE_ADRENO_KERNELS=ON"
+            "-DGGML_OPENCL_TARGET_VERSION=200"
+            "-DOpenCL_INCLUDE_DIR=${opencl_headers_SOURCE_DIR}"
+            "-DOpenCL_LIBRARY=${opencl_stub_dir}/libOpenCL.so"
+            "-DPython3_EXECUTABLE=${Python3_EXECUTABLE}"
+        # The kernel sources are UTF-8; Python on a Chinese Windows would read them as GBK.
+        BUILD_COMMAND "${CMAKE_COMMAND}" -E env PYTHONUTF8=1
+            "${CMAKE_COMMAND}" --build "${opencl_dir}" --target mtmd
+        INSTALL_COMMAND ""
+        BUILD_BYPRODUCTS ${opencl_libraries})
+
+    agent_qwen_library(agent_qwen_opencl)
+    add_dependencies(agent_qwen_opencl llama_opencl)
+    target_compile_definitions(agent_qwen_opencl PRIVATE AGENT_GPU_BACKEND=1)
+    target_include_directories(agent_qwen_opencl PRIVATE
+        "${llama_cpp_SOURCE_DIR}/include" "${llama_cpp_SOURCE_DIR}/ggml/include"
+        "${llama_cpp_SOURCE_DIR}/tools/mtmd" "${opencl_headers_SOURCE_DIR}")
+    target_link_libraries(agent_qwen_opencl PRIVATE
+        -Wl,--start-group ${opencl_libraries} -Wl,--end-group OpenCL log android m)
 else()
-    # Gradle builds the same target list for every ABI; the APK excludes this copy.
+    # Gradle builds the same target list for every ABI; the APK excludes these copies.
     agent_qwen_library(agent_qwen_dotprod)
     target_link_libraries(agent_qwen_dotprod PRIVATE llama mtmd log android)
+    agent_qwen_library(agent_qwen_opencl)
+    target_link_libraries(agent_qwen_opencl PRIVATE llama mtmd log android)
 endif()

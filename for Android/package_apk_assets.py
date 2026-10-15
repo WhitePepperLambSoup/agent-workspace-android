@@ -99,6 +99,8 @@ def build_agent_code_zip(zip_path: Path) -> int:
         ]
         android_items.extend(path.name for path in sorted(THIS_DIR.glob("mobile_*.py")))
         android_items.append("mobile_toolchain_catalog.json")
+        # The official skill pack this version ships with (mobile_skills.BUNDLED_DIR).
+        android_items.append("skills/official")
         for item in android_items:
             target = THIS_DIR / item
             if not target.exists():

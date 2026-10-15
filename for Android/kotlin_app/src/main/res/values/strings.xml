@@ -27,4 +27,7 @@
     <string name="widget_task_web_page_detail">生成可直接预览的页面</string>
     <string name="widget_task_analyze_title">分析数据</string>
     <string name="widget_task_analyze_detail">表格或 CSV 出结论与图表</string>
+    <string name="widget_card_label">AI 卡片</string>
+    <string name="widget_card_description">定时任务的最新结果，比如每日早报</string>
+    <string name="widget_card_empty">在「定时任务」里给一个任务点「显示在桌面卡片」，它的最新结果会显示在这里。</string>
 </resources>

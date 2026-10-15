@@ -35,6 +35,8 @@ class TermuxDaemonService : Service() {
         const val ACTION_STOP = "com.agentworkspace.mobile.STOP_ENGINE"
         const val EXTRA_PROVIDER_CONFIGURATION = "provider-configuration"
         const val EXTRA_EXPECTED_ENGINE_TOKEN = "expected-engine-token"
+        /** Why the engine is stopped or restarted (the user, a settings change, an update), for its log. */
+        const val EXTRA_REASON = "engine-reason"
         const val STARTUP_FAILURE_FILE = "engine.failed"
         private const val NOTIFICATION_ID = 2001
         private val engineMutex = Mutex()
@@ -82,11 +84,19 @@ class TermuxDaemonService : Service() {
         AndroidSystemBridge.initialize(this)
         AndroidTextToSpeech.initialize(this)
         com.agentworkspace.mobile.capabilities.AndroidClockCalendar.initialize(this)
+        com.agentworkspace.mobile.capabilities.AndroidSystemSettings.initialize(this)
+        com.agentworkspace.mobile.capabilities.AndroidPersonalInfo.initialize(this)
+        AgentWidgets.attach(this)
         com.agentworkspace.mobile.voice.AudioTranscriber.initialize(this)
         AndroidDocumentBridge.initialize(this)
         AndroidToolchainBridge.initialize(this)
         LocalModelBridge.initialize(this)
         com.agentworkspace.mobile.browser.AgentBrowser.initialize(this)
+        BackgroundRunGuide.startPauseMonitor(this)
+        // Automatic triggers: charging started, Wi-Fi joined (app openings come from the accessibility service).
+        TriggerEvents.start(this)
+        // Why the previous engine process ended (an update, the user, the system), for diagnostics.
+        Thread({ ProcessExits.record(this) }, "process-exits").start()
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AgentWorkspace::TermuxDaemonLock").apply {
@@ -115,7 +125,7 @@ class TermuxDaemonService : Service() {
             EngineRecovery.clearLaunchNotification(this)
             MobileScheduleCoordinator(this).restoreAlarms()
             releaseWakeLock()
-            stopPython()
+            stopPython(intent.getStringExtra(EXTRA_REASON) ?: "stopped by the user")
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
@@ -134,12 +144,17 @@ class TermuxDaemonService : Service() {
         startEmbeddedEngine(
             intent?.action == ACTION_RESTART || intent?.action == EngineRecovery.ACTION_RECOVER,
             intent?.getStringExtra(EXTRA_PROVIDER_CONFIGURATION),
-            intent?.getStringExtra(EXTRA_EXPECTED_ENGINE_TOKEN)
+            intent?.getStringExtra(EXTRA_EXPECTED_ENGINE_TOKEN),
+            intent?.getStringExtra(EXTRA_REASON) ?: when (intent?.action) {
+                EngineRecovery.ACTION_RECOVER -> "automatic recovery"
+                ACTION_RESTART -> "restart requested"
+                else -> "start requested"
+            },
         )
         return START_STICKY
     }
 
-    private fun startEmbeddedEngine(restart: Boolean, providerConfiguration: String?, expectedEngineToken: String?) {
+    private fun startEmbeddedEngine(restart: Boolean, providerConfiguration: String?, expectedEngineToken: String?, reason: String) {
         serviceScope.launch {
             try {
                 engineMutex.withLock {
@@ -154,8 +169,8 @@ class TermuxDaemonService : Service() {
                     engineRestarting = true
                     val previous = currentEngineJob
                     if (previous != null && !previous.isCompleted) {
-                        EngineStartupLog.append(this@TermuxDaemonService, "service: stopping the previous engine")
-                        stopPython()
+                        EngineStartupLog.append(this@TermuxDaemonService, "service: stopping the previous engine ($reason)")
+                        stopPython(reason)
                         val stopped = withTimeoutOrNull(10000) {
                             previous.join()
                             true
@@ -185,8 +200,17 @@ class TermuxDaemonService : Service() {
                     if (!Python.isStarted()) {
                         // The first start after an install or update unpacks the Python runtime and can take a while.
                         EngineStartupLog.append(this@TermuxDaemonService, "service: starting the Python runtime")
+                        val began = android.os.SystemClock.elapsedRealtime()
                         Python.start(AndroidPlatform(this@TermuxDaemonService))
-                        EngineStartupLog.append(this@TermuxDaemonService, "service: Python runtime started")
+                        val took = android.os.SystemClock.elapsedRealtime() - began
+                        // A slow first start: say how much memory was free, to tell a busy phone from a large unpack.
+                        val memory = if (took < 5000) "" else runCatching {
+                            val info = android.app.ActivityManager.MemoryInfo()
+                            getSystemService(android.app.ActivityManager::class.java).getMemoryInfo(info)
+                            "; memory available ${info.availMem / 1048576} of ${info.totalMem / 1048576} MB" +
+                                if (info.lowMemory) " (low)" else ""
+                        }.getOrDefault("")
+                        EngineStartupLog.append(this@TermuxDaemonService, "service: Python runtime started in $took ms$memory")
                     }
                     File(filesDir, "serve.token").delete()
                     activeProviderConfiguration = configuration
@@ -289,10 +313,10 @@ class TermuxDaemonService : Service() {
         throw IllegalStateException(reason)
     }
 
-    private fun stopPython() {
+    private fun stopPython(reason: String) {
         LocalModelBridge.cancel()
         if (Python.isStarted()) {
-            runCatching { Python.getInstance().getModule("mobile_embedded").callAttr("stop") }
+            runCatching { Python.getInstance().getModule("mobile_embedded").callAttr("stop", reason) }
                 .onFailure { android.util.Log.e("AgentEmbedded", "Failed to stop Python", it) }
         }
     }
@@ -356,7 +380,8 @@ class TermuxDaemonService : Service() {
             this, 2001, launchIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val stopEngine = PendingIntent.getService(this, 2002,
-            Intent(this, TermuxDaemonService::class.java).setAction(ACTION_STOP),
+            Intent(this, TermuxDaemonService::class.java).setAction(ACTION_STOP)
+                .putExtra(EXTRA_REASON, "stopped by the user from the notification"),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         return NotificationCompat.Builder(this, "termux_daemon_channel")
             .setContentTitle(com.agentworkspace.mobile.UiText.of(this@TermuxDaemonService, "Agent Workspace 引擎", "Agent Workspace engine"))
@@ -379,9 +404,10 @@ class TermuxDaemonService : Service() {
             lifecycleState.mark("interrupted", "The Android service stopped; reopen the app to recover tasks")
         }
         serviceClosing = true
+        TriggerEvents.stop(this)
         notificationJob?.cancel()
         readinessJob?.cancel()
-        stopPython()
+        stopPython(if (unexpected) "Android ended the engine service" else "the engine service closed")
         val stoppingJob = engineJob
         super.onDestroy()
         serviceScope.cancel()
@@ -435,7 +461,7 @@ class TermuxDaemonService : Service() {
         notificationJob?.cancel()
         readinessJob?.cancel()
         releaseWakeLock()
-        stopPython()
+        stopPython("Android's time limit for background services was reached")
         try { stopForeground(STOP_FOREGROUND_REMOVE) }
         finally { stopSelf() }
     }

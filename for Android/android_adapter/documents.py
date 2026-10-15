@@ -63,6 +63,14 @@ def _response(raw: Any) -> dict[str, Any]:
     return result
 
 
+class _NativeFailure(ToolError):
+    """A native document operation that answered with an error code."""
+
+    def __init__(self, message: str, code: str | None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 def _failure_message(result: dict[str, Any], fallback: str) -> str:
     error = result.get("error")
     if isinstance(error, dict):
@@ -220,7 +228,11 @@ class _Job:
             )
         )
         if not result.get("ok"):
-            raise ToolError(_failure_message(result, "Native PDF operation failed"))
+            error = result.get("error")
+            raise _NativeFailure(
+                _failure_message(result, "Native PDF operation failed"),
+                error.get("code") if isinstance(error, dict) else None,
+            )
         if result.get("request_id", self.identity) != self.identity:
             raise ToolError("Native document result belongs to another job")
         return result
@@ -619,16 +631,24 @@ class AndroidRenderPdfTool(_NativeTool):
         return json_result({**result, "pages": pages, "requires_vision": True})
 
 
+# What create_pdf typesets; the environment section of the system prompt follows this.
+CREATE_PDF_FORMATS = ("text", "markdown", "latex")
+
+
 class AndroidCreatePdfTool(_NativeTool):
     _SPEC = ToolSpec(
         name="create_pdf",
         description=(
-            "Create a real paginated A4 PDF with a title and plain text, including Chinese, "
-            "in the workspace. Use expected_sha256=null for a new file; replacing an existing "
-            "PDF requires its observed SHA-256. Parent directory must exist. Up to 262144 "
-            "text characters and 200 pages. Creates text reports; arbitrary existing-PDF "
-            "edits require other tools. PDF file bytes have no fixed size limit; available "
-            "storage and the device's memory still constrain processing and rollback preimages."
+            "Create a real paginated A4 PDF in the workspace, Chinese included. format: text "
+            "(plain text, the default), markdown (headings, lists, tables, code, links, math in "
+            "$…$ and $$…$$) or latex (a whole LaTeX document or a fragment: sections, lists, "
+            "tabular, theorem and proof, equation/align with numbers, \\newcommand macros, "
+            "footnotes, \\newpage; no TikZ, pictures or other packages). Formulas are typeset "
+            "properly; no TeX installation is needed or present, so for a LaTeX request pass the "
+            "source with format latex. title is an optional heading for text and markdown. Use "
+            "expected_sha256=null for a new file; replacing an existing PDF requires its observed "
+            "SHA-256. Parent directory must exist. Up to 262144 characters and 200 pages; editing "
+            "an existing PDF needs other tools."
         ),
         input_schema={
             "type": "object",
@@ -636,6 +656,7 @@ class AndroidCreatePdfTool(_NativeTool):
                 "path": {"type": "string", "minLength": 1},
                 "title": {"type": "string", "maxLength": 1024},
                 "content": {"type": "string", "minLength": 1, "maxLength": 262144},
+                "format": {"type": "string", "enum": list(CREATE_PDF_FORMATS)},
                 "font_size": {"type": "integer", "minimum": 8, "maximum": 28},
                 "page_size": {"type": "string", "enum": ["A4"]},
                 "expected_sha256": {"type": ["string", "null"]},
@@ -674,15 +695,33 @@ class AndroidCreatePdfTool(_NativeTool):
         if arguments.get("page_size", "A4") != "A4":
             raise ToolArgumentError("PDF page_size must be A4")
         font_size = optional_int(arguments, "font_size", 12, minimum=8, maximum=28)
-        result = job.execute(
-            {
-                "action": "create_pdf",
-                "title": title,
-                "content": content,
-                "page_size": "A4",
-                "font_size": font_size,
-            }
-        )
+        layout = arguments.get("format", "text")
+        if layout not in CREATE_PDF_FORMATS:
+            raise ToolArgumentError(f"PDF format must be one of {', '.join(CREATE_PDF_FORMATS)}")
+        request = {
+            "action": "create_pdf",
+            "title": title,
+            "content": content,
+            "page_size": "A4",
+            "font_size": font_size,
+        }
+        note = None
+        try:
+            result = job.execute(request if layout == "text" else {**request, "format": layout})
+        except _NativeFailure as exc:
+            if layout == "text" or exc.code != "typeset_failed":
+                raise
+            # This phone's WebView could not typeset it: the PDF still gets made, as written.
+            result = job.execute(request)
+            note = (
+                f"Typesetting {layout} failed on this phone ({exc}); the PDF shows the source as "
+                "plain text."
+            )
+        if result.get("math_errors"):
+            note = (
+                f"{result['math_errors']} formula(s) could not be typeset and show in red; check "
+                "their LaTeX."
+            )
         outputs = result.get("outputs")
         if (
             not isinstance(outputs, list)
@@ -696,13 +735,14 @@ class AndroidCreatePdfTool(_NativeTool):
         total = _page_count(output)
         if not 1 <= total <= 200 or result.get("total_pages") != total:
             raise ToolError("Native PDF export returned invalid page metadata")
+        # Android's PDF writers (its own and printing) map some ideographs to look-alike radicals.
         repaired = _repaired_text_layer(job, output)
         if repaired is not None:
             size, digest = _checked_copy(job.paths, str(repaired))
             if _page_count(repaired) != total:
                 raise ToolError("Repaired PDF lost pages")
             output = repaired
-        return _PdfExport(output, total, digest, size)
+        return _PdfExport(output, total, digest, size, result.get("format", "text"), note)
 
     def _write(
         self, path: Path, expected: str | None, job: _Job, export: _PdfExport
@@ -728,15 +768,17 @@ class AndroidCreatePdfTool(_NativeTool):
         except BaseException:
             temporary.unlink(missing_ok=True)
             raise
-        return json_result(
-            {
-                "path": self.paths.relative(target),
-                "media_type": "application/pdf",
-                "sha256": export.sha256,
-                "bytes_written": export.byte_count,
-                "total_pages": export.total_pages,
-            }
-        )
+        result = {
+            "path": self.paths.relative(target),
+            "media_type": "application/pdf",
+            "sha256": export.sha256,
+            "bytes_written": export.byte_count,
+            "total_pages": export.total_pages,
+            "format": export.layout,
+        }
+        if export.note:
+            result["note"] = export.note
+        return json_result(result)
 
     async def execute(self, arguments: dict[str, Any]) -> str:
         path, expected, _ = await _settled(
@@ -793,3 +835,5 @@ class _PdfExport:
     total_pages: int
     sha256: str
     byte_count: int
+    layout: str = "text"
+    note: str | None = None

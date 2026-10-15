@@ -2,9 +2,9 @@
   "schema_version": 1,
   "architectures": {
     "aarch64": {
-      "revision": "alpine-3.22.6-toolchain-20260930-1",
+      "revision": "alpine-3.22.6-toolchain-20261016-2",
       "architecture": "aarch64",
-      "minimum_free_bytes": 734003200,
+      "minimum_free_bytes": 754974720,
       "artifacts": [
         {
           "id": "rootfs",
@@ -31,15 +31,15 @@
         {
           "id": "python3",
           "package": "python3",
-          "version": "3.12.14-r0",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/python3-3.12.14-r0.apk",
-          "size": 8087858,
-          "sha256": "f1efbaa9148f40cd4324fa5c2f2c245c8a809c9d4785683a43576e3c19a35124",
+          "version": "3.12.15-r0",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/python3-3.12.15-r0.apk",
+          "size": 8092333,
+          "sha256": "553d2d36b845d9c1174f9bfa3fccd9d17f51c3df79375971a4c94ab3d3b11887",
           "kind": "apk",
           "license": "PSF-2.0",
           "source": "https://www.python.org/",
           "origin": "python3",
-          "index_checksum": "Q1Esvn/wq9ibkccwlXNCh7IQzU9Ps="
+          "index_checksum": "Q1Wdzd9uvPKc4WRzb5I1dz2q2bCIM="
         },
         {
           "id": "nodejs",
@@ -226,15 +226,15 @@
         {
           "id": "zlib",
           "package": "zlib",
-          "version": "1.3.2-r0",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/zlib-1.3.2-r0.apk",
-          "size": 54424,
-          "sha256": "7a39a917e4dab3c7a45537210ee5b5f17bf75f5e7777809a20cddd0afe074187",
+          "version": "1.3.2-r1",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/zlib-1.3.2-r1.apk",
+          "size": 54452,
+          "sha256": "2d274cb1b2a36d0e8347d802e6dea8648cab952ea5fae1989ab72e725842a2c3",
           "kind": "apk",
           "license": "Zlib",
           "source": "https://zlib.net/",
           "origin": "zlib",
-          "index_checksum": "Q1SeoFMCAxmy32FOFJ40woXHgElbM="
+          "index_checksum": "Q1B2OtvCCCPVaxhorsLOsoS1EFABA="
         },
         {
           "id": "libssl3",
@@ -845,6 +845,97 @@
           "license": "MIT",
           "source": "https://github.com/microsoft/pyright/tree/1.1.414",
           "integrity": "sha512-FPZZb51jepDX4eP7TEYDeNFtmE3WgwkkEcJpvH3/QmUSsj0EAy3LXu+xB4T/FWDejtsXlCfFr/rbWFjwuwuXww=="
+        },
+        {
+          "id": "tmux",
+          "package": "tmux",
+          "version": "3.5a-r1",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/tmux-3.5a-r1.apk",
+          "size": 358327,
+          "sha256": "16d16f01697d1f251a729b2d208ebeac3feec54c60f0a653fc2bf76102cc19a4",
+          "kind": "apk",
+          "license": "ISC",
+          "source": "https://tmux.github.io",
+          "origin": "tmux",
+          "index_checksum": "Q1FE2lgLzXQOdPwEYyYEDsAdkHn3s="
+        },
+        {
+          "id": "openssh-client-default",
+          "package": "openssh-client-default",
+          "version": "10.0_p1-r10",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/openssh-client-default-10.0_p1-r10.apk",
+          "size": 368789,
+          "sha256": "6fbf27577c3d94a1cf5d3e932f78b14e6adc8378d615bce5f13a171fe6a7cbc2",
+          "kind": "apk",
+          "license": "SSH-OpenSSH",
+          "source": "https://www.openssh.com/portable.html",
+          "origin": "openssh",
+          "index_checksum": "Q10bNabi4QtLtBS6n9nUYnVDoI3VY="
+        },
+        {
+          "id": "openssh-keygen",
+          "package": "openssh-keygen",
+          "version": "10.0_p1-r10",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/openssh-keygen-10.0_p1-r10.apk",
+          "size": 200971,
+          "sha256": "9049b2129bbd8f684ff6c673d1d62290da31ad571d8465f8c42d02892a3deff4",
+          "kind": "apk",
+          "license": "SSH-OpenSSH",
+          "source": "https://www.openssh.com/portable.html",
+          "origin": "openssh",
+          "index_checksum": "Q1ItfySmxfDInVWZMe6NMf0nHtgyk="
+        },
+        {
+          "id": "openssh-sftp-server",
+          "package": "openssh-sftp-server",
+          "version": "10.0_p1-r10",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/openssh-sftp-server-10.0_p1-r10.apk",
+          "size": 60764,
+          "sha256": "4f7e073dca14cf92f0fb4a54205c8b45500cb1b06cff3370d5b6496262032868",
+          "kind": "apk",
+          "license": "SSH-OpenSSH",
+          "source": "https://www.openssh.com/portable.html",
+          "origin": "openssh",
+          "index_checksum": "Q1sOAZioDfnN+MUFiTp2GiyCvuuo4="
+        },
+        {
+          "id": "libevent",
+          "package": "libevent",
+          "version": "2.1.13-r0",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libevent-2.1.13-r0.apk",
+          "size": 283826,
+          "sha256": "e030d2c21c1e1fe5913a80d6ab3117070632b266edb72256b983c9582a32d1b0",
+          "kind": "apk",
+          "license": "BSD-3-Clause",
+          "source": "https://libevent.org/",
+          "origin": "libevent",
+          "index_checksum": "Q1Bjpkdi+M1iVMYVHFkM9Wl66LnWQ="
+        },
+        {
+          "id": "openssh-client-common",
+          "package": "openssh-client-common",
+          "version": "10.0_p1-r10",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/openssh-client-common-10.0_p1-r10.apk",
+          "size": 850235,
+          "sha256": "47f71237be1d6df5c7b30db527f6fc5dea4e111686c22449c1b5e7ad212ca32d",
+          "kind": "apk",
+          "license": "SSH-OpenSSH",
+          "source": "https://www.openssh.com/portable.html",
+          "origin": "openssh",
+          "index_checksum": "Q1l2iqJGQ9hUSIkBT+MlCnbWsytWQ="
+        },
+        {
+          "id": "libedit",
+          "package": "libedit",
+          "version": "20250104.3.1-r1",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libedit-20250104.3.1-r1.apk",
+          "size": 78280,
+          "sha256": "2efe96a11315c8d3693da1c2546a7441935a94749326c148ad0325ad5f9cb039",
+          "kind": "apk",
+          "license": "BSD-3-Clause",
+          "source": "https://www.thrysoee.dk/editline",
+          "origin": "libedit",
+          "index_checksum": "Q1Z/iUYFQiGLqpnwsMInKb1hE4UbA="
         }
       ],
       "executables": {
@@ -852,13 +943,18 @@
         "git": "usr/bin/git",
         "python": "usr/bin/python3",
         "node": "usr/bin/node",
-        "pyright": "opt/pyright/index.js"
+        "pyright": "opt/pyright/index.js",
+        "tmux": "usr/bin/tmux",
+        "ssh": "usr/bin/ssh",
+        "scp": "usr/bin/scp",
+        "sftp": "usr/bin/sftp",
+        "ssh-keygen": "usr/bin/ssh-keygen"
       }
     },
     "x86_64": {
-      "revision": "alpine-3.22.6-toolchain-20260930-1",
+      "revision": "alpine-3.22.6-toolchain-20261016-2",
       "architecture": "x86_64",
-      "minimum_free_bytes": 734003200,
+      "minimum_free_bytes": 754974720,
       "artifacts": [
         {
           "id": "rootfs",
@@ -885,15 +981,15 @@
         {
           "id": "python3",
           "package": "python3",
-          "version": "3.12.14-r0",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/python3-3.12.14-r0.apk",
-          "size": 8073839,
-          "sha256": "f74286399e6910a9e531536b1e49971bda391a2e900d7fdd21e2f2a9da88c2ca",
+          "version": "3.12.15-r0",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/python3-3.12.15-r0.apk",
+          "size": 8078995,
+          "sha256": "65abdc4bef40a80beb0cad8238c984937d334cfcdd2719651fe7c3a3f6c909e8",
           "kind": "apk",
           "license": "PSF-2.0",
           "source": "https://www.python.org/",
           "origin": "python3",
-          "index_checksum": "Q1UlyMXNzkoItO+n+9ndzhjInG7iM="
+          "index_checksum": "Q1DiUH/6LER8o7OsAhlwv+MONZKGc="
         },
         {
           "id": "nodejs",
@@ -1080,28 +1176,28 @@
         {
           "id": "zlib",
           "package": "zlib",
-          "version": "1.3.2-r0",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/zlib-1.3.2-r0.apk",
-          "size": 55441,
-          "sha256": "1f3d5f463f490dad3a68097376711bfe5e8156e9e8daff3070513aa4378cdeca",
+          "version": "1.3.2-r1",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/zlib-1.3.2-r1.apk",
+          "size": 55457,
+          "sha256": "af24e502645e2b392cae833856d776691ac21655362e5db69d7b89f147f76216",
           "kind": "apk",
           "license": "Zlib",
           "source": "https://zlib.net/",
           "origin": "zlib",
-          "index_checksum": "Q1T9Ki+yEmHUsjMwFXFo/rDFYopMY="
+          "index_checksum": "Q1/4h5E7MrlBVDXCCuIDGXwWkzrzs="
         },
         {
           "id": "libssl3",
           "package": "libssl3",
-          "version": "3.5.8-r0",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libssl3-3.5.8-r0.apk",
-          "size": 381010,
-          "sha256": "e8d3ea5e9750cb1f4c4b459d172630925fe6bc13c113c590ac36c78013821e62",
+          "version": "3.5.9-r0",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libssl3-3.5.9-r0.apk",
+          "size": 383680,
+          "sha256": "6801c740b9760b5b08da8db6367ebc18b2cc4dbaf371f7148429538b8bb04e23",
           "kind": "apk",
           "license": "Apache-2.0",
           "source": "https://www.openssl.org/",
           "origin": "openssl",
-          "index_checksum": "Q1tVP5xy7R2xWxYuF/fPljbaWFu2M="
+          "index_checksum": "Q1vg55k+/1wPY5bIUvUA2ERnX9nTc="
         },
         {
           "id": "libbz2",
@@ -1119,15 +1215,15 @@
         {
           "id": "libcrypto3",
           "package": "libcrypto3",
-          "version": "3.5.8-r0",
-          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libcrypto3-3.5.8-r0.apk",
-          "size": 1984631,
-          "sha256": "1d111bc0ad6380fdda22e6513941dc2e7988d6b1621d535bed6b3fa5ef086fae",
+          "version": "3.5.9-r0",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libcrypto3-3.5.9-r0.apk",
+          "size": 1986879,
+          "sha256": "3f5825ced5fde1c66a5376a3f6076b3c08538ad52d9ef23f069857e212d9175a",
           "kind": "apk",
           "license": "Apache-2.0",
           "source": "https://www.openssl.org/",
           "origin": "openssl",
-          "index_checksum": "Q1kLI/t7BIk7nzs6GS0P12dqVEIok="
+          "index_checksum": "Q1oh3VN2UxBgaVmtvnt5CjXfB97sk="
         },
         {
           "id": "libffi",
@@ -1699,6 +1795,97 @@
           "license": "MIT",
           "source": "https://github.com/microsoft/pyright/tree/1.1.414",
           "integrity": "sha512-FPZZb51jepDX4eP7TEYDeNFtmE3WgwkkEcJpvH3/QmUSsj0EAy3LXu+xB4T/FWDejtsXlCfFr/rbWFjwuwuXww=="
+        },
+        {
+          "id": "tmux",
+          "package": "tmux",
+          "version": "3.5a-r1",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/tmux-3.5a-r1.apk",
+          "size": 353573,
+          "sha256": "10bbac4f47d0d2a0ffa844cf59770b1eadbf44e785d68c11562ec02921e11d84",
+          "kind": "apk",
+          "license": "ISC",
+          "source": "https://tmux.github.io",
+          "origin": "tmux",
+          "index_checksum": "Q1jYwMScvfiUrWi7ztIQH7d2UHaj4="
+        },
+        {
+          "id": "openssh-client-default",
+          "package": "openssh-client-default",
+          "version": "10.0_p1-r10",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/openssh-client-default-10.0_p1-r10.apk",
+          "size": 384868,
+          "sha256": "ea33240684ec7db3a485136d4e3c2101e78b9150ae4a94652bb5efed67f9d01a",
+          "kind": "apk",
+          "license": "SSH-OpenSSH",
+          "source": "https://www.openssh.com/portable.html",
+          "origin": "openssh",
+          "index_checksum": "Q1mvEPo9BHEjTq7n9ZnEXI2mysF98="
+        },
+        {
+          "id": "openssh-keygen",
+          "package": "openssh-keygen",
+          "version": "10.0_p1-r10",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/openssh-keygen-10.0_p1-r10.apk",
+          "size": 207013,
+          "sha256": "fc987a5cc9edea62c5b6caa57ba5c9444952939ab93ae5dbb75ed2c0f15f4fa7",
+          "kind": "apk",
+          "license": "SSH-OpenSSH",
+          "source": "https://www.openssh.com/portable.html",
+          "origin": "openssh",
+          "index_checksum": "Q1aHKFm/zMmAD5eO/v3IqxoRzvdAU="
+        },
+        {
+          "id": "openssh-sftp-server",
+          "package": "openssh-sftp-server",
+          "version": "10.0_p1-r10",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/openssh-sftp-server-10.0_p1-r10.apk",
+          "size": 61582,
+          "sha256": "d2c6698615387c9e9cd59f827c0f10ca8c36e42cea7ebe51b327e68424303542",
+          "kind": "apk",
+          "license": "SSH-OpenSSH",
+          "source": "https://www.openssh.com/portable.html",
+          "origin": "openssh",
+          "index_checksum": "Q1MahhjWQ40YXRtvYg6MaW+Ce+k9k="
+        },
+        {
+          "id": "libevent",
+          "package": "libevent",
+          "version": "2.1.13-r0",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libevent-2.1.13-r0.apk",
+          "size": 283527,
+          "sha256": "3f90298882aa3a15f5e2eaef27985f2ad3f1dc909fbb3c96787d6cdc0eae8402",
+          "kind": "apk",
+          "license": "BSD-3-Clause",
+          "source": "https://libevent.org/",
+          "origin": "libevent",
+          "index_checksum": "Q13Dtr68dMGkXoMEB/cYuP9+9TVzA="
+        },
+        {
+          "id": "openssh-client-common",
+          "package": "openssh-client-common",
+          "version": "10.0_p1-r10",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/openssh-client-common-10.0_p1-r10.apk",
+          "size": 864191,
+          "sha256": "1c7fe78682f1730546585f0aab360996f31ddacc38897fc3023dce81aa00e93c",
+          "kind": "apk",
+          "license": "SSH-OpenSSH",
+          "source": "https://www.openssh.com/portable.html",
+          "origin": "openssh",
+          "index_checksum": "Q1avUaFzmhtfrUZnDhNFwMeR0NmvQ="
+        },
+        {
+          "id": "libedit",
+          "package": "libedit",
+          "version": "20250104.3.1-r1",
+          "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libedit-20250104.3.1-r1.apk",
+          "size": 76926,
+          "sha256": "e2df23c675224c58983636b66ad418affc426406c0cf506056c20ec404685fc6",
+          "kind": "apk",
+          "license": "BSD-3-Clause",
+          "source": "https://www.thrysoee.dk/editline",
+          "origin": "libedit",
+          "index_checksum": "Q1t9DEweADS2blO3cMVTPIxl66NGQ="
         }
       ],
       "executables": {
@@ -1706,7 +1893,12 @@
         "git": "usr/bin/git",
         "python": "usr/bin/python3",
         "node": "usr/bin/node",
-        "pyright": "opt/pyright/index.js"
+        "pyright": "opt/pyright/index.js",
+        "tmux": "usr/bin/tmux",
+        "ssh": "usr/bin/ssh",
+        "scp": "usr/bin/scp",
+        "sftp": "usr/bin/sftp",
+        "ssh-keygen": "usr/bin/ssh-keygen"
       }
     }
   }

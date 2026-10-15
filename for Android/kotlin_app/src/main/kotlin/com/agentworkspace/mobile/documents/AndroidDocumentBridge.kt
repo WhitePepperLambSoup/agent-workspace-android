@@ -46,6 +46,9 @@ import kotlin.math.min
 object AndroidDocumentBridge {
     private const val MAX_IMAGE_BYTES = 5L * 1024 * 1024
     private const val MAX_RENDER_PAGES = 8
+    /** A conversation exported as pictures: at most this many pages, each picture at most this tall. */
+    private const val LONG_IMAGE_PAGES = 60
+    private const val LONG_IMAGE_PART = 12_000
     private const val MAX_DIMENSION = 1600
     private const val MAX_TEXT_CHARS = 262144
     private const val MAX_OUTPUT_PAGES = 200
@@ -54,11 +57,14 @@ object AndroidDocumentBridge {
     private val jobs = ConcurrentHashMap<String, Job>()
     private class Job(val root: File) { val lock = ReentrantLock() }
     private class DocumentError(val code: String, message: String) : RuntimeException(message)
+    private const val TYPESET_TIMEOUT_MS = 120_000L
     @Volatile private var tempRoot: File? = null
     @Volatile private var initializationError: String? = null
+    @Volatile private var appContext: Context? = null
 
     @JvmStatic @Synchronized
     fun initialize(context: Context) {
+        appContext = context.applicationContext
         try {
             val cache = context.applicationContext.cacheDir.canonicalFile
             val root = File(cache, "native-document-tools")
@@ -77,6 +83,7 @@ object AndroidDocumentBridge {
     @JvmStatic
     fun status(): String = JSONObject().put("available", tempRoot != null)
         .put("render_pdf", tempRoot != null).put("create_pdf", tempRoot != null)
+        .put("create_pdf_formats", JSONArray(listOf("text", "markdown", "latex")))
         .put("ocr", tempRoot != null).put("ocr_engine", "mlkit_bundled_chinese")
         .put("ocr_offline", true).put("temp_root", tempRoot?.path ?: JSONObject.NULL)
         .put("reason", initializationError ?: JSONObject.NULL)
@@ -116,6 +123,7 @@ object AndroidDocumentBridge {
                 when (text(request, "action", 32)) {
                     "render_pdf" -> render(job, id, request)
                     "create_pdf" -> create(job, id, request)
+                    "long_image" -> longImage(job, id, request)
                     else -> throw DocumentError("invalid_arguments", "Unsupported PDF action")
                 }.toString()
             } finally { job.lock.unlock() }
@@ -206,6 +214,76 @@ object AndroidDocumentBridge {
             checkedFile(job, "input.pdf")
             return ParcelFileDescriptor.dup(descriptor)
         } finally { Os.close(descriptor) }
+    }
+
+    /**
+     * The job's PDF as one long picture to share (a conversation exported as an image): every page at
+     * [width] pixels, its blank top and bottom cut away so the text runs on, joined top to bottom. A
+     * very long one becomes several pictures of at most [LONG_IMAGE_PART] pixels each, as JPEG.
+     */
+    private fun longImage(job: Job, id: String, request: JSONObject): JSONObject {
+        fields(request, setOf("width"))
+        val width = integer(request, "width", 1080, 480, 1440)
+        val outputs = JSONArray()
+        val descriptor = readPdf(job)
+        try {
+            PdfRenderer(descriptor).use { renderer ->
+                val total = renderer.pageCount
+                if (total !in 1..LONG_IMAGE_PAGES) throw DocumentError("invalid_pdf", "A long image takes 1 to $LONG_IMAGE_PAGES pages")
+                val margin = width / 18
+                val strips = ArrayList<Bitmap>()
+                fun flush() {
+                    if (strips.isEmpty()) return
+                    val height = strips.sumOf { it.height } + margin * 2
+                    val image = Bitmap.createBitmap(width, height, Bitmap.Config.RGB_565)
+                    try {
+                        image.eraseColor(Color.WHITE)
+                        val canvas = android.graphics.Canvas(image)
+                        var top = margin
+                        strips.forEach { canvas.drawBitmap(it, 0f, top.toFloat(), null); top += it.height; it.recycle() }
+                        strips.clear()
+                        val file = checkedFile(job, "long-${outputs.length() + 1}.jpg")
+                        exclusiveOutput(file, MAX_IMAGE_BYTES).use {
+                            if (!image.compress(Bitmap.CompressFormat.JPEG, 90, it)) throw DocumentError("render_failed", "The long image could not be encoded")
+                        }
+                        outputs.put(JSONObject().put("path", file.path).put("width", width).put("height", height)
+                            .put("bytes", file.length()).put("media_type", "image/jpeg"))
+                    } finally { image.recycle() }
+                }
+                for (index in 0 until total) {
+                    interrupted()
+                    renderer.openPage(index).use { page ->
+                        val height = ceil(page.height * width.toDouble() / page.width).toInt().coerceIn(1, width * 3)
+                        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                        try {
+                            bitmap.eraseColor(Color.WHITE)
+                            page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                            val (first, last) = inkRows(bitmap) ?: return@use
+                            val from = (first - margin / 2).coerceAtLeast(0)
+                            val to = (last + margin / 2).coerceAtMost(height - 1)
+                            val strip = Bitmap.createBitmap(bitmap, 0, from, width, to - from + 1)
+                            if (strips.sumOf { it.height } + strip.height > LONG_IMAGE_PART) flush()
+                            strips.add(strip.copy(Bitmap.Config.RGB_565, false).also { if (strip !== bitmap) strip.recycle() })
+                        } finally { bitmap.recycle() }
+                    }
+                }
+                flush()
+                if (outputs.length() == 0) throw DocumentError("invalid_pdf", "The PDF has nothing to show")
+                return success(id).put("total_pages", total).put("outputs", outputs)
+            }
+        } finally { descriptor.close() }
+    }
+
+    /** The first and last rows of [bitmap] with anything but white on them, or null for a blank page. */
+    private fun inkRows(bitmap: Bitmap): Pair<Int, Int>? {
+        val row = IntArray(bitmap.width)
+        fun inked(y: Int): Boolean {
+            bitmap.getPixels(row, 0, bitmap.width, 0, y, bitmap.width, 1)
+            return row.any { (it and 0xFF) < 245 || ((it shr 8) and 0xFF) < 245 || ((it shr 16) and 0xFF) < 245 }
+        }
+        val first = (0 until bitmap.height).firstOrNull(::inked) ?: return null
+        val last = (bitmap.height - 1 downTo first).first(::inked)
+        return first to last
     }
 
     private fun render(job: Job, id: String, request: JSONObject): JSONObject {
@@ -303,13 +381,20 @@ object AndroidDocumentBridge {
     }
 
     private fun create(job: Job, id: String, request: JSONObject): JSONObject {
-        fields(request, setOf("title", "content", "page_size", "font_size"))
+        fields(request, setOf("title", "content", "page_size", "font_size", "format"))
+        val format = if (request.has("format")) text(request, "format", 16) else "text"
+        if (format !in setOf("text", "markdown", "latex"))
+            throw DocumentError("invalid_arguments", "format must be text, markdown or latex")
+        if (format != "text") return typeset(job, id, request, format)
         val content = text(request, "content", MAX_TEXT_CHARS)
         val title = if (request.has("title")) text(request, "title", 1024, allowEmpty = true) else ""
         val paper = if (request.has("page_size")) text(request, "page_size", 16) else "A4"
         if (paper != "A4") throw DocumentError("invalid_arguments", "PDF generation supports A4 pages")
         val font = integer(request, "font_size", 12, 8, 28)
-        val text = (if (title.isEmpty()) "" else "$title\n\n") + content.replace("\r\n", "\n").replace('\r', '\n')
+        // Trailing blank lines would only start an empty last page (a model then "fixes" the
+        // length of a document that already fits on one page).
+        val text = ((if (title.isEmpty()) "" else "$title\n\n") + content.replace("\r\n", "\n").replace('\r', '\n'))
+            .trimEnd().ifEmpty { throw DocumentError("invalid_arguments", "PDF content is blank") }
         val paint = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
             color = Color.BLACK
             textSize = font.toFloat()
@@ -360,6 +445,45 @@ object AndroidDocumentBridge {
                 .put("font", pdfFont.second).put("unicode_layout", true)
         } finally {
             document.close()
+            Files.deleteIfExists(pending.toPath())
+        }
+    }
+
+    /** Markdown or a LaTeX document, typeset with its formulas by the app's page and printed (see [HtmlPdfTypesetter]). */
+    private fun typeset(job: Job, id: String, request: JSONObject, format: String): JSONObject {
+        val content = text(request, "content", MAX_TEXT_CHARS)
+        val title = if (request.has("title")) text(request, "title", 1024, allowEmpty = true) else ""
+        val paper = if (request.has("page_size")) text(request, "page_size", 16) else "A4"
+        if (paper != "A4") throw DocumentError("invalid_arguments", "PDF generation supports A4 pages")
+        val font = integer(request, "font_size", 12, 8, 28)
+        val context = appContext ?: throw DocumentError("unavailable", "Initialize PDF tools first")
+        val output = checkedFile(job, "output.pdf")
+        if (Files.exists(output.toPath(), LinkOption.NOFOLLOW_LINKS))
+            throw DocumentError("output_exists", "Use a new PDF job for another generated document")
+        val pending = checkedFile(job, "output.pending")
+        try {
+            val descriptor = Os.open(pending.path, OsConstants.O_RDWR or OsConstants.O_CREAT or OsConstants.O_EXCL or
+                OsConstants.O_NOFOLLOW or OsConstants.O_CLOEXEC, 384)
+            val writable = try { ParcelFileDescriptor.dup(descriptor) } finally { Os.close(descriptor) }
+            val report = try {
+                HtmlPdfTypesetter.typeset(context, JSONObject().put("format", format).put("title", title)
+                    .put("content", content).put("font_size", font), writable, TYPESET_TIMEOUT_MS)
+            } catch (failure: HtmlPdfTypesetter.Failure) {
+                throw DocumentError("typeset_failed", failure.message ?: "Typesetting failed")
+            }
+            interrupted()
+            val pages = ParcelFileDescriptor.open(pending, ParcelFileDescriptor.MODE_READ_ONLY).use { readable ->
+                PdfRenderer(ParcelFileDescriptor.dup(readable.fileDescriptor)).use { it.pageCount }
+            }
+            if (pages < 1) throw DocumentError("typeset_failed", "The typeset PDF has no pages")
+            if (pages > MAX_OUTPUT_PAGES) throw DocumentError("page_limit", "PDF content exceeds 200 pages")
+            checkedFile(job, "output.pdf")
+            Files.move(pending.toPath(), output.toPath(), StandardCopyOption.ATOMIC_MOVE)
+            return success(id).put("total_pages", pages).put("page_size", "A4").put("format", format)
+                .put("outputs", JSONArray().put(JSONObject().put("path", output.path)
+                    .put("media_type", "application/pdf").put("bytes", output.length())))
+                .put("math_errors", report.optInt("math_errors"))
+        } finally {
             Files.deleteIfExists(pending.toPath())
         }
     }

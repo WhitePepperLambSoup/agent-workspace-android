@@ -48,7 +48,9 @@
       <div id="taskStatusBar" hidden><span id="taskStateLabel"></span><button id="btnResumeTask" class="text-action" type="button" hidden><span data-icon="play"></span>恢复任务</button><button id="btnRetryTask" class="text-action" type="button" hidden><span data-icon="refresh-cw"></span>重试任务</button><button id="btnReconnect" class="text-action" type="button" hidden><span data-icon="refresh-cw"></span>重新连接</button></div>
       <div id="editBanner" class="edit-banner" role="status" hidden><span data-icon="pencil"></span><span>正在编辑之前的消息：发送后会替换它和之后的对话（已改动的文件不会撤销）</span><button id="btnCancelEdit" class="text-action" type="button">取消</button></div>
       <button id="btnImportNotice" class="text-action import-notice" type="button" hidden><span data-icon="paperclip"></span><span id="importNoticeText"></span></button>
-      <div id="linkClipNotice" class="link-clip" role="status" hidden><span data-icon="link"></span><span id="linkClipText"></span><button id="btnLinkClipSave" class="text-action" type="button">存入知识库</button><button id="btnLinkClipDismiss" class="icon-button" type="button" title="关闭" aria-label="关闭"><span data-icon="x"></span></button></div>
+      <div id="backgroundNotice" class="link-clip background-notice" role="status" hidden><span data-icon="battery-medium"></span><span id="backgroundNoticeText"></span><button id="btnBackgroundFix" class="text-action" type="button">允许后台运行</button><button id="btnBackgroundDismiss" class="icon-button" type="button" title="关闭" aria-label="关闭"><span data-icon="x"></span></button></div>
+      <div id="linkClipNotice" class="link-clip" role="status" hidden><span data-icon="link"></span><span id="linkClipText"></span><button id="btnLinkClipSave" class="text-action" type="button">存入知识库</button><button id="btnLinkClipSkills" class="text-action" type="button" hidden>导入技能包</button><button id="btnLinkClipDismiss" class="icon-button" type="button" title="关闭" aria-label="关闭"><span data-icon="x"></span></button></div>
+      <div id="mentionPopup" class="mention-popup" role="listbox" aria-label="选择" hidden></div>
       <div class="composer">
         <div id="attachmentList" aria-live="polite"></div>
         <input type="file" id="filePickerInput" hidden multiple>
@@ -60,9 +62,11 @@
             <button id="btnAttachPhotos" class="menu-row" type="button" role="menuitem" hidden><span data-icon="image-plus"></span><span>照片</span></button>
             <button id="btnAttachFiles" class="menu-row" type="button" role="menuitem"><span data-icon="paperclip"></span><span>选择文件</span></button>
             <button id="btnAttachVoiceNote" class="menu-row" type="button" role="menuitem" hidden><span data-icon="mic"></span><span>录音速记</span></button>
+            <button id="btnVoiceConversation" class="menu-row" type="button" role="menuitem"><span data-icon="mic"></span><span>连续语音对话</span></button>
           </div>
           <button id="modelBar" class="composer-chip" type="button" aria-label="模型与思考" title="模型与思考" aria-haspopup="dialog" aria-expanded="false" aria-controls="modelSheet"><span data-icon="cpu"></span><span id="modelSummary">正在读取模型...</span></button>
           <button id="btnModeChip" class="composer-chip mode-chip" type="button" aria-label="执行权限" title="执行权限"><span data-icon="shield"></span><span id="executionSummary"></span></button>
+          <button id="btnPlanChip" class="composer-chip plan-chip" type="button" aria-pressed="false" aria-label="计划模式：先给计划，你批准后再动手" title="计划模式：先给计划，你批准后再动手"><span data-icon="list-checks"></span><span class="plan-chip-label">计划</span></button>
           <button id="btnKnowledgeChip" class="composer-chip knowledge-chip" type="button" aria-label="本对话使用的知识库" title="本对话使用的知识库" hidden><span data-icon="book-open"></span><span id="knowledgeChipLabel"></span><span id="knowledgeChipBadge" hidden></span></button>
           <span class="composer-spacer"></span>
           <button id="btnVoiceInput" class="icon-button" type="button" title="语音输入" aria-label="语音输入" hidden><span data-icon="mic"></span></button>
@@ -99,8 +103,16 @@
       <div class="sheet-grip" aria-hidden="true"></div>
       <div class="model-sheet-header">
         <span class="model-sheet-icon" data-icon="cpu"></span>
-        <div class="model-sheet-heading"><h2 id="modelSheetTitle">模型与思考</h2><span id="modelSheetModel"></span></div>
+        <div class="model-sheet-heading"><h2 id="modelSheetTitle">模型与思考</h2><button id="modelSheetModel" type="button" aria-expanded="false" aria-controls="modelSheetPicker" title="换一个模型"></button></div>
         <button id="btnModelSheetMore" class="text-action" type="button">更多设置<span data-icon="chevron-right"></span></button>
+      </div>
+      <div id="modelSheetPicker" class="model-sheet-picker" hidden>
+        <div class="model-sheet-search">
+          <input id="modelSheetSearch" type="search" placeholder="搜索模型" aria-label="搜索模型" autocomplete="off" spellcheck="false">
+          <button id="btnModelSheetRefresh" class="icon-button" type="button" title="从服务商获取模型列表" aria-label="从服务商获取模型列表"><span data-icon="refresh-cw"></span></button>
+        </div>
+        <div id="modelSheetList" class="model-sheet-list" role="listbox" aria-label="模型"></div>
+        <p id="modelSheetListStatus" class="setting-hint" role="status"></p>
       </div>
       <div id="modelSheetProfiles" class="model-sheet-profiles" role="radiogroup" aria-label="模型配置" hidden></div>
       <div id="effortControl" class="effort-control" data-auto="true">
@@ -172,6 +184,7 @@
           <div class="menu-group">
             <button id="btnDoctorPage" class="menu-row" type="button" data-keywords="无障碍 诊断 工具链 浏览器 电池优化 后台运行 闹钟 日历 日程 python git accessibility toolchain battery alarm calendar"><span data-icon="activity"></span><span>设备与工具</span><span data-icon="chevron-right"></span></button>
             <button id="btnServicesPage" class="menu-row" type="button"><span data-icon="server"></span><span>后台服务<small id="menuServicesSummary">AI 启动的、一直运行的程序</small></span><span data-icon="chevron-right"></span></button>
+            <button id="btnSkillsPage" class="menu-row" type="button" data-keywords="技能包 导入 github 更新 skill skills pack import update"><span data-icon="sparkles"></span><span>技能</span><span data-icon="chevron-right"></span></button>
             <button id="btnExtensionsPage" class="menu-row" type="button"><span data-icon="puzzle"></span><span>MCP 与扩展</span><span data-icon="chevron-right"></span></button>
             <button id="btnConnectionsPage" class="menu-row" type="button" data-keywords="电脑 配对 局域网 远程 pc pair remote"><span data-icon="monitor-smartphone"></span><span>设备连接</span><span data-icon="chevron-right"></span></button>
             <button id="btnOutboxPage" class="menu-row" type="button"><span data-icon="send"></span><span>待发送与接力</span><span data-icon="chevron-right"></span></button>
@@ -199,9 +212,30 @@
           <p id="profileStatus" class="page-status" role="status"></p>
         </div>
         <label for="modelInput">模型</label><input id="modelInput" type="text" list="modelOptions" autocomplete="off" spellcheck="false" aria-label="模型"><datalist id="modelOptions"></datalist>
+        <div class="page-toolbar"><button id="btnRefreshModels" class="button-secondary" type="button" hidden><span data-icon="refresh-cw"></span>从服务商获取模型列表</button></div>
+        <p id="modelListStatus" class="page-status" role="status"></p>
         <label for="effortSelector">思考强度</label><select id="effortSelector" aria-label="思考强度"></select><p id="effortHint" class="setting-hint"></p>
         <label class="toggle-row" for="contextSummaryToggle"><span id="contextSummaryLabel">自动摘要压缩上下文</span><input id="contextSummaryToggle" type="checkbox"></label>
-        <p id="contextSummaryHint" class="setting-hint">临近容量时由当前模型总结较早记录。会额外调用模型，可能产生 Token 费用；摘要可能遗漏细节，原始会话仍保留。</p>
+        <p id="contextSummaryHint" class="setting-hint">临近容量时由当前模型（或下面设的摘要模型）总结较早记录。会额外调用模型，可能产生 Token 费用；摘要可能遗漏细节，原始会话仍保留。</p>
+        <div id="modelRolesSection" class="management-section">
+          <strong>按用途分配模型</strong>
+          <p class="setting-hint">手机操控和摘要压缩可以用同一服务商下更便宜的模型，普通对话仍用上面的主模型。留空就跟主模型一样；在对话或操控小窗里临时选的模型优先。使用本机模型时不适用。</p>
+          <label for="phoneModelInput">手机操控</label><input id="phoneModelInput" type="text" list="modelOptions" autocomplete="off" spellcheck="false" placeholder="跟主模型一样">
+          <label for="summaryModelInput">摘要压缩</label><input id="summaryModelInput" type="text" list="modelOptions" autocomplete="off" spellcheck="false" placeholder="跟主模型一样">
+          <div class="page-toolbar"><button id="btnSaveModelRoles" class="button-secondary" type="button"><span data-icon="save"></span>保存用途分配</button></div>
+          <p id="modelRolesStatus" class="page-status" role="status"></p>
+        </div>
+        <div id="providerExtrasSection" class="management-section">
+          <strong>网关与备用 Key</strong>
+          <p class="setting-hint">走网关或代理需要额外请求头时填在这里；同一服务商有多个 Key 时，一个被限流或失效会自动换下一个。都按当前服务商地址加密保存在手机里，保存后不再显示内容，重启引擎后生效。</p>
+          <p id="providerExtrasState" class="setting-hint"></p>
+          <label for="providerHeaders">自定义请求头（每行一个，例如 X-Team: abc）</label>
+          <textarea id="providerHeaders" rows="2" autocomplete="off" spellcheck="false"></textarea>
+          <label for="providerKeys">备用 API Key（每行一个）</label>
+          <textarea id="providerKeys" rows="2" autocomplete="off" spellcheck="false"></textarea>
+          <div class="page-toolbar"><button id="btnSaveProviderExtras" class="button-secondary" type="button"><span data-icon="save"></span>保存（会替换之前的设置）</button></div>
+          <p id="providerExtrasStatus" class="page-status" role="status"></p>
+        </div>
       </div>
       <div id="settingsAttachments" class="settings-page" hidden>
         <div class="page-toolbar"><button id="btnPickImportFiles" class="icon-button" type="button" title="选择多个文件" aria-label="选择多个文件"><span data-icon="paperclip"></span></button><strong>附件收件箱</strong><button id="btnRefreshImports" class="icon-button" type="button" title="刷新收件箱" aria-label="刷新收件箱"><span data-icon="refresh-cw"></span></button></div>
@@ -252,7 +286,7 @@
           <button class="accent-swatch" type="button" role="radio" data-accent-option="amber" aria-label="琥珀" title="琥珀" style="--swatch: #b45309"></button>
           <button class="accent-swatch" type="button" role="radio" data-accent-option="rose" aria-label="玫瑰" title="玫瑰" style="--swatch: #e11d48"></button>
         </div>
-        <label for="languageSelector">语言</label><select id="languageSelector" aria-label="语言"><option value="auto">跟随系统</option><option value="zh">中文</option><option value="en">English</option></select>
+        <label for="languageSelector">语言</label><select id="languageSelector" aria-label="语言"><option value="auto">跟随系统</option><option value="zh">简体中文</option><option value="zh-Hant">繁體中文</option><option value="en">English</option></select>
         <p class="setting-hint">切换语言后界面会重新载入；对话内容与模型回复不会被翻译。</p>
         <label for="themeSelector">外观</label><select id="themeSelector" aria-label="外观"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select>
         <label for="motionSelector">动画</label><select id="motionSelector" aria-label="动画"><option value="auto">跟随系统</option><option value="full">完整</option><option value="reduced">精简</option><option value="off">关闭</option></select>
@@ -260,6 +294,13 @@
         <label class="toggle-row" for="quickActionsToggle"><span>快捷任务</span><input id="quickActionsToggle" type="checkbox" checked></label>
         <button id="btnQuickTasksPage" class="menu-row" type="button"><span data-icon="zap"></span><span>编辑快捷任务<small>自定义输入框上方的快捷按钮</small></span><span data-icon="chevron-right"></span></button>
         <label class="toggle-row" for="hapticsToggle"><span>触觉反馈</span><input id="hapticsToggle" type="checkbox" checked></label>
+        <div id="appLockSection" class="management-section" hidden>
+          <strong>应用锁</strong>
+          <label class="toggle-row" for="appLockToggle"><span>打开应用时验证指纹、面容或锁屏密码</span><input id="appLockToggle" type="checkbox"></label>
+          <label for="appLockDelay">离开多久后需要解锁</label>
+          <select id="appLockDelay"><option value="0">每次都要</option><option value="1">1 分钟</option><option value="5">5 分钟</option></select>
+          <p id="appLockHint" class="setting-hint">对话、记忆和 API 设置都存在这台手机上。开启后，重新打开应用或从后台回来时需要解锁；悬浮球、圈选提问这些快捷入口不受影响。</p>
+        </div>
       </div>
       <div id="settingsBackup" class="settings-page" hidden>
         <p class="setting-hint">备份包含全部会话、记忆、定时任务与流程、内置工作区的文件，以及模型和界面设置。不包含 API 密钥、已下载的本机模型和开发工具链；放在手机公共文件夹里的工作区本来就在你的文件中，也不会重复打包。</p>
@@ -284,6 +325,16 @@
           <div class="page-toolbar"><button class="button-primary" type="submit"><span data-icon="plus"></span>添加</button></div>
         </form>
         <div class="management-section"><strong>最近触发</strong><div id="notificationRuleLog" class="management-list"></div></div>
+        <div id="notificationDigestSection" class="management-section">
+          <strong>通知摘要</strong>
+          <p class="setting-hint">打开后，手机收到的通知会记在手机上（48 小时后自动删除；验证码不记录；不让 AI 碰的应用不记录），AI 可以把它们整理成“要处理、可稍后、广告”，并把取件码、航班车次、会议变更、账单这类信息单独列出来。整理时通知内容会交给当前模型，用手机上的本地模型就完全不出手机。</p>
+          <label class="toggle-row" for="notificationDigestToggle"><span>记录通知用于摘要</span><input id="notificationDigestToggle" type="checkbox"></label>
+          <div class="page-toolbar">
+            <button id="btnDigestNow" class="button-secondary" type="button"><span data-icon="list-checks"></span>现在整理一次</button>
+            <button id="btnDigestSchedule" class="button-secondary" type="button"><span data-icon="clock"></span>每 2 小时自动整理</button>
+          </div>
+          <p id="notificationDigestStatus" class="page-status" role="status"></p>
+        </div>
       </div>
       <div id="settingsGlobalEntry" class="settings-page" hidden>
         <p class="setting-hint">在手机的任何地方都能快速开一个新对话。</p>
@@ -298,6 +349,12 @@
           <button id="btnPinWidgetQuickTasks" class="menu-row" type="button" data-widget="quick_tasks"><span data-icon="plus"></span><span>添加“常用任务”小组件<small>一键开始你的常用任务</small></span><span data-icon="chevron-right"></span></button>
         </div>
         <p class="setting-hint">也可以长按桌面空白处，在“小组件”里找到 Agent Workspace。</p>
+        <div id="externalEntrySection" class="management-section" hidden>
+          <strong>其他应用发起任务</strong>
+          <label class="toggle-row" for="externalEntryToggle"><span>允许 Tasker、快捷指令等应用直接发起任务</span><input id="externalEntryToggle" type="checkbox"></label>
+          <p class="setting-hint">关闭时，每次有应用发起任务都会先弹窗让你确认，并显示来源和内容。发起的任务和平时一样，需要确认的操作仍会询问。</p>
+          <p class="setting-hint">用法：发送 Intent，动作 <code>com.agentworkspace.mobile.action.RUN_TASK</code>，目标 Activity <code>com.agentworkspace.mobile/.entry.ExternalTaskActivity</code>，附加文本 <code>prompt</code>（要做的事）；要操作手机再加布尔值 <code>phone_control</code> = true。</p>
+        </div>
         <p id="globalEntryStatus" class="page-status" role="status"></p>
       </div>
       <div id="settingsServices" class="settings-page" hidden>
@@ -314,9 +371,10 @@
         <form id="memoryForm" class="management-form">
           <label id="memoryFormLabel" for="memoryContent">添加一条记忆</label>
           <textarea id="memoryContent" rows="2" maxlength="200" required placeholder="例如：我在杭州工作，回答请尽量简洁"></textarea>
-          <div class="page-toolbar"><span id="memoryCounter"></span><button id="btnCancelMemoryEdit" class="button-secondary" type="button" hidden>取消</button><button id="btnSaveMemory" class="button-primary" type="submit"><span data-icon="plus"></span><span id="memorySubmitLabel">添加</span></button></div>
+          <div class="page-toolbar"><span id="memoryCounter"></span><select id="memoryTopic" aria-label="主题"><option value="">自动分类</option><option value="profile">个人信息</option><option value="preferences">偏好习惯</option><option value="work">工作</option><option value="life">生活</option><option value="people">家人朋友</option><option value="projects">项目</option><option value="other">其他</option></select><button id="btnCancelMemoryEdit" class="button-secondary" type="button" hidden>取消</button><button id="btnSaveMemory" class="button-primary" type="submit"><span data-icon="plus"></span><span id="memorySubmitLabel">添加</span></button></div>
         </form>
         <p id="memoryStatus" class="page-status" role="status"></p>
+        <div class="memory-browse"><input id="memorySearch" type="search" placeholder="搜索记忆" aria-label="搜索记忆" autocomplete="off"><div id="memoryTopics" class="memory-topics" role="group" aria-label="按主题查看"></div></div>
         <div id="memoryList" class="management-list"></div>
         <div class="page-toolbar"><button id="btnClearMemory" class="button-secondary" type="button"><span data-icon="trash-2"></span>清空全部记忆</button></div>
       </div>
@@ -466,6 +524,24 @@
         <label class="toggle-row" for="liveScreenToggle"><span>实时画面</span><input id="liveScreenToggle" type="checkbox"></label>
         <p class="setting-hint">AI 操作手机时直接看当前画面：截图更快，画面在动（视频、动画）也能截到，Android 10 及以下也能截图。开启时系统会请你允许录制屏幕，状态栏会显示录屏标志；画面只留在手机上供 AI 截图用，半小时不用会自动关闭。</p>
         <label class="toggle-row" for="systemPaused"><span>暂停手机操作</span><input id="systemPaused" type="checkbox"></label>
+        <div id="blockedAppsSection" class="management-section" hidden>
+          <strong>不让 AI 操作的应用</strong>
+          <p class="setting-hint">这些应用在前台时，AI 不会读取屏幕，也不会点按、输入或滑动（比如银行、支付类应用）。</p>
+          <div id="blockedAppsList" class="management-list"></div>
+          <button id="btnAddBlockedApp" class="button-secondary" type="button"><span data-icon="plus"></span>添加应用</button>
+          <div id="blockedAppPicker" class="blocked-app-picker" hidden>
+            <input id="blockedAppSearch" type="search" placeholder="搜索应用" aria-label="搜索应用" autocomplete="off">
+            <div id="blockedAppChoices" class="management-list blocked-app-choices"></div>
+          </div>
+        </div>
+        <form id="hostedLimitsSection" class="management-section management-form">
+          <strong>托管上限</strong>
+          <p class="setting-hint">托管模式、定时任务和自动触发里操作手机时不会逐步问你，到达任一上限就停下，并告诉你做到了哪一步。付款、转账和支付密码在任何模式下都由你自己完成。</p>
+          <label for="hostedMaxSteps">最多步数</label><input id="hostedMaxSteps" type="number" min="5" max="300" step="1" inputmode="numeric">
+          <label for="hostedMaxMinutes">最长时间（分钟）</label><input id="hostedMaxMinutes" type="number" min="1" max="240" step="1" inputmode="numeric">
+          <button class="button-secondary" type="submit"><span data-icon="save"></span>保存上限</button>
+          <p id="hostedLimitsStatus" class="page-status" role="status"></p>
+        </form>
         <div class="page-toolbar"><button id="btnTakeover" class="button-secondary" type="button"><span data-icon="hand"></span>接管手机</button><button id="btnObserveScreen" class="icon-button" type="button" aria-label="读取当前屏幕" title="读取当前屏幕"><span data-icon="eye"></span></button></div>
         <pre id="systemObservation" class="management-output" hidden></pre><div id="doctorTools" class="management-list"></div>
         <div id="browserSection" class="management-section" hidden>
@@ -479,6 +555,12 @@
           <p class="setting-hint">说“明早 7 点叫我”或“20 分钟后提醒我”，AI 会在系统时钟里设好闹钟或计时，不需要授权。查看和添加日程需要允许访问日历；在「工作区」执行模式下，添加日程前会先请你确认。</p>
           <button id="btnCalendarAccess" class="menu-row" type="button"><span data-icon="calendar"></span><span>日历<small id="calendarAccessState"></small></span><span data-icon="chevron-right"></span></button>
         </div>
+        <div id="personalInfoSection" class="management-section" hidden>
+          <strong>联系人、位置与系统开关</strong>
+          <p class="setting-hint">允许后，AI 可以按名字查联系人的电话、查看手机当前位置。短信只会在短信应用里替你写好，由你自己点发送。音量、亮度、勿扰和媒体播放可以让 AI 调整（需要你确认）；Wi‑Fi 和蓝牙只能由你在弹出的面板里开关。</p>
+          <button id="btnContactsAccess" class="menu-row" type="button"><span data-icon="user-round"></span><span>联系人<small id="contactsAccessState"></small></span><span data-icon="chevron-right"></span></button>
+          <button id="btnLocationAccess" class="menu-row" type="button"><span data-icon="globe"></span><span>位置<small id="locationAccessState"></small></span><span data-icon="chevron-right"></span></button>
+        </div>
         <div class="management-section">
           <strong>可选开发工具链</strong><p id="toolchainStatus" class="page-status" role="status"></p><dl id="toolchainSummary" class="usage-summary"></dl>
           <p class="setting-hint">安装 Git、Python、Node 和 Python 语言服务。下载约 70 MB，安装后需重启引擎。</p>
@@ -488,6 +570,9 @@
         <div class="management-section">
           <strong>后台运行</strong><dl id="backgroundSummary" class="usage-summary"></dl>
           <p class="setting-hint">系统仍可能暂停后台进程。中断的操作需要检查状态后恢复。</p>
+          <p id="backgroundSteps" class="setting-hint" hidden></p>
+          <button id="btnAllowBackground" class="menu-row" type="button"><span data-icon="battery-medium"></span><span>允许后台运行</span><span data-icon="chevron-right"></span></button>
+          <button id="btnAutoStartSettings" class="menu-row" type="button"><span data-icon="settings"></span><span id="autoStartLabel">应用启动管理</span><span data-icon="chevron-right"></span></button>
           <button id="btnBatterySettings" class="menu-row" type="button"><span data-icon="activity"></span><span>电池优化设置</span><span data-icon="chevron-right"></span></button>
           <button id="btnBackgroundSettings" class="menu-row" type="button"><span data-icon="settings"></span><span>应用后台设置</span><span data-icon="chevron-right"></span></button>
         </div>
@@ -507,6 +592,35 @@
           <p id="diagnosticsStatus" class="page-status" role="status"></p>
         </div>
       </div>
+      <div id="settingsSkills" class="settings-page" hidden>
+        <button id="btnSkillsCheckUpdates" data-header-action class="icon-button" type="button" aria-label="检查技能更新" title="检查技能更新"><span data-icon="refresh-cw"></span></button>
+        <p id="skillsStatus" class="page-status" role="status"></p>
+        <p class="setting-hint">技能是写给 AI 的做事说明（比如「每天签到」怎么一步步做）。AI 只看到每个技能的名字和用途，遇到对应的请求时才读取全文。技能本身不能执行任何操作，AI 的每一步仍按你的确认规则执行。</p>
+        <div id="skillsOfficial" class="management-section">
+          <strong>官方技能</strong>
+          <p id="skillsOfficialStatus" class="setting-hint">读取中...</p>
+          <div id="skillsOfficialList" class="management-list"></div>
+          <button id="btnSkillsOfficial" class="button-primary" type="button" hidden><span data-icon="download"></span><span id="skillsOfficialAction">安装官方技能</span></button>
+        </div>
+        <div id="skillsList" class="management-list"></div>
+        <details id="skillsImportSection" class="management-section">
+          <summary>导入其他技能（非官方，未经测试）</summary>
+          <p class="setting-hint">别人仓库或文件里的技能没有经过本项目测试，可能写得不好，也可能引导 AI 做你不想做的事。只导入你信任的来源，安装前先看清每个技能的说明。</p>
+          <form id="skillsImportForm" class="management-form">
+            <label for="skillsGithubInput">从 GitHub 导入</label>
+            <input id="skillsGithubInput" maxlength="300" autocomplete="off" spellcheck="false" placeholder="owner/repo 或 github.com 链接">
+            <div class="page-toolbar"><button id="btnSkillsFetch" class="button-secondary" type="submit"><span data-icon="download"></span>获取</button><button id="btnSkillsFile" class="button-secondary" type="button"><span data-icon="upload"></span>从文件导入</button></div>
+            <input id="skillsFileInput" type="file" accept=".zip,.tgz,.gz,.md,application/zip" hidden>
+            <p class="setting-hint">优先使用仓库最新的 Release（附带的 .skillpack.zip，或源码包）；没有 Release 时用默认分支。文件可以是 zip、tar.gz 或单个 SKILL.md。</p>
+          </form>
+        </details>
+        <div id="skillsPreview" class="management-section" hidden>
+          <strong id="skillsPreviewTitle"></strong>
+          <p id="skillsPreviewSource" class="setting-hint"></p>
+          <div id="skillsPreviewList" class="management-list"></div>
+          <div class="page-toolbar"><button id="btnSkillsInstall" class="button-primary" type="button"><span data-icon="check"></span>安装</button><button id="btnSkillsCancel" class="button-secondary" type="button">取消</button></div>
+        </div>
+      </div>
       <div id="settingsExtensions" class="settings-page" hidden>
         <button id="btnExtensionsRefresh" data-header-action class="icon-button" type="button" aria-label="刷新扩展" title="刷新扩展"><span data-icon="refresh-cw"></span></button>
         <p id="extensionsStatus" class="page-status" role="status"></p><div id="extensionsList" class="management-list"></div>
@@ -514,14 +628,40 @@
       </div>
       <div id="settingsSchedules" class="settings-page" hidden>
         <p id="schedulesStatus" class="page-status" role="status"></p><div id="schedulesList" class="management-list"></div>
+        <div class="management-section">
+          <strong>每日早报</strong>
+          <p class="setting-hint">每天早上 8 点，在单独的「每日早报」对话里给你一份简报：今明两天的日程、所在城市的天气、昨天录音速记的要点、你提过的待办，最后说今天最该先做的事。完成后有通知。</p>
+          <button id="btnBriefingPreset" class="button-secondary" type="button"><span data-icon="sparkles"></span>添加每日早报</button>
+        </div>
         <form id="scheduleForm" class="management-form">
           <strong class="form-title">新建定时任务</strong>
           <label for="scheduleTitle">任务名称</label><input id="scheduleTitle" maxlength="100" required>
           <label for="schedulePrompt">任务指令</label><textarea id="schedulePrompt" rows="3" maxlength="16384" required></textarea>
           <label for="scheduleDue">执行时间</label><input id="scheduleDue" type="datetime-local" required>
           <label for="scheduleRepeat">重复</label><select id="scheduleRepeat"><option value="">仅一次</option><option value="3600">每小时</option><option value="86400">每天</option><option value="604800">每周</option></select>
+          <label class="toggle-row" for="schedulePhoneControl"><span>到点时操作手机（如打开应用签到）</span><input id="schedulePhoneControl" type="checkbox"></label>
+          <p class="setting-hint">到点时手机需要是解锁状态（息屏但没锁会自动亮屏）；锁着屏就跳过这一次。操作时不再逐步确认。</p>
           <button id="btnSaveSchedule" class="button-primary apply-button" type="submit"><span data-icon="plus"></span>创建定时任务</button>
         </form>
+        <div id="triggersSection" class="management-section">
+          <strong>自动触发</strong>
+          <p class="setting-hint">在这些时候自动执行一段指令或一个可复用流程，结果发到当前对话。同一个触发在冷却时间内只运行一次。</p>
+          <div id="triggersList" class="management-list"></div>
+          <form id="triggerForm" class="management-form">
+            <label for="triggerKind">什么时候</label>
+            <select id="triggerKind"><option value="charging">开始充电时</option><option value="wifi">连上 Wi‑Fi 时</option><option value="app_open">打开某个应用时</option></select>
+            <label for="triggerValue" id="triggerValueLabel">Wi‑Fi 名称（留空表示任意网络）</label>
+            <input id="triggerValue" type="text" maxlength="200" autocomplete="off" list="triggerApps"><datalist id="triggerApps"></datalist>
+            <label for="triggerWorkflow">做什么</label>
+            <select id="triggerWorkflow"><option value="">执行下面的指令</option></select>
+            <textarea id="triggerPrompt" rows="2" maxlength="4000" placeholder="例如：汇总一下今天的通知"></textarea>
+            <label class="toggle-row" for="triggerPhone"><span>需要操作手机</span><input id="triggerPhone" type="checkbox"></label>
+            <label for="triggerCooldown">冷却时间</label>
+            <select id="triggerCooldown"><option value="10">10 分钟</option><option value="30" selected>30 分钟</option><option value="60">1 小时</option><option value="240">4 小时</option><option value="1440">1 天</option></select>
+            <button class="button-secondary" type="submit"><span data-icon="plus"></span>添加自动触发</button>
+          </form>
+          <p id="triggersStatus" class="page-status" role="status"></p>
+        </div>
       </div>
       <div id="settingsConnections" class="settings-page" hidden>
         <p id="connectionsStatus" class="page-status" role="status"></p><div id="connectionsList" class="management-list"></div>
@@ -547,6 +687,13 @@
         <p id="outboxStatus" class="page-status" role="status"></p><div id="outboxList" class="management-list"></div>
       </div>
       <div id="settingsWorkflows" class="settings-page" hidden>
+        <div id="shortcutsSection" class="management-section">
+          <strong>快捷操作</strong>
+          <p class="setting-hint">AI 操作手机做完的事可以存成快捷操作：以后不用 AI，按记下的步骤直接做。可以改步骤、定时运行，或在「定时任务」里设成自动触发。</p>
+          <div id="shortcutsList" class="management-list"></div>
+          <button id="btnImportShortcut" class="button-secondary" type="button"><span data-icon="download"></span>导入分享码</button>
+          <p id="shortcutsStatus" class="page-status" role="status"></p>
+        </div>
         <p id="workflowsStatus" class="page-status" role="status"></p><div id="workflowsList" class="management-list"></div>
         <form id="workflowForm" class="management-form">
           <strong class="form-title">保存流程</strong>
@@ -574,6 +721,9 @@
         <label for="localMemorySelector">本机内存模式</label><select id="localMemorySelector" aria-label="本机内存模式"><option value="balanced">平衡</option><option value="extended">扩展（使用系统可用交换内存）</option></select>
         <label for="localThreadsInput">CPU 线程数（0 为自动）</label><input id="localThreadsInput" type="number" min="0" max="64" step="1" inputmode="numeric" value="0">
         <label for="localTimeoutInput">单次生成超时秒数（0 为自动）</label><input id="localTimeoutInput" type="number" min="0" max="7200" step="1" inputmode="numeric" value="0">
+        <label for="localAcceleratorSelector">推理设备</label><select id="localAcceleratorSelector" aria-label="推理设备" aria-describedby="localAcceleratorStatus" disabled><option value="auto">自动（支持时用 GPU，测试中）</option><option value="cpu">仅 CPU</option></select>
+        <p id="localAcceleratorStatus" class="setting-hint" role="status"></p>
+        <button id="btnRetryLocalGpu" class="button-secondary" type="button" hidden>重新尝试 GPU</button>
         <p class="setting-hint">自动值按可用于模型的内存（含系统可立即回收的部分）、模型上限和已测速度推荐。手动上下文保留所选容量，内存估算作为建议；实际分配失败会明确提示。扩展模式可使用系统剩余交换内存。</p>
         <p id="localContextHint" class="setting-hint">上下文按本机可用内存与模型上限决定。更改后会重启引擎。</p>
         <dl id="localDeviceRecommendation" class="usage-summary"></dl><button id="btnUseLocalRecommendation" class="button-secondary" type="button" aria-describedby="localDeviceStatus" disabled>填入推荐值</button>
@@ -583,7 +733,7 @@
           <dl id="localDeviceBenchmark" class="usage-summary"></dl>
         </details>
         <p id="localDeviceStatus" class="page-status" role="status"></p>
-        <p class="setting-hint">推荐先下载 Qwen3.5 0.8B Q4。本机 CPU 推理支持文字与工具调用；Qwen3.5 图片理解需配套视觉组件。模型按需下载，校验完成后才能使用。</p>
+        <p class="setting-hint">推荐先下载 Qwen3.5 0.8B Q4。本机推理支持文字与工具调用；Qwen3.5 图片理解需配套视觉组件。模型按需下载，校验完成后才能使用。</p>
         <label for="modelDownloadSource">模型下载来源</label>
         <select id="modelDownloadSource">
           <option value="auto">自动（推荐）</option>
@@ -605,9 +755,21 @@
       </div>
     </aside>
   </div>
+  <div id="sessionSheet" class="action-sheet" role="dialog" aria-modal="true" aria-labelledby="sessionSheetTitle" hidden>
+    <div class="action-sheet-panel">
+      <strong id="sessionSheetTitle"></strong>
+      <div id="sessionSheetActions" class="action-sheet-list"></div>
+      <div id="sessionSheetTags" class="session-tags-editor" hidden>
+        <div id="sessionTagChips" class="memory-topics"></div>
+        <div class="session-tag-input"><input id="sessionTagInput" type="text" maxlength="16" placeholder="新标签，例如：工作" aria-label="新标签" autocomplete="off"><button id="btnAddSessionTag" class="button-secondary" type="button">添加</button></div>
+      </div>
+      <p id="sessionSheetStatus" class="page-status" role="status"></p>
+    </div>
+  </div>
   <script src="/static/compat.js"></script>
   <script src="/static/mobile-vendor.js"></script>
-  <script src="/static/i18n.js"></script>
+  <script src="/static/i18n-zh-hant.js"></script>
+<script src="/static/i18n.js"></script>
   <script src="/static/motion.js"></script>
   <script src="/static/app.js"></script>
   <script src="/static/management.js"></script>

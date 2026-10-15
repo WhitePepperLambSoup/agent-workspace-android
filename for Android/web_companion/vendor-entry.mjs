@@ -51,6 +51,19 @@ window.MobileUi = {
   renderMarkdown(text) {
     return toHtml(renderer.runSync(renderer.parse(normalizeMath(text))));
   },
+  // PDFs (create_pdf): KaTeX's HTML output with its own fonts looks like LaTeX on every WebView
+  // version and prints exactly; `macros` carries a LaTeX document's \newcommand definitions.
+  renderDocument(text, macros = {}) {
+    const documentRenderer = unified()
+      .use(remarkParse)
+      .use(remarkGfm)
+      .use(remarkMath)
+      .use(rawHtmlAsText)
+      .use(remarkRehype)
+      .use(rehypeSanitize)
+      .use(rehypeKatex, { output: "html", strict: "ignore", macros: { ...macros } });
+    return toHtml(documentRenderer.runSync(documentRenderer.parse(normalizeMath(text))));
+  },
   iconMarkup(name) {
     const children = (iconNodes[name] || []).map(([tag, attributes]) => {
       const values = Object.entries(attributes).filter(([key]) => key !== "key").map(([key, value]) => `${key}="${escapeAttribute(value)}"`).join(" ");

@@ -52,7 +52,9 @@ object LocalModelBenchmark {
 
     @Synchronized fun start(context: Context, options: JSONObject): JSONObject {
         check(activeId == null) { "已有设备测试正在运行" }
-        require(options.keys().asSequence().all { it in setOf("model_id", "context_tokens", "memory_mode", "threads", "timeout_seconds") })
+        require(options.keys().asSequence().all { it in setOf("model_id", "context_tokens", "memory_mode", "threads", "timeout_seconds", "accelerator") })
+        val accelerator = options.optString("accelerator", "").ifEmpty { null }
+        require(accelerator == null || accelerator in LocalModelGpu.modes) { "Invalid local model accelerator" }
         val model = options.getString("model_id")
         val maximum = LocalModelContext.modelMaximumTokens(model)
         val configured = LocalModelPerformance.integer(options, "context_tokens", maximum)
@@ -68,9 +70,10 @@ object LocalModelBenchmark {
             .put("model_id", model).put("selected_context_tokens", configured)
             .put("configured_threads", threads).put("configured_timeout_seconds", timeout)
             .put("test_timeout_seconds", 90).put("tested_full_context", false)
+            .put("requested_accelerator", accelerator ?: JSONObject.NULL)
             .put("started_at_ms", System.currentTimeMillis())
         save(context, initial)
-        worker.execute { run(context.applicationContext, initial, model, configured, memoryMode, threads) }
+        worker.execute { run(context.applicationContext, initial, model, configured, memoryMode, threads, accelerator) }
         return JSONObject().put("ok", true).put("benchmark", initial)
     }
 
@@ -85,7 +88,7 @@ object LocalModelBenchmark {
     }
 
     private fun run(context: Context, initial: JSONObject, model: String, configured: Int,
-                    memoryMode: String, requestedThreads: Int) {
+                    memoryMode: String, requestedThreads: Int, accelerator: String?) {
         val result = JSONObject(initial.toString())
         val tokenFile = File(context.filesDir, "serve.token")
         val token = runCatching { tokenFile.readText().trim() }.getOrNull()
@@ -129,6 +132,7 @@ object LocalModelBenchmark {
                     .put("prompt", prompt).put("context_size", contextTokens).put("max_output_tokens", 64)
                     .put("memory_mode", memoryMode).put("threads", cpuThreads)
                     .put("temperature", 0).put("generation_timeout_ms", 90000)
+                if (accelerator != null) request.put("accelerator", accelerator)
                 val response = JSONObject(LocalModelBridge.generateBenchmark(request.toString()))
                 val measured = JSONObject(LocalModelBridge.status()).optJSONObject("last_generation")
                     ?.takeIf { it.optString("request_id") == result.getString("request_id") }
@@ -136,6 +140,9 @@ object LocalModelBenchmark {
                     result.put(key, response.opt(key) ?: JSONObject.NULL)
                 for (key in listOf("actual_context_size", "prompt_evaluation_ms", "prompt_tokens_per_second", "tokens_per_second"))
                     result.put(key, measured?.opt(key) ?: JSONObject.NULL)
+                val gpuLayers = measured?.optInt("gpu_layers", 0) ?: 0
+                result.put("accelerator", if (gpuLayers > 0) "gpu" else "cpu")
+                    .put("gpu", if (gpuLayers > 0) LocalModelBridge.acceleratorStatus(probe = false).opt("gpu") else JSONObject.NULL)
                 val state = when {
                     cancelled || response.optBoolean("cancelled") -> "cancelled"
                     response.has("error") -> "failed"
