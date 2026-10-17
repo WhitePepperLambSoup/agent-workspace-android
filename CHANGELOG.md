@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.0.1 — 2026-10-17
+
+2.0.1 修复了使用 DeepSeek 时任务一开始就失败的问题。Agent Workspace 2.0.1 fixes tasks failing at the start when using DeepSeek.
+
+### 中文
+
+- 修复：DeepSeek 在流式回复中发送空的结束原因时，任务立即失败，提示“provider sent an invalid finish reason”。现在空值按“回复尚未结束”处理，回复可以正常完成。其他 OpenAI 兼容服务商同样适用。
+- 覆盖安装即可，数据会保留。
+
+### English
+
+- Fixed: when DeepSeek sent an empty finish reason while streaming, the task failed at once with "provider sent an invalid finish reason". An empty value now means the reply is not finished yet, and the reply completes normally. The same applies to other OpenAI-compatible providers.
+- Install over the existing app; your data is kept.
+
 ## 2.0.0 — 2026-10-16
 
 2.0.0 是一次大更新：全新的界面和启动动画；AI 操作手机更准，会处理随时弹出的广告，删除类按钮先问你，付款转账一律交还给你，读到可疑指令会收回托管授权，每一步都能回看；做过的手机操作可以存成快捷操作，能自动修复、能分享，定时或在充电、连上 Wi‑Fi、打开某个应用时自动运行；回复里有可以勾选、加日历、导航的卡片；圈选屏幕后直接拨号、导航、比价；通知摘要、每日早报、桌面 AI 卡片；发送身份证号和银行卡号前提醒；计划模式、技能、按用途分配模型、记忆分主题、对话导出、应用锁、繁体中文界面，以及更稳的后台运行和诊断。Agent Workspace 2.0.0 is a big update: a redesigned interface and launch animation; more accurate phone control that deals with ads popping up at any moment, asks before delete buttons, never pays or transfers money, takes back advance approval when it reads suspicious instructions, and lets you replay every step; phone tasks saved as shortcuts that heal themselves, can be shared, and run on a schedule or when the phone starts charging, joins Wi‑Fi or opens an app; cards in replies that you can tick, add to the calendar or navigate to; call, navigate or compare prices straight from a circled part of the screen; a notification digest, a morning briefing and an AI card on the home screen; a reminder before ID card and bank card numbers are sent; plan mode, skills, models by purpose, memory by topic, conversation export, app lock, a Traditional Chinese interface, and steadier background running and diagnostics.

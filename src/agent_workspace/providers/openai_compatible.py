@@ -267,15 +267,18 @@ class OpenAICompatibleProvider:
 
                         raw_finish_reason = choice.get("finish_reason")
                         if raw_finish_reason is not None:
-                            if (
-                                not isinstance(raw_finish_reason, str)
-                                or not raw_finish_reason.strip()
-                            ):
+                            if not isinstance(raw_finish_reason, str):
                                 raise ProviderError(
-                                    "provider sent an invalid finish reason",
+                                    "provider sent an invalid finish reason: "
+                                    f"{type(raw_finish_reason).__name__}",
                                     status_code=status_code,
                                 )
-                            finish_reason = raw_finish_reason
+                            # Some servers send "" instead of null on chunks that do
+                            # not finish the turn (or on a trailing usage chunk after
+                            # the real reason): it means "not finished", never a
+                            # reason of its own, and must not erase one already seen.
+                            if raw_finish_reason.strip():
+                                finish_reason = raw_finish_reason
 
                 if finish_reason is None:
                     raise ProviderError(
