@@ -2,67 +2,135 @@
 
 # Agent Workspace for Android
 
-An AI agent that runs on your Android phone. It plans and carries out multi-step tasks with real tools — files, PDFs, web search, an optional Linux toolchain and Android automation — using a cloud model you choose or a model that runs entirely on the phone. Everything is packaged in one APK; no Termux or root is needed.
+An AI agent that runs on your Android phone. It plans and carries out multi-step tasks with real tools — files, PDFs, web search, an optional Linux toolchain and Android system actions — and, with the accessibility service turned on, operates other apps on the phone when you ask it to. It uses a cloud model you choose, Ollama on a computer in your local network, or a model that runs entirely on the phone. Everything is packaged in one APK; no Termux or root is needed.
 
 <p align="center">
-  <img src="docs/screenshots/chat-glass-en.png" width="250" alt="Conversation with tool calls in the liquid-glass style">
-  <img src="docs/screenshots/welcome-glass-en.png" width="250" alt="New task screen with shortcuts">
-  <img src="docs/screenshots/chat-dark-en.png" width="250" alt="Dark theme">
+  <img src="docs/screenshots/home-en.png" width="250" alt="New task screen">
+  <img src="docs/screenshots/chat-tools-en.png" width="250" alt="Tool calls in a conversation">
+  <img src="docs/screenshots/phone-done-en.png" width="250" alt="The Operate phone window over the Clock app">
 </p>
 
 ## Download
 
-Get `AgentWorkspace_2.0.1_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app (Menu → About and updates, or "Updates" on the loading screen).
+Get `AgentWorkspace_2.0.2_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app (Menu → About and updates, or "Updates" on the loading screen). Changes in each version are listed in the [CHANGELOG](CHANGELOG.md).
 
 - Android 8.0 (API 26) or newer, 64-bit ARM (`arm64-v8a`) or `x86_64`; phones running a 32-bit-only system cannot install it.
 - The interface is shown by the system's Android System WebView, which must be Chromium 80 or newer. If WebView is disabled, missing or too old, the app explains why and links to the app store to update it.
 - Works on Android 15+ devices with 16 KB memory pages, foldables, split screen and external keyboards, and keeps its own colours under system or vendor "force dark" modes.
-- About 75 MB to install. Local models are optional downloads inside the app.
+- About 73 MB to install. Local models and the offline speech model are optional downloads inside the app.
 
-## Highlights
+What changed in 2.0.2: Allow local network HTTP in Model settings connects to Ollama on a computer in your network (see [Ollama on your local network](#ollama-on-your-local-network)); cards that a model writes as a `json` code block now show as cards; native dialogs without a background on some phones, and an Operate phone window that kept the old language after a language switch, are fixed.
 
-1. **Real multi-step tasks.** The agent plans, calls tools and shows every step live: the streamed reply, its reasoning, and each tool call as running, finished, failed or cancelled.
-2. **Add to a running task.** Type while a task runs and your message joins it; the agent takes it into account at its next step instead of starting over.
-3. **Approvals you control.** Three execution modes — workspace only, YOLO, full access — and an approval prompt before sensitive actions; a long task can be approved as a whole, while deleting files, changing long-term memory and operating other apps from a chat still ask every time (the Operate phone window offers allow-for-this-task and a hosted mode).
-4. **Cloud or on-device models.** OpenAI-compatible APIs (OpenAI, DeepSeek, Qwen, Kimi, GLM, xAI …), Anthropic, Gemini and Ollama; or download a Qwen3 / Qwen3.5 GGUF model and run it offline on the phone's CPU through llama.cpp, including image input with Qwen3.5. On-device models reuse the system prompt and conversation they already evaluated, so a new conversation starts answering in about 1–2 seconds; chips with dot-product instructions get an accelerated build, and inference slows down on its own when the phone runs hot. Models download from ModelScope (a mainland China CDN) or Hugging Face, and a paused download can continue from the other source; a grammar keeps small models' tool calls well-formed. With DeepSeek, OpenAI, Kimi, Qwen, GLM, Gemini, Grok, OpenRouter or Claude, every request only grows at the end, so the provider's context cache covers most of the input (about 95% in long DeepSeek tasks on a phone), billed at a lower price.
-5. **Workspaces and files.** Each workspace is a folder. Generated files can be opened, previewed (Markdown, images, sandboxed HTML), shared or saved; text files can be edited in the app, files and folders can be renamed, moved, deleted and created, and workspaces appear in Android's file picker.
-6. **Share anything in.** Share files from WeChat, QQ or any app into a conversation; photos, pictures and files picked in the message box go straight into the open conversation, with large pictures shrunk; PDFs are read page by page with OCR for scanned pages.
-7. **Memory.** The AI remembers your preferences and recurring details within limits (up to 500 notes organized by topic and searchable, no near-duplicates, never passwords or verification codes); the Memory page shows, edits and deletes them.
-8. **Knowledge bases.** Add manuals, contracts, notes and e-books (PDF, Word, Excel, EPUB, web pages, Markdown, text) and the AI answers from the relevant passages, citing the document and page. Scanned PDFs are read with offline text recognition on the phone, and a web page can be saved from a pasted or shared link as it is at that moment. Sort documents into several knowledge bases and choose which ones each conversation uses, from the composer or just by asking. Documents stay on the phone and are searched by keyword with built-in and custom synonyms: no model download, no API usage.
-9. **Alarms, timers and calendar.** Say "wake me at 7 tomorrow" or "remind me in 20 minutes" and the AI sets it in the system Clock app; with calendar access it can also list and add events.
-10. **Built-in browser.** The AI uses the phone's WebView to open pages, read sites that need JavaScript, click, fill in forms and take screenshots, asking your approval before opening pages and clicking.
-11. **Background services and long commands.** Web servers, bots and other programs the AI starts keep running, with output and controls on the Background services page; installs and builds can run for up to 30 minutes with live output.
-12. **Ask from anywhere.** An "Ask Agent" quick settings tile, a floating bubble that fans out into operate phone, new chat, ask by voice, circle to ask and voice note when tapped (drag it onto the × at the bottom to hide it), home screen widgets (quick ask, task status, quick tasks), app icon shortcuts, and asking about a photo.
-13. **Notification rules.** When a notification from an app you chose arrives, the AI handles it the way you describe, such as noting a parcel pickup code; by default it asks you first.
-14. **Math and diagrams.** LaTeX formulas and Mermaid diagrams in replies are rendered.
-15. **Models and reasoning effort.** Tap the model button in the message box for a sheet that switches between your usual model profiles and sets the reasoning effort with a slider (with an aurora effect at the top level), without restarting the engine between cloud models; edit and resend messages, regenerate a reply, archive conversations or delete them for good.
-16. **Backup and restore.** Conversations, memory, automation, workspace files and settings go into one zip for a new phone or a reinstall.
-17. **Liquid-glass interface.** An Apple-style glass look with real edge refraction and light-catching rims, twelve backgrounds or your own wallpaper, five accent colours, light/dark themes and spring-based motion (panels animate in and out, can be dragged closed, and follow the system's reduce-motion setting) — or a plain standard style. The quick tasks above the input are yours to edit, and the menu has a search box for features and settings.
-18. **Simplified Chinese, Traditional Chinese and English.** The interface follows the system language or can be switched at any time.
-19. **Automation.** Scheduled tasks (also in the default workspace mode, where a run approves its own steps), automatic triggers (when the phone starts charging, joins Wi‑Fi or an app opens), triggers from apps such as Tasker, reusable workflows with step replay, task evaluations and hand-off between devices.
-20. **Optional developer toolchain.** A pinned Alpine toolchain (Git, Python, Node, Pyright, SSH, tmux) installs on demand and runs in an isolated PRoot process.
-21. **Phone control (opt-in, needs the accessibility service).** In any app, tap Operate phone on the floating bubble and tell the agent what to do in the small window that opens: it looks at the screen, taps, swipes, types and opens apps by name, showing each step; you can refresh, stop or retry, approvals appear in the window, and a hosted mode skips them. An optional live screen makes screenshots faster. The agent expects ads to pop up at any moment, stops to ask before delete or clear buttons, and leaves every payment or transfer to you; a finished task can be saved as a shortcut that repeats the steps without the agent, with editable steps, schedules and automatic triggers. Password fields and the lock screen are off limits.
-22. **Quick to start, recovers on its own.** A cold start takes about 3 seconds; if Android stops the engine, the app restarts it and reconnects; logs can be exported with secrets removed — shared, saved, or sent as a GitHub issue — even from the loading screen when the app cannot start.
-23. **Offline speech recognition.** With the SenseVoice Small speech model (about 239 MB) downloaded, the microphone recognises Chinese, English, Japanese, Korean and Cantonese on the phone without uploading audio, and the AI can transcribe recordings and videos in the workspace into timestamped text. A voice note records a meeting or a thought and turns it into minutes saved to the workspace and the knowledge base. Replies can be read aloud, and a voice conversation goes back and forth hands-free.
-24. **Plan mode and skills.** In plan mode the agent only looks and proposes a plan, acting once you agree; the Skills page installs official skills or imports SKILL.md files, which the agent reads only when needed.
-25. **Models by purpose.** Use cheaper models for operating the phone and for summarizing long conversations; providers take custom request headers and backup API keys that take over on errors.
-26. **Export and app lock.** Export a conversation as Markdown, PDF or one long image; optionally lock the app with a fingerprint, face or the screen lock.
-27. **Phone status and personal tools.** Read and set volume, brightness and Do Not Disturb and control playback; with your permission, look up contacts and the current location; draft a text message in the Messages app for you to send.
-28. **Safe to hand over.** The agent never taps pay, transfer or order buttons or types on payment password screens, in any mode (the rule is built into the app); when a web page, a notification or the screen holds what looks like instructions to the agent, the task's hosted approval ends and every further step asks you; hosted work has step and time limits; every step keeps a small screenshot to look back at afterwards; ID card and bank card numbers trigger a reminder before a message goes to a cloud model, with the option to mask them.
-29. **Shortcuts that heal.** When an app update gets a shortcut stuck at a step, the agent finishes from that step and one tap puts its steps into the shortcut; shortcuts can be shared as codes, and an import lists every step before it is saved.
-30. **Cards in replies and circle to act.** Replies carry checklists you can tick, comparison tables, events that go into the calendar and places that open in the map with one tap; circle part of the screen to call, open a link, navigate, add to the calendar, compare prices, translate or save to a knowledge base.
-31. **A proactive assistant.** A morning briefing (calendar, weather, voice note points, to-dos); a notification digest (notifications kept only on the phone, sorted into to do, later and promotions, with pickup codes, flights and meeting changes on their own); an AI card on the home screen shows a scheduled task's latest result.
+## Features
+
+### Conversations and multi-step tasks
 
 <p align="center">
-  <img src="docs/screenshots/backgrounds-en.png" width="250" alt="Background picker with twelve backgrounds and a custom wallpaper">
+  <img src="docs/screenshots/chat-tools-en.png" width="250" alt="List files, write a file and read a file, then the reply">
+  <img src="docs/screenshots/approval-en.png" width="250" alt="Tool approval before writing a file">
+  <img src="docs/screenshots/cards-en.png" width="250" alt="An event card in a reply">
 </p>
+
+- **Multi-step tasks.** The agent plans, calls tools and shows every step live: the streamed reply, its reasoning, and each tool call as running, finished, failed or cancelled. Generated files appear under the reply, ready to open, share or save.
+- **Add to a running task.** Type while a task runs and your message joins it; the agent takes it into account at its next step instead of starting over.
+- **Approvals.** Three execution modes — workspace only, YOLO, full access — and an approval prompt before sensitive actions, for this time only or for the rest of the task; deleting files, changing long-term memory and operating other apps from a chat still ask every time.
+- **Cards in replies.** Checklists you can tick, comparison tables, events that go into the calendar and places that open in the map with one tap, and next steps that send their request when tapped.
+- **Models and reasoning effort.** The model button in the message box switches between your usual model profiles and sets the reasoning effort with a slider, without restarting the engine between cloud models. Messages can be edited and resent, replies regenerated, and conversations archived or deleted for good.
+- **Math and diagrams.** LaTeX formulas and Mermaid diagrams in replies are rendered.
+- **Plan mode and skills.** In plan mode the agent only looks and proposes a plan, acting once you agree; the Skills page installs official skills or imports SKILL.md files, which the agent reads only when needed.
+
+### Phone control
+
+This needs the app's accessibility service, which you turn on in system settings. In any app, tap Operate phone on the floating bubble and write what you want in the small window that opens: the agent looks at the screen, taps, swipes, types and opens apps by name, and shows each step in the window.
+
+<p align="center">
+  <img src="docs/screenshots/bubble-en.png" width="250" alt="The floating bubble's five actions">
+  <img src="docs/screenshots/phone-approval-en.png" width="250" alt="The window asks before tapping Timers">
+  <img src="docs/screenshots/phone-done-en.png" width="250" alt="A finished task can be saved as a shortcut">
+</p>
+
+- **Approvals in the window.** Steps that need your approval are asked in the window: Allow, Allow for this task, or Always allow (hosted mode). Hosted work has step and time limits. You can refresh, pause, stop or retry at any time.
+- **Safety rules.** Pay, transfer and order buttons and payment password screens are never touched, in any mode (the rule is built into the app); delete and clear buttons stop for your approval; password fields and the lock screen are off limits. When a web page, a notification or the screen holds what looks like instructions to the agent, the task's hosted approval ends and every further step asks you.
+- **Look back.** Every step keeps a small screenshot that you can step through after the task. The pictures stay on the phone for the latest 20 tasks and at most 7 days; screens with passwords or other sensitive content are not captured.
+- **Shortcuts.** A finished task can be saved as a shortcut that repeats the steps without the model; steps can be edited, and shortcuts can run on a schedule or on a trigger. When an app update gets a shortcut stuck at a step, the agent finishes from that step and one tap puts its steps into the shortcut. Shortcuts can be shared as codes, and an import lists every step before it is saved.
+- **Circle to act.** Circle part of the screen and the phone reads the words offline, then offers what fits: call, open a link, navigate, add to the calendar, compare prices, translate, save to a knowledge base or copy the text; or send the circled part to the agent with a question. Nothing is captured while a password field is on screen.
+
+<p align="center">
+  <img src="docs/screenshots/step-replay-en.png" width="250" alt="Looking back through the step screenshots">
+  <img src="docs/screenshots/shortcut-en.png" width="250" alt="Editing a shortcut's steps">
+  <img src="docs/screenshots/circle-en.png" width="250" alt="Actions offered for circled text">
+</p>
+
+### Notification digest, briefing and automation
+
+<p align="center">
+  <img src="docs/screenshots/digest-en.png" width="250" alt="A notification digest sorted into needs attention, can wait and ads">
+</p>
+
+- **Notification digest.** With Keep notifications for digests on, incoming notifications are kept on the phone only, for 48 hours; on request they are sorted into needs attention, can wait and ads, with pickup codes, flights and trains, meeting changes and bills due listed separately in a checklist. Verification codes are never repeated. The digest can run every 2 hours.
+- **Morning briefing.** Calendar, weather, voice note points and to-dos; an AI card on the home screen shows a scheduled task's latest result.
+- **Schedules and triggers.** Scheduled tasks also run in the default workspace mode; tasks can start when the phone starts charging, joins Wi‑Fi or an app opens, or when an app such as Tasker sends a request.
+- **Notification rules.** When a notification from an app you chose arrives, the agent handles it the way you describe, such as noting a parcel pickup code; by default it asks you first.
+- **Reusable workflows** with step replay, task evaluations and hand-off between devices.
+
+### Models
+
+<p align="center">
+  <img src="docs/screenshots/lan-ollama-en.png" width="250" alt="Model settings with Allow local network HTTP checked">
+</p>
+
+- **Cloud providers.** OpenAI-compatible APIs (OpenAI, DeepSeek, Qwen, Kimi, GLM, xAI …), Anthropic, Gemini and Ollama. With DeepSeek, OpenAI, Kimi, Qwen, GLM, Gemini, Grok, OpenRouter or Claude, every request only grows at the end, so the provider's context cache covers most of the input (about 95% in long DeepSeek tasks on a phone), billed at a lower price.
+- **Ollama on your network.** With Allow local network HTTP checked, the app connects over http to Ollama and similar servers at private addresses such as 192.168.x.x, 10.x.x.x and 172.16–31.x.x; see the next section.
+- **On-device models.** Download a Qwen3 / Qwen3.5 GGUF model and run it offline on the phone's CPU through llama.cpp, including image input with Qwen3.5. A new conversation starts answering in about 1–2 seconds; chips with dot-product instructions get an accelerated build, and inference slows down on its own when the phone runs hot. Models download from ModelScope (a mainland China CDN) or Hugging Face, and a paused download can continue from the other source; a grammar keeps small models' tool calls well-formed.
+- **Models by purpose.** Use cheaper models for operating the phone and for summarizing long conversations; providers take custom request headers and backup API keys that take over on errors.
+
+#### Ollama on your local network
+
+1. Make Ollama on the computer listen on the network: set the environment variable `OLLAMA_HOST=0.0.0.0` and restart Ollama.
+   - Windows: add a user variable `OLLAMA_HOST` with the value `0.0.0.0` under System Properties → Environment Variables, then quit Ollama from the tray and start it again.
+   - macOS: run `launchctl setenv OLLAMA_HOST 0.0.0.0`, then restart the Ollama app.
+   - Linux (systemd): run `sudo systemctl edit ollama.service`, add `Environment="OLLAMA_HOST=0.0.0.0"` under `[Service]`, then `sudo systemctl restart ollama`.
+2. Find the computer's address on your network, such as `192.168.1.5`; its firewall must allow port 11434.
+3. On the phone, open the menu (⋯) → **Provider & API settings**, choose Ollama, enter `http://192.168.1.5:11434`, check **Allow local network HTTP**, tap **Get model list**, pick a model and save.
+
+The option applies to private IP addresses only: host names such as `.local` and public addresses still need HTTPS. When the phone and the computer are on different networks, give Ollama an HTTPS address with Tailscale or a similar tool. Plain http is not encrypted, so other devices on the same network can see the conversation. Model requests to a local address go through the same network access approval as requests to any other provider.
+
+### Files, knowledge bases and memory
+
+- **Workspaces and files.** Each workspace is a folder. Generated files can be opened, previewed (Markdown, images, sandboxed HTML), shared or saved; text files can be edited in the app, files and folders can be renamed, moved, deleted and created, and workspaces appear in Android's file picker.
+- **Share anything in.** Share files from WeChat, QQ or any app into a conversation; photos, pictures and files picked in the message box go straight into the open conversation, with large pictures shrunk; PDFs are read page by page with OCR for scanned pages.
+- **Knowledge bases.** Add manuals, contracts, notes and e-books (PDF, Word, Excel, EPUB, web pages, Markdown, text) and the agent answers from the relevant passages, citing the document and page. Scanned PDFs are read with offline text recognition on the phone, and a web page can be saved from a pasted or shared link as it is at that moment. Sort documents into several knowledge bases and choose which ones each conversation uses. Documents stay on the phone and are searched by keyword with built-in and custom synonyms: no model download, no API usage.
+- **Memory.** The agent remembers your preferences and recurring details within limits (up to 500 notes organized by topic and searchable, no near-duplicates, never passwords or verification codes); the Memory page shows, edits and deletes them.
+- **Backup and export.** Conversations, memory, automation, workspace files and settings go into one zip for a new phone or a reinstall; a conversation can be exported as Markdown, PDF or one long image.
+
+### Interface and entry points
+
+<p align="center">
+  <img src="docs/screenshots/appearance-en.png" width="250" alt="Appearance: liquid glass and twelve backgrounds">
+</p>
+
+- **Liquid-glass interface.** The top bar, composer and menus are glass that refracts light, with light-catching rims; twelve backgrounds or your own wallpaper, five accent colours, light/dark themes and spring-based motion (panels can be dragged closed and follow the system's reduce-motion setting) — or a plain standard style. The quick tasks above the input are yours to edit, and the menu has a search box for features and settings.
+- **Simplified Chinese, Traditional Chinese and English.** The interface follows the system language or can be switched at any time.
+- **Ask from anywhere.** The floating bubble (operate phone, new chat, ask by voice, circle to ask, voice note; drag it onto the × at the bottom to hide it), an "Ask Agent" quick settings tile, home screen widgets (quick ask, task status, quick tasks), app icon shortcuts, and asking about a photo.
+- **App lock.** Optionally lock the app with a fingerprint, face or the screen lock.
+
+### More tools
+
+- **Alarms, timers and calendar.** Say "wake me at 7 tomorrow" or "remind me in 20 minutes" and the agent sets it in the system Clock app; with calendar access it can also list and add events.
+- **Built-in browser.** The agent uses the phone's WebView to open pages, read sites that need JavaScript, click, fill in forms and take screenshots, asking your approval before opening pages and clicking.
+- **Background services and long commands.** Web servers, bots and other programs the agent starts keep running, with output and controls on the Background services page; installs and builds can run for up to 30 minutes with live output.
+- **Optional developer toolchain.** A pinned Alpine toolchain (Git, Python, Node, Pyright, SSH, tmux) installs on demand and runs in an isolated PRoot process.
+- **Offline speech recognition.** With the SenseVoice Small speech model (about 239 MB) downloaded, the microphone recognises Chinese, English, Japanese, Korean and Cantonese on the phone without uploading audio, and the agent can transcribe recordings and videos in the workspace into timestamped text. A voice note records a meeting or a thought and turns it into minutes saved to the workspace and the knowledge base. Replies can be read aloud, and a voice conversation goes back and forth hands-free.
+- **Phone status and personal tools.** Read and set volume, brightness and Do Not Disturb and control playback; with your permission, look up contacts and the current location; draft a text message in the Messages app for you to send. ID card and bank card numbers trigger a reminder before a message goes to a cloud model, with the option to mask them.
+- **Quick to start, recovers on its own.** A cold start takes about 3 seconds; if Android stops the engine, the app restarts it and reconnects; logs can be exported with secrets removed — shared, saved, or sent as a GitHub issue — even from the loading screen when the app cannot start.
 
 ## Quick Start
 
 1. Install the APK and open it. The first launch prepares the built-in Python runtime.
-2. Open the menu (⋯) → **Provider & API settings** to enter a cloud provider and API key, or **Local models** to download a model that runs on the phone.
-3. Type a task, or tap one of the shortcuts. Tap the model chip under the input to switch the model and set the reasoning effort; the shield sets the execution mode (green: workspace, yellow: YOLO, red: full access).
+2. Open the menu (⋯) → **Provider & API settings** to enter a cloud provider and API key, or **Local models** to download a model that runs on the phone. For Ollama on a computer in your network, see [above](#ollama-on-your-local-network).
+3. Type a task, or tap one of the quick tasks. Tap the model chip under the input to switch the model and set the reasoning effort; the shield sets the execution mode (green: workspace, yellow: YOLO, red: full access).
 4. While the task runs, type to add instructions, or tap stop. Generated files appear under the reply.
+5. For phone control, turn on the app's accessibility service in system settings, then turn on the floating bubble under Menu → **Global entry**.
 
 ## Tech Stack
 
@@ -72,6 +140,7 @@ Get `AgentWorkspace_2.0.1_android.apk` from [Releases](https://github.com/WhiteP
 | Interface | HTML / CSS / JavaScript (no framework), SVG-filter refraction for the glass style |
 | Agent engine | Python 3.12 embedded with Chaquopy, running the shared `agent_workspace` core in its own process |
 | Local inference | llama.cpp (pinned revision) through JNI, CPU only; an ARMv8.2 dot-product build is chosen per chip |
+| Phone control | Accessibility service; on-screen text recognition with ML Kit (offline) |
 | Storage | SQLite event store in app-private storage; credentials encrypted with Android Keystore |
 | Optional tools | PRoot launcher with a pinned Alpine 3.22 toolchain |
 
@@ -104,6 +173,7 @@ agent-workspace-android/
 │   ├── kotlin_app/          Android project: WebView host, native bridges, accessibility, JNI llama.cpp
 │   ├── web_companion/       App interface (HTML/CSS/JS), copied into the APK at build time
 │   ├── mobile_*.py          Mobile gateway, task controller, workspaces, model manager
+│   ├── skills/              Official skills
 │   ├── training/            Fine-tuning source and frozen synthetic datasets (no weights)
 │   └── docs/                Design notes, plans and reviews
 ├── src/agent_workspace/     Shared agent engine (runner, tools, providers, storage)
@@ -115,11 +185,13 @@ agent-workspace-android/
 - Conversations, files and settings stay in the app's private storage on your phone. Model requests go to the provider you configure, or stay on the phone with a local model.
 - API keys are stored encrypted with Android Keystore and are never shown back in the interface.
 - The engine listens only on `127.0.0.1`, requires a per-launch token, and proves its identity to the app before the token is handed over.
+- Providers need HTTPS by default (addresses on the phone itself excepted). With Allow local network HTTP checked, http is allowed for private IP addresses only; host names and public addresses still need HTTPS.
 - Diagnostic logs are only created and shared when you tap the button; the engine token and API keys are masked.
 - Memory stays on the phone and never holds passwords, keys, verification codes or ID numbers; you can review, delete or turn it off at any time.
 - Knowledge base documents stay on the phone. With a cloud model, the passages found for a question are sent to your provider along with it; to avoid that, turn off "Attach relevant passages to each question" or use an on-device model. Passages are marked as reference material for the model, not as instructions.
 - The built-in browser exposes no app interface to web pages, opens only http/https pages and keeps its sign-ins apart from the app's interface; its data can be cleared in one tap.
-- The system permissions behind notification rules and the floating bubble are requested only when you turn those features on; notification rules read only the apps you chose and pass a notification's content only to the task it triggers.
+- The system permissions behind notification rules, the notification digest and the floating bubble are requested only when you turn those features on; notification rules read only the apps you chose and pass a notification's content only to the task it triggers; notifications kept for digests stay on the phone and are cleared as soon as the digest is turned off.
+- Phone-control step screenshots stay on the phone for the latest 20 tasks and at most 7 days; screens with passwords or other sensitive content are not captured.
 - Backups never contain API keys.
 - Deleting a conversation erases its messages, tasks and images from the phone and cannot be undone; files it created in the workspace stay.
 - Offline speech recognition processes audio on the phone only; recordings are neither uploaded nor kept. Circle to ask sends only the screenshot you circled to the model, and takes no screenshot while a password field is on screen.
@@ -127,14 +199,15 @@ agent-workspace-android/
 ## Known Limitations
 
 - Android and phone makers may still freeze or stop background work; the app recovers when reopened, but a task interrupted at that moment needs to be resumed. Background services stop when the engine restarts; those marked "Start with the engine" run again.
-- The built-in browser is a WebView that is not on screen, so the few pages that draw only on animation frames may render incompletely, and some phones cannot capture it as an image; the AI then reads the page text instead.
+- System Settings and some other screens hide the floating bubble; open the window in another app first and ask the agent to open Settings.
+- The built-in browser is a WebView that is not on screen, so the few pages that draw only on animation frames may render incompletely, and some phones cannot capture it as an image; the agent then reads the page text instead.
 - On-device models run on the CPU, so speed depends heavily on the phone. For reference, Qwen3.5 2B on a Snapdragon 888 processes about 28 prompt tokens and generates about 10 tokens per second; after switching to an on-device model the first conversation takes about a minute to start answering, later ones about 1–2 seconds; long tasks such as rewriting a whole web page or analysing a file of tens of KB take from ten to several tens of minutes, and slow down when the phone gets hot. 2B needs about 1.8 GB of available memory; phones with less should use 0.8B.
 - Small models handle questions, reading, writing, copying and appending to files and simple pages; for complex edits their code is often incomplete, and documents in a strict format (JSON, CSV, HTML) often come out wrong, so check them or use a cloud model.
 - The knowledge base searches by keyword and does not understand meaning: a question worded completely differently, outside the synonym list, may miss the relevant passage; add your own synonyms on the Knowledge base page. Scanned pages are read with offline text recognition, so names and numbers in them may be misread.
 - While the app is in the background, Android does not let it open the system Clock app, so alarms and timers arrive as a notification that you tap to finish.
 - Offline speech recognition runs on 64-bit ARM phones only; x86_64 devices use the system recogniser.
 - Launchers do not let a widget blur the wallpaper behind it, so the glass-style widgets approximate the look with translucency and highlights.
-- Web search uses the free DuckDuckGo and Bing pages, so results and availability depend on your network; some phrasings return nothing, and the AI then rephrases.
+- Web search uses the free DuckDuckGo and Bing pages, so results and availability depend on your network; some phrasings return nothing, and the agent then rephrases.
 - The English interface text was written by the developer; corrections are welcome.
 
 ## License

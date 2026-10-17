@@ -503,7 +503,7 @@ class NativeJsBridge(
         val current = MobileProviderSettings.load(context)
         Thread({
             val result = try {
-                val models = ProviderModelCatalog.fetch(context, current.protocol, current.baseUrl, null)
+                val models = ProviderModelCatalog.fetch(context, current.protocol, current.baseUrl, null, current.allowLanHttp)
                 JSONObject().put("ok", true).put("state", "done").put("count", models.size)
             } catch (failure: Exception) {
                 JSONObject().put("ok", false).put("state", "error")
@@ -548,7 +548,7 @@ class NativeJsBridge(
             if (model.isEmpty() || model.length > 256) return@runCatching null
             val summary = if (update.has("context_summary_enabled")) update.getBoolean("context_summary_enabled") else null
             ProviderSettingsChange.applyWithoutRestart(context, current.protocol, current.baseUrl, model,
-                update.optString("reasoning_effort", current.reasoningEffort), summary)
+                update.optString("reasoning_effort", current.reasoningEffort), summary, current.allowLanHttp)
         }
         hot.exceptionOrNull()?.let { error ->
             return JSONObject().put("ok", false).put("error", error.message ?: "无法保存模型设置").toString()
@@ -579,9 +579,10 @@ class NativeJsBridge(
         val baseUrl = profile.getString("base_url")
         val model = profile.getString("model")
         val effort = profile.optString("reasoning_effort", "auto")
+        val lanHttp = profile.optBoolean("allow_lan_http", false)
         val local = baseUrl.trimEnd('/') == MobileProviderSettings.EMBEDDED_QWEN_BASE_URL
         if (!local) {
-            val hot = runCatching { ProviderSettingsChange.applyWithoutRestart(context, protocol, baseUrl, model, effort) }
+            val hot = runCatching { ProviderSettingsChange.applyWithoutRestart(context, protocol, baseUrl, model, effort, allowLanHttp = lanHttp) }
             hot.exceptionOrNull()?.let { error ->
                 return JSONObject().put("ok", false).put("error", error.message ?: "无法切换模型").toString()
             }
@@ -590,7 +591,8 @@ class NativeJsBridge(
         return changeProvider(local) {
             if (local) MobileProviderSettings.selectLocalModel(context, model)
             else MobileProviderSettings.save(context, protocol, baseUrl, model, null, false,
-                effort.takeIf { it in MobileProviderSettings.reasoningEfforts(protocol, baseUrl, model) } ?: "auto")
+                effort.takeIf { it in MobileProviderSettings.reasoningEfforts(protocol, baseUrl, model) } ?: "auto",
+                allowLanHttp = lanHttp)
         }
     }
 

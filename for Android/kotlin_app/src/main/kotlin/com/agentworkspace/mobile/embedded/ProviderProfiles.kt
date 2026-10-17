@@ -61,11 +61,13 @@ object ProviderProfiles {
         val existing = profiles.firstOrNull { sameTarget(it, current.protocol, current.baseUrl, current.model) }
         if (existing != null) {
             existing.put("name", label).put("reasoning_effort", current.reasoningEffort)
+                .put("allow_lan_http", current.allowLanHttp)
         } else {
             require(profiles.size < MAX_PROFILES) { "At most $MAX_PROFILES model profiles can be saved" }
             profiles.add(JSONObject().put("id", UUID.randomUUID().toString()).put("name", label)
                 .put("protocol", current.protocol).put("base_url", current.baseUrl)
-                .put("model", current.model).put("reasoning_effort", current.reasoningEffort))
+                .put("model", current.model).put("reasoning_effort", current.reasoningEffort)
+                .put("allow_lan_http", current.allowLanHttp))
         }
         write(context, profiles)
         snapshot(context)

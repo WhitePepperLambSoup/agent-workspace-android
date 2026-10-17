@@ -5,6 +5,9 @@
     <color name="text_primary">#F0F6FC</color>
     <!-- Matches the web UI's light surface token; values-night overrides it. -->
     <color name="web_surface">#FFFFFF</color>
+    <!-- Native dialogs: a dark panel (their fields use the app's dark Material text) in both modes. -->
+    <color name="dialog_surface">#FF2E3134</color>
+    <color name="dialog_accent">#5CC6B1</color>
     <!-- Home screen widgets follow the web UI's light tokens; values-night holds the dark ones. -->
     <color name="widget_surface">#FFFFFF</color>
     <color name="widget_field">#EEF1F0</color>

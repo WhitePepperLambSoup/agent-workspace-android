@@ -107,6 +107,14 @@ def configure_environment(files_dir: str, provider_json: str) -> tuple[Path, Pat
         AGENT_WORKSPACE_LOCAL_TIMEOUT_SECONDS=str(local_timeout_seconds),
         AGENT_WORKSPACE_CONTEXT_SUMMARY_ENABLED="1" if context_summary_enabled else "0",
     )
+    allow_lan_http = provider.get("allow_lan_http", False)
+    if type(allow_lan_http) is not bool:
+        raise ValueError("invalid allow_lan_http")
+    # Plain HTTP to a private address (Ollama on a computer at home): only when the user turned it on.
+    if allow_lan_http:
+        os.environ["AGENT_WORKSPACE_ALLOW_LAN_HTTP"] = "1"
+    else:
+        os.environ.pop("AGENT_WORKSPACE_ALLOW_LAN_HTTP", None)
     api_key = setting("api_key", "apiKey")
     if effort != "auto":
         os.environ["AGENT_WORKSPACE_REASONING_EFFORT"] = effort

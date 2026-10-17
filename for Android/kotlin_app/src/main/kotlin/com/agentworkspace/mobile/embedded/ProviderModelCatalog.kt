@@ -92,21 +92,28 @@ object ProviderModelCatalog {
         check(partial.renameTo(target)) { "Could not keep the model list" }
     }
 
-    /** Reads the provider's list (blocking; call off the main thread) and keeps it for next time. */
-    fun fetch(context: Context, protocol: String, baseUrl: String, apiKey: String?): List<Model> = try {
-        read(context, protocol, baseUrl, apiKey)
+    /**
+     * Reads the provider's list (blocking; call off the main thread) and keeps it for next time.
+     * [allowLanHttp]: plain HTTP to a private-network address, as chosen in the model settings.
+     */
+    fun fetch(context: Context, protocol: String, baseUrl: String, apiKey: String?, allowLanHttp: Boolean = false): List<Model> = try {
+        read(context, protocol, baseUrl, apiKey, allowLanHttp)
     } catch (failure: Failure) {
         val text = com.agentworkspace.mobile.UiText.of(context, failure.zh, failure.en)
         throw Failure(text, text)
     }
 
-    private fun read(context: Context, protocol: String, baseUrl: String, apiKey: String?): List<Model> {
+    private fun read(context: Context, protocol: String, baseUrl: String, apiKey: String?, allowLanHttp: Boolean): List<Model> {
         val base = baseUrl.trim().trimEnd('/')
         val uri = runCatching { URI(base) }.getOrNull() ?: throw Failure("地址无效", "Invalid address")
         if (uri.scheme !in listOf("http", "https") || uri.host.isNullOrBlank() || uri.userInfo != null ||
             uri.query != null || uri.fragment != null) throw Failure("请填写完整的 http(s) 地址", "Enter a full http(s) address")
-        if (uri.scheme != "https" && uri.host !in listOf("localhost", "127.0.0.1", "::1", "[::1]")) {
-            throw Failure("远程地址需要 HTTPS", "Remote addresses need HTTPS")
+        if (!ProviderEndpoints.allowed(uri.scheme, uri.host, allowLanHttp)) {
+            throw if (ProviderEndpoints.isPrivateLanHost(uri.host)) {
+                Failure("这是局域网地址：勾选「允许局域网 HTTP」后才能用 http 连接", "This is a local network address: turn on Allow local network HTTP to connect over http")
+            } else {
+                Failure("远程地址需要 HTTPS", "Remote addresses need HTTPS")
+            }
         }
         if (base == MobileProviderSettings.EMBEDDED_QWEN_BASE_URL) throw Failure("本机模型在「本地模型」里下载和选择", "On-device models are downloaded and chosen under Local models")
         val key = apiKey?.trim()?.ifEmpty { null } ?: runCatching {
@@ -210,7 +217,19 @@ object ProviderModelCatalog {
     }
 
     private fun get(address: String, headers: Map<String, String>): JSONObject {
-        val connection = (URL(address).openConnection() as HttpURLConnection).apply {
+        val url = URL(address)
+        // Android's network policy keeps the platform HTTP stack off plain HTTP except to this phone
+        // (and it stays that way for everything else); a private-network server the user allowed is
+        // read over a plain socket instead.
+        if (url.protocol == "http" && !ProviderEndpoints.isLoopbackHost(url.host)) {
+            val (status, body) = try { PlainHttp.get(url, headers, MAX_BYTES) } catch (error: PlainHttp.TooLarge) {
+                throw Failure("模型列表太大", "The model list is too large")
+            } catch (error: Exception) {
+                throw Failure("无法连接：${error.message ?: error.javaClass.simpleName}", "Could not connect: ${error.message ?: error.javaClass.simpleName}")
+            }
+            return answer(status) { body }
+        }
+        val connection = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 8000
             readTimeout = 15000
@@ -223,26 +242,34 @@ object ProviderModelCatalog {
             val status = try { connection.responseCode } catch (error: Exception) {
                 throw Failure("无法连接：${error.message ?: error.javaClass.simpleName}", "Could not connect: ${error.message ?: error.javaClass.simpleName}")
             }
-            when {
-                status in 300..399 -> throw Failure("地址发生了跳转（HTTP $status），请填写最终的 API 地址", "The address redirects (HTTP $status); enter the final API address")
-                status == 401 || status == 403 -> throw Failure("API Key 无效或没有权限（HTTP $status）", "The API key is invalid or not allowed (HTTP $status)")
-                status == 404 || status == 405 -> throw Failure("这个服务没有模型列表接口，请手动填写模型名称", "This service has no model list; type the model name")
-                status !in 200..299 -> throw Failure("服务返回 HTTP $status", "The service answered HTTP $status")
-            }
-            val output = ByteArrayOutputStream()
-            connection.inputStream.use { input ->
-                val buffer = ByteArray(64 * 1024)
-                while (true) {
-                    val count = input.read(buffer)
-                    if (count < 0) break
-                    output.write(buffer, 0, count)
-                    if (output.size() > MAX_BYTES) throw Failure("模型列表太大", "The model list is too large")
+            return answer(status) {
+                val output = ByteArrayOutputStream()
+                connection.inputStream.use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        output.write(buffer, 0, count)
+                        if (output.size() > MAX_BYTES) throw Failure("模型列表太大", "The model list is too large")
+                    }
                 }
+                output.toByteArray()
             }
-            return runCatching { JSONObject(output.toString(Charsets.UTF_8.name())) }
-                .getOrElse { throw Failure("服务返回的不是模型列表（不是 JSON）", "The service did not answer with a model list (not JSON)") }
         } finally {
             connection.disconnect()
         }
+    }
+
+    /** What every answer goes through, whichever way it was read: redirects, keys, no list, JSON. */
+    private fun answer(status: Int, body: () -> ByteArray): JSONObject {
+        when {
+            status in 300..399 -> throw Failure("地址发生了跳转（HTTP $status），请填写最终的 API 地址", "The address redirects (HTTP $status); enter the final API address")
+            status == 401 || status == 403 -> throw Failure("API Key 无效或没有权限（HTTP $status）", "The API key is invalid or not allowed (HTTP $status)")
+            status == 404 || status == 405 -> throw Failure("这个服务没有模型列表接口，请手动填写模型名称", "This service has no model list; type the model name")
+            status !in 200..299 -> throw Failure("服务返回 HTTP $status", "The service answered HTTP $status")
+        }
+        val bytes = body()
+        return runCatching { JSONObject(String(bytes, Charsets.UTF_8)) }
+            .getOrElse { throw Failure("服务返回的不是模型列表（不是 JSON）", "The service did not answer with a model list (not JSON)") }
     }
 }

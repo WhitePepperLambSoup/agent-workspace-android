@@ -11,6 +11,17 @@
              ColorOS, MagicOS...) would otherwise invert it a second time. -->
         <item name="android:forceDarkAllowed" tools:targetApi="q">false</item>
         <item name="android:isLightTheme" tools:targetApi="q">true</item>
+        <item name="android:alertDialogTheme">@style/Theme.AgentWorkspace.Dialog</item>
+    </style>
+
+    <!-- Native dialogs (model settings and others): dark like before, but with their own solid
+         panel. The default one takes the theme's floating colour, which came out transparent on
+         some phones (ZTE): dialog text was drawn straight over the page. -->
+    <style name="Theme.AgentWorkspace.Dialog" parent="android:Theme.Material.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/dialog_background</item>
+        <item name="android:colorBackgroundFloating">@color/dialog_surface</item>
+        <item name="android:colorAccent">@color/dialog_accent</item>
+        <item name="android:forceDarkAllowed" tools:targetApi="q">false</item>
     </style>
 
     <!-- Circle to ask: invisible while the screen is captured, then the screenshot fills it. -->

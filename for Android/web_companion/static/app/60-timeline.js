@@ -111,7 +111,8 @@
     body.querySelectorAll("pre > code").forEach((code) => {
       const pre = code.parentElement;
       // ```card blocks become interactive cards once the reply is complete (63-cards.js).
-      if (code.classList.contains("language-card")) {
+      const tag = [...code.classList].find((name) => name.startsWith("language-"));
+      if (tag === "language-card" || (final && (!tag || tag === "language-json") && isCardJson(code.textContent))) {
         const card = final ? renderAgentCard(code.textContent) : null;
         if (card) { pre.replaceWith(card); return; }
         if (!final) { pre.classList.add("card-pending"); return; }

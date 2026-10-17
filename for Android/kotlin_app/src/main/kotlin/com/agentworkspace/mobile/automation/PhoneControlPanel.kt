@@ -620,7 +620,9 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
         modelsFetching = true
         modelsTried = "$protocol $base"
         scope.launch {
-            withContext(Dispatchers.IO) { runCatching { ProviderModelCatalog.fetch(service, protocol, base, null) } }
+            withContext(Dispatchers.IO) { runCatching {
+                ProviderModelCatalog.fetch(service, protocol, base, null, MobileProviderSettings.load(service).allowLanHttp)
+            } }
             modelsFetching = false
             if (stage == Stage.COMPOSE && chooserOpen) render()
         }

@@ -19,7 +19,8 @@ object ProviderSettingsChange {
      * refuses because tasks are running.
      */
     fun applyWithoutRestart(context: Context, protocol: String, baseUrl: String, model: String,
-                            reasoningEffort: String, contextSummaryEnabled: Boolean? = null): Boolean {
+                            reasoningEffort: String, contextSummaryEnabled: Boolean? = null,
+                            allowLanHttp: Boolean? = null): Boolean {
         val application = context.applicationContext
         val current = MobileProviderSettings.load(application)
         val local = MobileProviderSettings.EMBEDDED_QWEN_BASE_URL
@@ -27,14 +28,16 @@ object ProviderSettingsChange {
         val token = runCatching { File(application.filesDir, "serve.token").readText().trim() }.getOrNull()
             ?.takeIf { it.isNotEmpty() } ?: return false
         val effort = reasoningEffort.takeIf { it in MobileProviderSettings.reasoningEfforts(protocol, baseUrl, model) } ?: "auto"
-        fun payload(protocol: String, baseUrl: String, model: String, effort: String, summary: Boolean?) = JSONObject()
+        val lanHttp = allowLanHttp ?: current.allowLanHttp
+        fun payload(protocol: String, baseUrl: String, model: String, effort: String, summary: Boolean?, lan: Boolean) = JSONObject()
             .put("protocol", protocol).put("base_url", baseUrl).put("model", model).put("reasoning_effort", effort)
+            .put("allow_lan_http", lan)
             .apply {
                 MobileProviderSettings.apiKeyFor(application, protocol, baseUrl)?.let { put("api_key", it) }
                 if (summary != null) put("context_summary_enabled", summary)
             }
         val (code, reply) = try {
-            post(token, "/mobile/provider/apply", payload(protocol, baseUrl, model, effort, contextSummaryEnabled))
+            post(token, "/mobile/provider/apply", payload(protocol, baseUrl, model, effort, contextSummaryEnabled, lanHttp))
         } catch (_: java.io.IOException) {
             return false
         }
@@ -50,11 +53,12 @@ object ProviderSettingsChange {
         }
         try {
             MobileProviderSettings.save(application, protocol, baseUrl, model, null, false, effort,
-                contextSummaryEnabled = contextSummaryEnabled)
+                contextSummaryEnabled = contextSummaryEnabled, allowLanHttp = lanHttp)
         } catch (failure: Exception) {
             // Keep the engine and the saved settings in agreement: put the engine back.
             runCatching { post(token, "/mobile/provider/apply",
-                payload(current.protocol, current.baseUrl, current.model, current.reasoningEffort, current.contextSummaryEnabled)) }
+                payload(current.protocol, current.baseUrl, current.model, current.reasoningEffort, current.contextSummaryEnabled,
+                    current.allowLanHttp)) }
             throw failure
         }
         return true

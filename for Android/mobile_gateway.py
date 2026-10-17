@@ -1885,17 +1885,34 @@ class MobileGateway:
             raise ValueError("reasoning_effort is invalid")
         if summary is not None and not isinstance(summary, bool):
             raise ValueError("context_summary_enabled must be true or false")
+        allow_lan = payload.get("allow_lan_http", False)
+        if not isinstance(allow_lan, bool):
+            raise ValueError("allow_lan_http must be true or false")
         config = ProviderConfig(
             id=protocol, protocol=ProviderProtocol(protocol), base_url=base_url.strip(),
             model=model.strip(), api_key=api_key or None,
         )
-        config.validate()
-        local = "/embedded-qwen/v1"
-        if config.base_url.rstrip("/").endswith(local) or str(
-            self._settings.get("base_url", "")
-        ).rstrip("/").endswith(local):
-            raise ProviderRestartRequired("switching to or from the on-device model restarts the engine")
-        previous = await self.controller.switch_provider(config, effort)
+        # Plain HTTP to a private address follows the choice that comes with this provider.
+        previous_lan = os.environ.get("AGENT_WORKSPACE_ALLOW_LAN_HTTP")
+        if allow_lan:
+            os.environ["AGENT_WORKSPACE_ALLOW_LAN_HTTP"] = "1"
+        else:
+            os.environ.pop("AGENT_WORKSPACE_ALLOW_LAN_HTTP", None)
+        try:
+            config.validate()
+            local = "/embedded-qwen/v1"
+            if config.base_url.rstrip("/").endswith(local) or str(
+                self._settings.get("base_url", "")
+            ).rstrip("/").endswith(local):
+                raise ProviderRestartRequired("switching to or from the on-device model restarts the engine")
+            previous = await self.controller.switch_provider(config, effort)
+        except BaseException:
+            # The provider in use did not change: neither does its HTTP choice.
+            if previous_lan is None:
+                os.environ.pop("AGENT_WORKSPACE_ALLOW_LAN_HTTP", None)
+            else:
+                os.environ["AGENT_WORKSPACE_ALLOW_LAN_HTTP"] = previous_lan
+            raise
         for provider in previous:
             close = getattr(provider, "aclose", None)
             if callable(close):

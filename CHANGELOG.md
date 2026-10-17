@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.0.2 — 2026-10-18
+
+2.0.2 可以连接局域网电脑上的 Ollama，并修复了几处显示问题。Agent Workspace 2.0.2 can connect to Ollama on a computer in your local network, and fixes a few display problems.
+
+### 中文
+
+- 新增：模型设置里可以勾选「允许局域网 HTTP」，用 http 连接局域网电脑上的 Ollama 等服务，例如 `http://192.168.1.5:11434`。只对 192.168.x.x、10.x.x.x、172.16–31.x.x 这类内网 IP 生效，公网地址仍然必须使用 HTTPS。电脑上的 Ollama 需要设置 `OLLAMA_HOST=0.0.0.0` 才能被手机访问，设置方法见 README。
+- 修复：模型把卡片写成 `json` 代码块或不标语言的代码块时，回复里显示成代码，没有变成清单、日程、地点卡片。
+- 修复：部分手机（如中兴）上，模型设置等原生对话框没有背景，文字直接叠在页面上。
+- 修复：切换界面语言后，操作手机小窗要等引擎重启才换成新语言。
+- 修复：Ollama 不在本机时，连接检查误报需要填写 API Key。
+- README 按功能重写，配了新的截图。
+- 覆盖安装即可，数据会保留。
+
+### English
+
+- New: Allow local network HTTP in Model settings connects over http to Ollama and similar servers on a computer in your network, such as `http://192.168.1.5:11434`. It applies only to private IP addresses (192.168.x.x, 10.x.x.x, 172.16–31.x.x); public addresses still need HTTPS. Ollama on the computer needs `OLLAMA_HOST=0.0.0.0` to be reachable from the phone; the README shows how to set it.
+- Fixed: when a model wrote a card as a `json` code block or a code block without a language, the reply showed code instead of a checklist, event or place card.
+- Fixed: on some phones (ZTE, for example), Model settings and other native dialogs had no background, with their text drawn over the page.
+- Fixed: after switching the interface language, the Operate phone window kept the old language until the engine restarted.
+- Fixed: the connection check asked for an API key when Ollama was not on this phone.
+- The README is rewritten by feature, with new screenshots.
+- Install over the existing app; your data is kept.
+
 ## 2.0.1 — 2026-10-17
 
 2.0.1 修复了使用 DeepSeek 时任务一开始就失败的问题。Agent Workspace 2.0.1 fixes tasks failing at the start when using DeepSeek.

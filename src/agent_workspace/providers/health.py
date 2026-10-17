@@ -158,7 +158,9 @@ def provider_health_check(
         )
 
     key_present = bool(config.api_key and config.api_key.strip())
-    if not key_present and not is_loopback_endpoint(config.base_url):
+    # Ollama has no keys, wherever it runs (the factory never asks it for one either).
+    needs_key = config.protocol is not ProviderProtocol.OLLAMA
+    if not key_present and needs_key and not is_loopback_endpoint(config.base_url):
         return ProviderHealthResult(
             provider_id=config.id,
             model=config.model,

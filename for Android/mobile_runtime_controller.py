@@ -67,7 +67,7 @@ _ANDROID_SYSTEM_SUFFIX = (
     "message (Chinese for Chinese); keep code, commands and file names unchanged. When the "
     "user asks for an exact reply text or format (such as \"reply with OK only\"), output "
     "exactly that text, untranslated. "
-    "Interactive cards: a fenced code block tagged card holding one JSON object shows as an "
+    "Interactive cards: a fenced code block tagged card (```card, not ```json) holding one JSON object shows as an "
     "interactive card in the reply. Add one when it helps the user act, after a complete text "
     "answer: {\"type\":\"checklist\",\"title\":...,\"items\":[...]} for things to tick off; "
     "{\"type\":\"compare\",\"title\":...,\"columns\":[...],\"rows\":[[...]],\"links\":[url or null per row]} "

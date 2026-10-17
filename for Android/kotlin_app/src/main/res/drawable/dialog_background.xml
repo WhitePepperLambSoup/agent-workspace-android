@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Native dialogs draw this solid panel themselves: the theme's floating colour came out
+     transparent on some phones (ZTE), leaving dialog text over the page. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:insetLeft="16dp"
+    android:insetTop="16dp"
+    android:insetRight="16dp"
+    android:insetBottom="16dp">
+    <shape android:shape="rectangle">
+        <corners android:radius="20dp" />
+        <solid android:color="@color/dialog_surface" />
+    </shape>
+</inset>

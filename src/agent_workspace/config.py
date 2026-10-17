@@ -24,6 +24,26 @@ _DEFAULT_BASE_URLS = {
 }
 
 
+_PRIVATE_NETWORKS = tuple(
+    ipaddress.ip_network(network)
+    for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
+)
+
+
+def lan_http_allowed() -> bool:
+    """Plain HTTP to a private-network address, turned on per provider by the Android app."""
+    return os.environ.get("AGENT_WORKSPACE_ALLOW_LAN_HTTP") == "1"
+
+
+def is_private_lan_address(hostname: str) -> bool:
+    """An IP literal in a private range (192.168/16, 10/8, 172.16/12, fc00::/7); names never count."""
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    return any(address in network for network in _PRIVATE_NETWORKS)
+
+
 def provider_origin(base_url: str) -> tuple[str, str, int]:
     try:
         parsed = urlparse(base_url)
@@ -41,7 +61,10 @@ def provider_origin(base_url: str) -> tuple[str, str, int]:
     if "#" in base_url:
         raise ValueError("provider base URL may not include a fragment")
     if parsed.scheme == "http" and hostname not in {"127.0.0.1", "localhost", "::1"}:
-        raise ValueError("unencrypted provider endpoints are only allowed on loopback")
+        # A local server on the home or office network (Ollama on a computer, say) may be reached
+        # over plain HTTP only when the user turned that on; public addresses always need HTTPS.
+        if not (lan_http_allowed() and is_private_lan_address(hostname)):
+            raise ValueError("unencrypted provider endpoints are only allowed on loopback")
 
     default_port = 80 if parsed.scheme == "http" else 443
     return parsed.scheme, hostname, port if port is not None else default_port

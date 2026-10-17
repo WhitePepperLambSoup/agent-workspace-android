@@ -1281,6 +1281,27 @@ class WebUiActivity : ComponentActivity() {
                 }
             }
         }
+        // Plain HTTP to a computer on the home or office network (Ollama listens on http). Shown for
+        // such an address only; public addresses always need HTTPS.
+        val allowLan = CheckBox(this).apply {
+            text = UiText.of(this@WebUiActivity, "允许局域网 HTTP", "Allow local network HTTP")
+            isChecked = current.allowLanHttp
+        }
+        val allowLanHint = TextView(this).apply {
+            textSize = 12f
+            alpha = 0.75f
+            text = UiText.of(this@WebUiActivity,
+                "只对 192.168.x.x、10.x.x.x 这类内网地址生效，内容在局域网内不加密传输。电脑上的 Ollama 需要设置 OLLAMA_HOST=0.0.0.0 才能被手机访问。",
+                "Only for private addresses such as 192.168.x.x or 10.x.x.x; traffic on your network is not encrypted. Ollama on a computer needs OLLAMA_HOST=0.0.0.0 to be reachable from the phone.")
+        }
+        fun refreshAllowLan() {
+            val uri = runCatching { URI(baseUrl.text.toString().trim()) }.getOrNull()
+            val relevant = uri?.scheme == "http" && MobileProviderSettings.isPrivateLanHost(uri.host)
+            val show = relevant || allowLan.isChecked
+            allowLan.visibility = if (show) View.VISIBLE else View.GONE
+            allowLanHint.visibility = allowLan.visibility
+        }
+        refreshAllowLan()
         val apiKey = EditText(this).apply {
             hint = if (current.apiKey.isNullOrBlank()) "API Key" else UiText.of(this@WebUiActivity, "API Key（留空则保留）", "API key (leave blank to keep)")
             inputType = android.text.InputType.TYPE_CLASS_TEXT or
@@ -1322,8 +1343,9 @@ class WebUiActivity : ComponentActivity() {
             modelStatus.text = UiText.of(this@WebUiActivity, "正在获取模型列表…", "Reading the model list…")
             fetchJob = activityScope.launch {
                 try {
+                    val lanHttp = allowLan.isChecked
                     val models = withContext(Dispatchers.IO) {
-                        ProviderModelCatalog.fetch(this@WebUiActivity, protocol, base, typedKey)
+                        ProviderModelCatalog.fetch(this@WebUiActivity, protocol, base, typedKey, lanHttp)
                     }
                     model.setAdapter(ModelSuggestionAdapter(this@WebUiActivity, models))
                     modelStatus.text = UiText.of(this@WebUiActivity, "已获取 ${models.size} 个模型，点模型名称选择",
@@ -1397,6 +1419,13 @@ class WebUiActivity : ComponentActivity() {
         }
         baseUrl.addTextChangedListener(listWatcher)
         apiKey.addTextChangedListener(listWatcher)
+        baseUrl.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(s: Editable?) = refreshAllowLan()
+        })
+        // Turning it on reads the model list at once (it could not be read before).
+        allowLan.setOnCheckedChangeListener { _, _ -> refreshAllowLan(); readModelListSoon() }
         showModels(current.protocol, current.baseUrl)
         // A list read more than a day ago is read again (models come and go).
         val listed = runCatching { ProviderModelCatalog.cached(this, current.protocol, current.baseUrl) }.getOrNull()
@@ -1414,6 +1443,8 @@ class WebUiActivity : ComponentActivity() {
         // The key comes before the model: the model list is read with it.
         fields.addView(provider)
         fields.addView(baseUrl)
+        fields.addView(allowLan)
+        fields.addView(allowLanHint)
         fields.addView(apiKey)
         fields.addView(removeKey)
         fields.addView(model)
@@ -1439,6 +1470,7 @@ class WebUiActivity : ComponentActivity() {
                 val deleteKey = removeKey.isChecked
                 val selectedEffort = effortOptions[effort.selectedItemPosition]
                 val selectedAutonomy = MobileProviderSettings.autonomies[autonomy.selectedItemPosition]
+                val selectedLanHttp = allowLan.isChecked
                 val saveButton = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
                 saveButton.isEnabled = false
                 activityScope.launch {
@@ -1448,7 +1480,8 @@ class WebUiActivity : ComponentActivity() {
                             ProviderSettingsChange.apply(this@WebUiActivity,
                                 selectedBase.trimEnd('/') == MobileProviderSettings.EMBEDDED_QWEN_BASE_URL) {
                                 MobileProviderSettings.save(this@WebUiActivity, selectedProtocol,
-                                    selectedBase, selectedModel, selectedKey, deleteKey, selectedEffort, selectedAutonomy)
+                                    selectedBase, selectedModel, selectedKey, deleteKey, selectedEffort, selectedAutonomy,
+                                    allowLanHttp = selectedLanHttp)
                             }
                         }
                         dialog.dismiss()

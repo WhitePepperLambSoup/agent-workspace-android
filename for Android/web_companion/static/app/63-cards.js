@@ -32,6 +32,14 @@
     return `agent-card-${hash >>> 0}`;
   }
 
+  // Models often tag the block json, or leave it untagged; such a block holding one card object counts.
+  function isCardJson(source) {
+    try {
+      const spec = JSON.parse(source);
+      return !!spec && typeof spec === "object" && !Array.isArray(spec) && cardTypes.has(spec.type);
+    } catch { return false; }
+  }
+
   function renderAgentCard(source) {
     let spec;
     try { spec = JSON.parse(source); } catch { return null; }

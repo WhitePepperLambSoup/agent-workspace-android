@@ -30,6 +30,8 @@ data class MobileProviderSettings(
     val localThreads: Int = 0,
     val localTimeoutSeconds: Int = 0,
     val contextSummaryEnabled: Boolean = defaultContextSummaryEnabled(baseUrl),
+    /** Plain HTTP to a private-network address (Ollama on a computer at home); off by default. */
+    val allowLanHttp: Boolean = false,
 ) {
     fun toJson(): String = JSONObject().apply {
         put("id", protocol)
@@ -43,6 +45,7 @@ data class MobileProviderSettings(
         put("local_threads", localThreads)
         put("local_timeout_seconds", localTimeoutSeconds)
         put("context_summary_enabled", contextSummaryEnabled)
+        put("allow_lan_http", allowLanHttp)
         if (!apiKey.isNullOrBlank()) put("api_key", apiKey)
     }.toString()
 
@@ -59,6 +62,7 @@ data class MobileProviderSettings(
         put("local_timeout_seconds", localTimeoutSeconds)
         put("context_summary_enabled", contextSummaryEnabled)
         put("context_summary_experimental", experimentalContextSummary(baseUrl))
+        put("allow_lan_http", allowLanHttp)
         put("local_context_min_tokens", 512)
         put("local_context_max_tokens", 262144)
         put("local_max_threads", LocalModelPerformance.MAX_THREADS)
@@ -237,7 +241,8 @@ data class MobileProviderSettings(
             require(base.trimEnd('/') != EMBEDDED_QWEN_BASE_URL) { "原模型配置无效" }
             save(context, previous.getString("protocol"), base, previous.getString("model"),
                 null, false, previous.optString("reasoning_effort", "auto"),
-                previous.optString("autonomy", "workspace"))
+                previous.optString("autonomy", "workspace"),
+                allowLanHttp = previous.optBoolean("allow_lan_http", false))
             load(context)
         }
 
@@ -260,6 +265,11 @@ data class MobileProviderSettings(
             }
             return listOf("auto")
         }
+
+        fun isPrivateLanHost(host: String?): Boolean = ProviderEndpoints.isPrivateLanHost(host)
+        fun isLoopbackHost(host: String?): Boolean = ProviderEndpoints.isLoopbackHost(host)
+        fun endpointAllowed(scheme: String?, host: String?, allowLanHttp: Boolean): Boolean =
+            ProviderEndpoints.allowed(scheme, host, allowLanHttp)
 
         fun modelSuggestions(protocol: String): List<String> =
             modelsByProtocol[protocol] ?: emptyList()
@@ -299,6 +309,7 @@ data class MobileProviderSettings(
                     ?.takeIf { it in 0..LocalModelPerformance.MAX_TIMEOUT_SECONDS } ?: 0,
                 preferences.getString("context_summary_enabled", null)?.toBooleanStrictOrNull()
                     ?: defaultContextSummaryEnabled(baseUrl),
+                preferences.getString("allow_lan_http", null)?.toBooleanStrictOrNull() ?: false,
             )
         }
 
@@ -317,7 +328,7 @@ data class MobileProviderSettings(
                  reasoningEffort: String? = null, autonomy: String? = null,
                  localContextTokens: Int? = null, localMemoryMode: String? = null,
                  localThreads: Int? = null, localTimeoutSeconds: Int? = null,
-                 contextSummaryEnabled: Boolean? = null) {
+                 contextSummaryEnabled: Boolean? = null, allowLanHttp: Boolean? = null) {
             require(protocol in protocols) { "Invalid provider protocol" }
             require(model.isNotBlank() && model.length <= 256) { "Invalid model name" }
             require(localContextTokens == null || validLocalContext(localContextTokens)) {
@@ -345,8 +356,14 @@ data class MobileProviderSettings(
             require(uri.userInfo == null && uri.query == null && uri.fragment == null) {
                 "Endpoint may not contain credentials, query parameters, or a fragment"
             }
-            require(uri.scheme == "https" || uri.host in listOf("localhost", "127.0.0.1", "::1", "[::1]")) {
-                "Remote endpoints require HTTPS"
+            val lanHttp = allowLanHttp ?: (preferences.getString("allow_lan_http", null)?.toBooleanStrictOrNull() ?: false)
+            require(endpointAllowed(uri.scheme, uri.host, lanHttp)) {
+                if (lanHttp || !isPrivateLanHost(uri.host)) com.agentworkspace.mobile.UiText.of(context,
+                    "远程地址需要 HTTPS。局域网里的电脑请填它的 IP 地址（如 192.168.1.5）",
+                    "Remote addresses need HTTPS. For a computer on your network, use its IP address (such as 192.168.1.5)")
+                else com.agentworkspace.mobile.UiText.of(context,
+                    "这是局域网地址：勾选「允许局域网 HTTP」后才能用 http 连接",
+                    "This is a local network address: turn on Allow local network HTTP to connect over http")
             }
             if (baseUrl.trimEnd('/') == EMBEDDED_QWEN_BASE_URL) {
                 val previous = load(context)
@@ -382,6 +399,7 @@ data class MobileProviderSettings(
             if (contextSummaryEnabled != null) {
                 editor.putString("context_summary_enabled", contextSummaryEnabled.toString())
             }
+            if (allowLanHttp != null) editor.putString("allow_lan_http", allowLanHttp.toString())
             check(editor.commit()) { "Failed to save provider settings" }
         }
 

@@ -8,5 +8,6 @@
              ColorOS, MagicOS...) would otherwise invert it a second time. -->
         <item name="android:forceDarkAllowed" tools:targetApi="q">false</item>
         <item name="android:isLightTheme" tools:targetApi="q">false</item>
+        <item name="android:alertDialogTheme">@style/Theme.AgentWorkspace.Dialog</item>
     </style>
 </resources>
