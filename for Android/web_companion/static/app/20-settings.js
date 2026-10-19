@@ -315,6 +315,7 @@
       elements.contextSummaryToggle.checked = settings.context_summary_enabled;
       contextSummaryDirty = false;
       void loadModelRoles();
+      void loadTaskLimits();
     }
     if (page === "permission") elements.autonomySelector.value = settings.autonomy;
     if (page === "localModels") {

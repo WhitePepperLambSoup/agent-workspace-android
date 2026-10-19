@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- 基础网络与保活权限 -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -32,6 +33,9 @@
     <!-- Asks the user to let the engine run in the background (BackgroundRunGuide); strict
          phone makers otherwise freeze it and every reply crawls or fails. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Never granted on install: only when the user runs `adb shell pm grant … WRITE_SECURE_SETTINGS`
+         once, after which Device & tools can turn a stalled accessibility service off and on again. -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" tools:ignore="ProtectedPermissions" />
     <!-- Personal-info tools, each only after the user allows it in Device & tools. -->
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />

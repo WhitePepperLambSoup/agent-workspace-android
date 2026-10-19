@@ -37,11 +37,17 @@ ApprovalRequestListener = Callable[[dict[str, Any]], Awaitable[None] | None]
 # Scopes the user can pick on the approval shelf. "task" approves this request and every later
 # request of the same task, until it ends, except the tools below.
 APPROVAL_SCOPES = frozenset({"once", "session", "task"})
-# A task-wide approval never covers deleting files, changing long-term memory or operating
-# other apps: those still ask each time. The exception is a task the user started from the phone
-# control panel to operate the phone: there "allow for this task" covers its taps and typing.
-_ALWAYS_ASK_TOOLS = frozenset({"delete_path", "memory_write", "android_action"})
+# A task-wide approval never covers deleting files, changing long-term memory (app notes too),
+# operating other apps or sending a message as the user: those still ask each time. The exception
+# is a task the user started from the phone control panel to operate the phone: there "allow for
+# this task" covers its taps and typing (never a reply sent from a notification).
+_ALWAYS_ASK_TOOLS = frozenset(
+    {"delete_path", "memory_write", "app_note", "android_action", "notification_reply"}
+)
 _PHONE_CONTROL_TOOLS = frozenset({"android_action"})
+# A message sent as the user: approved one at a time, whatever scope is picked (a "session" grant
+# would let later replies in the conversation go out unasked).
+_ONCE_ONLY_TOOLS = frozenset({"notification_reply"})
 
 
 class MobileApprovalBroker:
@@ -133,6 +139,8 @@ class MobileApprovalBroker:
             return False
         if scope not in APPROVAL_SCOPES:
             raise ValueError("scope must be once, session or task")
+        if pending.details.get("tool") in _ONCE_ONLY_TOOLS:
+            scope = "once"
         if (
             allowed
             and scope == "task"

@@ -256,6 +256,10 @@ def configure_android_registry(
 
     if personal_tools_available():
         factories.update(personal_tools())
+    from .notification_tools import notification_tools, notification_tools_available
+
+    if notification_tools_available():
+        factories.update(notification_tools())
     from .speech_tools import TranscribeAudioTool, speech_runtime_status
 
     speech = speech_runtime_status()
@@ -272,6 +276,8 @@ def configure_android_registry(
         # Phone-wide memory (Memory page) replaces the per-workspace core memory tools.
         factories["memory_search"] = lambda: _memory_tools()[0]
         factories["memory_write"] = lambda: _memory_tools()[1]
+        # What earlier tasks learned about an app, shown when a task enters it (mobile_app_notes).
+        factories["app_note"] = _app_note_tool
         # The phone-wide knowledge base (Knowledge page): the user's own documents.
         from .knowledge_tools import KnowledgeAddTool, KnowledgeSearchTool, KnowledgeUseTool
 
@@ -282,6 +288,10 @@ def configure_android_registry(
 
         factories["use_skill"] = UseSkillTool
         factories["save_skill"] = SaveSkillTool
+        # Helpers that look into independent parts of a task side by side (mobile_subagents).
+        from mobile_subagents import RunSubagentsTool
+
+        factories["run_subagents"] = RunSubagentsTool
         if workspace is not None:
             factories["knowledge_add"] = lambda: KnowledgeAddTool(workspace)
     documents = document_status()
@@ -390,6 +400,19 @@ def _memory_tools() -> tuple[Any, Any]:
 
         _MEMORY_TOOLS = (MobileMemorySearchTool(), MobileMemoryWriteTool())
     return _MEMORY_TOOLS
+
+
+_APP_NOTE_TOOL: Any | None = None
+
+
+def _app_note_tool() -> Any:
+    """One shared instance, so the per-task save counter survives registry refreshes."""
+    global _APP_NOTE_TOOL
+    if _APP_NOTE_TOOL is None:
+        from .app_notes_tool import AppNoteTool
+
+        _APP_NOTE_TOOL = AppNoteTool()
+    return _APP_NOTE_TOOL
 
 
 def refresh_android_registry(registry: Any) -> dict[str, Any]:

@@ -36,10 +36,19 @@ class ProviderEgressPolicy:
         self._approval_callback = approval_callback
         self._local = _is_loopback(hostname)
         self._session_grants: dict[tuple[str, str], set[str]] = {}
+        # Helper session -> the session whose grants it uses (see link_session).
+        self._linked: dict[tuple[str, str], tuple[str, str]] = {}
 
     @property
     def endpoint(self) -> str:
         return self._endpoint
+
+    def link_session(self, workspace: str, parent_session: str, helper_session: str) -> None:
+        """A helper session started by a task's own tool sends under its parent's grants: what
+        the parent may send, the helper may send, and a session approval the user gives to the
+        helper (on the parent task's approval shelf) counts for the parent and its other helpers."""
+        parent = self._linked.get((workspace, parent_session), (workspace, parent_session))
+        self._linked[(workspace, helper_session)] = parent
 
     def retarget(self, endpoint: str) -> ProviderEgressPolicy:
         """The same policy for another Provider endpoint; earlier session grants do not carry over."""
@@ -59,6 +68,7 @@ class ProviderEgressPolicy:
             return ApprovalDecision(True, "YOLO mode records Provider egress without prompting")
 
         grant_key = (request.workspace, request.session_id)
+        grant_key = self._linked.get(grant_key, grant_key)
         sensitive = any(category.startswith("sensitive_") for category in request.data_categories)
         granted_categories = self._session_grants.get(grant_key, set())
         if not sensitive and set(request.data_categories).issubset(granted_categories):

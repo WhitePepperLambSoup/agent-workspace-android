@@ -133,6 +133,8 @@ def _usage_rows(
                 json_extract(u.data_json, '$.output_tokens') AS output_tokens,
                 COALESCE(json_extract(u.data_json, '$.cached_tokens'), 0) AS cached_tokens,
                 COALESCE(json_extract(u.data_json, '$.estimated'), 0) AS estimated,
+                u.session_id AS session_id,
+                json_extract(u.data_json, '$.kind') AS kind,
                 COALESCE(NULLIF(json_extract(request.data_json, '$.model'), ''), (
                     SELECT json_extract(previous.data_json, '$.model')
                     FROM events AS previous
@@ -208,6 +210,11 @@ def usage_summary(
         end = end.replace(tzinfo=UTC)
     cutoff = end - timedelta(days=days) if days is not None else None
     buckets: dict[str, dict[str, Any]] = {}
+    # What the calls were for: the conversations themselves, summaries of long ones, helpers.
+    from mobile_subagents import helper_sessions
+
+    helpers = helper_sessions()
+    purposes: dict[str, dict[str, Any]] = {}
     for usage in _usage_rows(runtime, workspace, session_id, cutoff, end):
         inputs, outputs, cached = (usage[field] for field in (
             "input_tokens", "output_tokens", "cached_tokens"
@@ -222,23 +229,35 @@ def usage_summary(
                 **_empty_totals(),
             }
         row = buckets[model]
+        purpose = (
+            "summary"
+            if usage["kind"] == "context_summary"
+            else "subagent"
+            if usage["session_id"] in helpers
+            else "conversation"
+        )
+        share = purposes.setdefault(purpose, {"purpose": purpose, **_empty_totals()})
         cached = min(cached, inputs)
-        row["model_calls"] += 1
-        row["input_tokens"] += inputs
-        row["output_tokens"] += outputs
-        row["cached_tokens"] += cached
-        row["total_tokens"] += inputs + outputs
-        row["estimated_calls"] += usage["estimated"]
         pricing = row["pricing"]
-        if pricing is None:
-            row["unpriced_calls"] += 1
-        else:
+        cost = (
+            None
+            if pricing is None
             # Convert token units before multiplying to avoid intermediate overflow.
-            row["known_cost_usd"] += (
-                (inputs - cached) / 1_000_000 * pricing["input_usd_per_million"]
-                + outputs / 1_000_000 * pricing["output_usd_per_million"]
-                + cached / 1_000_000 * pricing["cached_usd_per_million"]
-            )
+            else (inputs - cached) / 1_000_000 * pricing["input_usd_per_million"]
+            + outputs / 1_000_000 * pricing["output_usd_per_million"]
+            + cached / 1_000_000 * pricing["cached_usd_per_million"]
+        )
+        for target in (row, share):
+            target["model_calls"] += 1
+            target["input_tokens"] += inputs
+            target["output_tokens"] += outputs
+            target["cached_tokens"] += cached
+            target["total_tokens"] += inputs + outputs
+            target["estimated_calls"] += usage["estimated"]
+            if cost is None:
+                target["unpriced_calls"] += 1
+            else:
+                target["known_cost_usd"] += cost
     totals = _empty_totals()
     for row in buckets.values():
         if not math.isfinite(row["known_cost_usd"]):
@@ -249,10 +268,14 @@ def usage_summary(
     if not math.isfinite(totals["known_cost_usd"]):
         raise ValueError("cost exceeds the supported numeric range; lower model rates")
     totals["cost_usd"] = None if totals["unpriced_calls"] else totals["known_cost_usd"]
+    for share in purposes.values():
+        share["cost_usd"] = None if share["unpriced_calls"] else share["known_cost_usd"]
+    order = ("conversation", "summary", "subagent")
     return {
         "scope": "session" if session_id is not None else "workspace",
         "currency": "USD",
         "days": days,
         "totals": totals,
         "models": sorted(buckets.values(), key=lambda row: (-row["total_tokens"], row["model"])),
+        "purposes": [purposes[name] for name in order if name in purposes],
     }

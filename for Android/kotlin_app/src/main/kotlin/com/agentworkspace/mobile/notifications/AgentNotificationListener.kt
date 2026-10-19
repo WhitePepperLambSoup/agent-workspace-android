@@ -33,6 +33,17 @@ import org.json.JSONObject
 class AgentNotificationListener : NotificationListenerService() {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
+    // The connected listener, for the agent's notification tools (NotificationActions, same process).
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        connected = this
+    }
+
+    override fun onListenerDisconnected() {
+        if (connected === this) connected = null
+        super.onListenerDisconnected()
+    }
+
     override fun onNotificationPosted(notification: StatusBarNotification) {
         if (notification.packageName == packageName) return
         val flags = notification.notification.flags
@@ -76,6 +87,7 @@ class AgentNotificationListener : NotificationListenerService() {
     }
 
     override fun onDestroy() {
+        if (connected === this) connected = null
         scope.cancel()
         super.onDestroy()
     }
@@ -124,6 +136,8 @@ class AgentNotificationListener : NotificationListenerService() {
     }
 
     companion object {
+        @Volatile internal var connected: AgentNotificationListener? = null
+
         fun accessGranted(context: Context): Boolean =
             NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName)
 

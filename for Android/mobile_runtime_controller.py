@@ -26,8 +26,10 @@ from mobile_hosted_limits import budget as hosted_budget
 from mobile_hosted_limits import reason as hosted_limit_reason
 from mobile_images import resolve_mobile_images
 from mobile_injection import assess as assess_injection
-from mobile_model_roles import model_for_task, summary_model
+from mobile_model_roles import model_for_task, subagent_model, summary_model
 from mobile_pause import bind_task, forget_task, make_pausable
+from mobile_subagents import SubagentHost, bind_host, reset_host
+from mobile_task_limits import TaskLimits, limits_for_task
 from mobile_prompt_cache import FrozenPrompts, prefix_cache_endpoint
 from mobile_prompt_cache import assemble as assemble_prompt
 from mobile_protocol import REASONING_EFFORTS, MobileEvent, MobileTask, MobileTaskRequest, TaskState
@@ -161,7 +163,10 @@ def _phone_control_note(
         "reach other apps: shell commands such as am, input or monkey cannot. Do not switch to "
         "Agent Workspace. If automation is paused, stop and tell the user instead of looking for "
         "another way; the same for an app the user keeps the agent away from (blocked_app). "
-        "A warning that actions changed nothing means: change approach. Ask before paying, "
+        "A warning that actions changed nothing means: change approach. A result's app_notes "
+        "are what earlier tasks found in that app (hints; the app may have changed); when you "
+        "find out something about an app that would save steps next time, keep it with "
+        "app_note. Ask before paying, "
         "entering passwords, deleting anything or messaging other "
         "people. Stop as soon as the goal is reached and tell the user the result in a sentence "
         "or two. Write progress notes and the result in the language of the user's request "
@@ -207,6 +212,7 @@ _PHONE_TOOLS = frozenset(
         "list_calendar_events", "add_calendar_event", "memory_search", "memory_write",
         "knowledge_search", "read_file", "write_file", "list_files", "use_skill", "save_skill",
         "system_status", "system_settings", "find_contacts", "current_location", "compose_sms",
+        "active_notifications", "notification_reply", "notification_open",
     }
 )
 
@@ -333,6 +339,10 @@ class MobileRuntimeController:
         self._maintenance = False
         self._active_task_id: str | None = None
         self._active_session_id: str | None = None
+        # The running task's helpers (mobile_subagents) and spending limit (mobile_task_limits).
+        self._host: SubagentHost | None = None
+        self._limits: TaskLimits | None = None
+        self._limit_reasons: dict[str, str] = {}
         self._started = False
         self._closing = False
         self._restart_pending = False
@@ -817,7 +827,21 @@ class MobileRuntimeController:
 
     async def handle_runtime_event(self, event: Event) -> None:
         task_id = self._active_task_id
-        if task_id is None or event.session_id != self._active_session_id:
+        if task_id is None:
+            return
+        host = self._host
+        helper = host is not None and event.session_id in host.started
+        if helper or event.session_id == self._active_session_id:
+            self._count_spending(task_id, event)
+        if helper and event.type == "tool.started":
+            # What the helpers are doing, shown under the run_subagents step.
+            with suppress(KeyError):
+                self.tasks.append_event(
+                    task_id,
+                    "task.subagent.step",
+                    {"session_id": event.session_id, "tool": str(event.data.get("name") or "")},
+                )
+        if event.session_id != self._active_session_id:
             return
         scope = self._artifact_scopes.get(task_id)
         checkpoint_allowed = True
@@ -884,6 +908,44 @@ class MobileRuntimeController:
                         resume_available=True,
                     )
 
+    def _count_spending(self, task_id: str, event: Event) -> None:
+        """Adds a model call to the running task's spending; past its limit the task stops."""
+        limits = self._limits
+        if limits is None or event.type != "usage.updated" or task_id in self._limit_reasons:
+            return
+        data = event.data
+        host = self._host
+        model = str(data.get("model") or "")
+        if not model and host is not None:
+            if data.get("kind") == "context_summary" and host.summary_model:
+                model = host.summary_model
+            elif event.session_id in host.started:
+                model = host.model
+            else:
+                model = host.task_model or host.model
+        limits.add(
+            model,
+            data.get("input_tokens"),
+            data.get("output_tokens"),
+            data.get("cached_tokens") or 0,
+        )
+        reason = limits.reached()
+        job = self._jobs.get(task_id)
+        if reason is not None and job is not None and not job.done():
+            self._limit_reasons[task_id] = reason
+            job.cancel()
+
+    def _price_lookup(self) -> Any:
+        """Prices as the usage page shows them (custom ones first), read once per task."""
+        from mobile_usage import _pricing, _read_pricing
+
+        try:
+            _, document, _ = _read_pricing(self.runtime)
+            custom = document["models"]
+        except (OSError, KeyError, TypeError, AttributeError):
+            custom = {}
+        return lambda model: _pricing(model, custom)
+
     def _tool_registry(self) -> Any | None:
         """The runtime's tool registry (what the environment section describes), if it has one."""
         runner = getattr(getattr(self.runtime, "service", None), "runner", None)
@@ -911,6 +973,7 @@ class MobileRuntimeController:
 
     async def _execute(self, task_id: str) -> None:
         hosted = False
+        host_token = None
         try:
             async with self._artifact_execution_lock(task_id):
                 task = self.tasks.get(task_id)
@@ -1049,6 +1112,18 @@ class MobileRuntimeController:
                 if runner is not None:
                     make_pausable(runner)
                 bind_task(task_id)
+                # Helpers (run_subagents) and the per-task spending limit, both for this run only.
+                self._limits = limits_for_task(self._price_lookup())
+                self._host = SubagentHost(
+                    runtime=self.runtime,
+                    session=session,
+                    model=subagent_model(task_model=model, local=local),
+                    task_model=model,
+                    reasoning_effort=task.reasoning_effort,
+                    summary_model=options.get("summary_model"),
+                    limits=self._limits,
+                )
+                host_token = bind_host(self._host)
                 if execution is not None:
                     result = await execution(task)
                 elif self._execution_kind(task_id) == "workflow_replay":
@@ -1105,6 +1180,15 @@ class MobileRuntimeController:
                     await asyncio.to_thread(widget_card_task_finished, task.session_id, str(getattr(result, "text", "") or ""))
         except asyncio.CancelledError:
             current = self.tasks.get(task_id)
+            # Stopped by its own spending limit: a failure that says which limit, not a cancel.
+            limit = self._limit_reasons.pop(task_id, None)
+            if limit is not None and not self._closing:
+                if current.state not in _TERMINAL_STATES:
+                    self._offer_step_shots(task_id)
+                    with suppress(ValueError, KeyError):
+                        self.tasks.transition(task_id, TaskState.FAILED, reason=limit)
+                        self.tasks.append_event(task_id, "task.failed", {"error": limit})
+                return
             if current.state not in _TERMINAL_STATES and current.state is not TaskState.INTERRUPTED:
                 state = TaskState.INTERRUPTED if self._closing else TaskState.CANCELLED
                 reason = (
@@ -1150,10 +1234,16 @@ class MobileRuntimeController:
                         "tool.cancelled",
                         {**unused["attempt"], "reason": "state changed before Android dispatch"},
                     )
+            if host_token is not None:
+                with suppress(ValueError, RuntimeError):
+                    reset_host(host_token)
             if self._active_task_id == task_id:
                 self.approvals.clear_active_task(task_id)
                 self._active_task_id = None
                 self._active_session_id = None
+                self._host = None
+                self._limits = None
+            self._limit_reasons.pop(task_id, None)
             self._cancel_reasons.pop(task_id, None)
             self._execution_checks.pop(task_id, None)
             self._executions.pop(task_id, None)

@@ -479,6 +479,14 @@ class MobileManagement:
             from mobile_model_roles import get_roles
 
             return 200, {"roles": get_roles()}
+        if path == "/mobile/task-limits":
+            from mobile_task_limits import get_limits
+
+            return 200, {"limits": get_limits()}
+        if path == "/mobile/app-notes":
+            from mobile_app_notes import listing
+
+            return 200, await asyncio.to_thread(listing)
         if path == "/mobile/skills":
             return 200, await asyncio.to_thread(self.skills().snapshot)
         if path == "/mobile/skills/job":
@@ -807,6 +815,29 @@ class MobileManagement:
                 return 200, {"roles": set_roles(payload.get("roles") or {})}
             except ValueError as error:
                 return 400, {"error": str(error)}
+        if path == "/mobile/task-limits":
+            from mobile_task_limits import set_limits
+
+            try:
+                return 200, {"limits": set_limits(payload.get("limits") or {})}
+            except ValueError as error:
+                return 400, {"error": str(error)}
+        if path == "/mobile/app-notes":
+            import mobile_app_notes as notes
+
+            action = payload.get("action")
+            try:
+                if action == "delete_note":
+                    await asyncio.to_thread(notes.delete_note, payload.get("package_name"), payload.get("id"))
+                elif action == "forget_app":
+                    await asyncio.to_thread(notes.forget_app, payload.get("package_name"))
+                elif action == "set_enabled" and isinstance(payload.get("enabled"), bool):
+                    await asyncio.to_thread(notes.set_enabled, payload["enabled"])
+                else:
+                    return 400, {"error": "action must be delete_note, forget_app or set_enabled"}
+            except ValueError as error:
+                return 400, {"error": str(error)}
+            return 200, await asyncio.to_thread(notes.listing)
         if path.startswith("/mobile/memory"):
             store = self.memory()
             if path == "/mobile/memory":

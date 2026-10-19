@@ -141,6 +141,18 @@
       detail.textContent = tokenCount(totals.estimated_calls);
       elements.usageSummary.append(term, detail);
     }
+    // What the calls were for: the conversations, summaries of long ones, and sub-tasks.
+    const purposeNames = { conversation: t("对话"), summary: t("摘要压缩"), subagent: t("子任务") };
+    const purposes = (Array.isArray(data.purposes) ? data.purposes : []).filter((share) => purposeNames[share?.purpose]);
+    if (purposes.length > 1) {
+      for (const share of purposes) {
+        const term = document.createElement("dt");
+        term.textContent = t("其中{0}", purposeNames[share.purpose]);
+        const detail = document.createElement("dd");
+        detail.textContent = t("{0} Token · {1}", tokenCount(share.total_tokens), estimatedCost(share));
+        elements.usageSummary.append(term, detail);
+      }
+    }
     for (const record of Array.isArray(data.models) ? data.models : []) {
       if (!record || typeof record.model !== "string") continue;
       const row = document.createElement("div");

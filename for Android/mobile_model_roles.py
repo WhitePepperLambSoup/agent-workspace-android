@@ -1,5 +1,6 @@
-"""Models by purpose: a cheaper model of the same provider for phone control and for summarizing
-long conversations, while ordinary conversations keep the main model.
+"""Models by purpose: a cheaper model of the same provider for phone control, for summarizing
+long conversations and for helpers (mobile_subagents), while ordinary conversations keep the main
+model.
 
 Stored as <data>/model-roles.json. An empty role uses the main model. A model the user picks for
 one task (the panel's model picker, the chat's model sheet) always wins over a role.
@@ -14,7 +15,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-ROLES = ("phone", "summary")
+ROLES = ("phone", "summary", "subagent")
 _MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$")
 _lock = threading.Lock()
 
@@ -75,3 +76,8 @@ def model_for_task(
 def summary_model(*, local: bool) -> str | None:
     """The model that summarizes dropped history, or None for the task's own model."""
     return None if local else (get_roles()["summary"] or None)
+
+
+def subagent_model(*, task_model: str, local: bool) -> str:
+    """The model helpers run on: the helper role, else the task's own model."""
+    return task_model if local else (get_roles()["subagent"] or task_model)

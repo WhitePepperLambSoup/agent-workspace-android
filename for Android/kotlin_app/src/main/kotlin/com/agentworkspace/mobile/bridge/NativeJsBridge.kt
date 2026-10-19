@@ -418,6 +418,10 @@ class NativeJsBridge(
     @JavascriptInterface
     fun openAccessibilitySettings() { Handler(Looper.getMainLooper()).post { AndroidSystemBridge.openAccessibilitySettings(context) } }
 
+    /** Turns the accessibility service off and on again when the app may (else opens the settings page). */
+    @JavascriptInterface
+    fun repairAccessibility(): String = AndroidSystemBridge.repairAccessibility(context)
+
     /** The apps on the home screen (Device & tools: apps the agent may not use), by name. */
     @JavascriptInterface
     fun listLauncherApps(): String {

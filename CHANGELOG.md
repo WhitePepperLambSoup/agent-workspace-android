@@ -1,5 +1,39 @@
 # Changelog
 
+## 2.1.0 — 2026-10-19
+
+2.1.0 让一个任务可以拆成几个子任务同时做，可以给单个任务设花费上限，能直接回复通知，AI 操作手机时会记下各个应用里的操作经验。Agent Workspace 2.1.0 splits a task into sub-tasks that run side by side, caps what one task may spend, replies to notifications directly, and keeps notes on how each app works while the AI operates the phone.
+
+### 中文
+
+- 新增：子任务。一个任务里互不相关的几件事（查几份文档、比较几个选项），AI 可以分给子任务同时做，最多 4 个、同时 3 个，最后汇总。子任务只能查看文件、知识库、记忆和网页，不能改文件、运行命令或操作手机，也不读位置、联系人、日历和通知。每个子任务有自己的对话，在归档里能打开看它做了什么。
+- 新增：「模型与思考 → 按用途分配模型」里可以给子任务单独选模型，比如用更便宜的模型。
+- 新增：单个任务上限。在「模型与思考」里给每个任务设费用（美元）和 Token 上限，连同它分出的子任务一起计算；到了上限任务就停下，并说明是哪一项到了。默认不限。
+- 新增：「Token 与费用」按用途分开显示对话、摘要压缩和子任务各花了多少。
+- 新增：直接回复通知。AI 可以列出通知栏里的通知，用应用自带的快捷回复回复消息（短信、微信、QQ、Telegram 等提供快捷回复的应用），不用打开应用；每条回复发出前都要你单独同意，不能一次允许多条。AI 也可以打开通知指向的页面。需要通知使用权。
+- 新增：应用经验。AI 操作手机时，手机记下在每个应用里点哪些按钮能打开页面、哪些点了没反应；AI 也可以记几句某个应用怎么用。之后的任务进入这个应用时会先看到这些。在「记忆」页底部查看、删除或关闭。不记录输入的文字和带长串数字的内容（验证码、手机号、金额）。
+- 改进：AI 每次操作后知道屏幕有没有变化、键盘或通知栏是否挡在前面。屏幕黑着时先点亮再操作；手机锁着时停下来请你解锁。
+- 改进：点到灰色（不可用）的按钮时，AI 会被告知按钮不可用，不再反复重看屏幕、重试同一个按钮。
+- 改进：查网页、读文件这类只读操作遇到网络抖动失败时，自动再试一次。
+- 改进：很长的工具输出保留开头和结尾，省略中间部分，结论和报错不会被截掉。
+- 新增：「设备与工具」页能识别系统里无障碍开关开着、服务却没在运行的情况（更新或崩溃后常见），提示关掉再打开。用 adb 授予过 `WRITE_SECURE_SETTINGS` 的手机可以一键重新启用。
+- 覆盖安装即可，数据会保留。
+
+### English
+
+- New: sub-tasks. When a task has independent parts (several documents to read, options to compare), the AI can hand them to sub-tasks that run side by side, up to 4 per call and 3 at a time, and combine their reports. Sub-tasks can only look at files, the knowledge base, memory and web pages; they cannot change files, run commands or operate the phone, and do not read location, contacts, calendar or notifications. Each one has its own conversation, which you can open from the archive to see what it did.
+- New: Model & reasoning → Models by purpose can give sub-tasks a model of their own, a cheaper one for example.
+- New: per-task limit. Model & reasoning sets a cost (US dollars) and a token limit for each task, counting the sub-tasks it starts; a task that reaches one stops and says which. There is no limit by default.
+- New: Tokens & cost shows what conversations, summaries and sub-tasks each spent.
+- New: reply to notifications. The AI can list the notifications in the shade and answer a message with the app's own quick reply (Messages, WeChat, QQ, Telegram and other apps that offer one) without opening the app. You approve each reply on its own before it is sent; there is no allowing several at once. The AI can also open the page a notification leads to. This needs notification access.
+- New: app notes. While the AI operates the phone, the phone notes which buttons in each app lead somewhere and which do nothing, and the AI can add a few lines on how an app works. Later tasks see these when they enter that app. View, delete or turn them off at the bottom of the Memory page. Typed text and anything with long numbers in it (codes, phone numbers, amounts) is never recorded.
+- Improved: after each action the AI knows whether the screen changed and whether the keyboard or the notification shade covers the app. A dark screen is turned on before an action; on a locked phone the AI stops and asks you to unlock it.
+- Improved: tapping a greyed-out (disabled) button now tells the AI the button is disabled, instead of sending it to look at the screen and retry the same button.
+- Improved: read-only steps such as fetching a web page or reading a file are tried once more when they fail on a network hiccup.
+- Improved: very long tool output keeps its start and its end and leaves out the middle, so conclusions and errors are not cut off.
+- New: the Device & tools page recognizes when accessibility is switched on in the system but the service is not running (common after an update or a crash) and says to turn it off and on again. On a phone where `WRITE_SECURE_SETTINGS` was granted with adb, one tap restarts it.
+- Install over the existing app; your data is kept.
+
 ## 2.0.2 — 2026-10-18
 
 2.0.2 可以连接局域网电脑上的 Ollama，并修复了几处显示问题。Agent Workspace 2.0.2 can connect to Ollama on a computer in your local network, and fixes a few display problems.

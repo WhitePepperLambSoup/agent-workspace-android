@@ -225,15 +225,46 @@
       const { roles = {} } = await apiJson("/mobile/model-roles");
       $("phoneModelInput").value = roles.phone || "";
       $("summaryModelInput").value = roles.summary || "";
+      $("subagentModelInput").value = roles.subagent || "";
       status.textContent = "";
     } catch (error) { status.textContent = t("读取失败：{0}", error.message); }
   }
   async function saveModelRoles() {
     const status = $("modelRolesStatus");
-    const roles = { phone: $("phoneModelInput").value.trim(), summary: $("summaryModelInput").value.trim() };
+    const roles = {
+      phone: $("phoneModelInput").value.trim(),
+      summary: $("summaryModelInput").value.trim(),
+      subagent: $("subagentModelInput").value.trim(),
+    };
     try {
       await apiJson("/mobile/model-roles", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ roles }) });
-      status.textContent = roles.phone || roles.summary ? t("已保存，下一个任务开始生效") : t("已保存：都使用主模型");
+      status.textContent = roles.phone || roles.summary || roles.subagent ? t("已保存，下一个任务开始生效") : t("已保存：都使用主模型");
+    } catch (error) { status.textContent = t("保存失败：{0}", error.message); }
+  }
+
+  // A spending limit per task, its sub-tasks included (mobile_task_limits). Tokens are entered in units of 10,000.
+  async function loadTaskLimits() {
+    const status = $("taskLimitsStatus");
+    try {
+      const { limits = {} } = await apiJson("/mobile/task-limits");
+      if (disposed) return;
+      $("taskCostLimitInput").value = limits.max_cost_usd > 0 ? String(limits.max_cost_usd) : "";
+      $("taskTokenLimitInput").value = limits.max_tokens > 0 ? String(Math.round(limits.max_tokens / 10_000)) : "";
+      status.textContent = "";
+    } catch (error) { status.textContent = t("读取失败：{0}", error.message); }
+  }
+  async function saveTaskLimits() {
+    const status = $("taskLimitsStatus");
+    const cost = Number($("taskCostLimitInput").value.trim() || 0);
+    const tokens = Number($("taskTokenLimitInput").value.trim() || 0);
+    if (!Number.isFinite(cost) || cost < 0 || cost > 1000 || !Number.isFinite(tokens) || tokens < 0 || tokens > 100_000) {
+      status.textContent = t("请填 0 到 1000 美元、0 到 100000 万 Token");
+      return;
+    }
+    const limits = { max_cost_usd: cost, max_tokens: Math.round(tokens) * 10_000 };
+    try {
+      await apiJson("/mobile/task-limits", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ limits }) });
+      status.textContent = cost || tokens ? t("已保存，下一个任务开始生效") : t("已保存：不限");
     } catch (error) { status.textContent = t("保存失败：{0}", error.message); }
   }
 

@@ -12,6 +12,10 @@
       elements.approvalDetail.textContent = approvalText(approval);
       elements.approvalDetail.dataset.kind = approval.kind || "";
       if (changed) elements.approvalScopeSelector.value = "once";
+      // A reply sent as the user is approved one at a time (the engine ignores a wider scope too).
+      const onceOnly = approval.details?.tool === "notification_reply";
+      if (onceOnly) elements.approvalScopeSelector.value = "once";
+      elements.approvalScopeSelector.disabled = onceOnly;
     }
   }
 
@@ -36,7 +40,16 @@
       // The task read instructions in outside content: this step may be driven by them.
       if (details.untrusted_content) lines.unshift(t("⚠ 这一步可能是被外部内容驱动的（{0}）。请确认这确实是你要做的。", String(details.untrusted_content).slice(0, 120)));
       const argumentsValue = details.arguments && typeof details.arguments === "object" ? details.arguments : {};
-      for (const [name, value] of Object.entries(argumentsValue)) lines.push(`${name}: ${plain(value)}`);
+      // A reply sent from a notification goes out as the user: who it is to and what it says, in full.
+      if (details.tool === "notification_reply") {
+        if (argumentsValue.to) lines.push(t("发给：{0}", plain(argumentsValue.to)));
+        lines.push(t("内容：{0}", plain(argumentsValue.text ?? "")));
+        return lines.join("\n");
+      }
+      for (const [name, value] of Object.entries(argumentsValue)) {
+        if (name === "key" && String(details.tool).startsWith("notification_")) continue;
+        lines.push(`${name}: ${plain(value)}`);
+      }
       return lines.join("\n");
     }
     return JSON.stringify(details, null, 2);
@@ -97,6 +110,8 @@
       task.shortcutSteps = Number(payload.steps) || 0;
     } else if (event.event_type === "task.step_shots") {
       task.stepShots = Number(payload.count) || 0;
+    } else if (event.event_type === "task.subagent.step") {
+      showSubagentStep(payload);
     } else if (event.event_type === "task.untrusted_content") {
       notice(t("AI 读到的内容（{0}）里有像是写给 AI 的指令。为了安全，这个任务接下来的每一步都会先问你。", toolTitles[payload.tool] || payload.tool || ""));
     } else if (event.event_type === "runtime.message.created" && payload.role === "assistant") {

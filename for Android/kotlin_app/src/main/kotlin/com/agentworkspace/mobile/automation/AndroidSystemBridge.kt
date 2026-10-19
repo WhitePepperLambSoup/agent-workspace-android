@@ -2,8 +2,10 @@ package com.agentworkspace.mobile.automation
 
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.app.ActivityManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Looper
 import android.provider.Settings
@@ -31,8 +33,11 @@ object AndroidSystemBridge {
         } == true)
         val memory = ActivityManager.MemoryInfo()
         (context?.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)?.getMemoryInfo(memory)
+        val switchedOn = context?.let { switchedOn(it) } ?: false
         val reason = when {
             context == null -> "Android system bridge is not initialized; restart the engine"
+            !enabled && switchedOn -> "Accessibility is on for Agent Workspace but Android is not running it (this happens " +
+                "after an update or a crash): turn it off and on again in Accessibility settings"
             !enabled -> "Enable Agent Workspace in Android Accessibility settings"
             !connected -> "Android accessibility service is disconnected; enable it in Accessibility settings"
             else -> null
@@ -40,6 +45,9 @@ object AndroidSystemBridge {
         val status = JSONObject()
             .put("available", context != null)
             .put("enabled", enabled)
+            // The switch in Accessibility settings, which Android may keep on without running the service.
+            .put("switched_on", switchedOn)
+            .put("can_repair", context?.let { canRepair(it) } ?: false)
             .put("connected", connected)
             .put("local_connection", service != null)
             .put("paused", state.optBoolean("paused"))
@@ -63,6 +71,44 @@ object AndroidSystemBridge {
             .put("service_component", "${context?.packageName ?: "com.agentworkspace.mobile"}/com.agentworkspace.mobile.automation.AgentAccessibilityService")
             .put("reason", reason ?: JSONObject.NULL)
         return status.toString()
+    }
+
+    private fun component(context: Context) =
+        ComponentName(context.packageName, AgentAccessibilityService::class.java.name)
+
+    private fun switchedOn(context: Context): Boolean = runCatching {
+        val ours = component(context)
+        Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES).orEmpty()
+            .split(':').any { ComponentName.unflattenFromString(it) == ours }
+    }.getOrDefault(false)
+
+    /** Granted only by the user, once, with adb (pm grant … WRITE_SECURE_SETTINGS). */
+    private fun canRepair(context: Context) =
+        context.checkSelfPermission(android.Manifest.permission.WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED
+
+    /**
+     * On the user's tap: turns the accessibility service off and on again (or on), which brings back
+     * one Android stopped running after an update or a crash. Needs WRITE_SECURE_SETTINGS; without it
+     * Accessibility settings open for the user to do the same.
+     */
+    @JvmStatic
+    fun repairAccessibility(context: Context): String {
+        val resolver = context.contentResolver
+        val ours = component(context)
+        if (canRepair(context)) try {
+            val others = Settings.Secure.getString(resolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES).orEmpty()
+                .split(':').filter { it.isNotBlank() && ComponentName.unflattenFromString(it) != ours }
+            Settings.Secure.putString(resolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, others.joinToString(":"))
+            Thread.sleep(500)
+            Settings.Secure.putString(resolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+                (others + ours.flattenToString()).joinToString(":"))
+            Settings.Secure.putInt(resolver, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
+            return JSONObject().put("ok", true).toString()
+        } catch (_: SecurityException) {
+            // The grant was taken back: fall through to the settings page.
+        }
+        val opened = openAccessibilitySettings(context)
+        return JSONObject().put("ok", false).put("opened_settings", opened).toString()
     }
 
     private fun isEnabled(context: Context): Boolean {

@@ -2065,22 +2065,48 @@ class AgentRunner:
             if existing.content != artifact.content:
                 raise ValueError("tool artifact digest collision detected")
 
-        outcome = await _execute_to_settlement(
-            tool,
-            execution_arguments,
-            _tool_timeout_seconds(tool, execution_arguments, budget.max_tool_seconds),
-            budget.max_tool_settlement_seconds,
-            ToolExecutionContext(
-                session_id=session_id,
-                correlation_id=correlation_id,
-                attempt_id=attempt_id,
-                started_event_id=started.id,
-                record_event=buffer_domain_event,
-                prepare_file_checkpoint=prepare_file_checkpoint,
-                record_artifact=buffer_artifact,
-                autonomy=autonomy,
-            ),
-        )
+        async def execute_once() -> Any:
+            return await _execute_to_settlement(
+                tool,
+                execution_arguments,
+                _tool_timeout_seconds(tool, execution_arguments, budget.max_tool_seconds),
+                budget.max_tool_settlement_seconds,
+                ToolExecutionContext(
+                    session_id=session_id,
+                    correlation_id=correlation_id,
+                    attempt_id=attempt_id,
+                    started_event_id=started.id,
+                    record_event=buffer_domain_event,
+                    prepare_file_checkpoint=prepare_file_checkpoint,
+                    record_artifact=buffer_artifact,
+                    autonomy=autonomy,
+                ),
+            )
+
+        outcome = await execute_once()
+        # A read that failed on the network gets one more try before the model hears about it.
+        # Only tools without side effects qualify, so a retried call can never act twice.
+        if (
+            _transient_read_failure(tool, outcome)
+            and not pending_domain_events
+            and not pending_artifacts
+        ):
+            await self._record(
+                Event(
+                    session_id=session_id,
+                    type="tool.retried",
+                    data={
+                        "attempt_id": attempt_id,
+                        "tool_call_id": call.id,
+                        "name": call.name,
+                        "reason": f"{type(outcome.error).__name__}: {outcome.error}"[:300],
+                    },
+                    causation_id=started.id,
+                    correlation_id=correlation_id,
+                )
+            )
+            await asyncio.sleep(_TRANSIENT_RETRY_DELAY_SECONDS)
+            outcome = await execute_once()
         if outcome.settlement_timeout_exceeded:
             result = "Tool did not settle within the cancellation grace period; outcome is unknown."
             await self._record(
@@ -3292,6 +3318,8 @@ def _provider_egress_request(
 
 
 def _truncate_tool_output(result: str, maximum: int) -> tuple[str, int, bool]:
+    """Keep the start and the end of an oversized result: a command's errors, exit status and
+    conclusion are usually at the end, so only the middle is dropped."""
     encoded = result.encode("utf-8")
     original_size = len(encoded)
     if original_size <= maximum:
@@ -3301,8 +3329,21 @@ def _truncate_tool_output(result: str, maximum: int) -> tuple[str, int, bool]:
     if len(marker_bytes) >= maximum:
         return marker_bytes[:maximum].decode("utf-8", errors="ignore"), original_size, True
     retained = max(0, maximum - len(marker_bytes))
-    prefix = encoded[:retained].decode("utf-8", errors="ignore")
-    return prefix + marker, original_size, True
+    middle = (
+        f"\n[tool output truncated at {maximum} of {original_size} bytes: "
+        f"{{}} bytes omitted from the middle; read a narrower range to see them]\n"
+    )
+    # Results too short for a useful tail keep only their start, as before.
+    if retained < 512:
+        prefix = encoded[:retained].decode("utf-8", errors="ignore")
+        return prefix + marker, original_size, True
+    room = retained - len(middle.format(original_size).encode("utf-8"))
+    head_bytes = room * 3 // 5
+    tail_bytes = room - head_bytes
+    head = encoded[:head_bytes].decode("utf-8", errors="ignore")
+    tail = encoded[original_size - tail_bytes :].decode("utf-8", errors="ignore")
+    omitted = original_size - len(head.encode("utf-8")) - len(tail.encode("utf-8"))
+    return head + middle.format(omitted) + tail, original_size, True
 
 
 def _summary_message(
@@ -3444,6 +3485,49 @@ def _image_parts_from_artifacts(artifacts: tuple[BinaryArtifact, ...]) -> tuple[
     validated = tuple(parts[:4])
     validate_image_parts(validated)
     return validated
+
+
+_TRANSIENT_RETRY_DELAY_SECONDS = 0.5
+_READ_ONLY_SIDE_EFFECTS = frozenset({"none", "read", "read_state", "git_read"})
+# Transport failures of common HTTP clients, by name so no client has to be imported here.
+_TRANSIENT_ERROR_NAMES = frozenset(
+    {
+        "ConnectError",
+        "ConnectTimeout",
+        "ReadError",
+        "ReadTimeout",
+        "WriteError",
+        "PoolTimeout",
+        "RemoteProtocolError",
+        "IncompleteRead",
+        "ServerDisconnectedError",
+        "ClientConnectorError",
+    }
+)
+
+
+def _transient_read_failure(tool: Any, outcome: Any) -> bool:
+    """A side-effect-free tool failed on the network or a transient timeout of its own: safe to
+    run again. Time budget overruns, cancellations and argument errors never qualify."""
+    error = outcome.error
+    if (
+        error is None
+        or outcome.timeout_exceeded
+        or outcome.caller_cancelled
+        or outcome.settlement_timeout_exceeded
+        or isinstance(error, asyncio.CancelledError)
+    ):
+        return False
+    spec = tool.spec
+    if spec.side_effect not in _READ_ONLY_SIDE_EFFECTS or getattr(
+        spec, "durable_preimage_checkpoint", False
+    ):
+        return False
+    if getattr(error, "transient", False) is True:
+        return True
+    return isinstance(error, (ConnectionError, TimeoutError)) or (
+        type(error).__name__ in _TRANSIENT_ERROR_NAMES
+    )
 
 
 def _classify_tool_failure(

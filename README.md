@@ -33,11 +33,13 @@ What changed in 2.0.2: Allow local network HTTP in Model settings connects to Ol
 
 - **Multi-step tasks.** The agent plans, calls tools and shows every step live: the streamed reply, its reasoning, and each tool call as running, finished, failed or cancelled. Generated files appear under the reply, ready to open, share or save.
 - **Add to a running task.** Type while a task runs and your message joins it; the agent takes it into account at its next step instead of starting over.
-- **Approvals.** Three execution modes — workspace only, YOLO, full access — and an approval prompt before sensitive actions, for this time only or for the rest of the task; deleting files, changing long-term memory and operating other apps from a chat still ask every time.
+- **Approvals.** Three execution modes — workspace only, YOLO, full access — and an approval prompt before sensitive actions, for this time only or for the rest of the task; deleting files, changing long-term memory, operating other apps from a chat and replying to notifications still ask every time.
 - **Cards in replies.** Checklists you can tick, comparison tables, events that go into the calendar and places that open in the map with one tap, and next steps that send their request when tapped.
 - **Models and reasoning effort.** The model button in the message box switches between your usual model profiles and sets the reasoning effort with a slider, without restarting the engine between cloud models. Messages can be edited and resent, replies regenerated, and conversations archived or deleted for good.
 - **Math and diagrams.** LaTeX formulas and Mermaid diagrams in replies are rendered.
 - **Plan mode and skills.** In plan mode the agent only looks and proposes a plan, acting once you agree; the Skills page installs official skills or imports SKILL.md files, which the agent reads only when needed.
+- **Sub-tasks.** When a task has independent parts (several documents to read, options to compare), the agent can hand them to sub-tasks that run side by side (up to 4 per call, 3 at a time) and combine their reports. Sub-tasks can only look at files, the knowledge base, memory and web pages; they cannot change files, run commands or operate the phone. Each has its own conversation, which you can open from the archive.
+- **Per-task limit.** Model & reasoning sets a cost and a token limit for each task, counting the sub-tasks it starts; a task that reaches one stops and says which. Tokens & cost shows conversations, summaries and sub-tasks separately.
 
 ### Phone control
 
@@ -54,6 +56,8 @@ This needs the app's accessibility service, which you turn on in system settings
 - **Look back.** Every step keeps a small screenshot that you can step through after the task. The pictures stay on the phone for the latest 20 tasks and at most 7 days; screens with passwords or other sensitive content are not captured.
 - **Shortcuts.** A finished task can be saved as a shortcut that repeats the steps without the model; steps can be edited, and shortcuts can run on a schedule or on a trigger. When an app update gets a shortcut stuck at a step, the agent finishes from that step and one tap puts its steps into the shortcut. Shortcuts can be shared as codes, and an import lists every step before it is saved.
 - **Circle to act.** Circle part of the screen and the phone reads the words offline, then offers what fits: call, open a link, navigate, add to the calendar, compare prices, translate, save to a knowledge base or copy the text; or send the circled part to the agent with a question. Nothing is captured while a password field is on screen.
+- **App notes.** While the agent works, the phone notes which buttons in each app lead somewhere and which do nothing, and the agent can add a few lines on how an app works; later tasks see these when they enter that app. View, delete or turn them off at the bottom of the Memory page. Typed text and anything with long numbers in it is never recorded.
+- **Phone state.** After each step the agent knows whether the screen changed and whether the keyboard or the notification shade covers the app; a dark screen is turned on before an action, and on a locked phone the agent stops and asks you to unlock it. Tapping a greyed-out button tells it the button is disabled.
 
 <p align="center">
   <img src="docs/screenshots/step-replay-en.png" width="250" alt="Looking back through the step screenshots">
@@ -71,6 +75,7 @@ This needs the app's accessibility service, which you turn on in system settings
 - **Morning briefing.** Calendar, weather, voice note points and to-dos; an AI card on the home screen shows a scheduled task's latest result.
 - **Schedules and triggers.** Scheduled tasks also run in the default workspace mode; tasks can start when the phone starts charging, joins Wi‑Fi or an app opens, or when an app such as Tasker sends a request.
 - **Notification rules.** When a notification from an app you chose arrives, the agent handles it the way you describe, such as noting a parcel pickup code; by default it asks you first.
+- **Reply to notifications.** The agent can list the notifications in the shade and answer a message with the app's own quick reply (Messages, WeChat, QQ, Telegram and other apps that offer one) without opening the app; you approve each reply on its own before it is sent. It can also open the page a notification leads to. This needs notification access.
 - **Reusable workflows** with step replay, task evaluations and hand-off between devices.
 
 ### Models
@@ -82,7 +87,7 @@ This needs the app's accessibility service, which you turn on in system settings
 - **Cloud providers.** OpenAI-compatible APIs (OpenAI, DeepSeek, Qwen, Kimi, GLM, xAI …), Anthropic, Gemini and Ollama. With DeepSeek, OpenAI, Kimi, Qwen, GLM, Gemini, Grok, OpenRouter or Claude, every request only grows at the end, so the provider's context cache covers most of the input (about 95% in long DeepSeek tasks on a phone), billed at a lower price.
 - **Ollama on your network.** With Allow local network HTTP checked, the app connects over http to Ollama and similar servers at private addresses such as 192.168.x.x, 10.x.x.x and 172.16–31.x.x; see the next section.
 - **On-device models.** Download a Qwen3 / Qwen3.5 GGUF model and run it offline on the phone's CPU through llama.cpp, including image input with Qwen3.5. A new conversation starts answering in about 1–2 seconds; chips with dot-product instructions get an accelerated build, and inference slows down on its own when the phone runs hot. Models download from ModelScope (a mainland China CDN) or Hugging Face, and a paused download can continue from the other source; a grammar keeps small models' tool calls well-formed.
-- **Models by purpose.** Use cheaper models for operating the phone and for summarizing long conversations; providers take custom request headers and backup API keys that take over on errors.
+- **Models by purpose.** Use cheaper models for operating the phone, for summarizing long conversations and for sub-tasks; providers take custom request headers and backup API keys that take over on errors.
 
 #### Ollama on your local network
 
@@ -130,7 +135,7 @@ The option applies to private IP addresses only: host names such as `.local` and
 2. Open the menu (⋯) → **Provider & API settings** to enter a cloud provider and API key, or **Local models** to download a model that runs on the phone. For Ollama on a computer in your network, see [above](#ollama-on-your-local-network).
 3. Type a task, or tap one of the quick tasks. Tap the model chip under the input to switch the model and set the reasoning effort; the shield sets the execution mode (green: workspace, yellow: YOLO, red: full access).
 4. While the task runs, type to add instructions, or tap stop. Generated files appear under the reply.
-5. For phone control, turn on the app's accessibility service in system settings, then turn on the floating bubble under Menu → **Global entry**.
+5. For phone control, turn on the app's accessibility service in system settings, then turn on the floating bubble under Menu → **Global entry**. If after an update or a crash accessibility is switched on but does nothing, the Device & tools page says so; turn it off and on again in system settings. On a phone where you ran `adb shell pm grant com.agentworkspace.mobile android.permission.WRITE_SECURE_SETTINGS`, one tap there restarts it.
 
 ## Tech Stack
 
@@ -187,7 +192,8 @@ agent-workspace-android/
 - The engine listens only on `127.0.0.1`, requires a per-launch token, and proves its identity to the app before the token is handed over.
 - Providers need HTTPS by default (addresses on the phone itself excepted). With Allow local network HTTP checked, http is allowed for private IP addresses only; host names and public addresses still need HTTPS.
 - Diagnostic logs are only created and shared when you tap the button; the engine token and API keys are masked.
-- Memory stays on the phone and never holds passwords, keys, verification codes or ID numbers; you can review, delete or turn it off at any time.
+- Memory stays on the phone and never holds passwords, keys, verification codes or ID numbers; you can review, delete or turn it off at any time. App notes stay on the phone as well and never hold typed text or anything with long numbers in it.
+- A notification reply sends a message as you, so each one needs your approval. Sub-tasks do not read location, contacts, calendar or notifications, and cannot operate the phone.
 - Knowledge base documents stay on the phone. With a cloud model, the passages found for a question are sent to your provider along with it; to avoid that, turn off "Attach relevant passages to each question" or use an on-device model. Passages are marked as reference material for the model, not as instructions.
 - The built-in browser exposes no app interface to web pages, opens only http/https pages and keeps its sign-ins apart from the app's interface; its data can be cleared in one tap.
 - The system permissions behind notification rules, the notification digest and the floating bubble are requested only when you turn those features on; notification rules read only the apps you chose and pass a notification's content only to the task it triggers; notifications kept for digests stay on the phone and are cleared as soon as the digest is turned off.

@@ -1280,7 +1280,18 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
         "android_observe" -> if (arguments?.has("until_text") == true || arguments?.has("until_gone") == true)
             text("等待屏幕变化", "Waiting for the screen") else text("查看屏幕", "Looked at the screen")
         "android_screenshot" -> text("截图看屏幕", "Took a screenshot")
+        "active_notifications" -> text("查看通知", "Looked at the notifications")
+        "notification_open" -> text("打开通知", "Opened a notification")
+        "notification_reply" -> replyWords(arguments)
         else -> name + (arguments?.optString("path")?.takeIf { it.isNotEmpty() }?.let { " $it" } ?: "")
+    }
+
+    /** A reply sent from a notification, in full: it goes out as the user. */
+    private fun replyWords(arguments: JSONObject?): String {
+        val to = arguments?.optString("to")?.trim().orEmpty().take(40)
+        val reply = arguments?.optString("text")?.trim().orEmpty().take(300)
+        return if (to.isNotEmpty()) text("回复「$to」：$reply", "Reply to \"$to\": $reply")
+        else text("从通知回复：$reply", "Reply from the notification: $reply")
     }
 
     private fun resolve(allowed: Boolean, scope: String) {
@@ -1403,6 +1414,7 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
         val tool = details.optString("tool")
         val arguments = details.optJSONObject("arguments") ?: JSONObject()
         if (tool == "android_action") return service.describeAction(arguments)
+        if (tool == "notification_reply" || tool == "notification_open") return toolWords(tool, arguments)
         return text("使用工具 $tool", "Use the tool $tool")
     }
 

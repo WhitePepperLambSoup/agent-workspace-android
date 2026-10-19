@@ -588,6 +588,10 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
                     "The user does not let the agent read or use $label. Stop here and tell the user: they can do " +
                         "this themselves, or take the app off the list under Device & tools.")
             }
+            // Reading the screen works with it dark or locked; anything that touches it does not.
+            if (action !in setOf("observe", "verify", "wait_for", "stop_repeat")) {
+                screenGate(refuseLocked = action !in setOf("screenshot", "ocr"))
+            }
             when (action) {
                 "observe" -> {
                     panel?.step(say("查看屏幕", "Looking at the screen"))
@@ -872,7 +876,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             val done = try { perform(step, snapshot) } catch (failure: AutomationFailure) {
                 when (failure.code) {
                     // A refused tap (something else under the finger) skips this round's step, as a person would.
-                    "target_changed", "not_scrollable" -> false
+                    "target_changed", "not_scrollable", "control_disabled" -> false
                     // The window changed right then: another app means the user left, anything else waits a round.
                     "stale_snapshot" -> {
                         val after = capture().observation.optString("package_name").ifEmpty { null }
@@ -924,6 +928,24 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
                 "Stop and tell the user; do not try another way to operate the phone. They can check the screen " +
                 "and resume it (Retry in the phone control window, or Resume in Agent Workspace).")
         }
+    }
+
+    /**
+     * Before an action: a locked phone is refused (no app may unlock it), without lighting the
+     * screen; a dark one that is not locked yet is woken, since a tap on it would do nothing.
+     */
+    private fun screenGate(refuseLocked: Boolean) {
+        val locked = getSystemService(android.app.KeyguardManager::class.java)?.isKeyguardLocked == true
+        if (locked && refuseLocked) throw AutomationFailure("phone_locked", "The phone is locked and no app may " +
+            "unlock it. Stop and ask the user to unlock the phone; go on once they have")
+        val power = getSystemService(android.os.PowerManager::class.java) ?: return
+        if (locked || power.isInteractive) return
+        @Suppress("DEPRECATION")
+        power.newWakeLock(android.os.PowerManager.SCREEN_BRIGHT_WAKE_LOCK or android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP or
+            android.os.PowerManager.ON_AFTER_RELEASE, "agentworkspace:phone-action").acquire(3000)
+        val until = SystemClock.uptimeMillis() + 1500
+        while (!power.isInteractive && SystemClock.uptimeMillis() < until) Thread.sleep(100)
+        Thread.sleep(300)
     }
 
     private fun requireSnapshot(version: String): Snapshot {
@@ -1086,6 +1108,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             // Content moved while it was read: fine for acting, but prefer refs or a fresh look.
             .put("content_changing", content != contentEpoch.get())
             .put("sensitive_content_redacted", sensitive)
+            .put("locked", getSystemService(android.app.KeyguardManager::class.java)?.isKeyguardLocked == true)
         Snapshot(version, generation, SystemClock.elapsedRealtime(), display,
             AndroidAutomationControl.readState(this).optString("revision"), targets, data, sensitive, windowsBefore)
             .also { if (store) synchronized(recent) { recent[version] = it } }
@@ -1713,10 +1736,14 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
                 val label = ownLabel(current) ?: if (current.isClickable) innerLabel(current) else null
                 val now = Target(target.windowId, target.path, Rect().also { current.getBoundsInScreen(it) },
                     bounded(current.className, 160), bounded(current.viewIdResourceName, 255), false, label)
-                if (!target.sameControl(now) || !current.isEnabled || current.isPassword ||
+                if (!target.sameControl(now) || current.isPassword ||
                     (Build.VERSION.SDK_INT >= 34 && current.isAccessibilityDataSensitive)) {
                     throw AutomationFailure("target_changed", "The referenced control changed; observe again")
                 }
+                // Said apart from a changed control: observing again shows the same greyed-out button.
+                if (!current.isEnabled) throw AutomationFailure("control_disabled", "That control is disabled (greyed " +
+                    "out) and takes no taps. Do what enables it first (fill in the form, pick a value), or use another " +
+                    "control; a control marked offscreen may belong to another tab or page")
             }
             val visible = onReader {
                 recheck(saved)

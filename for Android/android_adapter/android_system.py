@@ -163,6 +163,8 @@ def get_android_system_status(bridge: Any | None = None) -> dict[str, Any]:
     allowed = {
         "available",
         "enabled",
+        "switched_on",
+        "can_repair",
         "connected",
         "local_connection",
         "paused",
@@ -271,7 +273,9 @@ _UI_FORMAT = (
     '"text" desc="..." hint="..." id=...`, indented under their container, grouped by window. '
     "Flags: click, long (takes a long press), edit, scroll (a list: scroll it by ref), checked or "
     "unchecked (a switch or box), selected, focused, disabled, offscreen (a ref action scrolls it "
-    "into view), protected (never read or touched). Layout-only containers are left out."
+    "into view), protected (never read or touched). Layout-only containers are left out. "
+    "keyboard_shown and notification_shade_open say what covers the app (back closes either); "
+    "locked means the phone is locked: stop and ask the user to unlock it."
 )
 
 
@@ -645,6 +649,50 @@ def _going_in_circles(session: str, arguments: dict[str, Any], response: dict[st
         )
     return None
 _REF_IN_LINE = re.compile(r"^\s*(n\d+) ")
+# A ui line's flags, then its words and its description (see _ui_lines).
+_LINE_WORDS = re.compile(
+    r'^\S+ \S+ \[[^\]]*\]((?: [a-z]+(?= |$))*)(?: ("(?:[^"\\]|\\.)*"))?(?: desc=("(?:[^"\\]|\\.)*"))?'
+)
+
+
+def _tapped_label(arguments: dict[str, Any], state: dict[str, Any]) -> str | None:
+    """The words of the control a tap is aimed at, as the screen showed them before it (never a
+    field being typed into or a protected one)."""
+    if arguments.get("action") == "tap_text":
+        return arguments.get("text") if isinstance(arguments.get("text"), str) else None
+    if arguments.get("action") != "ref" or not isinstance(arguments.get("ref"), str):
+        return None
+    match = _LINE_WORDS.match(state.get("lines", {}).get(arguments["ref"]) or "")
+    if not match or {"edit", "protected"} & set(match.group(1).split()):
+        return None
+    words = match.group(2) or match.group(3)
+    return json.loads(words) if words else None
+
+
+def _record_tap(package: str, label: str, changed: bool, before: Any, after: Any) -> None:
+    try:
+        from mobile_app_notes import record_tap
+    except ImportError:  # outside the app
+        return
+    record_tap(package, label, changed=changed, before=before, after=after)
+
+
+def _app_notes(session: str, observation: dict[str, Any]) -> str | None:
+    """What earlier tasks learned about the app in front, once per conversation and app."""
+    package = observation.get("package_name")
+    if not isinstance(package, str) or not package or package in _NOT_LEFT_FOR:
+        return None
+    shown = _SCREENS.get(session).setdefault("noted", set())
+    if package in shown:
+        return None
+    shown.add(package)
+    try:
+        from mobile_app_notes import notes_for
+    except ImportError:  # outside the app
+        return None
+    return notes_for(package)
+
+
 _CHANGES_NOTE = (
     "Only ui_changes (new or different lines) and ui_gone (refs no longer shown) are listed; "
     "every other line, and its ref, is as in the previous result."
@@ -655,6 +703,30 @@ _CHANGES_NOTE = (
 _TOUCHES = frozenset({"ref", "tap", "tap_text", "long_press", "batch", "scroll_to_text"})
 # Apps whose windows show up on their own over others (this app's panel, keyboards, installers).
 _NOT_LEFT_FOR = frozenset({"com.agentworkspace.mobile", "android", "com.android.systemui"}) | _PERMISSION_PACKAGES
+
+
+def _phone_state(observation: dict[str, Any]) -> dict[str, bool]:
+    """What covers the app, said outright: the keyboard (it hides what is under it, and back closes
+    it first) and the pulled-down notification shade (taps land in it, not in the app)."""
+    screen = observation.get("screen") if isinstance(observation.get("screen"), dict) else {}
+    height = int(screen.get("height") or 0)
+    state: dict[str, bool] = {}
+    for window in observation.get("windows") or []:
+        if not isinstance(window, dict):
+            continue
+        if window.get("type") == 2:
+            state["keyboard_shown"] = True
+        _, top, _, bottom = _box(window.get("bounds"))
+        if (
+            window.get("type") == 3
+            and window.get("package_name") == "com.android.systemui"
+            and height
+            and bottom - top > height * 0.5
+            and (window.get("active") or window.get("focused"))
+            and not observation.get("locked")
+        ):
+            state["notification_shade_open"] = True
+    return state
 
 
 def _for_model(
@@ -672,9 +744,10 @@ def _for_model(
         for key in ("package_name", "activity_name", "snapshot_version", "screen", "stable")
         if key in observation
     }
-    for flag in ("truncated", "content_changing", "sensitive_content_redacted"):
+    for flag in ("truncated", "content_changing", "sensitive_content_redacted", "locked"):
         if observation.get(flag):
             compact[flag] = True
+    compact.update(_phone_state(observation))
     lines = _ui_lines(observation)
     identity = (observation.get("ref_epoch"), observation.get("package_name"))
     by_ref = {match.group(1): line.strip() for line in lines if (match := _REF_IN_LINE.match(line))}
@@ -713,8 +786,12 @@ def _for_model(
     else:
         compact["ui"] = lines
     if state is not None:
+        # Whether the action left the screen as it was: a tap that did nothing is seen at once.
+        if changes_only and response.get("executed") is True and state["identity"] is not None:
+            compact["screen_changed"] = previous is None or previous != by_ref
         state["still"] = state["still"] + 1 if previous is not None and previous == by_ref else 0
         state["identity"], state["lines"] = identity, by_ref
+        state["activity"] = observation.get("activity_name")
     text = _screen_text(response, observation)
     if text:
         compact["text_on_screen"] = text
@@ -775,7 +852,12 @@ class _BridgeTool:
         await _wait_if_paused()
         # Looking at the screen gives it whole, and is what later actions report changes against.
         response = await asyncio.to_thread(self._run, arguments)
-        return json_result(_for_model(response, memory_key=context.session_id))
+        result = _for_model(response, memory_key=context.session_id)
+        observation = result.get("observation")
+        notes = _app_notes(context.session_id, observation if isinstance(observation, dict) else {})
+        if notes:
+            result["app_notes"] = notes
+        return json_result(result)
 
     def _run(self, arguments: dict[str, Any]) -> dict[str, Any]:
         raise NotImplementedError
@@ -1256,7 +1338,8 @@ class AndroidActionTool(_BridgeTool):
             "android_screenshot (not needed for tap_text, scroll_to_text, open_page, launch_app, "
             "back, home, recents, notifications). A snapshot stays valid while the same window is shown, even if "
             "content in it keeps moving; if the target changed, the result says target_changed "
-            "with a fresh observation. Each result shows the screen once it settled. Quickest: "
+            "with a fresh observation. Each result shows the screen once it settled; "
+            "screen_changed false means the action left it exactly as it was. Quickest: "
             "tap_text text (taps the control showing those words, on the screen as it is now; no "
             "snapshot needed; if several show them it lists them, then pass nth; words drawn in "
             "pictures are found too); scroll_to_text text (scrolls the list until the words show, "
@@ -1342,9 +1425,21 @@ class AndroidActionTool(_BridgeTool):
                 correlation_id=context.correlation_id,
             )
         )
+        before = _SCREENS.get(context.session_id)
+        tapped = _tapped_label(arguments, before)
+        was_app = before["identity"][1] if before["identity"] else None
+        was_page = before.get("activity")
         compact = _for_model(
             response, memory_key=context.session_id, changes_only=True, action=arguments.get("action")
         )
+        observation = compact.get("observation") if isinstance(compact.get("observation"), dict) else {}
+        if tapped and "screen_changed" in observation and was_app and was_app == observation.get("package_name"):
+            await asyncio.to_thread(
+                _record_tap, was_app, tapped, observation["screen_changed"], was_page, observation.get("activity_name")
+            )
+        notes = _app_notes(context.session_id, observation)
+        if notes:
+            compact["app_notes"] = notes
         warning = _going_in_circles(context.session_id, arguments, response)
         if warning:
             compact["warning"] = warning

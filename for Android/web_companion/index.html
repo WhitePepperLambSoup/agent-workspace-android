@@ -219,11 +219,20 @@
         <p id="contextSummaryHint" class="setting-hint">临近容量时由当前模型（或下面设的摘要模型）总结较早记录。会额外调用模型，可能产生 Token 费用；摘要可能遗漏细节，原始会话仍保留。</p>
         <div id="modelRolesSection" class="management-section">
           <strong>按用途分配模型</strong>
-          <p class="setting-hint">手机操控和摘要压缩可以用同一服务商下更便宜的模型，普通对话仍用上面的主模型。留空就跟主模型一样；在对话或操控小窗里临时选的模型优先。使用本机模型时不适用。</p>
+          <p class="setting-hint">手机操控、摘要压缩和子任务可以用同一服务商下更便宜的模型，普通对话仍用上面的主模型。留空就跟主模型一样；在对话或操控小窗里临时选的模型优先。使用本机模型时不适用。</p>
           <label for="phoneModelInput">手机操控</label><input id="phoneModelInput" type="text" list="modelOptions" autocomplete="off" spellcheck="false" placeholder="跟主模型一样">
           <label for="summaryModelInput">摘要压缩</label><input id="summaryModelInput" type="text" list="modelOptions" autocomplete="off" spellcheck="false" placeholder="跟主模型一样">
+          <label for="subagentModelInput">子任务</label><input id="subagentModelInput" type="text" list="modelOptions" autocomplete="off" spellcheck="false" placeholder="跟主模型一样">
           <div class="page-toolbar"><button id="btnSaveModelRoles" class="button-secondary" type="button"><span data-icon="save"></span>保存用途分配</button></div>
           <p id="modelRolesStatus" class="page-status" role="status"></p>
+        </div>
+        <div id="taskLimitsSection" class="management-section">
+          <strong>单个任务上限</strong>
+          <p class="setting-hint">一个任务（连同它分出的子任务）花到上限就停下，并说明是哪项到了。费用按「Token 与费用」页的单价计算，没有单价的模型只按 Token 计。留空或填 0 表示不限。</p>
+          <label for="taskCostLimitInput">费用（美元）</label><input id="taskCostLimitInput" type="number" inputmode="decimal" min="0" max="1000" step="0.01" placeholder="不限">
+          <label for="taskTokenLimitInput">Token（万）</label><input id="taskTokenLimitInput" type="number" inputmode="numeric" min="0" max="100000" step="1" placeholder="不限">
+          <div class="page-toolbar"><button id="btnSaveTaskLimits" class="button-secondary" type="button"><span data-icon="save"></span>保存上限</button></div>
+          <p id="taskLimitsStatus" class="page-status" role="status"></p>
         </div>
         <div id="providerExtrasSection" class="management-section">
           <strong>网关与备用 Key</strong>
@@ -377,6 +386,13 @@
         <div class="memory-browse"><input id="memorySearch" type="search" placeholder="搜索记忆" aria-label="搜索记忆" autocomplete="off"><div id="memoryTopics" class="memory-topics" role="group" aria-label="按主题查看"></div></div>
         <div id="memoryList" class="management-list"></div>
         <div class="page-toolbar"><button id="btnClearMemory" class="button-secondary" type="button"><span data-icon="trash-2"></span>清空全部记忆</button></div>
+        <div id="appNotesSection" class="management-section">
+          <strong>应用经验</strong>
+          <label class="toggle-row" for="appNotesToggle"><span>记下在各应用里的操作经验</span><input id="appNotesToggle" type="checkbox"></label>
+          <p class="setting-hint">AI 操作手机时，手机会记下在每个应用里点哪些按钮能打开页面、哪些点了没反应；AI 也可以记几句某个应用怎么用。之后的任务再进入这个应用时会先看到这些。只保存在这台手机上，不记录输入的文字和带长串数字的内容。</p>
+          <p id="appNotesStatus" class="page-status" role="status"></p>
+          <div id="appNotesList" class="management-list"></div>
+        </div>
       </div>
       <div id="settingsConversationKnowledge" class="settings-page" hidden>
         <p class="setting-hint">选择这个对话要查阅的知识库。也可以直接在对话里说，比如“这个对话只用学习知识库”。</p>
@@ -521,6 +537,10 @@
         <button id="btnDoctorRefresh" data-header-action class="icon-button" type="button" aria-label="刷新诊断" title="刷新诊断"><span data-icon="refresh-cw"></span></button>
         <p id="doctorStatus" class="page-status" role="status"></p><dl id="doctorSummary" class="usage-summary"></dl>
         <button id="btnAccessibilitySettings" class="menu-row" type="button"><span data-icon="shield"></span><span>系统无障碍设置</span><span data-icon="chevron-right"></span></button>
+        <div id="accessibilityRepair" hidden>
+          <p id="accessibilityRepairHint" class="setting-hint"></p>
+          <div class="page-toolbar"><button id="btnRepairAccessibility" class="button-secondary" type="button"><span data-icon="rotate-ccw"></span><span id="repairAccessibilityLabel">重新启用无障碍</span></button></div>
+        </div>
         <label class="toggle-row" for="liveScreenToggle"><span>实时画面</span><input id="liveScreenToggle" type="checkbox"></label>
         <p class="setting-hint">AI 操作手机时直接看当前画面：截图更快，画面在动（视频、动画）也能截到，Android 10 及以下也能截图。开启时系统会请你允许录制屏幕，状态栏会显示录屏标志；画面只留在手机上供 AI 截图用，半小时不用会自动关闭。</p>
         <label class="toggle-row" for="systemPaused"><span>暂停手机操作</span><input id="systemPaused" type="checkbox"></label>

@@ -849,6 +849,10 @@ class _Handler(BaseHTTPRequestHandler):
                 "/mobile/provider/",
                 # Which model each kind of task runs on (and so what it costs).
                 "/mobile/model-roles",
+                # How much one task may spend.
+                "/mobile/task-limits",
+                # What later tasks are told about each app.
+                "/mobile/app-notes",
                 # Triggers start tasks on their own later.
                 "/mobile/triggers",
                 # Shortcuts operate the phone without asking.

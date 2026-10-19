@@ -551,6 +551,7 @@
   elements.btnStop.addEventListener("click", stopTask);
   elements.noticeText.addEventListener("click", () => notice(""));
   $("btnSaveModelRoles").addEventListener("click", saveModelRoles);
+  $("btnSaveTaskLimits").addEventListener("click", saveTaskLimits);
   elements.btnJumpLatest.addEventListener("click", () => scrollToBottom(true));
   elements.btnResumeTask.addEventListener("click", resumeTask);
   elements.btnRetryTask.addEventListener("click", () => { if (retryTask?.inputText) sendPrompt(retryTask.inputText, retryTask.attachments); });

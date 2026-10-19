@@ -229,7 +229,7 @@
   }
 
   const toolTitles = {
-    memory_write: t("更新记忆"), memory_search: t("查找记忆"), run_terminal: t("运行命令"),
+    memory_write: t("更新记忆"), memory_search: t("查找记忆"), app_note: t("记下应用经验"), run_terminal: t("运行命令"),
     knowledge_search: t("查阅知识库"), knowledge_add: t("添加到知识库"), knowledge_use: t("选择知识库"),
     append_file: t("追加到文件"),
     set_alarm: t("设置闹钟"), set_timer: t("设置计时"), list_calendar_events: t("查看日程"), add_calendar_event: t("添加日程"),
@@ -242,6 +242,8 @@
     web_search: t("联网搜索"), web_fetch: t("读取网页"), read_document: t("读取文档"), render_pdf: t("查看 PDF 页面"),
     create_pdf: t("生成 PDF"), create_docx: t("生成 Word 文档"), create_xlsx: t("生成表格"),
     use_skill: t("使用技能"), save_skill: t("保存技能"),
+    run_subagents: t("分给子任务"),
+    active_notifications: t("查看通知"), notification_reply: t("回复通知"), notification_open: t("打开通知"),
   };
   // What each tool call was asked to do (from its proposal), for a step label in plain words.
   const toolArguments = new Map();
@@ -264,6 +266,8 @@
     if (name === "android_action") return t("操作手机");
     if (args && name === "use_skill" && args.skill) return t("使用技能「{0}」", short(args.skill));
     if (args && name === "web_search" && args.query) return t("搜索「{0}」", short(args.query));
+    if (args && name === "run_subagents" && Array.isArray(args.tasks)) return t("分给 {0} 个子任务", args.tasks.length);
+    if (args && name === "notification_reply" && args.to) return t("回复「{0}」", short(args.to));
     if (args && ["read_file", "write_file", "append_file", "read_document", "create_pdf", "create_docx", "create_xlsx"].includes(name) && args.path) {
       return `${toolTitles[name]} · ${file(args.path)}`;
     }
@@ -271,6 +275,24 @@
   }
   // Tools whose output the engine streams while they run (long installs and builds).
   const liveOutputTools = new Set(["run_terminal"]);
+
+  // While helpers work (run_subagents), the step lists what each of them is doing now.
+  const helperSteps = new WeakMap();
+  function showSubagentStep(payload) {
+    const cards = [...elements.timelineList.querySelectorAll('.message-card.tool[data-tool="run_subagents"]')];
+    const card = cards.reverse().find((item) => item.dataset.state === "running");
+    if (!card || !payload?.session_id) return;
+    const steps = helperSteps.get(card) || new Map();
+    helperSteps.set(card, steps);
+    steps.set(payload.session_id, toolTitles[payload.tool] || payload.tool || t("工具"));
+    let live = card.querySelector(".tool-live");
+    if (!live) {
+      live = document.createElement("pre");
+      live.className = "tool-live";
+      card.appendChild(live);
+    }
+    live.textContent = [...steps.values()].map((step, index) => t("子任务 {0}：{1}", index + 1, step)).join("\n");
+  }
 
   function endToolOutput(card) {
     delete card.dataset.following;

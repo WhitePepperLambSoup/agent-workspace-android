@@ -140,11 +140,20 @@
     $("systemPaused").checked = !!android.paused;
     $("systemPaused").disabled = typeof native?.setSystemPaused !== "function";
     $("btnAccessibilitySettings").disabled = typeof native?.openAccessibilitySettings !== "function";
+    // Switched on in the system but not running (after an update or a crash), or switched off.
+    const stalled = android.switched_on && !android.enabled;
+    $("accessibilityRepair").hidden = android.enabled && android.connected || typeof native?.repairAccessibility !== "function";
+    $("repairAccessibilityLabel").textContent = android.can_repair
+      ? (stalled ? t("重新启用无障碍") : t("打开无障碍服务"))
+      : (stalled ? t("去系统设置里重新打开") : t("去系统设置里打开"));
+    $("accessibilityRepairHint").textContent = stalled
+      ? (android.can_repair ? t("系统里无障碍开关是开着的，但服务没有运行（更新或崩溃后常见）。点下面关掉再打开。") : t("系统里无障碍开关是开着的，但服务没有运行（更新或崩溃后常见）。在系统设置里把 Agent Workspace 关掉再打开即可。"))
+      : (android.can_repair ? t("无障碍服务没开，点下面直接打开。") : t("无障碍服务没开，手机操作需要它。"));
     $("btnTakeover").disabled = typeof native?.requestSystemTakeover !== "function";
     $("doctorTools").replaceChildren();
     for (const tool of value.tools || []) $("doctorTools").append(row(tool.name, tool.available ? t("可用") : tool.reason || t("不可用")));
     $("browserSection").hidden = !(value.tools || []).some((tool) => tool.name === "browser_view" && tool.available);
-    status("doctorStatus", android.reason || "");
+    status("doctorStatus", localizeError(android.reason) || "");
     let background = {};
     try { background = JSON.parse(native?.getBackgroundStatus?.() || "{}"); } catch {}
     const run = backgroundRunState();
@@ -451,6 +460,7 @@
       || (/[\u4e00-\u9fff]/.test(word) && word.length > 2 && [...word].slice(0, -1).some((_, index) => text.includes(word.slice(index, index + 2)))));
   }
   async function memory(isCurrent = () => true, value = null) {
+    const fresh = !value;
     value = value || await ui.apiJson("/mobile/memory");
     if (!isCurrent()) return;
     memoryLimits = { ...memoryLimits, ...(value.limits || {}) };
@@ -508,6 +518,37 @@
     }
     $("btnClearMemory").disabled = !items.length;
     status("memoryStatus", value.enabled === false ? t("记忆已关闭：对话中不会使用，AI 也不会保存") : "");
+    if (fresh) await appNotes(isCurrent).catch((error) => { if (isCurrent()) status("appNotesStatus", error.message || t("操作失败"), true); });
+  }
+
+  // ---- App notes: what earlier tasks learned in each app (mobile_app_notes) ----
+  async function appNotes(isCurrent = () => true, value = null) {
+    value = value || await ui.apiJson("/mobile/app-notes");
+    if (!isCurrent()) return;
+    $("appNotesToggle").checked = value.enabled !== false;
+    $("appNotesList").replaceChildren();
+    const apps = Array.isArray(value.apps) ? value.apps : [];
+    for (const app of apps) {
+      const taps = Array.isArray(app.taps) ? app.taps : [];
+      const parts = [];
+      if (app.notes?.length) parts.push(t("{0} 条说明", app.notes.length));
+      if (taps.length) parts.push(t("{0} 个按钮", taps.length));
+      const element = row(app.app || app.package_name, [app.app ? app.package_name : "", parts.join(" · ")].filter(Boolean).join("\n"));
+      action(element, "trash-2", t("清除这个应用的经验"), async () => {
+        if (!window.confirm(t("清除「{0}」的全部经验？", app.app || app.package_name))) return;
+        await appNotes(undefined, await post("/mobile/app-notes", { action: "forget_app", package_name: app.package_name }));
+      });
+      $("appNotesList").append(element);
+      for (const note of app.notes || []) {
+        const child = row(note.text, note.saved_ms ? new Date(note.saved_ms).toLocaleString() : "");
+        child.classList.add("management-row-child");
+        action(child, "trash-2", t("删除"), async () => {
+          await appNotes(undefined, await post("/mobile/app-notes", { action: "delete_note", package_name: app.package_name, id: note.id }));
+        });
+        $("appNotesList").append(child);
+      }
+    }
+    status("appNotesStatus", value.enabled === false ? t("已关闭：不再记录，任务里也不会用到") : apps.length ? "" : t("还没有记下任何应用的经验"));
   }
 
   // ---- Knowledge base: the user's own documents, searched while they chat ----
@@ -1559,6 +1600,10 @@
       catch (error) { $(id).checked = !$(id).checked; throw error; }
     }, "memoryStatus");
   }
+  on("appNotesToggle", "change", async () => {
+    try { await appNotes(undefined, await post("/mobile/app-notes", { action: "set_enabled", enabled: $("appNotesToggle").checked })); }
+    catch (error) { $("appNotesToggle").checked = !$("appNotesToggle").checked; throw error; }
+  }, "appNotesStatus");
   for (const [id, key] of [["knowledgeEnabledToggle", "enabled"], ["knowledgeAutoToggle", "auto"]]) {
     on(id, "change", async () => {
       try { await knowledge(undefined, await post("/mobile/knowledge/settings", { [key]: $(id).checked })); }
@@ -1814,6 +1859,14 @@
     await memory(undefined, await post("/mobile/memory/clear", {}));
   }, "memoryStatus");
   on("btnAccessibilitySettings", "click", () => native?.openAccessibilitySettings?.(), "doctorStatus");
+  on("btnRepairAccessibility", "click", async () => {
+    let result = {};
+    try { result = JSON.parse(native?.repairAccessibility?.() || "{}"); } catch {}
+    if (!result.ok) { status("doctorStatus", result.opened_settings ? t("在列表里找到 Agent Workspace，关掉再打开") : t("操作失败"), !result.opened_settings); return; }
+    status("doctorStatus", t("已重新启用，正在确认…"));
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    if (!closed) await doctor();
+  }, "doctorStatus");
   on("btnAddBlockedApp", "click", () => {
     const picker = $("blockedAppPicker");
     picker.hidden = !picker.hidden;
