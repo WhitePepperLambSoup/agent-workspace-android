@@ -4,21 +4,46 @@
   // (mobile_elder.py), which also asks the model for short spoken replies and care with scams. The
   // screen covers the app and drives the same conversation machinery, one thing at a time: the last
   // question and its answer, one big button (speak; stop while an answer is coming), a photo button
-  // and a call button. Sending what is said to the AI and looking things up on the web were agreed
-  // when the family started the mode, so only words that look sensitive and the AI's own actions
-  // ask, as one plain question with two big buttons. Leaving takes a two-second press, and the PIN
-  // when the family set one.
+  // and a call button. Nothing is asked of the older person: the mode's conversation runs as under
+  // full access, a step driven by outside content is refused (mobile_approval), and card and ID
+  // numbers are covered before sending. Leaving takes a two-second press, and the PIN when the
+  // family set one.
   // State is kept on the functions, not in top-level lets: earlier parts call these during start-up.
   function elderState() { return elderState.value || null; }
   function elderOn() { return elderState()?.enabled === true; }
   function elderExchanges() { return elderExchanges.list || (elderExchanges.list = []); }
   function elderShown() { return elderOn() && $("elderScreen")?.hidden === false; }
 
-  async function loadElder() {
-    try { elderState.value = await apiJson("/mobile/elder"); } catch { elderState.value = null; return; }
+  async function loadElder(tries = 0) {
+    try { elderState.value = await apiJson("/mobile/elder"); }
+    catch {
+      elderState.value = null;
+      // Shown early (below) while the engine still starts: try again for a while.
+      if (!disposed && !$("elderScreen").hidden && tries < 40) window.setTimeout(() => void loadElder(tries + 1), 3000);
+      return;
+    }
     if (disposed) return;
+    elderRemember(elderOn());
     renderElderSettings();
     if (elderOn()) await showElderScreen();
+    else if (!$("elderScreen").hidden) hideElderScreen();
+  }
+
+  // Remembered on the phone, so the next start shows the screen at once (elderEarly).
+  function elderRemember(on) {
+    try { window.localStorage.setItem("agent-mobile-elder-v1", on ? "1" : "0"); } catch { /* shown once loaded */ }
+  }
+
+  // On a slow phone the rest of the app takes a moment to load: the screen comes first.
+  function elderEarly() {
+    let on = false;
+    try { on = window.localStorage.getItem("agent-mobile-elder-v1") === "1"; } catch { return; }
+    if (!on) return;
+    document.body.classList.add("elder-mode");
+    $("elderScreen").hidden = false;
+    elements.appShell.inert = true;
+    elderToday();
+    elderStatus(t("准备中..."));
   }
 
   async function saveElder(changes) {
@@ -28,16 +53,30 @@
     return value;
   }
 
-  // The conversation the mode uses: kept by the engine, made again when it was archived or deleted.
+  // The conversation the mode uses: one a day, so its history and what goes to the model stay small
+  // (what matters is kept in the phone's memory). Made again when archived or deleted.
   async function elderSession() {
     const kept = elderState()?.session_id;
     const listed = kept && sessions.find((session) => session.id === kept);
-    if (listed && listed.archived !== true) return kept;
+    const today = (value) => new Date(value).toDateString() === new Date().toDateString();
+    if (listed && listed.archived !== true && (!listed.updated_at || today(listed.updated_at))) return kept;
+    if (listed && listed.archived !== true) {
+      try { await apiJson(`/sessions/${encodeURIComponent(kept)}/archive`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ archived: true }) }); }
+      catch { /* An older conversation left in the list is harmless. */ }
+    }
     const created = await apiJson("/sessions", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: t("长辈模式"), ...(currentWorkspaceId ? { workspace_id: currentWorkspaceId } : {}) }) });
     await saveElder({ session_id: created.id });
     await loadSessions(created.id);
+    elderExchanges.list = [];
     return created.id;
+  }
+
+  // Before each question: still today's conversation (the screen may have stayed up overnight).
+  async function elderKeepToday() {
+    elderToday();
+    const sessionId = await elderSession();
+    if (sessionId !== currentSessionId) await switchSession(sessionId);
   }
 
   async function showElderScreen() {
@@ -49,6 +88,7 @@
     elements.appShell.inert = true;
     elderToday();
     elderCallButton();
+    if ($("elderStatus").textContent === t("准备中...")) elderStatus("");
     try {
       const sessionId = await elderSession();
       if (sessionId !== currentSessionId) await switchSession(sessionId);
@@ -199,6 +239,8 @@
 
   async function elderSend(message, shown = message) {
     if (activeTask) { elderStatus(t("还在回答上一个问题，请稍等。")); return; }
+    // A photo just taken belongs to the conversation it was attached to.
+    if (!attachments.length) { try { await elderKeepToday(); } catch { /* Stays in the conversation it has. */ } }
     // Bank card and ID numbers never go out from here: they are covered first, without the
     // three-way question the app asks otherwise (65-privacy.js).
     const found = cloudModel() ? privateParts(message) : [];
@@ -231,9 +273,9 @@
     void elderSay(spokenText(answer));
   }
 
-  // An approval while the mode is on. Sending what is said and web lookups go ahead (the family
-  // agreed when they started the mode) unless the words look sensitive or the task read outside
-  // instructions; anything else is one plain question, read aloud.
+  // The mode's conversation asks the older person nothing: the engine decides (mobile_approval).
+  // Should a question still come (another conversation on this screen), it is one plain question
+  // with two big buttons, read aloud.
   function elderApproval(approval) {
     const card = $("elderApproval");
     if (!card) return;
@@ -248,16 +290,7 @@
     const details = approval.details || {};
     let text;
     if (approval.kind === "egress") {
-      const categories = Array.isArray(details.data_categories) ? details.data_categories.map(String) : [];
-      if (!categories.some((item) => item.startsWith("sensitive"))) {
-        window.setTimeout(() => { if (pendingApproval?.request_id === approval.request_id) elderResolve(true, "session"); }, 0);
-        return;
-      }
-      text = t("这段话里可能有银行卡号、密码这类要紧的信息。确定要发给 AI 吗？");
-    } else if (["web_search", "web_fetch"].includes(details.tool) && !details.untrusted_content) {
-      // Looking something up (the weather, the news) only reads: agreed with the mode as well.
-      window.setTimeout(() => { if (pendingApproval?.request_id === approval.request_id) elderResolve(true, "once"); }, 0);
-      return;
+      text = t("要把这些话发给 AI 来回答，可以吗？");
     } else {
       // What it would do in words: "打开 微信", "设置闹钟".
       const known = details.tool === "android_action" || toolTitles[details.tool];
@@ -272,20 +305,15 @@
     void elderSay(text);
   }
 
-  function elderResolve(allowed, scope = "once") {
-    if (!pendingApproval) return;
-    elements.approvalScopeSelector.value = allowed ? scope : "once";
-    $("elderApproval").hidden = true;
-    elderApproval.current = pendingApproval.request_id;
-    $("elderScreen").classList.remove("approving");
-    void resolveApproval(allowed);
-  }
-
   function elderAnswerApproval(allowed) {
     if (!pendingApproval) return;
     elderStatus(allowed ? t("好的，正在做…") : t("好的，不做了。"));
     void stopReading();
-    elderResolve(allowed);
+    elements.approvalScopeSelector.value = "once";
+    $("elderApproval").hidden = true;
+    elderApproval.current = pendingApproval.request_id;
+    $("elderScreen").classList.remove("approving");
+    void resolveApproval(allowed);
   }
 
   // 拍照问问: the camera, then the picture is sent with a question as soon as it is attached.
@@ -331,6 +359,7 @@
     }
     try {
       await saveElder({ enabled: false, ...(pin !== undefined ? { current_pin: pin } : {}) });
+      elderRemember(false);
       hideElderScreen();
       notice(t("已退出长辈模式"), "info");
     } catch (error) {
@@ -378,7 +407,7 @@
   });
   $("btnElderPinRemove")?.addEventListener("click", () => void elderPinChange(""));
   $("btnElderStart")?.addEventListener("click", async () => {
-    try { await saveElder({ enabled: true }); await showElderScreen(); }
+    try { await saveElder({ enabled: true }); elderRemember(true); await showElderScreen(); }
     catch (error) { pageStatus($("elderSettingsStatus"), localizeError(error.message), true); }
   });
   $("elderSpeak")?.addEventListener("click", () => {
@@ -432,3 +461,4 @@
     exit.addEventListener("pointerup", () => cancel(true));
     for (const type of ["pointerleave", "pointercancel"]) exit.addEventListener(type, () => cancel(false));
   })();
+  elderEarly();

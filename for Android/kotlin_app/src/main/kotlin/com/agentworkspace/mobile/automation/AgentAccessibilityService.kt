@@ -332,13 +332,29 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         }
     }
 
-    /** The app in front when the user keeps it away from the agent (its name), else null. */
-    private fun blockedFront(): String? {
-        if (BlockedApps.packages(this).isEmpty()) return null
-        val front = frontPackage()
-        if (!BlockedApps.blocked(this, front)) return null
-        return runCatching { packageManager.getApplicationLabel(packageManager.getApplicationInfo(front!!, 0)).toString() }
-            .getOrDefault(front!!)
+    /** An app in front that the agent keeps away from: one the user listed, or one 长辈模式 guards. */
+    private class Blocked(val label: String, private val elder: Boolean) {
+        override fun toString() = label
+
+        /** For the model; [brought]: the action itself brought the app up. */
+        fun refusal(brought: Boolean): String = when {
+            elder -> "In elder mode the agent does not use $label: installing or removing apps and remote control " +
+                "are how many scams work. Stop and tell them plainly; a family member can help if it is really needed."
+            brought -> "That brought up $label, which the user does not let the agent read or use. Stop here and tell the user."
+            else -> "The user does not let the agent read or use $label. Stop here and tell the user: they can do " +
+                "this themselves, or take the app off the list under Device & tools."
+        }
+    }
+
+    private fun blockedFront(): Blocked? {
+        val elder = ElderGuard.on(this)
+        if (BlockedApps.packages(this).isEmpty() && !elder) return null
+        val front = frontPackage() ?: return null
+        val guarded = elder && ElderGuard.guarded(front)
+        if (!guarded && !BlockedApps.blocked(this, front)) return null
+        val label = runCatching { packageManager.getApplicationLabel(packageManager.getApplicationInfo(front, 0)).toString() }
+            .getOrDefault(front)
+        return Blocked(label, guarded)
     }
 
     // ---- A task recorded as a shortcut, and a shortcut run again ------------------------------
@@ -652,10 +668,9 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             if (response.isNull("observation") || response.optJSONObject("error")?.optString("code") == "blocked_app") {
                 return@synchronized response
             }
-            val label = runCatching { blockedFront() }.getOrNull() ?: return@synchronized response
+            val blocked = runCatching { blockedFront() }.getOrNull() ?: return@synchronized response
             // The action opened (or went into) such an app: say so, without its screen.
-            AndroidSystemBridge.failure("blocked_app", "That brought up $label, which the user does not let the agent " +
-                "read or use. Stop here and tell the user.").put("executed", response.optBoolean("executed"))
+            AndroidSystemBridge.failure("blocked_app", blocked.refusal(true)).put("executed", response.optBoolean("executed"))
         } finally {
             screenId = outer
             agentActedAt = SystemClock.uptimeMillis()
@@ -697,10 +712,8 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             val action = request.getString("action")
             val say = { zh: String, en: String -> com.agentworkspace.mobile.UiText.of(this, zh, en) }
             // An app the user keeps away from the agent: nothing of it is read, nothing is done in it.
-            if (action != "stop_repeat") blockedFront()?.let { label ->
-                return@synchronized AndroidSystemBridge.failure("blocked_app",
-                    "The user does not let the agent read or use $label. Stop here and tell the user: they can do " +
-                        "this themselves, or take the app off the list under Device & tools.")
+            if (action != "stop_repeat") blockedFront()?.let { blocked ->
+                return@synchronized AndroidSystemBridge.failure("blocked_app", blocked.refusal(false))
             }
             // Reading the screen works with it dark or locked; anything that touches it does not. The
             // background screen is drawn whatever the phone's screen does: that one is left alone.

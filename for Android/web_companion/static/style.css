@@ -1928,6 +1928,8 @@ pre.card-pending { max-height: 3.2em; overflow: hidden; opacity: .55; }
   background: var(--bg); color: var(--text); overflow: hidden;
 }
 .elder-screen[hidden] { display: none; }
+/* The app underneath is not drawn at all while the screen is up: modest phones stay quick. */
+body.elder-mode #appShell { display: none; }
 .elder-head strong { font-size: 22px; font-weight: 700; }
 .elder-talk { display: flex; flex: 1; flex-direction: column; min-height: 0; padding: 2px; overflow-y: auto; overscroll-behavior: contain; }
 .elder-exchange { display: flex; flex-direction: column; gap: 14px; }

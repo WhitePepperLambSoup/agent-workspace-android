@@ -4,7 +4,8 @@ The settings live on the phone (<data>/elder-mode.json): whether the mode is on,
 it uses, how a family member is called and their phone number (for the call button; the number
 never goes to the model), reading replies aloud and how fast, and an optional exit PIN so the mode
 is not left by accident. While it is on, the system prompt asks for short spoken-style replies and
-for care with anything that looks like a scam.
+for care with anything that looks like a scam, and the mode's conversation runs as under full
+access: the older person is never asked to approve anything (mobile_approval decides).
 """
 
 from __future__ import annotations
@@ -142,6 +143,91 @@ def update(changes: Any) -> dict[str, Any]:
         return _public(value)
 
 
+# Apps that let someone else see and use the phone: 向日葵, ToDesk, TeamViewer, AnyDesk, RustDesk,
+# Splashtop, Microsoft Remote Desktop (also kept from the agent's screen by ElderGuard.kt).
+_REMOTE_CONTROL = ("com.oray.sunlogin", "youqu.android.todesk", "com.teamviewer.", "com.anydesk.",
+                   "com.carriez.flutter_hbb", "com.splashtop.", "com.microsoft.rdc.")  # fmt: skip
+_REMOTE_NAMES = re.compile(r"向日葵|todesk|teamviewer|anydesk|rustdesk|远程控制|远程协助", re.IGNORECASE)
+_ID_WEIGHTS = (7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2)
+# A code on its own in a message (4 to 8 digits): what scams ask an older person to pass on.
+_CODE = re.compile(r"(?<!\d)\d{4,8}(?!\d)")
+_NOT_DONE = "Not done (elder mode): "
+_TELL = " Tell them plainly that you did not do it and why, and that a family member can help if it is really needed."
+
+
+def _valid_id(value: str) -> bool:
+    if not re.fullmatch(r"\d{17}[\dXx]", value):
+        return False
+    total = sum(weight * int(value[index]) for index, weight in enumerate(_ID_WEIGHTS))
+    return "10X98765432"[total % 11] == value[17].upper()
+
+
+def _valid_card(digits: str) -> bool:
+    if not re.fullmatch(r"\d{16,19}", digits):
+        return False
+    total = 0
+    for index, digit in enumerate(reversed(digits)):
+        value = int(digit) * (2 if index % 2 else 1)
+        total += value - 9 if value > 9 else value
+    return total % 10 == 0
+
+
+def personal_numbers(text: str) -> bool:
+    """A Chinese ID card or bank card number (with a valid check digit) in [text]."""
+    if any(_valid_id(match.group()) for match in re.finditer(r"(?<![\dXx])\d{17}[\dXx](?![\dXx])", text)):
+        return True
+    return any(_valid_card(re.sub(r"[ -]", "", match.group()))
+               for match in re.finditer(r"(?<!\d)\d(?:[ -]?\d){15,18}(?!\d)", text))  # fmt: skip
+
+
+def _texts(arguments: dict[str, Any]) -> list[str]:
+    """What an action would type or send (a batch's steps too)."""
+    found = [arguments.get(key) for key in ("text", "body")]
+    for step in arguments.get("steps") or []:
+        if isinstance(step, dict):
+            found.append(step.get("text"))
+    return [value for value in found if isinstance(value, str) and value]
+
+
+def _launches(arguments: dict[str, Any]) -> list[dict[str, Any]]:
+    steps = [step for step in arguments.get("steps") or [] if isinstance(step, dict)]
+    return [item for item in [arguments, *steps] if item.get("action") == "launch_app"]
+
+
+def elder_refusal(tool: str, arguments: Any) -> str | None:
+    """Why 长辈模式 refuses this step without asking, for the model; None when it goes ahead.
+
+    Only what scams on older people need, or what cannot be undone: card and ID numbers typed or
+    sent anywhere, a code sent in a message, remote-control apps, deleting files, removing apps."""
+    arguments = arguments if isinstance(arguments, dict) else {}
+    if tool == "delete_path":
+        return _NOT_DONE + "files are not deleted." + _TELL
+    if tool == "manage_app" and arguments.get("page") == "uninstall":
+        return _NOT_DONE + "apps are not removed." + _TELL
+    for launch in _launches(arguments):
+        name = str(launch.get("package_name") or "")
+        if name.startswith(_REMOTE_CONTROL) or _REMOTE_NAMES.search(str(launch.get("app_name") or "")):
+            return (_NOT_DONE + "remote-control apps let someone else use the phone, which is how many scams "
+                    "work." + _TELL)  # fmt: skip
+    texts = _texts(arguments)
+    if any(personal_numbers(text) for text in texts):
+        return _NOT_DONE + "bank card and ID numbers are never typed or sent." + _TELL
+    if tool in {"notification_reply", "compose_sms"} and any(_CODE.search(text) for text in texts):
+        return (_NOT_DONE + "a message with a code in it is not sent: passing on verification codes is how "
+                "many scams work." + _TELL)  # fmt: skip
+    return None
+
+
+def elder_session(session_id: Any) -> bool:
+    """Whether a task in [session_id] runs for the older person: the mode is on and it is the mode's
+    own conversation. Such tasks never ask them anything (mobile_approval)."""
+    if not isinstance(session_id, str) or not session_id:
+        return False
+    with _LOCK:
+        value = _load()
+    return value.get("enabled") is True and value.get("session_id") == session_id
+
+
 def elder_system_suffix() -> str:
     """The system prompt section while the mode is on; empty otherwise."""
     value = _load()
@@ -154,7 +240,9 @@ def elder_system_suffix() -> str:
         "listens to your replies read aloud. Answer in a few short, plain sentences that sound "
         "natural when spoken: no tables, code, links, headings or long lists, no cards, and say "
         "numbers, dates and times in words people say. Be patient and respectful, not chatty. Do "
-        "one thing at a time and say in one sentence what you did. When they ask how to do "
+        "one thing at a time and say in one sentence what you did. They are not asked before you "
+        "act, so do only what they clearly asked for; when something is unclear, ask them in one "
+        "short question instead of guessing. When they ask how to do "
         "something on the phone, give at most three short steps, then offer the next ones. If "
         "something looks like a scam (someone asking for money or a transfer, verification codes, "
         "bank card or ID numbers, a prize, a parcel or police problem that needs paying, a "

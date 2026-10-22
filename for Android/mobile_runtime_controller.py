@@ -22,6 +22,7 @@ from mobile_artifacts import (
     register_task_artifacts,
     snapshot_task_workspace,
 )
+from mobile_elder import elder_session
 from mobile_hosted_limits import budget as hosted_budget
 from mobile_hosted_limits import reason as hosted_limit_reason
 from mobile_images import resolve_mobile_images
@@ -227,6 +228,20 @@ def _phone_tool(name: str) -> bool:
     return (name.startswith("android_") and name != "android_clean_app") or name in _PHONE_TOOLS
 
 
+# 长辈模式's conversation: everyday help only (no terminal, files, documents or code), so each
+# request is smaller and answers come sooner, on modest phones too.
+_ELDER_TOOLS = (_PHONE_TOOLS | frozenset(
+    {
+        "web_search", "web_fetch", "list_calendar_events", "add_calendar_event", "recent_notifications",
+        "memory_search", "memory_write", "knowledge_search", "app_note",
+    }
+)) - frozenset({"read_file", "write_file", "list_files", "use_skill", "save_skill"})  # fmt: skip
+
+
+def _elder_tool(name: str) -> bool:
+    return (name.startswith("android_") and name != "android_clean_app") or name in _ELDER_TOOLS
+
+
 def _android_system_suffix(session_id: str | None = None, registry: Any | None = None) -> str:
     """Android guidance plus the environment, memory and knowledge sections, rebuilt per task."""
     return assemble_prompt(_ANDROID_SYSTEM_SUFFIX, _prompt_sections(session_id, registry))
@@ -298,6 +313,41 @@ def migrate_workspace_sessions_autonomy(
     return changed
 
 
+# Tools that act (on the phone, as the user, on files): refused in 长辈模式 once the task read outside
+# content that talks to the agent. Reading goes on.
+_ELDER_ACTING_TOOLS = frozenset({
+    "android_action", "notification_reply", "notification_open", "compose_sms", "system_settings", "manage_app",
+    "delete_path", "write_file", "append_file", "browser", "set_alarm", "set_timer", "add_calendar_event",
+})  # fmt: skip
+
+
+class _ElderGuard:
+    """长辈模式's refusals, checked before any execution mode, full access included (the policy's
+    argument check). For the mode's own conversation only: what scams on older people need
+    (mobile_elder.elder_refusal), and any action once the task read outside instructions."""
+
+    def __init__(self, inner: Any, controller: MobileRuntimeController) -> None:
+        self._inner = inner
+        self._controller = controller
+
+    def evaluate(self, tool_name: str, arguments: dict[str, Any]) -> tuple[bool, str | None]:
+        if self._inner is not None:
+            allowed, reason = self._inner.evaluate(tool_name, arguments)
+            if not allowed:
+                return allowed, reason
+        from mobile_approval import _ELDER_REFUSAL
+        from mobile_elder import elder_refusal
+
+        controller = self._controller
+        if not elder_session(controller._active_session_id):
+            return True, None
+        refusal = elder_refusal(tool_name, arguments)
+        task_id = controller._active_task_id
+        if refusal is None and tool_name in _ELDER_ACTING_TOOLS and task_id and controller.approvals.distrusted(task_id):
+            refusal = _ELDER_REFUSAL
+        return refusal is None, refusal
+
+
 class MobileRuntimeController:
     """Serialize mobile runs while preserving durable task state and resumability."""
 
@@ -331,6 +381,9 @@ class MobileRuntimeController:
         )
         if approval_broker is not None and approval_broker.request_listener is None:
             approval_broker.request_listener = self._on_approval_requested
+        policy = getattr(getattr(service, "runner", None), "_policy", None)
+        if policy is not None and hasattr(policy, "argument_policy") and not isinstance(policy.argument_policy, _ElderGuard):
+            policy.argument_policy = _ElderGuard(policy.argument_policy, self)
         self._jobs: dict[str, asyncio.Task[None]] = {}
         self._frozen: FrozenPrompts | None = None
         self._execution_checks: dict[str, tuple[Any, Any]] = {}
@@ -695,7 +748,7 @@ class MobileRuntimeController:
         self._resume_after_approval(task_id)
         return RuntimeApprovalDecision(
             decision.allowed,
-            "approved by mobile" if decision.allowed else "denied by mobile",
+            decision.reason or ("approved by mobile" if decision.allowed else "denied by mobile"),
             _approval_scope(decision.scope) if decision.allowed else None,
         )
 
@@ -1093,6 +1146,10 @@ class MobileRuntimeController:
                     names = set(getattr(registry, "_tools", None) or {})
                     if names:
                         options["allowed_tools"] = frozenset(name for name in names if _phone_tool(name))
+                elif elder_session(session.id):
+                    names = set(getattr(registry, "_tools", None) or {})
+                    if names:
+                        options["allowed_tools"] = frozenset(name for name in names if _elder_tool(name))
                 # Plan mode: read-only tools and a plan for an answer; the user approves before anything changes.
                 if any(event.event_type == "task.plan_mode" for event in task_events):
                     context_notes = (*context_notes, _PLAN_NOTE)
