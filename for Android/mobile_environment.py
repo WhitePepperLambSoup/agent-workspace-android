@@ -103,6 +103,11 @@ def _ways(tools: set[str]) -> list[str]:
         ways.append(
             "a chart or diagram → an HTML file with inline SVG (or a ```mermaid block in the reply)"
         )
+        ways.append(
+            "a small tool (converter, tracker, timer) → one HTML file with inline CSS and JS that "
+            "needs no network and keeps its data in localStorage; the user can add it to the home "
+            "screen from the file"
+        )
     if "transcribe_audio" in tools:
         ways.append("speech in an audio file → transcribe_audio (no audio or video converting)")
     else:

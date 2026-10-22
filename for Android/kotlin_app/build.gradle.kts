@@ -23,8 +23,8 @@ android {
         applicationId = "com.agentworkspace.mobile"
         minSdk = 26
         targetSdk = 36
-        versionCode = 20100
-        versionName = "2.1.0"
+        versionCode = 20200
+        versionName = "2.2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Local test builds can inspect the console page over adb (chrome://inspect) while keeping
@@ -66,6 +66,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    // The background screen's interface to its Shizuku service (src/main/aidl).
+    buildFeatures {
+        aidl = true
+    }
 
     androidResources {
         ignoreAssetsPatterns += listOf(
@@ -208,6 +212,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation("androidx.work:work-runtime-ktx:2.10.1")
     implementation(libs.shizuku.api)
+    implementation(libs.shizuku.provider)
     // Pure-logic tests (memory planning) run on the JVM without a device.
     testImplementation("junit:junit:4.13.2")
     // Android's org.json is a stub on the JVM; parsing tests need the real one.

@@ -161,6 +161,14 @@
             android:exported="false"
             android:label="HTML Preview"
             android:screenOrientation="unspecified" />
+        <!-- 桌面小工具：每个工具在最近任务里是单独的一项 -->
+        <activity
+            android:name=".workspace.ToolActivity"
+            android:exported="false"
+            android:documentLaunchMode="intoExisting"
+            android:autoRemoveFromRecents="true"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden" />
 
         <!-- 守护进程服务：常驻后台托管 Termux Python 进程 -->
         <service
@@ -194,6 +202,16 @@
         </service>
         <!-- The bubble's "operate the phone" opens the accessibility service's panel in :engine. -->
         <receiver android:name=".automation.PhoneControlReceiver" android:exported="false" android:process=":engine" />
+        <!-- Shizuku hands its binder to this provider, in the engine process where the background
+             screen is used (BackgroundScreen). Only Shizuku, holding the permission below, can call it. -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:process=":engine"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
         <!-- Live screen for the agent's screenshots: in :engine next to the accessibility service. -->
         <service
             android:name=".automation.LiveScreenService"

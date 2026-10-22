@@ -252,6 +252,9 @@
     elements.btnFileSource.disabled = !loaded || fileSaving;
     elements.btnFileInteractive.hidden = !loaded || !/\.html?$/i.test(fileEditor.path) || typeof bridge?.workspaceFileAction !== "function";
     elements.btnFileInteractive.disabled = !loaded || fileSaving || fileDirty() || restartPending;
+    elements.btnFileHomeTool.hidden = elements.btnFileInteractive.hidden || !canMakeHomeTools();
+    elements.btnFileHomeTool.disabled = elements.btnFileInteractive.disabled;
+    syncHomeToolsVisibility();
     elements.btnFileToKnowledge.hidden = !loaded || !knowledgeFiles.test(fileEditor.path);
     elements.btnFileToKnowledge.disabled = fileSaving || fileKnowledgeAdding;
   }

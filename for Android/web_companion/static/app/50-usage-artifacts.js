@@ -522,6 +522,7 @@
     if (!pending) return;
     artifactActions.delete(result.request_id);
     pending.button.disabled = false;
-    pageStatus(pending.status, result.cancelled ? "" : result.ok ? (pending.action === "save" ? t("已保存") : "") : localizeError(result.error) || t("文件操作失败"), !result.ok && !result.cancelled);
+    pageStatus(pending.status, result.cancelled ? "" : result.ok ? (pending.action === "save" ? t("已保存")
+      : pending.action === "home_tool" ? homeToolAdded(result) : "") : localizeError(result.error) || t("文件操作失败"), !result.ok && !result.cancelled);
   });
 

@@ -94,6 +94,12 @@ class WorkspaceFileActionController(
                         saving = action
                         launchSave(WorkspaceFileIntents.save(cached))
                     }
+                    "home_tool" -> {
+                        // A copy in the app (the workspace file may change later), then the launcher's own "add" prompt.
+                        val tool = withContext(Dispatchers.IO) { HomeTools.install(context, cached.file, request.path) }
+                        val pinned = HomeTools.pin(context, tool)
+                        finish(action, request.result(true).put("tool_id", tool.id).put("tool_name", tool.name).put("pinned", pinned))
+                    }
                 }
             } catch (failure: CancellationException) {
                 finish(action, request.result(false, "File action cancelled", cancelled = true))

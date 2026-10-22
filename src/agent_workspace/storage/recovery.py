@@ -956,22 +956,9 @@ def import_session_archive(
         raise ValueError(f"workspace is not a directory: {workspace_path}")
     imported_session_id = str(uuid4())
     event_ids = {event.id: str(uuid4()) for event in verified.events}
-    attempt_ids: dict[str, str] = {}
-    tool_call_ids: dict[str, str] = {}
-    todo_ids: dict[str, str] = {}
-    citation_ids: dict[str, str] = {}
-    idempotency_keys: dict[str, str] = {}
-    for event in verified.events:
-        _collect_import_id(event.data.get("attempt_id"), attempt_ids)
-        _collect_import_id(event.data.get("tool_call_id"), tool_call_ids)
-        _collect_import_id(event.data.get("todo_id"), todo_ids)
-        _collect_import_id(event.data.get("citation_id"), citation_ids)
-        _collect_import_id(event.data.get("idempotency_key"), idempotency_keys)
-        raw_calls = event.data.get("tool_calls")
-        if isinstance(raw_calls, list):
-            for raw_call in raw_calls:
-                if isinstance(raw_call, dict):
-                    _collect_import_id(raw_call.get("id"), tool_call_ids)
+    attempt_ids, tool_call_ids, todo_ids, citation_ids, idempotency_keys = _import_identifiers(
+        verified.events
+    )
     correlation_ids: dict[str, str] = {}
     external_causation_ids: dict[str, str] = {}
     replacements = {
@@ -1069,6 +1056,131 @@ def import_session_archive(
     projected = store.get_session(imported_session_id)
     if projected is None:
         raise RuntimeError("imported session projection is unavailable")
+    return projected
+
+
+_TURN_ENDS = frozenset({"turn.completed", "turn.failed", "turn.cancelled"})
+
+
+def fork_session(
+    store: SQLiteEventStore,
+    session_id: str,
+    events: Iterable[Event],
+    *,
+    title: str,
+) -> Session:
+    """A new session that continues a conversation from an earlier point.
+
+    ``events`` are the session's first events up to that point, in order; the caller may have
+    rewritten the data of its own event types. They are copied with fresh identifiers into a
+    session on the same workspace. Unlike an imported archive, this is the user's own conversation
+    on this device: messages keep their trust, reasoning and provider metadata, and the model's
+    context carries on from them. Memory changes become audit records (memories are shared, not
+    per session), and the point must not fall inside a turn.
+    """
+
+    source = store.get_session(session_id)
+    if source is None:
+        raise KeyError(f"unknown session: {session_id}")
+    chosen = list(events)
+    stored = store.list_events(session_id)
+    if not chosen or [event.id for event in stored[: len(chosen)]] != [event.id for event in chosen]:
+        raise ValueError("a fork copies the first events of the session, in order")
+    in_turn = False
+    for event in chosen:
+        if event.type == "turn.started":
+            in_turn = True
+        elif event.type in _TURN_ENDS:
+            in_turn = False
+    if in_turn:
+        raise ValueError("the conversation is in the middle of a turn at that point")
+    forked_session_id = str(uuid4())
+    event_ids = {event.id: str(uuid4()) for event in chosen}
+    # The copy is numbered from 1 again; a rewind names the point it went back to by number.
+    sequences = {event.sequence: position for position, event in enumerate(chosen, start=1)}
+    attempt_ids, tool_call_ids, todo_ids, citation_ids, idempotency_keys = _import_identifiers(chosen)
+    replacements = {**attempt_ids, **tool_call_ids, **todo_ids, **citation_ids, **idempotency_keys}
+    correlation_ids: dict[str, str] = {}
+    external_causation_ids: dict[str, str] = {}
+    forked_events: list[Event] = []
+    for event in chosen:
+        event_type = event.type
+        if event_type in {"memory.upserted", "memory.deleted"}:
+            audit: dict[str, Any] = {
+                "operation": "upsert" if event_type == "memory.upserted" else "delete",
+                "content_omitted": True,
+            }
+            attempt_id = event.data.get("attempt_id")
+            if isinstance(attempt_id, str) and attempt_id in attempt_ids:
+                audit["attempt_id"] = attempt_ids[attempt_id]
+            event_type, data = "memory.audit", audit
+        else:
+            data = _remap_import_event_data(
+                event,
+                forked_session_id,
+                source.workspace,
+                attempt_ids=attempt_ids,
+                tool_call_ids=tool_call_ids,
+                todo_ids=todo_ids,
+                citation_ids=citation_ids,
+                idempotency_keys=idempotency_keys,
+                replacements=replacements,
+                untrusted=False,
+            )
+        if event_type == "context.rewound":
+            if data.get("from_event_id") in event_ids:
+                data["from_event_id"] = event_ids[data["from_event_id"]]
+            if data.get("from_sequence") in sequences:
+                data["from_sequence"] = sequences[data["from_sequence"]]
+        if event_type == "sandbox.change.applied":
+            # The workspace's application state belongs to the original session.
+            event_type = "sandbox.change.applied.imported"
+        forked_events.append(
+            Event(
+                id=event_ids[event.id],
+                session_id=forked_session_id,
+                type=event_type,
+                data=data,
+                schema_version=event.schema_version,
+                causation_id=_remap_event_link(event.causation_id, event_ids, external_causation_ids),
+                correlation_id=_remap_event_link(event.correlation_id, event_ids, correlation_ids),
+                created_at=event.created_at,
+            )
+        )
+    now = datetime.now(UTC).isoformat()
+    for anchor in _active_background_job_anchors(forked_events).values():
+        forked_events.append(
+            Event(
+                session_id=forked_session_id,
+                type="background.job.interrupted",
+                data={
+                    "job_id": anchor.data["job_id"],
+                    "reason": "the conversation was forked; the job stays with the original",
+                },
+                causation_id=anchor.id,
+                correlation_id=anchor.correlation_id,
+                created_at=now,
+            )
+        )
+    artifacts: list[BinaryArtifact] = []
+    for sha256 in sorted(_referenced_binary_artifact_ids(chosen)):
+        artifact = store.get_binary_artifact(sha256)
+        if artifact is None:
+            raise ValueError("a file the conversation refers to is no longer stored")
+        artifacts.append(artifact)
+    forked = Session(
+        workspace=source.workspace,
+        mode=_archive_initial_mode(source, chosen),
+        autonomy=_archive_initial_autonomy(source, chosen),
+        id=forked_session_id,
+        title=title[:500],
+        created_at=now,
+        updated_at=now,
+    )
+    store.import_session(forked, tuple(forked_events), tuple(artifacts))
+    projected = store.get_session(forked_session_id)
+    if projected is None:
+        raise RuntimeError("forked session projection is unavailable")
     return projected
 
 
@@ -1624,6 +1736,30 @@ def _collect_import_id(value: object, mapping: dict[str, str]) -> None:
         mapping.setdefault(value, str(uuid4()))
 
 
+def _import_identifiers(
+    events: Iterable[Event],
+) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str], dict[str, str]]:
+    """Fresh attempt, tool call, todo, citation and idempotency identifiers for copied events:
+    the store keeps those unique across sessions."""
+    attempt_ids: dict[str, str] = {}
+    tool_call_ids: dict[str, str] = {}
+    todo_ids: dict[str, str] = {}
+    citation_ids: dict[str, str] = {}
+    idempotency_keys: dict[str, str] = {}
+    for event in events:
+        _collect_import_id(event.data.get("attempt_id"), attempt_ids)
+        _collect_import_id(event.data.get("tool_call_id"), tool_call_ids)
+        _collect_import_id(event.data.get("todo_id"), todo_ids)
+        _collect_import_id(event.data.get("citation_id"), citation_ids)
+        _collect_import_id(event.data.get("idempotency_key"), idempotency_keys)
+        raw_calls = event.data.get("tool_calls")
+        if isinstance(raw_calls, list):
+            for raw_call in raw_calls:
+                if isinstance(raw_call, dict):
+                    _collect_import_id(raw_call.get("id"), tool_call_ids)
+    return attempt_ids, tool_call_ids, todo_ids, citation_ids, idempotency_keys
+
+
 def _remap_event_link(
     value: str | None,
     event_ids: dict[str, str],
@@ -1647,6 +1783,7 @@ def _remap_import_event_data(
     citation_ids: dict[str, str],
     idempotency_keys: dict[str, str],
     replacements: dict[str, str],
+    untrusted: bool = True,
 ) -> dict[str, Any]:
     data = copy.deepcopy(event.data)
     mappings = {
@@ -1664,7 +1801,7 @@ def _remap_import_event_data(
         data["session_id"] = session_id
     if event.type == "sandbox.changeset.created":
         data["workspace"] = workspace
-    if event.type == "message.created":
+    if event.type == "message.created" and untrusted:
         data["trust"] = "untrusted_data"
         data["reasoning"] = ""
         data["provider_metadata"] = {}
@@ -1676,7 +1813,8 @@ def _remap_import_event_data(
             call_id = raw_call.get("id")
             if isinstance(call_id, str) and call_id in tool_call_ids:
                 raw_call["id"] = tool_call_ids[call_id]
-            raw_call["provider_metadata"] = {}
+            if untrusted:
+                raw_call["provider_metadata"] = {}
             arguments = raw_call.get("arguments")
             if isinstance(arguments, dict):
                 raw_call["arguments"] = _replace_import_ids(arguments, replacements)

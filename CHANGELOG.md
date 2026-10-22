@@ -1,5 +1,35 @@
 # Changelog
 
+## 2.2.0 — 2026-10-22
+
+2.2.0 能把一次手机操作做成图文教程，能从任意一条消息分叉出新对话，能让另一个模型回答同一个问题并排对比，能把 AI 做的网页小工具放到桌面；新增实验性的后台操作，网页和长对话占用的上下文更少。Agent Workspace 2.2.0 turns a phone task into a picture guide, forks a conversation from any message, compares another model's answer to the same question, puts the small tools the AI makes on the home screen, adds an experimental background mode, and uses less context for web pages and long conversations.
+
+### 中文
+
+- 新增：图文教程。AI 操作手机后，在「回看操作」里点「做成图文教程」（对话菜单 ⋯ 里也能为这个对话里较早的任务做）。每一步写明做了什么，点过屏幕的步骤配上当时那一屏，用红圈标出点的位置。说明可以改，用不上的步骤可以删，生成长图后直接分享。截图里的悬浮球、悬浮按钮这类悬浮窗会被抹掉。
+- 新增：对话分叉。每条消息多了分叉按钮：在你的消息上，新对话保留这条之前的内容，并把这条消息放回输入框改写；在回复上，新对话保留到这条回复为止。原对话不变，新对话里 AI 记得之前的内容；两个对话共用工作区里的文件。
+- 新增：换个模型对比。回复下面多了一个按钮，选当前服务商的另一个模型回答同一个问题，两个回答放在一起看，各自标出模型用时和 Token。用时只算模型自己花的时间，不算等你批准的时间。「用这个回答继续」切到另一个回答所在的对话；「关闭」把它归档。原对话已允许本对话内发送的内容，对比时不会再问。
+- 新增：桌面小工具。AI 生成的 HTML 文件多了「添加到桌面」：页面复制进应用，按系统提示放到桌面，点图标就能打开。小工具离线运行，连不了网络，也碰不到应用里的数据；它自己存下的数据会一直保留。存下的小工具列在「文件」页最上方，可以再次添加或删除；删除后桌面图标会变灰，长按即可移除。要 AI 做换算、记账、计时这类小工具时，它会做成一个能离线使用的 HTML 文件。
+- 新增：后台操作（实验）。在「设备与工具」里打开后，对话里的手机任务在一块看不见的后台屏幕上进行，你可以同时正常使用手机，需要时把后台应用移到前台查看。需要 Shizuku（无需 root）。打开前请看安全说明：审批、禁止操作的应用和不做付款转账的规则在后台同样适用。同一个应用不能同时在前台和后台使用；后台应用发出的声音会从手机外放。
+- 改进：读网页时只取正文和链接，一个网页占用的上下文少了许多（例如 Python 官网的一页从约 6.4 万字符降到约 1.6 万）；需要时 AI 可以分段往下读，或取原始 HTML。
+- 改进：同一对话里较早任务的长工具输出，在后面的任务里只保留开头部分，长对话消耗的 Token 更少。
+- 改进：手机上用不到的沙盒变更工具不再发给模型。
+- 改进：操作截图清晰度提高，有密码框等敏感内容的步骤不截图，但会保留做了什么。
+- 覆盖安装即可，数据会保留。
+
+### English
+
+- New: picture guides. After the AI operates the phone, tap Make a picture guide in Look back (or, for an earlier task of the conversation, in the conversation menu ⋯). Each step says what was done; a step that touched the screen shows that screen with the spot circled in red. Change the words, drop the steps you do not need, and share the long picture it makes. Floating windows such as the bubble or a floating button are painted out of the pictures.
+- New: fork a conversation. Every message has a fork button. On your message, the new conversation keeps what came before it and puts the message back in the input box to rewrite; on a reply, it keeps everything up to that reply. The original stays as it is, the AI in the new conversation remembers what came before, and both share the workspace's files.
+- New: compare with another model. A reply has a button that asks another model of the current provider the same question and shows both answers together, each with its model time and tokens. Model time counts only the model's own time, not the time spent waiting for your approval. Continue with this answer switches to the other answer's conversation; Close archives it. What you allowed this conversation to send is not asked again for the comparison.
+- New: home-screen tools. An HTML file the AI made has Add to home screen: the page is copied into the app and, after the system prompt, opens from its own icon. A tool runs offline, cannot reach the network or the app's data, and keeps the data it saves. Saved tools are listed at the top of the Files page, where you can add them again or remove them; a removed tool's icon turns grey and can be removed with a long press. When you ask for a converter, a ledger or a timer, the AI makes it as one HTML file that works offline.
+- New: background mode (experimental). Turned on under Device & tools, phone tasks from a conversation run on a hidden background screen while you keep using the phone; bring the app to the front to look at it. This needs Shizuku (no root). Read the safety note before turning it on: approvals, the apps the AI may not operate and the no-payments rule apply in the background too. An app cannot be used in front and in the background at the same time, and sound from an app in the background plays from the phone's speaker.
+- Improved: a web page is read as its main text and links, so it takes much less context (one python.org page went from about 64,000 to about 16,000 characters); the AI can read further in parts or ask for the raw HTML.
+- Improved: in a later task of the same conversation, long tool output from earlier tasks keeps only its beginning, so long conversations use fewer tokens.
+- Improved: the sandbox change tools, which a phone cannot use, are no longer sent to the model.
+- Improved: step pictures are sharper; a step on a screen with a password field or other sensitive content is kept without its picture.
+- Install over the existing app; your data is kept.
+
 ## 2.1.0 — 2026-10-19
 
 2.1.0 让一个任务可以拆成几个子任务同时做，可以给单个任务设花费上限，能直接回复通知，AI 操作手机时会记下各个应用里的操作经验。Agent Workspace 2.1.0 splits a task into sub-tasks that run side by side, caps what one task may spend, replies to notifications directly, and keeps notes on how each app works while the AI operates the phone.

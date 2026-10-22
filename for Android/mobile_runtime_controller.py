@@ -28,6 +28,8 @@ from mobile_images import resolve_mobile_images
 from mobile_injection import assess as assess_injection
 from mobile_model_roles import model_for_task, subagent_model, summary_model
 from mobile_pause import bind_task, forget_task, make_pausable
+from mobile_screen import bind as bind_screen
+from mobile_screen import reset as reset_screen
 from mobile_subagents import SubagentHost, bind_host, reset_host
 from mobile_task_limits import TaskLimits, limits_for_task
 from mobile_prompt_cache import FrozenPrompts, prefix_cache_endpoint
@@ -974,6 +976,7 @@ class MobileRuntimeController:
     async def _execute(self, task_id: str) -> None:
         hosted = False
         host_token = None
+        screen_token = None
         try:
             async with self._artifact_execution_lock(task_id):
                 task = self.tasks.get(task_id)
@@ -1124,6 +1127,9 @@ class MobileRuntimeController:
                     limits=self._limits,
                 )
                 host_token = bind_host(self._host)
+                # A conversation's task may use the background screen; a panel task is about the
+                # app on the phone's own screen (mobile_screen).
+                screen_token = bind_screen(phone is None)
                 if execution is not None:
                     result = await execution(task)
                 elif self._execution_kind(task_id) == "workflow_replay":
@@ -1237,6 +1243,9 @@ class MobileRuntimeController:
             if host_token is not None:
                 with suppress(ValueError, RuntimeError):
                     reset_host(host_token)
+            if screen_token is not None:
+                with suppress(ValueError, RuntimeError):
+                    reset_screen(screen_token)
             if self._active_task_id == task_id:
                 self.approvals.clear_active_task(task_id)
                 self._active_task_id = None

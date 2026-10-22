@@ -39,7 +39,7 @@ data class WorkspaceFileRequest(
             val requestId = string("request_id")
             require(requestIdPattern.matches(requestId)) { "Invalid file action request_id" }
             val action = string("action")
-            require(action in setOf("open", "share", "save")) { "Unsupported file action" }
+            require(action in setOf("open", "share", "save", "home_tool")) { "Unsupported file action" }
             val workspaceId = if (!payload.has("workspace_id") || payload.isNull("workspace_id")) null else string("workspace_id").also {
                 require(requestIdPattern.matches(it)) { "Invalid workspace_id" }
             }
@@ -50,6 +50,7 @@ data class WorkspaceFileRequest(
             }.lowercase(Locale.ROOT)
             val suppliedMime = if (!payload.has("mime_type") || payload.isNull("mime_type")) null else string("mime_type")
             val mime = WorkspaceFileMime.vetted(path, suppliedMime)
+            require(action != "home_tool" || mime == "text/html") { "Only an HTML page can become a home-screen tool" }
             return WorkspaceFileRequest(requestId, action, path, sha, mime, workspaceId)
         }
 

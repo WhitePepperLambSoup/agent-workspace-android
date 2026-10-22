@@ -483,6 +483,30 @@
     if (pendingRewind?.reason === "regenerate") cancelRewind();
   }
 
+  // ---- Fork: a new conversation from an earlier point; this one stays as it is ----
+  // From a user's message: what came before it, with the message back in the input box to change.
+  // From a reply: everything up to that reply. Files are shared (same workspace).
+  async function forkFrom(card, keepReply) {
+    if (!historyReady || !currentSessionId || isLoadingSession) return;
+    let userCard = card;
+    while (keepReply && userCard && !(userCard.classList.contains("user") && !userCard.hidden)) userCard = userCard.previousElementSibling;
+    if (!userCard) return;
+    const text = keepReply ? "" : (userCard.dataset.displayText || userCard.dataset.messageText || "");
+    try {
+      const eventId = await userEventIdFor(userCard);
+      const result = await apiJson("/mobile/sessions/fork", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: currentSessionId, message_event_id: eventId, keep_reply: keepReply,
+          title: t("{0}（分叉）", sessionTitle(currentSessionId)) }) });
+      if (disposed || !await switchSession(result.session.id, result.session.title)) return;
+      if (text && !elements.promptInput.value.trim()) {
+        elements.promptInput.value = text;
+        elements.promptInput.dispatchEvent(new Event("input", { bubbles: true }));
+        elements.promptInput.focus();
+      }
+      notice(t("已分叉为新对话，原对话不变"), "info");
+    } catch (error) { notice(t("分叉失败：{0}", error.message)); }
+  }
+
   async function sendPrompt(customText = null, attachmentOverride = []) {
     flushQuickEffort();
     // Personal numbers typed for a cloud model: mask, send or cancel (65-privacy.js).

@@ -57,6 +57,7 @@
       sheetButton("file-text", t("导出为 Markdown"), (event) => void exportSession(session, "md", event.currentTarget)),
       sheetButton("download", t("导出为 PDF"), (event) => void exportSession(session, "pdf", event.currentTarget)),
       sheetButton("image-plus", t("导出为长图"), (event) => void exportSession(session, "image", event.currentTarget)),
+      sheetButton("book-open", t("做成图文教程"), (event) => void chooseTutorialTask(session, event.currentTarget)),
       sheetButton(archived ? "archive-restore" : "archive", archived ? t("恢复") : t("归档"),
         () => { closeSessionSheet(); void setSessionArchived(session, !archived); }, archived ? "data-session-restore" : "data-session-archive"),
     ];
@@ -131,6 +132,23 @@
     } catch (error) {
       status.textContent = t("导出失败: {0}", error.message);
     } finally { button.disabled = false; }
+  }
+
+  // A picture guide from one of this conversation's phone tasks whose step pictures are still kept
+  // (66-step-replay.js opens the editor).
+  async function chooseTutorialTask(session, button) {
+    const status = $("sessionSheetStatus");
+    button.disabled = true;
+    let tasks = [];
+    try { tasks = (await apiJson(`/mobile/step-shots/tasks?session_id=${encodeURIComponent(session.id)}`)).tasks || []; }
+    catch (error) { status.textContent = t("读取失败：{0}", error.message); return; }
+    finally { button.disabled = false; }
+    if (disposed || sheetSession !== session) return;
+    if (!tasks.length) { status.textContent = t("这个对话里没有可用的手机操作截图（只保留最近 20 个任务、最多 7 天）"); return; }
+    const open = (task) => { closeSessionSheet(); void openStepTutorial({ id: task.task_id, sessionId: session.id, prompt: task.prompt }); };
+    if (tasks.length === 1) { open(tasks[0]); return; }
+    status.textContent = t("选一次手机操作");
+    $("sessionSheetActions").replaceChildren(...tasks.map((task) => sheetButton("book-open", t("{0} · {1} 步", task.prompt, task.steps), () => open(task))));
   }
 
   $("sessionSheet").addEventListener("click", (event) => { if (event.target === $("sessionSheet")) closeSessionSheet(); });

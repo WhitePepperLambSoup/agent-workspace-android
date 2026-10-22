@@ -460,6 +460,18 @@ class MobileManagement:
             import mobile_step_shots
 
             return 200, {"steps": await asyncio.to_thread(mobile_step_shots.steps, query.get("task_id", [""])[0])}
+        if path == "/mobile/step-shots/tutorial":
+            import mobile_step_tutorial
+
+            return 200, {"frames": await asyncio.to_thread(mobile_step_tutorial.preview, query.get("task_id", [""])[0])}
+        if path == "/mobile/step-shots/tasks":
+            import mobile_step_tutorial
+
+            session_id = query.get("session_id", [""])[0]
+            if not session_id:
+                return 400, {"error": "session_id is required"}
+            tasks = self.controller.list(session_id)
+            return 200, {"tasks": await asyncio.to_thread(mobile_step_tutorial.tasks_with_steps, tasks)}
         if path == "/mobile/shortcuts/pending":
             import mobile_shortcuts
 
@@ -487,6 +499,23 @@ class MobileManagement:
             from mobile_app_notes import listing
 
             return 200, await asyncio.to_thread(listing)
+        if path == "/mobile/background-screen":
+            from android_adapter.android_system import background_screen
+
+            try:
+                return 200, await asyncio.to_thread(background_screen)
+            except Exception:
+                return 200, {"supported": False, "reason": "unavailable"}
+        if path == "/mobile/background-screen/picture":
+            import base64
+
+            from android_adapter.android_system import background_picture
+
+            try:
+                picture = await asyncio.to_thread(background_picture, 720)
+            except Exception:
+                picture = None
+            return 200, {"jpeg_base64": base64.b64encode(picture).decode("ascii") if picture else None}
         if path == "/mobile/skills":
             return 200, await asyncio.to_thread(self.skills().snapshot)
         if path == "/mobile/skills/job":
@@ -799,6 +828,54 @@ class MobileManagement:
             events = await asyncio.to_thread(self.runtime.store.list_events, session_id)
             title = str(payload.get("title") or "")[:120] or "Agent Workspace"
             return 200, await export_conversation(session.workspace, title, events, fmt)
+        if path == "/mobile/sessions/fork":
+            from mobile_session_fork import fork_conversation
+
+            session_id, message_id, keep_reply = payload.get("session_id"), payload.get("message_event_id"), payload.get("keep_reply")
+            title = payload.get("title")
+            if not isinstance(session_id, str) or not isinstance(message_id, str) or not isinstance(keep_reply, bool):
+                return 400, {"error": "session_id, message_event_id and keep_reply are required"}
+            source = self.runtime.service.get_session(session_id)
+            title = title.strip()[:200] if isinstance(title, str) and title.strip() else source.title
+            try:
+                result = await asyncio.to_thread(fork_conversation, self.runtime.store, session_id, message_id,
+                                                 keep_reply=keep_reply, title=title)
+            except ValueError as error:
+                return 400, {"error": str(error)}
+            forked = result["session"]
+            # The same conversation goes on: what the user let it send to the model for the rest of the
+            # conversation, the fork may send too. Each conversation's tasks run under their own
+            # runtime's policy, so the approval is carried over, not shared.
+            with suppress(Exception):
+                def egress(controller):
+                    runtime = getattr(controller, "runtime", None) or self.runtime
+                    return getattr(getattr(runtime.service, "runner", None), "_egress_policy", None)
+
+                source_policy = egress(await self._session_controller(session_id))
+                fork_policy = egress(await self._session_controller(forked.id))
+                granted = source_policy.session_grant(forked.workspace, session_id)
+                if granted:
+                    fork_policy.carry_session_grant(forked.workspace, forked.id, granted)
+            # The knowledge bases chosen for the conversation go along.
+            with suppress(Exception):
+                knowledge = self.knowledge()
+                chosen = await asyncio.to_thread(knowledge.session_selection, session_id)
+                if chosen.get("explicit"):
+                    await asyncio.to_thread(knowledge.set_session_selection, forked.id, chosen["collections"])
+            return 201, {"session": {"id": forked.id, "title": forked.title, "workspace": forked.workspace},
+                         "message_event_id": result["message_event_id"], "model": result["model"]}
+        if path == "/mobile/step-shots/tutorial":
+            from mobile_step_tutorial import export_tutorial
+
+            session_id = payload.get("session_id")
+            if not isinstance(session_id, str) or not session_id:
+                return 400, {"error": "session_id is required"}
+            session = self.runtime.service.get_session(session_id)
+            try:
+                return 200, await export_tutorial(session.workspace, str(payload.get("task_id") or ""), payload.get("title"),
+                                                  payload.get("subtitle", ""), payload.get("frames"))
+            except ValueError as error:
+                return 400, {"error": str(error)}
         if path in ("/mobile/session-meta/tags", "/mobile/session-meta/pin"):
             import mobile_session_meta
 
@@ -822,6 +899,17 @@ class MobileManagement:
                 return 200, {"limits": set_limits(payload.get("limits") or {})}
             except ValueError as error:
                 return 400, {"error": str(error)}
+        if path == "/mobile/background-screen":
+            from android_adapter.android_system import background_screen
+
+            from agent_workspace.tools.base import ToolArgumentError
+
+            try:
+                return 200, await asyncio.to_thread(background_screen, payload)
+            except ToolArgumentError as error:
+                return 400, {"error": str(error)}
+            except Exception as error:
+                return 503, {"error": f"background screen unavailable: {error}"[:300]}
         if path == "/mobile/app-notes":
             import mobile_app_notes as notes
 

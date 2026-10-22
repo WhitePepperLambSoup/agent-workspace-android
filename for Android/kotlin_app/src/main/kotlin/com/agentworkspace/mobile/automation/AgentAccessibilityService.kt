@@ -139,6 +139,15 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
     /** When a list last moved: a fling keeps it going after the finger lifts. */
     @Volatile private var lastScrollAt = 0L
 
+    /** The display the request being run works on: the phone's screen, or the background screen. */
+    @Volatile private var screenId = Display.DEFAULT_DISPLAY
+    private val onBackground: Boolean get() = screenId != Display.DEFAULT_DISPLAY
+
+    /** The windows of [display] (the background screen's when the agent works there). */
+    private fun screenWindows(display: Int = screenId): List<AccessibilityWindowInfo> =
+        if (display == Display.DEFAULT_DISPLAY || Build.VERSION.SDK_INT < 30) windows
+        else windowsOnAllDisplays.get(display) ?: emptyList()
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         // Window events arrive late or for windows that end up where they were, so they only count as
         // content; whether the windows changed is decided by comparing them (windowSignature).
@@ -177,9 +186,11 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         super.onDestroy()
     }
 
-    override fun onDisplayAdded(displayId: Int) = invalidate()
+    // Another display coming or changing (the background screen being created, a cast) leaves what
+    // the phone's screen shows as it was; a display going away may take a screen read from it.
+    override fun onDisplayAdded(displayId: Int) { if (displayId == Display.DEFAULT_DISPLAY) invalidate() }
     override fun onDisplayRemoved(displayId: Int) = invalidate()
-    override fun onDisplayChanged(displayId: Int) = invalidate()
+    override fun onDisplayChanged(displayId: Int) { if (displayId == Display.DEFAULT_DISPLAY) invalidate() }
 
     internal fun invalidate() {
         epoch.incrementAndGet()
@@ -323,21 +334,68 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
 
     internal fun endStepShots() { shotTask = null }
 
-    /** After the screen settles; a screenshot Android refuses (one a second at most) is skipped. */
-    private fun shootStep(label: String) {
+    /**
+     * After the screen settles. A screen with protected content, or a screenshot Android refuses (one a
+     * second at most), leaves the step without a picture. [point]: where the action touched.
+     */
+    private fun shootStep(label: String, point: Pair<Float, Float>? = null) {
         val task = shotTask ?: return
         val index = ++shotIndex
         if (index > 60) return
+        val step = StepShots.Step(index, label, System.currentTimeMillis(), point)
+        // The picture is taken later, after the request: of the screen the action was on.
+        val on = screenId
         shotWorker.execute {
             Thread.sleep(700)
             if (shotTask != task) return@execute
-            runCatching {
-                // Not stored: the agent's current snapshot must stay the one it acts on.
-                if (capture(store = false).sensitive) return@runCatching
-                val grabbed = grab()
-                try { StepShots.save(this, task, index, label, grabbed.bitmap) } finally { grabbed.bitmap.recycle() }
-            }
+            val shotAt = System.currentTimeMillis()
+            // Not stored: the agent's current snapshot must stay the one it acts on.
+            val grabbed = runCatching { if (capture(store = false, on = on).sensitive) null else grab(on) }.getOrNull()
+            val covers = if (grabbed == null) emptyList() else runCatching { floatingWindows(on) }.getOrDefault(emptyList())
+            try { runCatching { StepShots.save(this, task, step, grabbed?.bitmap, shotAt, covers) } } finally { grabbed?.bitmap?.recycle() }
         }
+    }
+
+    /**
+     * Small windows floating over the app (this app's bubble and stop button, a phone's floating
+     * assist button or side-bar handle), as fractions of the screen: a tutorial made from the pictures
+     * paints them out, since whoever follows it has none of them.
+     */
+    private fun floatingWindows(on: Int): List<FloatArray> {
+        val size = screen()
+        if (size.width <= 0 || size.height <= 0) return emptyList()
+        val found = ArrayList<FloatArray>()
+        val all = screenWindows(on)
+        try {
+            for (window in all) {
+                if (window.type != AccessibilityWindowInfo.TYPE_SYSTEM &&
+                    window.type != AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) continue
+                val bounds = Rect().also { window.getBoundsInScreen(it) }
+                // By shape, as phones draw such buttons from their system UI too: bars along the screen
+                // (status, navigation) and large windows (a dialog, the task panel) are part of the picture.
+                if (bounds.isEmpty || bounds.width() > size.width * 0.6 || bounds.height() > size.height * 0.6 ||
+                    bounds.width().toLong() * bounds.height() > size.width.toLong() * size.height / 6) continue
+                // Such a window may reach past the screen's edge: only the part on it is pictured.
+                if (!bounds.intersect(0, 0, size.width, size.height)) continue
+                found.add(floatArrayOf(bounds.left.toFloat() / size.width, bounds.top.toFloat() / size.height,
+                    bounds.right.toFloat() / size.width, bounds.bottom.toFloat() / size.height))
+            }
+        } finally { all.forEach { recycle(it) } }
+        return found
+    }
+
+    /** Where on the screen an action touched, as fractions of it; null for one that touched no spot. */
+    private fun touchedPoint(request: JSONObject, source: Snapshot): Pair<Float, Float>? {
+        if (source.screen.width <= 0 || source.screen.height <= 0) return null
+        fun center(ref: String) = source.targets[ref]?.bounds?.let { it.exactCenterX() to it.exactCenterY() }
+        val (x, y) = when (request.optString("action")) {
+            "ref", "type_text" -> center(request.optString("ref"))
+            "long_press" -> if (request.has("ref")) center(request.optString("ref"))
+                else request.optInt("x").toFloat() to request.optInt("y").toFloat()
+            "tap" -> request.optInt("x").toFloat() to request.optInt("y").toFloat()
+            else -> null
+        } ?: return null
+        return (x / source.screen.width).coerceIn(0f, 1f) to (y / source.screen.height).coerceIn(0f, 1f)
     }
 
     /**
@@ -541,13 +599,32 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
      * [settle]: wait for a page to finish loading before reading it back (not between a batch's steps).
      * Whatever the action, the screen of an app the user keeps the agent away from is not returned.
      */
-    internal fun executeRequest(request: JSONObject, settle: Boolean = true): JSONObject {
-        val response = executeUnguarded(request, settle)
-        if (response.isNull("observation") || response.optJSONObject("error")?.optString("code") == "blocked_app") return response
-        val label = runCatching { blockedFront() }.getOrNull() ?: return response
-        // The action opened (or went into) such an app: say so, without its screen.
-        return AndroidSystemBridge.failure("blocked_app", "That brought up $label, which the user does not let the agent " +
-            "read or use. Stop here and tell the user.").put("executed", response.optBoolean("executed"))
+    internal fun executeRequest(request: JSONObject, settle: Boolean = true, background: Boolean = false): JSONObject =
+        synchronized(executionLock) {
+        // A batch runs its steps through here too: they stay on the screen the batch works on.
+        val outer = screenId
+        // A task from a conversation works on the background screen when the user turned it on
+        // (BackgroundScreen); the phone control panel's tasks always use the phone's own screen.
+        if (background && BackgroundScreen.enabled(this)) {
+            screenId = try { BackgroundScreen.open(this) } catch (error: Exception) {
+                return@synchronized AndroidSystemBridge.failure("background_unavailable",
+                    "Background operation is on, but the background screen is unavailable: ${error.message}. Shizuku " +
+                    "stops when the phone restarts. Stop and tell the user: start Shizuku again, or turn off background " +
+                    "operation under Device & tools so the agent uses the phone's own screen.")
+            }
+        }
+        try {
+            val response = executeUnguarded(request, settle)
+            if (response.isNull("observation") || response.optJSONObject("error")?.optString("code") == "blocked_app") {
+                return@synchronized response
+            }
+            val label = runCatching { blockedFront() }.getOrNull() ?: return@synchronized response
+            // The action opened (or went into) such an app: say so, without its screen.
+            AndroidSystemBridge.failure("blocked_app", "That brought up $label, which the user does not let the agent " +
+                "read or use. Stop here and tell the user.").put("executed", response.optBoolean("executed"))
+        } finally {
+            screenId = outer
+        }
     }
 
     /**
@@ -588,9 +665,15 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
                     "The user does not let the agent read or use $label. Stop here and tell the user: they can do " +
                         "this themselves, or take the app off the list under Device & tools.")
             }
-            // Reading the screen works with it dark or locked; anything that touches it does not.
-            if (action !in setOf("observe", "verify", "wait_for", "stop_repeat")) {
+            // Reading the screen works with it dark or locked; anything that touches it does not. The
+            // background screen is drawn whatever the phone's screen does: that one is left alone.
+            if (!onBackground && action !in setOf("observe", "verify", "wait_for", "stop_repeat")) {
                 screenGate(refuseLocked = action !in setOf("screenshot", "ocr"))
+            }
+            if (onBackground && action in setOf("repeat", "home", "recents", "notifications")) {
+                throw AutomationFailure("not_on_background", if (action == "home") "The background screen has no " +
+                    "home screen: open the next app with launch_app" else "That belongs to the phone's own screen, which " +
+                    "the user is using; the background screen cannot do it")
             }
             when (action) {
                 "observe" -> {
@@ -638,10 +721,14 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             invalidate()
             if (executed) {
                 recordAction(request, source)
-                shootStep(describeAction(request))
+                shootStep(describeAction(request), touchedPoint(request, source))
             }
-            if (!executed && harmless) {
-                return@synchronized AndroidSystemBridge.failure("action_failed",
+            if (!executed && (harmless || onBackground)) {
+                // Nobody touches the background screen, so a dropped gesture there is no sign of the
+                // user taking over; with the phone's screen off, Android may drop such gestures.
+                return@synchronized AndroidSystemBridge.failure("action_failed", if (onBackground)
+                    "The background screen did not take the gesture (with the phone's screen off Android may drop " +
+                        "them); act by the control's ref instead, or look again" else
                     "Android did not take the action; look at the screen and try another way", freshObservation())
             }
             if (!executed) {
@@ -986,7 +1073,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
     /** Reads the windows; [store] = false only looks (a check before acting) without issuing a version. */
     // Reading the windows the first time, or of an app that redraws all the time, fetches each node
     // from the app and can take seconds.
-    private fun capture(maxNodes: Int = 400, maxDepth: Int = 24, store: Boolean = true): Snapshot = onReader(10_000) {
+    private fun capture(maxNodes: Int = 400, maxDepth: Int = 24, store: Boolean = true, on: Int = screenId): Snapshot = onReader(10_000) {
         val generation = epoch.get()
         val content = contentEpoch.get()
         val display = screen()
@@ -1053,7 +1140,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             }
         }
 
-        val allWindows = windows
+        val allWindows = screenWindows(on)
         val observedWindows = appWindows(allWindows)
         val windowsBefore = signature(observedWindows)
         if (windowsBefore != refWindows || refNext > 9000) {
@@ -1082,7 +1169,8 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
                 }
             }
             if (observedWindows.size > 8) truncated = true
-            if (targets.isEmpty()) {
+            // The active window's root belongs to the phone's screen: no use on the background screen.
+            if (targets.isEmpty() && on == Display.DEFAULT_DISPLAY) {
                 rootInActiveWindow?.let { root ->
                     try {
                         activePackage = bounded(root.packageName, 255)
@@ -1104,11 +1192,13 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             .put("screen", display.json()).put("windows", windowsJson).put("nodes", nodes)
             // The same ref_epoch: refs name the same controls as in the previous observation.
             .put("ref_epoch", refEpoch)
-            .put("truncated", truncated).put("stable", generation == epoch.get() && windowsBefore == windowSignature())
+            .put("truncated", truncated).put("stable", generation == epoch.get() && windowsBefore == windowSignature(on))
             // Content moved while it was read: fine for acting, but prefer refs or a fresh look.
             .put("content_changing", content != contentEpoch.get())
             .put("sensitive_content_redacted", sensitive)
-            .put("locked", getSystemService(android.app.KeyguardManager::class.java)?.isKeyguardLocked == true)
+            .put("locked", on == Display.DEFAULT_DISPLAY &&
+                getSystemService(android.app.KeyguardManager::class.java)?.isKeyguardLocked == true)
+            .put("background_screen", on != Display.DEFAULT_DISPLAY)
         Snapshot(version, generation, SystemClock.elapsedRealtime(), display,
             AndroidAutomationControl.readState(this).optString("revision"), targets, data, sensitive, windowsBefore)
             .also { if (store) synchronized(recent) { recent[version] = it } }
@@ -1213,6 +1303,12 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
                     "repeat the same action with confirmed=true.")
             }
         }
+        // A global action would go to the phone's own screen: the background screen gets the key.
+        if (action == "back" && onBackground) {
+            onReader { recheck(saved) }
+            BackgroundScreen.key(android.view.KeyEvent.KEYCODE_BACK)?.let { throw AutomationFailure("action_failed", it) }
+            return true
+        }
         return when (action) {
             "tap" -> gesture(saved, request.getInt("x"), request.getInt("y"), duration = 70)
             "swipe" -> gesture(saved, request.getInt("x"), request.getInt("y"), request.getInt("x2"), request.getInt("y2"), 350)
@@ -1236,6 +1332,11 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             }
             "launch_app" -> {
                 val intent = launchIntent(request)
+                if (onBackground) {
+                    onReader { recheck(saved) }
+                    BackgroundScreen.start(intent)?.let { throw AutomationFailure("launch_failed", it) }
+                    return true
+                }
                 onReader {
                     recheck(saved)
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -1498,7 +1599,9 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         panel?.step(describeAction(request))
         val windowsBefore = windowSignature()
         val packageBefore = frontPackage()
-        onReader { startActivity(intent) }
+        if (onBackground) {
+            BackgroundScreen.start(intent)?.let { throw AutomationFailure("page_unavailable", it) }
+        } else onReader { startActivity(intent) }
         invalidate()
         record(JSONObject().put("kind", "page").put("request", JSONObject(request.toString()).apply { remove("snapshot_version") }))
         shootStep(describeAction(request))
@@ -1534,11 +1637,13 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
 
     /** The package of the app window in front, or null while none can be read. */
     private fun frontPackage(): String? = onReader {
-        val all = windows
+        val all = screenWindows()
         try {
-            all.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && (it.isActive || it.isFocused) }
+            val apps = all.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+            // On the background screen nothing is active or focused for the user: its top app counts.
+            (apps.firstOrNull { it.isActive || it.isFocused } ?: if (onBackground) apps.maxByOrNull { it.layer } else null)
                 ?.let { window -> window.root?.let { root -> root.packageName?.toString().also { recycle(root) } } }
-                ?: rootInActiveWindow?.let { root -> root.packageName?.toString().also { recycle(root) } }
+                ?: if (onBackground) null else rootInActiveWindow?.let { root -> root.packageName?.toString().also { recycle(root) } }
         } finally { all.forEach { recycle(it) } }
     }
 
@@ -1832,6 +1937,10 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             // A field that does not report its text cannot be checked; setting it said it worked.
             if (shown != false) return true
         }
+        // The user is using the phone meanwhile: their clipboard is not taken for the background screen.
+        if (onBackground) throw AutomationFailure("text_not_accepted", "The field did not take the text; on the " +
+            "background screen it is not pasted (that would replace the user's clipboard). Tap the field to focus it " +
+            "and try again, or tell the user this field needs the phone's own screen")
         val pasted = onReader {
             getSystemService(android.content.ClipboardManager::class.java)
                 .setPrimaryClip(android.content.ClipData.newPlainText("Agent Workspace", text))
@@ -1870,7 +1979,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
 
     private fun resolve(target: Target): AccessibilityNodeInfo? {
         var node: AccessibilityNodeInfo? = if (target.windowId == -1) rootInActiveWindow else {
-            val current = windows
+            val current = screenWindows()
             try { current.firstOrNull { it.id == target.windowId }?.root }
             finally { current.forEach { recycle(it) } }
         }
@@ -1906,7 +2015,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             throw AutomationFailure("target_changed", "Something else is at these coordinates now; observe again")
         }
         // The phone control panel lets the finger through to the app while the gesture runs.
-        val shield = panel
+        val shield = panel?.takeIf { !onBackground }
         return if (shield != null) shield.outOfTheWay { dispatch(saved, x, y, x2, y2, duration) }
             else dispatch(saved, x, y, x2, y2, duration)
     }
@@ -1917,8 +2026,9 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         val accepted = onReader {
             recheck(saved)
             val path = Path().apply { moveTo(x.toFloat(), y.toFloat()); lineTo(x2.toFloat(), y2.toFloat()) }
-            val gesture = GestureDescription.Builder().addStroke(
-                GestureDescription.StrokeDescription(path, 0, duration)).build()
+            val builder = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, duration))
+            if (onBackground && Build.VERSION.SDK_INT >= 30) builder.setDisplayId(screenId)
+            val gesture = builder.build()
             dispatchGesture(gesture, object : GestureResultCallback() {
                 override fun onCompleted(gestureDescription: GestureDescription) {
                     completed = true
@@ -1957,8 +2067,8 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         return own
     }
 
-    private fun windowSignature(): String = onReader {
-        val current = windows
+    private fun windowSignature(display: Int = screenId): String = onReader {
+        val current = screenWindows(display)
         try { signature(appWindows(current)) } finally { current.forEach { recycle(it) } }
     }
 
@@ -2001,7 +2111,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             if (observed.sensitive) return AndroidSystemBridge.failure("protected_content",
                 "Screenshot capture is blocked while password or sensitive controls are visible", observed.observation)
             val grabbed = try {
-                val shield = panel
+                val shield = panel?.takeIf { !onBackground }
                 if (shield != null) shield.outOfTheWay { grab() } else grab()
             } catch (failure: AutomationFailure) {
                 return AndroidSystemBridge.failure(failure.code, failure.message ?: "Android did not provide a screenshot",
@@ -2019,8 +2129,16 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             "Windows kept opening or closing during the capture; try again in a moment", observed.observation)
     }
 
-    /** The live screen's newest frame when it is on, otherwise Android's accessibility screenshot. */
-    private fun grab(): Grab {
+    /**
+     * The background screen's picture when the agent works there; else the live screen's newest
+     * frame when it is on, otherwise Android's accessibility screenshot.
+     */
+    private fun grab(on: Int = screenId): Grab {
+        if (on != Display.DEFAULT_DISPLAY) {
+            val picture = BackgroundScreen.picture() ?: throw AutomationFailure("screenshot_unavailable",
+                "The background screen has not drawn anything yet; look again in a moment")
+            return Grab(picture.copy(Bitmap.Config.ARGB_8888, true).also { picture.recycle() }, "background")
+        }
         LiveScreen.frame()?.let { return Grab(it.bitmap, "live") }
         if (Build.VERSION.SDK_INT < 30) throw AutomationFailure("unsupported_api",
             "Screenshots on Android 10 and older need the live screen; turn it on in Device & tools")

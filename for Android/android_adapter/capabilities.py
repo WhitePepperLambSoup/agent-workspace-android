@@ -158,6 +158,16 @@ def _tool_reason(name: str, executables: dict[str, dict[str, str]]) -> str | Non
         "sandbox_status",
     }:
         return "The optional PRoot toolchain is not an OS sandbox; sandbox execution is unavailable"
+    # These only handle changes made by run_sandbox, which the phone does not have: offering them
+    # would cost every request their descriptions for nothing.
+    if os.getenv("AGENT_WORKSPACE_EMBEDDED_PYTHON") == "chaquopy" and name in {
+        "apply_sandbox_change",
+        "inspect_sandbox_change",
+        "review_sandbox_change",
+        "sandbox_change_status",
+        "list_sandbox_changesets",
+    }:
+        return "Sandbox changesets come from run_sandbox, which is unavailable on Android"
     if (
         os.getenv("AGENT_WORKSPACE_EMBEDDED_PYTHON") == "chaquopy"
         and name

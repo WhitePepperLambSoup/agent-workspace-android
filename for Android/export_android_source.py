@@ -38,6 +38,7 @@ _SOURCE_SUFFIXES = {
     ".kt",
     ".java",
     ".kts",
+    ".aidl",
     ".c",
     ".cpp",
     ".h",

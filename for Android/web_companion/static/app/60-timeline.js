@@ -38,7 +38,13 @@
       status.setAttribute("role", "status");
       open.addEventListener("click", () => artifactAction(file, "open", open, status));
       row.appendChild(open);
-      for (const [action, glyph, title] of [["share", "share-2", t("分享文件")], ["save", "download", t("另存文件")]]) {
+      const actions = [["share", "share-2", t("分享文件")], ["save", "download", t("另存文件")]];
+      // A page the agent made can live on the home screen as a small tool (41-home-tools.js).
+      if (/\.html?$/i.test(file.path) && canMakeHomeTools()) {
+        actions.push(["home_tool", "app-window", t("添加到桌面")]);
+        row.classList.add("with-home-tool");
+      }
+      for (const [action, glyph, title] of actions) {
         const button = actionButton(glyph, title, "data-file-action", action);
         button.addEventListener("click", () => artifactAction(file, action, button, status));
         row.appendChild(button);
@@ -183,10 +189,13 @@
         ["btn-copy", "copy", t("复制回复"), () => copyText(card.dataset.messageText)],
         ["btn-share", "share-2", t("分享回复"), () => shareText(t("Agent 回复"), card.dataset.messageText)],
         ["btn-regenerate", "rotate-ccw", t("重新生成"), () => regenerateReply(card)],
+        ["btn-fork", "git-branch", t("从这里分叉成新对话"), () => void forkFrom(card, true)],
+        ["btn-compare", "cpu", t("换个模型对比"), () => void compareWithModel(card)],
         ["btn-read", "play", t("朗读"), () => void readAloud(card)],
       ] : [
         ["btn-copy", "copy", t("复制"), () => copyText(card.dataset.displayText || card.dataset.messageText)],
         ["btn-edit", "pencil", t("编辑后重新发送"), () => editMessage(card)],
+        ["btn-fork", "git-branch", t("改写这条，分叉成新对话"), () => void forkFrom(card, false)],
       ];
       for (const [name, iconName, title, action] of buttons) {
         const button = document.createElement("button");

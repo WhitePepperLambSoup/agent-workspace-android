@@ -184,9 +184,14 @@ object AndroidSystemBridge {
 
     @JvmStatic
     fun execute(requestJson: String): String {
+        var background = false
         val request = try {
             require(requestJson.length in 2..32768)
-            JSONObject(requestJson).also { validateRequest(it) }
+            JSONObject(requestJson).also {
+                // Set by the engine for conversation tasks: work on the background screen if it is on.
+                background = it.remove("background") == true
+                validateRequest(it)
+            }
         } catch (_: Exception) {
             return failure("invalid_arguments", "Invalid or oversized Android system request").toString()
         }
@@ -195,7 +200,55 @@ object AndroidSystemBridge {
         }
         val connected = service ?: return failure("service_unavailable",
             "Enable Agent Workspace in Android Accessibility settings and retry in the engine process").toString()
-        return connected.executeRequest(request).toString()
+        return connected.executeRequest(request, background = background).toString()
+    }
+
+    // ---- The background screen (Device & tools → Background operation), see BackgroundScreen ----
+
+    @JvmStatic
+    fun backgroundStatus(): String =
+        applicationContext?.let { BackgroundScreen.status(it).toString() } ?: JSONObject().put("supported", false).toString()
+
+    @JvmStatic
+    fun setBackground(enabled: Boolean): String {
+        val context = applicationContext ?: return backgroundStatus()
+        BackgroundScreen.setEnabled(context, enabled)
+        // Turning it on asks Shizuku for permission right away, when that is what is missing.
+        if (enabled) BackgroundScreen.requestPermission()
+        return backgroundStatus()
+    }
+
+    @JvmStatic
+    fun requestBackgroundPermission(): String {
+        BackgroundScreen.requestPermission()
+        return backgroundStatus()
+    }
+
+    /** Opens the background screen without a task (Device & tools → Test): its status, or why not. */
+    @JvmStatic
+    fun openBackground(): String {
+        val context = applicationContext ?: return backgroundStatus()
+        val error = runCatching { BackgroundScreen.open(context) }.exceptionOrNull()
+        return JSONObject(backgroundStatus()).put("error", error?.message ?: JSONObject.NULL).toString()
+    }
+
+    /** Moves the app on the background screen to the phone's screen, for the user to take over. */
+    @JvmStatic
+    fun bringBackgroundToFront(): String {
+        val error = BackgroundScreen.bringToFront()
+        return JSONObject().put("ok", error == null).put("error", error ?: JSONObject.NULL).toString()
+    }
+
+    /** The background screen's picture as JPEG bytes (the conversation's live view), or null. */
+    @JvmStatic
+    fun backgroundPicture(maxEdge: Int): ByteArray? {
+        if (BackgroundScreen.currentDisplay() == -1) return null
+        val bitmap = BackgroundScreen.picture(maxEdge.coerceIn(200, 1600)) ?: return null
+        return java.io.ByteArrayOutputStream().use { out ->
+            bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, out)
+            bitmap.recycle()
+            out.toByteArray()
+        }
     }
 
     /** Actions a batch may contain (one approval covers them all; no app launches or nested batches). */

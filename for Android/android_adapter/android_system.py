@@ -136,6 +136,38 @@ def _bridge_or_default(bridge: Any | None) -> Any:
     return bridge if bridge is not None else _java_bridge()
 
 
+def background_screen(change: dict[str, Any] | None = None, bridge: Any | None = None) -> dict[str, Any]:
+    """Device & tools → Background operation: its status, after an optional change
+    ({"enabled": bool}, or {"action": "request_permission" | "open" | "bring_to_front"})."""
+    target = _bridge_or_default(bridge)
+    result: dict[str, Any] = {}
+    if change and "enabled" in change:
+        if not isinstance(change["enabled"], bool):
+            raise ToolArgumentError("enabled must be true or false")
+        target.setBackground(change["enabled"])
+    elif change and change.get("action") == "request_permission":
+        target.requestBackgroundPermission()
+    elif change and change.get("action") == "open":
+        opened = json.loads(str(target.openBackground()))
+        if opened.get("error"):
+            result["error"] = str(opened["error"])[:300]
+    elif change and change.get("action") == "bring_to_front":
+        moved = json.loads(str(target.bringBackgroundToFront()))
+        result["moved"] = moved.get("ok") is True
+        if moved.get("error"):
+            result["error"] = str(moved["error"])[:300]
+    elif change:
+        raise ToolArgumentError("expected enabled, or action request_permission, open or bring_to_front")
+    status = json.loads(str(target.backgroundStatus()))
+    return {**(status if isinstance(status, dict) else {}), **result}
+
+
+def background_picture(max_edge: int = 720, bridge: Any | None = None) -> bytes | None:
+    """The background screen's newest picture (JPEG), or None when nothing is open there."""
+    data = _bridge_or_default(bridge).backgroundPicture(max(200, min(1600, int(max_edge))))
+    return bytes(data) if data is not None else None
+
+
 def _status(bridge: Any | None = None) -> dict[str, Any]:
     target = _bridge_or_default(bridge)
     try:
@@ -207,8 +239,19 @@ def _require_available(bridge: Any | None) -> None:
         )
 
 
+def _background_allowed() -> bool:
+    try:
+        from mobile_screen import allowed
+    except ImportError:  # outside the app
+        return False
+    return allowed()
+
+
 def _invoke(bridge: Any | None, request: dict[str, Any]) -> dict[str, Any]:
     _require_available(bridge)
+    if _background_allowed():
+        # A conversation task: the phone uses the background screen when the user turned it on.
+        request = {**request, "background": True}
     try:
         raw = _bridge_or_default(bridge).execute(
             json.dumps(request, ensure_ascii=False, separators=(",", ":"))
@@ -275,7 +318,10 @@ _UI_FORMAT = (
     "unchecked (a switch or box), selected, focused, disabled, offscreen (a ref action scrolls it "
     "into view), protected (never read or touched). Layout-only containers are left out. "
     "keyboard_shown and notification_shade_open say what covers the app (back closes either); "
-    "locked means the phone is locked: stop and ask the user to unlock it."
+    "locked means the phone is locked: stop and ask the user to unlock it. background_screen means "
+    "you work on a screen the user does not see while they use the phone: open apps with "
+    "launch_app (it has no home screen), act by ref, and when an app should be handed to the "
+    "user, say so in your reply (they can bring it to the phone's screen)."
 )
 
 
@@ -744,7 +790,7 @@ def _for_model(
         for key in ("package_name", "activity_name", "snapshot_version", "screen", "stable")
         if key in observation
     }
-    for flag in ("truncated", "content_changing", "sensitive_content_redacted", "locked"):
+    for flag in ("truncated", "content_changing", "sensitive_content_redacted", "locked", "background_screen"):
         if observation.get(flag):
             compact[flag] = True
     compact.update(_phone_state(observation))

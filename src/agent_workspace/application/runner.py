@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import os
 import re
 from collections.abc import Callable
 from copy import deepcopy
@@ -386,6 +387,10 @@ class AgentRunner:
             )
         await self._recover_incomplete_tool_attempts(session.id, correlation_id)
         messages = self._load_messages(session.id)
+        # Everything loaded here came before this run: long tool results of earlier tasks
+        # (a fetched page, a file) go on as their start only, when the host asks for it.
+        if os.getenv("AGENT_WORKSPACE_TRIM_EARLIER_TOOL_RESULTS") == "1":
+            messages = _trim_earlier_tool_results(messages)
         if exclude_image_digests:
             messages = _exclude_image_digests(messages, exclude_image_digests)
         total_usage = Usage()
@@ -3811,6 +3816,38 @@ def _prepared_anthropic_thinking(prepared: PreparedTurn) -> dict[str, Any] | Non
                 "temperature": profile_data.get("temperature", 1.0),
             }
     return None
+
+
+_EARLIER_RESULT_LIMIT = 4_000
+_EARLIER_RESULT_PREVIEW = 600
+
+
+def _trim_earlier_tool_results(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """Long tool results of earlier tasks, cut to their start: the replies that followed already
+    say what mattered, and every later request would carry them again. The same history always
+    comes out the same, so a provider's prompt cache misses only once, after a task ends."""
+    names = {
+        call.id: call.name
+        for message in messages
+        if message.role is Role.ASSISTANT
+        for call in message.tool_calls
+    }
+    trimmed: list[ChatMessage] = []
+    for message in messages:
+        if message.role is Role.TOOL and len(message.content) > _EARLIER_RESULT_LIMIT:
+            name = names.get(message.tool_call_id or "", "the tool")
+            left_out = len(message.content) - _EARLIER_RESULT_PREVIEW
+            message = replace(
+                message,
+                content=(
+                    message.content[:_EARLIER_RESULT_PREVIEW].rstrip()
+                    + f"\n[... {left_out} more characters of this {name} result from an earlier "
+                    f"task were left out to save context; call {name} again if the details are "
+                    "needed.]"
+                ),
+            )
+        trimmed.append(message)
+    return trimmed
 
 
 def _context_summary_history(messages: tuple[ChatMessage, ...]) -> str:

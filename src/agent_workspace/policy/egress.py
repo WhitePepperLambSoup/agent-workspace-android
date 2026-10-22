@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import ipaddress
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 
 from agent_workspace.application.ports import ApprovalDecision
 from agent_workspace.config import provider_origin
@@ -49,6 +49,20 @@ class ProviderEgressPolicy:
         helper (on the parent task's approval shelf) counts for the parent and its other helpers."""
         parent = self._linked.get((workspace, parent_session), (workspace, parent_session))
         self._linked[(workspace, helper_session)] = parent
+
+    def session_grant(self, workspace: str, session_id: str) -> frozenset[str]:
+        """The data categories the user let this session send for the rest of the session."""
+        key = self._linked.get((workspace, session_id), (workspace, session_id))
+        return frozenset(self._session_grants.get(key, ()))
+
+    def carry_session_grant(self, workspace: str, session_id: str, categories: Iterable[str]) -> None:
+        """A session approval given for a conversation, carried to one that continues it (a fork,
+        whose tasks may run under another policy). Sensitive categories are never granted for a
+        session, so none are carried."""
+        key = self._linked.get((workspace, session_id), (workspace, session_id))
+        allowed = {category for category in categories if not category.startswith("sensitive_")}
+        if allowed:
+            self._session_grants.setdefault(key, set()).update(allowed)
 
     def retarget(self, endpoint: str) -> ProviderEgressPolicy:
         """The same policy for another Provider endpoint; earlier session grants do not carry over."""

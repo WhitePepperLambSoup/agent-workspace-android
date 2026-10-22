@@ -796,6 +796,10 @@
     if (!fileEditor?.loaded) return;
     void artifactAction({ ...fileEditor, mime_type: "text/html" }, "open", elements.btnFileInteractive, elements.fileEditorStatus, true);
   });
+  elements.btnFileHomeTool.addEventListener("click", () => {
+    if (!fileEditor?.loaded) return;
+    void artifactAction({ ...fileEditor, mime_type: "text/html" }, "home_tool", elements.btnFileHomeTool, elements.fileEditorStatus, true);
+  });
   elements.fileContentInput.addEventListener("input", () => {
     if (!fileEditor?.loaded || !fileEditor.editable || fileSaving) return;
     fileEditor.content = elements.fileContentInput.value;

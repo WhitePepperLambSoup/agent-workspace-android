@@ -128,7 +128,25 @@
     catch (error) { if (current === generation && !closed) status(statusId, error.message, true); }
   }
 
+  // ---- Background operation: phone tasks on an off-screen display (needs Shizuku) ----
+  const backgroundReasons = { needs_android_11: "需要 Android 11 或更高版本", shizuku_missing: "没有安装 Shizuku", shizuku_stopped: "Shizuku 没有运行（手机重启后需要重新启动 Shizuku）", shizuku_permission: "还没有授权本应用使用 Shizuku" }; // i18n-ignore: keys for t()
+  function backgroundScreen(value) {
+    $("backgroundScreenToggle").checked = value.enabled === true;
+    $("backgroundScreenToggle").disabled = value.supported === false;
+    $("btnBackgroundPermission").hidden = value.reason !== "shizuku_permission";
+    $("btnBackgroundLook").hidden = !(value.enabled && !value.reason);
+    $("btnBackgroundToFront").hidden = value.active !== true;
+    const reason = value.reason ? t(backgroundReasons[value.reason] || backgroundReasons.shizuku_stopped) : "";
+    status("backgroundScreenStatus", value.enabled ? (reason || (value.active ? t("后台屏幕已打开") : t("可以使用：对话里的手机任务会在后台进行"))) : reason,
+      !!(value.enabled && reason));
+  }
+  async function loadBackgroundScreen(isCurrent = () => true) {
+    const value = await ui.apiJson("/mobile/background-screen");
+    if (isCurrent()) backgroundScreen(value);
+  }
+
   async function doctor(isCurrent = () => true) {
+    loadBackgroundScreen(isCurrent).catch(() => {});
     const value = await ui.apiJson("/mobile/capabilities");
     if (!isCurrent()) return;
     const android = value.android || {};
@@ -1859,6 +1877,37 @@
     await memory(undefined, await post("/mobile/memory/clear", {}));
   }, "memoryStatus");
   on("btnAccessibilitySettings", "click", () => native?.openAccessibilitySettings?.(), "doctorStatus");
+  on("backgroundScreenToggle", "change", async () => {
+    // Turning it on needs the user to read and accept the safety notice first.
+    if ($("backgroundScreenToggle").checked && !window.confirm(t("开启后台操作前请确认：\n\n· 对话里的手机任务会在一块你看不到的屏幕上进行。\n· 需要 Shizuku 给本应用授予更高的系统权限；只在你自己的手机上开启，只给你信任的应用授权。\n· 需要审批的操作照样先问你；付款、转账一律不做；你设为禁止的应用，AI 不会读取或操作。\n· 可以随时在「设备与工具」里查看后台屏幕、移到前台或关闭。\n· 不使用时，建议在 Shizuku 里停止服务，并关闭无线调试。\n\n确定开启吗？"))) {
+      $("backgroundScreenToggle").checked = false;
+      return;
+    }
+    try { backgroundScreen(await post("/mobile/background-screen", { enabled: $("backgroundScreenToggle").checked })); }
+    catch (error) { $("backgroundScreenToggle").checked = !$("backgroundScreenToggle").checked; throw error; }
+    // Shizuku asks for permission in its own dialog; the answer shows a moment later.
+    setTimeout(() => { if (!closed) loadBackgroundScreen().catch(() => {}); }, 4000);
+  }, "backgroundScreenStatus");
+  on("btnBackgroundPermission", "click", async () => {
+    backgroundScreen(await post("/mobile/background-screen", { action: "request_permission" }));
+    setTimeout(() => { if (!closed) loadBackgroundScreen().catch(() => {}); }, 4000);
+  }, "backgroundScreenStatus");
+  // Opens the background screen if needed and shows what is on it now.
+  on("btnBackgroundLook", "click", async () => {
+    const value = await post("/mobile/background-screen", { action: "open" });
+    backgroundScreen(value);
+    if (value.error) { status("backgroundScreenStatus", value.error, true); return; }
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    const { jpeg_base64: picture } = await ui.apiJson("/mobile/background-screen/picture");
+    $("backgroundScreenPicture").hidden = !picture;
+    if (picture) $("backgroundScreenPicture").src = `data:image/jpeg;base64,${picture}`;
+    else status("backgroundScreenStatus", t("后台屏幕已打开，还没有画面（上面没有打开应用）"));
+  }, "backgroundScreenStatus");
+  on("btnBackgroundToFront", "click", async () => {
+    const value = await post("/mobile/background-screen", { action: "bring_to_front" });
+    backgroundScreen(value);
+    if (value.moved === false) status("backgroundScreenStatus", value.error || t("操作失败"), true);
+  }, "backgroundScreenStatus");
   on("btnRepairAccessibility", "click", async () => {
     let result = {};
     try { result = JSON.parse(native?.repairAccessibility?.() || "{}"); } catch {}

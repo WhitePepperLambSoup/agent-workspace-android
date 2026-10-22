@@ -29,6 +29,7 @@ import com.agentworkspace.mobile.entry.FloatingBallService
 import com.agentworkspace.mobile.entry.QuickEntry
 import com.agentworkspace.mobile.notifications.AgentNotificationListener
 import com.agentworkspace.mobile.localmodels.TrainedLocalModel
+import com.agentworkspace.mobile.workspace.HomeTools
 import com.agentworkspace.mobile.workspace.WorkspaceStorageAccess
 import com.agentworkspace.mobile.workspace.WorkspaceDocumentsAccess
 import org.json.JSONObject
@@ -232,6 +233,24 @@ class NativeJsBridge(
 
     @JavascriptInterface
     fun workspaceFileAction(requestJson: String): String = workspaceFileActionHandler(requestJson)
+
+    /** Home-screen tools (HomeTools): the list. A page becomes one through workspaceFileAction "home_tool". */
+    @JavascriptInterface
+    fun getHomeTools(): String = HomeTools.listJson(context)
+
+    /** Open a tool, add its shortcut again, or remove it; returns the list after. */
+    @JavascriptInterface
+    fun homeToolAction(requestJson: String): String = runCatching {
+        val request = JSONObject(requestJson)
+        val tool = HomeTools.get(context, request.optString("id")) ?: error("This tool has been removed")
+        when (request.optString("action")) {
+            "open" -> context.startActivity(HomeTools.openIntent(context, tool.id))
+            "pin" -> check(HomeTools.pin(context, tool)) { "This home screen cannot add shortcuts" }
+            "delete" -> HomeTools.delete(context, tool.id)
+            else -> error("Unknown tool action")
+        }
+        JSONObject(HomeTools.listJson(context)).put("ok", true).toString()
+    }.getOrElse { JSONObject().put("ok", false).put("error", it.message ?: "The tool action failed").toString() }
 
     @JavascriptInterface
     fun pickWorkspaceFolder(): String = workspaceFolderPicker()

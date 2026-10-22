@@ -485,6 +485,11 @@
       <div id="settingsFiles" class="settings-page" hidden>
         <div class="page-toolbar"><button id="btnFileParent" class="icon-button" type="button" title="上级目录" aria-label="上级目录" disabled><span data-icon="chevron-left"></span></button><span id="workspaceFilePath">工作区</span><button id="btnNewFolder" class="icon-button" type="button" title="新建文件夹" aria-label="新建文件夹"><span data-icon="plus"></span></button><button id="btnFilesRefresh" class="icon-button" type="button" title="刷新文件" aria-label="刷新文件"><span data-icon="refresh-cw"></span></button></div>
         <p id="workspaceFilesStatus" class="page-status" role="status"></p>
+        <section id="homeToolsSection" class="home-tools" aria-labelledby="homeToolsTitle" hidden>
+          <h3 id="homeToolsTitle">桌面小工具</h3>
+          <div id="homeToolsList" class="home-tools-list"></div>
+          <p id="homeToolsStatus" class="page-status" role="status"></p>
+        </section>
         <div id="workspaceFilesList" class="workspace-files-list"></div>
         <div id="fileEditorPanel" hidden>
           <div class="page-toolbar file-editor-toolbar">
@@ -493,6 +498,7 @@
               <button id="btnFileSource" class="icon-button" type="button" title="源文件" aria-label="源文件" aria-pressed="true" hidden><span data-icon="file-text"></span></button>
               <button id="btnFilePreview" class="icon-button" type="button" title="预览文件" aria-label="预览文件" aria-pressed="false" hidden><span data-icon="eye"></span></button>
               <button id="btnFileInteractive" class="icon-button" type="button" title="交互预览" aria-label="交互预览" hidden><span data-icon="play"></span></button>
+              <button id="btnFileHomeTool" class="icon-button" type="button" title="添加到桌面" aria-label="添加到桌面" hidden><span data-icon="app-window"></span></button>
             </div>
             <button id="btnFileToKnowledge" class="icon-button" type="button" title="加入知识库" aria-label="加入知识库" hidden><span data-icon="book-open"></span></button>
             <button id="btnReloadFile" class="icon-button" type="button" title="重新读取文件" aria-label="重新读取文件"><span data-icon="refresh-cw"></span></button>
@@ -540,6 +546,23 @@
         <div id="accessibilityRepair" hidden>
           <p id="accessibilityRepairHint" class="setting-hint"></p>
           <div class="page-toolbar"><button id="btnRepairAccessibility" class="button-secondary" type="button"><span data-icon="rotate-ccw"></span><span id="repairAccessibilityLabel">重新启用无障碍</span></button></div>
+        </div>
+        <div id="backgroundScreenSection" class="management-section">
+          <strong>后台操作（实验）</strong>
+          <label class="toggle-row" for="backgroundScreenToggle"><span>在后台屏幕上操作手机</span><input id="backgroundScreenToggle" type="checkbox"></label>
+          <p class="setting-hint">打开后，对话里的手机任务在一块看不见的后台屏幕上进行，你可以同时正常使用手机；从操作手机小窗发起的任务仍在前台。需要 Shizuku。同一个应用不能同时在前台和后台使用；后台应用发出的声音会从手机外放。</p>
+          <details class="setting-hint background-screen-notice">
+            <summary>安全说明</summary>
+            <p>开启后，对话里的手机任务会在一块你看不到的屏幕上进行。</p>
+            <p>这需要 Shizuku 给本应用授予更高的系统权限。只在你自己的手机上开启，只给你信任的应用授权 Shizuku。</p>
+            <p>后台的每一步仍按原来的规则执行：需要审批的操作照样先问你；付款、转账一律不做；你设为禁止的应用，AI 不会读取或操作。</p>
+            <p>可以随时在这里查看后台屏幕、把应用移到前台，或关闭后台操作。</p>
+            <p>不使用时，建议在 Shizuku 里停止服务，并关闭开发者选项中的无线调试。</p>
+            <p>如果你没有开启过后台操作，却发现它是开着的，请立即关闭，并在 Shizuku 里撤销本应用的授权。</p>
+          </details>
+          <p id="backgroundScreenStatus" class="page-status" role="status"></p>
+          <div class="page-toolbar"><button id="btnBackgroundPermission" class="button-secondary" type="button" hidden>授权 Shizuku</button><button id="btnBackgroundLook" class="button-secondary" type="button" hidden>查看后台屏幕</button><button id="btnBackgroundToFront" class="button-secondary" type="button" hidden>把后台应用移到前台</button></div>
+          <img id="backgroundScreenPicture" class="background-screen-picture" alt="后台屏幕的画面" hidden>
         </div>
         <label class="toggle-row" for="liveScreenToggle"><span>实时画面</span><input id="liveScreenToggle" type="checkbox"></label>
         <p class="setting-hint">AI 操作手机时直接看当前画面：截图更快，画面在动（视频、动画）也能截到，Android 10 及以下也能截图。开启时系统会请你允许录制屏幕，状态栏会显示录屏标志；画面只留在手机上供 AI 截图用，半小时不用会自动关闭。</p>

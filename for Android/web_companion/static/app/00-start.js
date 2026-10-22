@@ -27,7 +27,7 @@
     "btnTasksPage", "btnFilesPage", "btnSessionPage", "btnNotificationsPage",
     "btnTasksRefresh", "taskCenterStatus", "taskCenterList",
     "btnFileParent", "btnFilesRefresh", "workspaceFilePath", "workspaceFilesStatus", "workspaceFilesList",
-    "fileEditorPanel", "fileEditorMeta", "fileEditorStatus", "fileContentInput", "filePreviewPanel", "btnFileSource", "btnFilePreview", "btnFileInteractive", "btnFileToKnowledge", "btnReloadFile", "btnDiscardFileDraft", "btnSaveFile",
+    "fileEditorPanel", "fileEditorMeta", "fileEditorStatus", "fileContentInput", "filePreviewPanel", "btnFileSource", "btnFilePreview", "btnFileInteractive", "btnFileHomeTool", "btnFileToKnowledge", "btnReloadFile", "btnDiscardFileDraft", "btnSaveFile",
     "sessionTitleInput", "btnRenameSession", "sessionRenameStatus",
     "taskNotificationsToggle", "notificationPermissionStatus", "btnNotificationSettings",
     "settingsUsage", "settingsPricing", "btnUsagePage", "usageScopeSelector", "usageDaysSelector", "usageSummary", "usageModelsList", "usageStatus", "btnUsageRefresh", "btnPricingPage",

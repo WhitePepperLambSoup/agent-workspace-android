@@ -12,7 +12,7 @@ An AI agent that runs on your Android phone. It plans and carries out multi-step
 
 ## Download
 
-Get `AgentWorkspace_2.0.2_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app (Menu → About and updates, or "Updates" on the loading screen). Changes in each version are listed in the [CHANGELOG](CHANGELOG.md).
+Get `AgentWorkspace_2.2.0_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app (Menu → About and updates, or "Updates" on the loading screen). Changes in each version are listed in the [CHANGELOG](CHANGELOG.md).
 
 - Android 8.0 (API 26) or newer, 64-bit ARM (`arm64-v8a`) or `x86_64`; phones running a 32-bit-only system cannot install it.
 - The interface is shown by the system's Android System WebView, which must be Chromium 80 or newer. If WebView is disabled, missing or too old, the app explains why and links to the app store to update it.
@@ -40,6 +40,8 @@ What changed in 2.0.2: Allow local network HTTP in Model settings connects to Ol
 - **Plan mode and skills.** In plan mode the agent only looks and proposes a plan, acting once you agree; the Skills page installs official skills or imports SKILL.md files, which the agent reads only when needed.
 - **Sub-tasks.** When a task has independent parts (several documents to read, options to compare), the agent can hand them to sub-tasks that run side by side (up to 4 per call, 3 at a time) and combine their reports. Sub-tasks can only look at files, the knowledge base, memory and web pages; they cannot change files, run commands or operate the phone. Each has its own conversation, which you can open from the archive.
 - **Per-task limit.** Model & reasoning sets a cost and a token limit for each task, counting the sub-tasks it starts; a task that reaches one stops and says which. Tokens & cost shows conversations, summaries and sub-tasks separately.
+- **Fork a conversation.** Start a new conversation from any message. From your message, it keeps what came before and puts the message back in the input box to rewrite; from a reply, it keeps everything up to that reply. The original stays as it is, the AI in the new one remembers what came before, and both share the workspace's files.
+- **Compare with another model.** Ask another model of the current provider the same question and see both answers together, each with its model time (not counting the wait for your approval) and tokens; continue with the other answer if you prefer it.
 
 ### Phone control
 
@@ -54,10 +56,12 @@ This needs the app's accessibility service, which you turn on in system settings
 - **Approvals in the window.** Steps that need your approval are asked in the window: Allow, Allow for this task, or Always allow (hosted mode). Hosted work has step and time limits. You can refresh, pause, stop or retry at any time.
 - **Safety rules.** Pay, transfer and order buttons and payment password screens are never touched, in any mode (the rule is built into the app); delete and clear buttons stop for your approval; password fields and the lock screen are off limits. When a web page, a notification or the screen holds what looks like instructions to the agent, the task's hosted approval ends and every further step asks you.
 - **Look back.** Every step keeps a small screenshot that you can step through after the task. The pictures stay on the phone for the latest 20 tasks and at most 7 days; screens with passwords or other sensitive content are not captured.
+- **Picture guides.** Turn a phone task into one long picture: each step says what was done, the spot it touched is circled in red on the screen it was done on, and floating windows such as the bubble are painted out. Change the words, drop steps, and share it, for example to show a relative how to do it.
 - **Shortcuts.** A finished task can be saved as a shortcut that repeats the steps without the model; steps can be edited, and shortcuts can run on a schedule or on a trigger. When an app update gets a shortcut stuck at a step, the agent finishes from that step and one tap puts its steps into the shortcut. Shortcuts can be shared as codes, and an import lists every step before it is saved.
 - **Circle to act.** Circle part of the screen and the phone reads the words offline, then offers what fits: call, open a link, navigate, add to the calendar, compare prices, translate, save to a knowledge base or copy the text; or send the circled part to the agent with a question. Nothing is captured while a password field is on screen.
 - **App notes.** While the agent works, the phone notes which buttons in each app lead somewhere and which do nothing, and the agent can add a few lines on how an app works; later tasks see these when they enter that app. View, delete or turn them off at the bottom of the Memory page. Typed text and anything with long numbers in it is never recorded.
 - **Phone state.** After each step the agent knows whether the screen changed and whether the keyboard or the notification shade covers the app; a dark screen is turned on before an action, and on a locked phone the agent stops and asks you to unlock it. Tapping a greyed-out button tells it the button is disabled.
+- **Background mode (experimental).** Turned on under Device & tools, phone tasks from a conversation run on a hidden background screen while you keep using the phone; bring the app to the front to look at it. This needs Shizuku (no root). Approvals, the apps the AI may not operate and the no-payments rule apply in the background too.
 
 <p align="center">
   <img src="docs/screenshots/step-replay-en.png" width="250" alt="Looking back through the step screenshots">
@@ -103,6 +107,7 @@ The option applies to private IP addresses only: host names such as `.local` and
 ### Files, knowledge bases and memory
 
 - **Workspaces and files.** Each workspace is a folder. Generated files can be opened, previewed (Markdown, images, sandboxed HTML), shared or saved; text files can be edited in the app, files and folders can be renamed, moved, deleted and created, and workspaces appear in Android's file picker.
+- **Home-screen tools.** An HTML file the AI made can be added to the home screen and opened from its own icon. A tool runs offline, cannot reach the network or the app's data, and keeps the data it saves; manage tools at the top of the Files page.
 - **Share anything in.** Share files from WeChat, QQ or any app into a conversation; photos, pictures and files picked in the message box go straight into the open conversation, with large pictures shrunk; PDFs are read page by page with OCR for scanned pages.
 - **Knowledge bases.** Add manuals, contracts, notes and e-books (PDF, Word, Excel, EPUB, web pages, Markdown, text) and the agent answers from the relevant passages, citing the document and page. Scanned PDFs are read with offline text recognition on the phone, and a web page can be saved from a pasted or shared link as it is at that moment. Sort documents into several knowledge bases and choose which ones each conversation uses. Documents stay on the phone and are searched by keyword with built-in and custom synonyms: no model download, no API usage.
 - **Memory.** The agent remembers your preferences and recurring details within limits (up to 500 notes organized by topic and searchable, no near-duplicates, never passwords or verification codes); the Memory page shows, edits and deletes them.
@@ -198,6 +203,8 @@ agent-workspace-android/
 - The built-in browser exposes no app interface to web pages, opens only http/https pages and keeps its sign-ins apart from the app's interface; its data can be cleared in one tap.
 - The system permissions behind notification rules, the notification digest and the floating bubble are requested only when you turn those features on; notification rules read only the apps you chose and pass a notification's content only to the task it triggers; notifications kept for digests stay on the phone and are cleared as soon as the digest is turned off.
 - Phone-control step screenshots stay on the phone for the latest 20 tasks and at most 7 days; screens with passwords or other sensitive content are not captured.
+- A home-screen tool runs in a page of its own with no app interface, and all its network requests are blocked; what each tool saves belongs to it alone and is cleared when the tool is removed.
+- Background mode needs Shizuku to grant the app higher system permissions; turn it on only on your own phone, and when you do not use it, stop the service in Shizuku and turn off wireless debugging in the developer options.
 - Backups never contain API keys.
 - Deleting a conversation erases its messages, tasks and images from the phone and cannot be undone; files it created in the workspace stay.
 - Offline speech recognition processes audio on the phone only; recordings are neither uploaded nor kept. Circle to ask sends only the screenshot you circled to the model, and takes no screenshot while a password field is on screen.
@@ -214,6 +221,8 @@ agent-workspace-android/
 - Offline speech recognition runs on 64-bit ARM phones only; x86_64 devices use the system recogniser.
 - Launchers do not let a widget blur the wallpaper behind it, so the glass-style widgets approximate the look with translucency and highlights.
 - Web search uses the free DuckDuckGo and Bing pages, so results and availability depend on your network; some phrasings return nothing, and the agent then rephrases.
+- Background mode is experimental: an app cannot be used in front and in the background at the same time, sound from an app in the background plays from the phone's speaker, and Shizuku has to be started again after the phone restarts.
+- Android does not let an app remove a home-screen icon: after a home-screen tool is removed, its icon turns grey and can be removed with a long press.
 - The English interface text was written by the developer; corrections are welcome.
 
 ## License

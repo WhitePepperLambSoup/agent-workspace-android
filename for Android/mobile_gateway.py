@@ -853,6 +853,8 @@ class _Handler(BaseHTTPRequestHandler):
                 "/mobile/task-limits",
                 # What later tasks are told about each app.
                 "/mobile/app-notes",
+                # Where phone tasks run (the background screen).
+                "/mobile/background-screen",
                 # Triggers start tasks on their own later.
                 "/mobile/triggers",
                 # Shortcuts operate the phone without asking.

@@ -339,6 +339,7 @@
     }
     if (page === "workspaces") { renderWorkspaceNavigation(); refreshWorkspaceAccess(); void loadWorkspaces(); }
     if (page === "files") {
+      renderHomeTools();
       if (fileEditor?.loaded) renderFileEditor();
       else void loadWorkspaceFiles(workspacePath);
     }

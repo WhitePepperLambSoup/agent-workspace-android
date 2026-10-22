@@ -106,6 +106,8 @@ def configure_environment(files_dir: str, provider_json: str) -> tuple[Path, Pat
         AGENT_WORKSPACE_LOCAL_THREADS=str(local_threads),
         AGENT_WORKSPACE_LOCAL_TIMEOUT_SECONDS=str(local_timeout_seconds),
         AGENT_WORKSPACE_CONTEXT_SUMMARY_ENABLED="1" if context_summary_enabled else "0",
+        # Long tool results of earlier tasks in a conversation are cut to their start (runner).
+        AGENT_WORKSPACE_TRIM_EARLIER_TOOL_RESULTS="1",
     )
     allow_lan_http = provider.get("allow_lan_http", False)
     if type(allow_lan_http) is not bool:
