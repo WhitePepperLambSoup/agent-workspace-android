@@ -8,7 +8,13 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 const dependencies = path.resolve(root, "../node_modules");
 const names = ["activity", "archive", "archive-restore", "arrow-down", "arrow-up", "battery-medium", "bell", "bot", "book-open", "brain", "calendar", "camera", "chart-no-axes-column", "check", "chevron-down", "chevron-left", "chevron-right", "circle-alert", "circle-check", "circle-plus", "circle-x", "clipboard-check", "clock", "code", "copy", "cpu", "database-backup", "download", "ellipsis", "eye", "file-text", "folder", "folder-open", "app-window", "bell-ring", "git-branch", "globe", "graduation-cap", "hand", "hard-drive", "heart", "history", "image-plus", "info", "languages", "layers", "lightbulb", "link", "list-checks", "list-todo", "loader-circle", "log-out", "mail", "menu", "message-square-plus", "mic", "monitor-smartphone", "notebook-pen", "paperclip", "palette", "panel-left", "pause", "pencil", "phone", "play", "plus", "puzzle", "pin", "plane", "refresh-cw", "rotate-ccw", "save", "search", "send", "server", "settings", "share-2", "shield", "shield-check", "shopping-cart", "sparkles", "square", "square-pen", "star", "terminal", "trash-2", "upload", "user-round", "utensils", "volume-2", "wifi-off", "workflow", "wrench", "x", "zap"];
 const icons = Object.fromEntries(await Promise.all(names.map(async (name) => {
-  const module = await import(pathToFileURL(path.join(dependencies, "lucide-react/dist/esm/icons", `${name}.mjs`)).href);
+  const file = path.join(dependencies, "lucide-react/dist/esm/icons", `${name}.mjs`);
+  let module = await import(pathToFileURL(file).href);
+  if (!module.__iconNode) {
+    // A renamed icon (history → rotate-ccw-clock) only re-exports the new one.
+    const renamed = (await readFile(file, "utf8")).match(/from '\.\/([a-z0-9-]+)\.mjs'/)?.[1];
+    if (renamed) module = await import(pathToFileURL(path.join(path.dirname(file), `${renamed}.mjs`)).href);
+  }
   return [name, module.__iconNode];
 })));
 buildSync({

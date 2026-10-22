@@ -121,7 +121,21 @@
   function elderCallButton() {
     const value = elderState() || {};
     $("elderCall").hidden = !value.family_phone;
+    $("elderSos").hidden = !value.family_phone;
     $("elderCallLabel").textContent = value.family_name ? t("打给{0}", value.family_name) : t("打给家人");
+  }
+
+  // 一键求救: a text to the family member, with where the phone is when location is allowed, opened
+  // in the Messages app for them to send (mobile_elder.sos); then the call button stands out.
+  async function elderSos() {
+    elderStatus(t("正在写求救短信…"));
+    try {
+      const result = await apiJson("/mobile/elder/sos", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const name = elderState()?.family_name || t("家人");
+      elderStatus(result.location ? t("求救短信写好了，带上了你的位置。按发送键发给{0}；发完回来，再按「打给{0}」。", name)
+        : t("求救短信写好了。按发送键发给{0}；发完回来，再按「打给{0}」。", name));
+      $("elderCall").classList.add("attention");
+    } catch (error) { elderStatus(t("没能写好求救短信：{0}", localizeError(error.message))); }
   }
 
   function elderStatus(text) { $("elderStatus").textContent = text || ""; }
@@ -183,9 +197,11 @@
   }
 
   // Reads a text aloud when the family left reading on (always for 再听一遍); slower when they
-  // chose so. With [wait], it returns once the speech ended.
+  // chose so. With [wait], it returns once the speech ended. With TalkBack on, the screen reader
+  // reads the answer (elderTalk is a live region), so only 再听一遍 speaks.
   async function elderSay(text, force = false, wait = false) {
     if (!text || (!force && elderState()?.read_aloud === false)) return;
+    if (!force && screenReaderOn()) return;
     await stopReading();
     let id;
     try {
@@ -339,6 +355,7 @@
   function elderCall() {
     const phone = elderState()?.family_phone;
     if (!phone) return;
+    $("elderCall").classList.remove("attention");
     if (typeof bridge?.dialNumber !== "function") { elderStatus(t("这台手机不能打电话。")); return; }
     let result = {};
     try { result = JSON.parse(bridge.dialNumber(phone)); } catch { result = { ok: false }; }
@@ -377,6 +394,11 @@
     $("elderSlowSpeech").checked = value.slow_speech !== false;
     $("btnElderPinSave").textContent = value.has_pin ? t("更换密码") : t("设置密码");
     $("btnElderPinRemove").hidden = !value.has_pin;
+    // Location for the call-for-help text: the same permission as Device & tools → Location.
+    let access = null;
+    try { access = typeof bridge?.getPersonalAccess === "function" ? JSON.parse(bridge.getPersonalAccess() || "{}") : null; } catch { access = null; }
+    $("btnElderLocation").hidden = !access;
+    if (access) $("elderLocationState").textContent = access.location ? t("已允许") : t("未允许：点这里授权");
   }
 
   async function elderSettingsChange(changes, done = "") {
@@ -434,8 +456,15 @@
   });
   $("elderPhoto")?.addEventListener("click", elderPhoto);
   $("elderCall")?.addEventListener("click", elderCall);
+  $("elderSos")?.addEventListener("click", () => void elderSos());
+  $("btnElderLocation")?.addEventListener("click", () => bridge?.requestPersonalAccess?.("location"));
+  window.addEventListener("agent-personal-access-changed", () => { if (elderState()) renderElderSettings(); });
   $("elderApprove")?.addEventListener("click", () => elderAnswerApproval(true));
   $("elderReject")?.addEventListener("click", () => elderAnswerApproval(false));
+  function screenReaderOn() {
+    try { return typeof bridge?.isScreenReaderOn === "function" && bridge.isScreenReaderOn() === true; } catch { return false; }
+  }
+
   // Leaving takes a two-second press, so a passing touch does not end the mode.
   (() => {
     const exit = $("elderExit");
@@ -453,12 +482,19 @@
     // without its long-press menu the press lasts until the finger lifts.
     exit.addEventListener("touchstart", (event) => event.preventDefault(), { passive: false });
     exit.addEventListener("contextmenu", (event) => event.preventDefault());
+    let pressedAt = 0;
     exit.addEventListener("pointerdown", () => {
+      pressedAt = Date.now();
       cancel(false);
       exit.classList.add("holding");
       timer = window.setTimeout(() => { timer = null; exit.classList.remove("holding"); void elderLeave(); }, 2000);
     });
     exit.addEventListener("pointerup", () => cancel(true));
     for (const type of ["pointerleave", "pointercancel"]) exit.addEventListener(type, () => cancel(false));
+    // TalkBack and keyboards activate the button without a touch to hold: ask instead.
+    exit.addEventListener("click", () => {
+      if (Date.now() - pressedAt < 3000) return;
+      if (window.confirm(t("退出长辈模式？"))) void elderLeave();
+    });
   })();
   elderEarly();

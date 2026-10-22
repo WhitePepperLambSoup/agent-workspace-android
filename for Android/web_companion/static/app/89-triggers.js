@@ -1,6 +1,23 @@
 
-  // ---- Automatic triggers (2.0): charging, Wi-Fi, an app opening -----------------------------
-  const triggerKinds = { charging: t("开始充电时"), wifi: t("连上 Wi‑Fi 时"), app_open: t("打开某个应用时") };
+  // ---- Automatic triggers (2.0): charging, Wi-Fi, an app opening, low battery, headphones,
+  // unlocking, a calendar event coming up -------------------------------------------------------
+  const triggerKinds = { charging: t("开始充电时"), wifi: t("连上 Wi‑Fi 时"), app_open: t("打开某个应用时"),
+    battery_low: t("电量低于某个值时"), headset: t("连上耳机或蓝牙音频设备时"), unlock: t("解锁手机时"), calendar: t("日程开始前") };
+  // What the value field means for each kind; none for charging and unlocking.
+  const triggerValues = {
+    wifi: { label: t("Wi‑Fi 名称（留空表示任意网络）") },
+    app_open: { label: t("应用（输入名字可以搜索）") },
+    headset: { label: t("设备名称（留空表示任意耳机或音箱）") },
+    battery_low: { label: t("电量（%）"), number: [5, 90, 20] },
+    calendar: { label: t("提前几分钟"), number: [1, 720, 10] },
+  };
+
+  function triggerWhen(trigger) {
+    if (trigger.kind === "battery_low") return t("电量低于 {0}% 时", trigger.value || 20);
+    if (trigger.kind === "calendar") return t("日程开始前 {0} 分钟", trigger.value || 10);
+    const name = trigger.kind === "app_open" ? appName(trigger.value) : trigger.value;
+    return `${triggerKinds[trigger.kind] || trigger.kind}${name ? ` · ${name}` : ""}`;
+  }
   let launcherApps = null;
   let triggerWorkflows = [];
   let triggerShortcuts = [];
@@ -16,9 +33,18 @@
 
   function syncTriggerForm() {
     const kind = $("triggerKind").value;
-    $("triggerValue").hidden = kind === "charging";
-    $("triggerValueLabel").hidden = kind === "charging";
-    $("triggerValueLabel").textContent = kind === "app_open" ? t("应用（输入名字可以搜索）") : t("Wi‑Fi 名称（留空表示任意网络）");
+    const field = triggerValues[kind];
+    const input = $("triggerValue");
+    input.hidden = !field;
+    $("triggerValueLabel").hidden = !field;
+    if (field) $("triggerValueLabel").textContent = field.label;
+    input.type = field?.number ? "number" : "text";
+    input.inputMode = field?.number ? "numeric" : "text";
+    if (field?.number) [input.min, input.max, input.placeholder] = field.number.map(String);
+    else input.placeholder = "";
+    // A calendar trigger runs once for each event, so it has no cooldown.
+    $("triggerCooldown").hidden = kind === "calendar";
+    $("triggerCooldownLabel").hidden = kind === "calendar";
     $("triggerApps").replaceChildren(...(kind === "app_open" ? appsOnPhone() : []).map((app) => {
       const option = document.createElement("option");
       option.value = app.label;
@@ -51,7 +77,7 @@
         ...triggerWorkflows.map((flow) => choice(flow.workflow_id, t("运行流程「{0}」", flow.name))));
       select.value = chosen;
       const rows = (value.triggers || []).map((trigger) => {
-        const when = `${triggerKinds[trigger.kind] || trigger.kind}${trigger.value ? ` · ${trigger.kind === "app_open" ? appName(trigger.value) : trigger.value}` : ""}`;
+        const when = triggerWhen(trigger);
         const flow = trigger.workflow_id && triggerWorkflows.find((item) => item.workflow_id === trigger.workflow_id);
         const shortcut = trigger.shortcut_id && triggerShortcuts.find((item) => item.id === trigger.shortcut_id);
         const what = shortcut ? t("运行快捷操作「{0}」", shortcut.name) : trigger.shortcut_id ? t("快捷操作已删除")
@@ -62,7 +88,7 @@
         const title = document.createElement("strong");
         title.textContent = when;
         const detail = document.createElement("small");
-        detail.textContent = `${what} · ${t("冷却 {0} 分钟", trigger.cooldown_minutes)}${trigger.enabled ? "" : ` · ${t("已暂停")}`}`;
+        detail.textContent = `${what} · ${trigger.kind === "calendar" ? t("每个日程一次") : t("冷却 {0} 分钟", trigger.cooldown_minutes)}${trigger.enabled ? "" : ` · ${t("已暂停")}`}`;
         text.append(title, detail);
         const toggle = document.createElement("button");
         toggle.type = "button";
@@ -92,13 +118,25 @@
     syncTriggerForm();
   }
 
-  $("triggerKind").addEventListener("change", syncTriggerForm);
+  $("triggerKind").addEventListener("change", () => {
+    $("triggerValue").value = "";
+    syncTriggerForm();
+  });
   $("triggerWorkflow").addEventListener("change", syncTriggerForm);
   $("triggerForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     const status = $("triggersStatus");
     const kind = $("triggerKind").value;
-    let value = kind === "charging" ? "" : $("triggerValue").value.trim();
+    if (kind === "calendar" && typeof bridge?.getCalendarAccess === "function") {
+      let access = {};
+      try { access = JSON.parse(bridge.getCalendarAccess() || "{}"); } catch {}
+      if (!access.read) {
+        bridge.requestCalendarAccess?.();
+        status.textContent = t("日程触发要读取日历：允许后再点一次添加");
+        return;
+      }
+    }
+    let value = triggerValues[kind] ? $("triggerValue").value.trim() : "";
     if (kind === "app_open") value = appsOnPhone().find((app) => app.label === value || app.package === value)?.package || value;
     const workflow = $("triggerWorkflow").value;
     const target = workflow.startsWith("shortcut:") ? { shortcut_id: workflow.slice(9) }

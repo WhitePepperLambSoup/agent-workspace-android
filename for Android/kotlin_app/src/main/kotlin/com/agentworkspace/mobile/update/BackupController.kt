@@ -21,7 +21,8 @@ import java.util.UUID
  * Backup and restore from the Settings page. The engine writes and checks the archive (it owns the
  * databases); this side adds the app's own settings, lets the user pick where the file goes or
  * comes from, and restarts the engine after a restore. API keys are never part of a backup.
- * Progress reaches the page as `agent-backup` events.
+ * With a passphrase the zip is locked (BackupCrypto) before it is saved, and restoring such a file
+ * asks for it. Progress reaches the page as `agent-backup` events.
  */
 class BackupController(
     private val activity: ComponentActivity,
@@ -30,11 +31,20 @@ class BackupController(
     private val restartEngine: () -> Unit,
 ) {
     private var pendingArchive: File? = null
+    // A locked backup picked for restoring, waiting for its passphrase.
+    private var pendingLocked: File? = null
 
     private val saveLauncher = activity.registerForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { target ->
+        saveTo(target)
+    }
+    private val saveLockedLauncher = activity.registerForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { target ->
+        saveTo(target)
+    }
+
+    private fun saveTo(target: Uri?) {
         val archive = pendingArchive
         pendingArchive = null
-        if (target == null || archive == null) { dispatch(state("cancelled")); return@registerForActivityResult }
+        if (target == null || archive == null) { dispatch(state("cancelled")); return }
         scope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
@@ -45,6 +55,7 @@ class BackupController(
             }
             result.onSuccess { dispatch(state("saved").put("size", it)) }
                 .onFailure { dispatch(state("failed").put("error", it.message ?: "Could not save the backup")) }
+            archive.delete()
         }
     }
 
@@ -90,8 +101,9 @@ class BackupController(
 
     // ---- create ----
 
-    fun create(webSettings: String) {
+    fun create(webSettings: String, passphrase: String? = null) {
         val web = runCatching { JSONObject(webSettings) }.getOrDefault(JSONObject())
+        val lock = passphrase?.takeIf { it.isNotEmpty() }?.toCharArray()
         dispatch(state("creating"))
         scope.launch {
             val result = withContext(Dispatchers.IO) {
@@ -115,13 +127,18 @@ class BackupController(
                         }
                         check(System.currentTimeMillis() < deadline) { "The backup took too long" }
                     }
-                    output to finished
+                    val summary = checkNotNull(finished)
+                    if (lock == null) return@runCatching output to summary
+                    val locked = File(folder, output.name.removeSuffix(".zip") + ".awbackup")
+                    try { BackupCrypto.encrypt(output, locked, lock) } finally { lock.fill(' '); output.delete() }
+                    locked to summary.put("size", locked.length()).put("locked", true)
                 }
             }
             result.onSuccess { (archive, summary) ->
                 dispatch(state("saving").put("summary", summary))
                 pendingArchive = archive
-                runCatching { saveLauncher.launch(archive.name) }.onFailure {
+                val launcher = if (archive.name.endsWith(".awbackup")) saveLockedLauncher else saveLauncher
+                runCatching { launcher.launch(archive.name) }.onFailure {
                     pendingArchive = null
                     dispatch(state("failed").put("error", "No file manager is available to save the backup"))
                 }
@@ -138,12 +155,54 @@ class BackupController(
 
     private suspend fun restoreFrom(source: Uri) {
         dispatch(state("restoring"))
-        val result = withContext(Dispatchers.IO) {
+        pendingLocked = null
+        val copied = withContext(Dispatchers.IO) {
             runCatching {
                 val folder = File(activity.cacheDir, "backup-restore").apply { deleteRecursively(); mkdirs() }
-                val copy = File(folder, "incoming.zip")
+                val copy = File(folder, "incoming.bin")
                 val input = activity.contentResolver.openInputStream(source) ?: error("The selected backup cannot be read")
                 input.use { stream -> copy.outputStream().use { stream.copyTo(it) } }
+                copy
+            }
+        }
+        val copy = copied.getOrElse { dispatch(state("failed").put("error", it.message ?: "The backup could not be read")); return }
+        if (withContext(Dispatchers.IO) { BackupCrypto.isEncrypted(copy) }) {
+            // Locked: the page asks for the passphrase (restoreWithPassphrase).
+            pendingLocked = copy
+            dispatch(state("passphrase_required"))
+            return
+        }
+        finishRestore(copy)
+    }
+
+    /** The passphrase of the locked backup picked last; a wrong one can be tried again. */
+    fun restoreWithPassphrase(passphrase: String) {
+        val locked = pendingLocked ?: run { dispatch(state("failed").put("error", "Pick the backup again")); return }
+        dispatch(state("restoring"))
+        scope.launch {
+            val opened = withContext(Dispatchers.IO) {
+                runCatching {
+                    val plain = File(locked.parentFile, "incoming.zip")
+                    val key = passphrase.toCharArray()
+                    try { BackupCrypto.decrypt(locked, plain, key) } finally { key.fill(' ') }
+                    plain
+                }
+            }
+            opened.onSuccess { plain ->
+                pendingLocked = null
+                locked.delete()
+                finishRestore(plain)
+            }.onFailure {
+                File(locked.parentFile, "incoming.zip").delete()
+                dispatch(state(if (it is BackupCrypto.WrongPassphrase) "passphrase_wrong" else "failed")
+                    .put("error", it.message ?: "The backup could not be opened"))
+            }
+        }
+    }
+
+    private suspend fun finishRestore(copy: File) {
+        val result = withContext(Dispatchers.IO) {
+            runCatching {
                 val reply = EngineHttp.request(activity, "POST", "/mobile/backup/restore",
                     JSONObject().put("path", copy.absolutePath), readTimeoutMs = 10 * 60_000)
                 copy.delete()

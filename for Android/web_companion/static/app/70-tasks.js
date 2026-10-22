@@ -1,3 +1,12 @@
+  // TalkBack: the timeline is not a live region (it would read every streamed piece, and a whole
+  // conversation when one opens); a finished reply or an approval to give is said here once.
+  function announce(text) {
+    const region = $("srAnnouncer");
+    if (!region || !text) return;
+    region.textContent = "";
+    window.setTimeout(() => { region.textContent = String(text).slice(0, 600); }, 50);
+  }
+
   function showApproval(approval) {
     if (approval && activeTask?.resolvedApprovals.has(approval.request_id)) approval = null;
     const changed = approval?.request_id !== pendingApproval?.request_id;
@@ -16,6 +25,7 @@
       const onceOnly = approval.details?.tool === "notification_reply";
       if (onceOnly) elements.approvalScopeSelector.value = "once";
       elements.approvalScopeSelector.disabled = onceOnly;
+      if (changed && !elderShown()) announce(t("需要你批准：{0}", elements.approvalTitle.textContent));
     }
     elderApproval(approval);
   }
@@ -255,6 +265,7 @@
     if (activeTask !== task || !task.done || disposed) return;
     if (task.error) {
       showTaskError(t("任务失败: {0}", task.error));
+      announce(t("任务失败: {0}", task.error));
       retryTask = task.prompt ? task : null;
       updateTaskStatus(t("任务失败"), { retry: !!task.prompt, idle: true });
       if (!elements.promptInput.value.trim() && task.inputText) {
@@ -274,6 +285,9 @@
       if (task.card && !task.text && !task.reasoning && !task.card.querySelector(".task-artifacts")) task.card.remove();
       updateTaskStatus(task.state === "cancelled" ? t("任务已停止") : "", { idle: true });
       notice("");
+      // The elder screen has its own live region for the answer.
+      const reply = task.card?.querySelector(".message-body")?.textContent.trim();
+      if (task.state !== "cancelled" && reply && !elderShown()) announce(t("回复：{0}", reply));
       if (task.state !== "cancelled") { offerPlanExecution(task); offerShortcut(task); offerStepShots(task); continueVoiceConversation(task); }
     }
     elderTaskDone(task);

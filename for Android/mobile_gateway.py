@@ -54,6 +54,7 @@ from mobile_workspace import (
     move_workspace_path,
     open_workspace_download,
     read_workspace_file,
+    restore_workspace_version,
     runtime_workspace,
     save_session_alias,
     save_session_archived,
@@ -86,6 +87,8 @@ _FILE_CHANGES = {
     "delete": delete_workspace_path,
     "move": move_workspace_path,
     "mkdir": make_workspace_directory,
+    # A kept version put back (mobile_file_history).
+    "restore": restore_workspace_version,
 }
 _IDENTITY_CHALLENGE = re.compile(r"[A-Za-z0-9_-]{32,128}")
 _IDENTITY_CONTEXT = b"agent-workspace-mobile-identity-v1\n"
@@ -494,6 +497,32 @@ class _Handler(BaseHTTPRequestHandler):
                 else:
                     self._reply(500, {"error": "could not read workspace file"})
             return
+        if path in {"/mobile/file-history", "/mobile/file-history/content"}:
+            # Kept versions of a workspace's files (mobile_file_history).
+            import mobile_file_history
+
+            try:
+                root = runtime_workspace(
+                    self._api.scoped_runtime(
+                        query.get("workspace_id", [None])[0], session_id=query.get("session_id", [None])[0]
+                    )
+                )
+                document = (
+                    mobile_file_history.versions(root, query.get("path", [None])[0])
+                    if path == "/mobile/file-history"
+                    else mobile_file_history.content(root, query.get("id", [None])[0])
+                )
+            except (FileNotFoundError, KeyError):
+                self._reply(404, {"error": "this version is no longer kept"})
+                return
+            except (TypeError, ValueError) as exc:
+                self._reply(400, {"error": " ".join(str(exc).split())[:2000]})
+                return
+            except OSError:
+                self._reply(500, {"error": "could not read the file history"})
+                return
+            self._reply(200, document)
+            return
         if path in {"/mobile/workspace/files", "/mobile/workspace/file"}:
             try:
                 relative = query.get("path", [""])[0]
@@ -517,6 +546,30 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             except (OSError, ToolError):
                 self._reply(500, {"error": "could not read workspace files"})
+                return
+            self._reply(200, document)
+            return
+        if path == "/mobile/cost-estimate":
+            # A message's likely cost before sending, from recent tasks (mobile_cost_estimate).
+            from mobile_cost_estimate import estimate
+
+            try:
+                session_id = query.get("session_id", [None])[0]
+                model = query.get("model", [""])[0]
+                if not model or len(model) > 200:
+                    raise ValueError("model is required")
+                document = estimate(
+                    self._api.scoped_runtime(query.get("workspace_id", [None])[0], session_id=session_id),
+                    session_id, model, _query_int(query, "chars", 0, minimum=0) if "chars" in query else 0,
+                )
+            except KeyError:
+                self._reply(404, {"error": "unknown session"})
+                return
+            except ValueError as exc:
+                self._reply(400, {"error": str(exc)})
+                return
+            except OSError:
+                self._reply(500, {"error": "could not read usage"})
                 return
             self._reply(200, document)
             return

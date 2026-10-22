@@ -194,6 +194,44 @@ object AndroidClockCalendar {
         JSONObject().put("ok", true).put("events", events).put("truncated", more).toString()
     }
 
+    /**
+     * Timed events starting within the next [minutes], for calendar triggers (mobile_triggers):
+     * key (event and start, so a repeating event counts each time), begin in epoch ms and a line
+     * that names the event in the phone's language.
+     */
+    @JvmStatic
+    fun upcoming(minutes: Int): String = guarded {
+        val context = context()
+        if (!granted(context, Manifest.permission.READ_CALENDAR))
+            return@guarded failure("permission_required", "Calendar access is off")
+        val now = System.currentTimeMillis()
+        val uri = CalendarContract.Instances.CONTENT_URI.buildUpon().also {
+            ContentUris.appendId(it, now)
+            ContentUris.appendId(it, now + minutes.coerceIn(1, 1440) * 60_000L)
+        }.build()
+        val projection = arrayOf(CalendarContract.Instances.EVENT_ID, CalendarContract.Instances.TITLE,
+            CalendarContract.Instances.BEGIN, CalendarContract.Instances.END, CalendarContract.Instances.EVENT_LOCATION)
+        val clock = DateTimeFormatter.ofPattern("HH:mm")
+        val zone = ZoneId.systemDefault()
+        val events = JSONArray()
+        context.contentResolver.query(uri, projection,
+            "${CalendarContract.Instances.VISIBLE} = 1 AND ${CalendarContract.Instances.ALL_DAY} = 0 AND ${CalendarContract.Instances.BEGIN} >= ?",
+            arrayOf(now.toString()), "${CalendarContract.Instances.BEGIN} ASC")?.use { cursor ->
+            while (cursor.moveToNext() && events.length() < 20) {
+                val title = cursor.getString(1).orEmpty().take(200)
+                val begin = cursor.getLong(2)
+                val time = "${java.time.Instant.ofEpochMilli(begin).atZone(zone).format(clock)}–" +
+                    java.time.Instant.ofEpochMilli(cursor.getLong(3)).atZone(zone).format(clock)
+                val place = cursor.getString(4)?.take(200).orEmpty()
+                val line = UiText.of(context, "日程：%s，%s", "Calendar event: %s, %s").format(title, time) +
+                    if (place.isBlank()) "" else UiText.of(context, "，%s", ", %s").format(place)
+                events.put(JSONObject().put("key", "${cursor.getLong(0)}:$begin").put("title", title)
+                    .put("begin", begin).put("line", line))
+            }
+        }
+        JSONObject().put("ok", true).put("events", events).toString()
+    }
+
     @JvmStatic
     fun addEvent(requestJson: String): String = guarded {
         val context = context()

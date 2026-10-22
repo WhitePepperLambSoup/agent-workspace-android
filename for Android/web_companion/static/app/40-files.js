@@ -331,6 +331,7 @@
     if (!fileEditor) return;
     elements.workspaceFilesList.hidden = true;
     elements.fileEditorPanel.hidden = false;
+    $("fileHistoryPanel").hidden = true;
     elements.workspaceFilePath.textContent = fileEditor.path;
     elements.fileContentInput.value = fileEditor.content || "";
     elements.fileEditorMeta.textContent = fileEditor.loaded ? `${formatBytes(fileEditor.size)}${fileEditor.editable ? " · UTF-8" : t(" · 只读")}` : "";
@@ -347,6 +348,7 @@
     elements.workspaceFilePath.textContent = path || t("工作区");
     elements.workspaceFilesList.hidden = false;
     elements.fileEditorPanel.hidden = true;
+    $("fileHistoryPanel").hidden = true;
     elements.workspaceFilesList.replaceChildren();
     pageStatus(elements.workspaceFilesStatus, t("加载中..."));
     syncFileControls();

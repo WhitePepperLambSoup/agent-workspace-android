@@ -5,6 +5,7 @@ import android.content.ContentValues
 import android.database.Cursor
 import android.net.Uri
 import android.os.Binder
+import android.os.Build
 import android.os.Bundle
 import android.os.Process
 import org.json.JSONObject
@@ -25,6 +26,15 @@ class LocalModelControlProvider : ContentProvider() {
                 "set_accelerator" -> JSONObject().put("ok", true)
                     .put("accelerator", LocalModelBridge.setAccelerator(options.getString("mode")))
                 "retry_gpu" -> JSONObject().put("ok", true).put("accelerator", LocalModelBridge.retryGpu())
+                // Diagnostics → GPU compatibility report: the phone, its chip, the GPU and how the last device test ran.
+                "gpu_report" -> JSONObject().put("ok", true)
+                    .put("device", JSONObject().put("manufacturer", Build.MANUFACTURER).put("model", Build.MODEL)
+                        .put("soc", if (Build.VERSION.SDK_INT >= 31) "${Build.SOC_MANUFACTURER} ${Build.SOC_MODEL}".trim() else Build.HARDWARE)
+                        .put("android", Build.VERSION.RELEASE).put("sdk", Build.VERSION.SDK_INT)
+                        .put("abi", Build.SUPPORTED_ABIS.firstOrNull() ?: JSONObject.NULL))
+                    .put("cpu_build", JSONObject(LocalModelBridge.status()).opt("cpu_build") ?: JSONObject.NULL)
+                    .put("accelerator", LocalModelBridge.acceleratorStatus())
+                    .put("benchmark", LocalModelBenchmark.status(application))
                 "status" -> {
                     val model = options.optString("model_id")
                     val configured = LocalModelPerformance.integer(options, "context_tokens", 262144)

@@ -321,14 +321,17 @@ _ELDER_ACTING_TOOLS = frozenset({
 })  # fmt: skip
 
 
-class _ElderGuard:
-    """长辈模式's refusals, checked before any execution mode, full access included (the policy's
-    argument check). For the mode's own conversation only: what scams on older people need
-    (mobile_elder.elder_refusal), and any action once the task read outside instructions."""
+class _ToolGuard:
+    """Checked before every tool call in any execution mode, full access included (the policy's
+    argument check). 长辈模式's refusals, for the mode's own conversation: what scams on older
+    people need (mobile_elder.elder_refusal), and any action once the task read outside
+    instructions. Then, for a call that goes on, the files it is about to change are kept in the
+    file history (mobile_file_history), so the change can be undone."""
 
-    def __init__(self, inner: Any, controller: MobileRuntimeController) -> None:
+    def __init__(self, inner: Any, controller: MobileRuntimeController, root: Any = None) -> None:
         self._inner = inner
         self._controller = controller
+        self._root = root
 
     def evaluate(self, tool_name: str, arguments: dict[str, Any]) -> tuple[bool, str | None]:
         if self._inner is not None:
@@ -339,13 +342,21 @@ class _ElderGuard:
         from mobile_elder import elder_refusal
 
         controller = self._controller
-        if not elder_session(controller._active_session_id):
-            return True, None
-        refusal = elder_refusal(tool_name, arguments)
         task_id = controller._active_task_id
-        if refusal is None and tool_name in _ELDER_ACTING_TOOLS and task_id and controller.approvals.distrusted(task_id):
-            refusal = _ELDER_REFUSAL
-        return refusal is None, refusal
+        if elder_session(controller._active_session_id):
+            refusal = elder_refusal(tool_name, arguments)
+            if refusal is None and tool_name in _ELDER_ACTING_TOOLS and task_id and controller.approvals.distrusted(task_id):
+                refusal = _ELDER_REFUSAL
+            if refusal is not None:
+                return False, refusal
+        if self._root is not None:
+            import mobile_file_history
+
+            try:
+                mobile_file_history.before_tool(self._root, tool_name, arguments, task_id)
+            except OSError:
+                pass  # The history is a help; a full disk must not stop the task.
+        return True, None
 
 
 class MobileRuntimeController:
@@ -382,8 +393,9 @@ class MobileRuntimeController:
         if approval_broker is not None and approval_broker.request_listener is None:
             approval_broker.request_listener = self._on_approval_requested
         policy = getattr(getattr(service, "runner", None), "_policy", None)
-        if policy is not None and hasattr(policy, "argument_policy") and not isinstance(policy.argument_policy, _ElderGuard):
-            policy.argument_policy = _ElderGuard(policy.argument_policy, self)
+        if policy is not None and hasattr(policy, "argument_policy") and not isinstance(policy.argument_policy, _ToolGuard):
+            root = getattr(getattr(policy, "paths", None), "root", None)
+            policy.argument_policy = _ToolGuard(policy.argument_policy, self, root)
         self._jobs: dict[str, asyncio.Task[None]] = {}
         self._frozen: FrozenPrompts | None = None
         self._execution_checks: dict[str, tuple[Any, Any]] = {}

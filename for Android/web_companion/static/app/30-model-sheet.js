@@ -7,6 +7,7 @@
     if (closeModelSheet()) return true;
     if (closeDrawer()) return true;
     if (!layerOpen(elements.settingsOverlay)) return false;
+    if (settingsPage === "files" && fileHistoryOpen()) { closeFileHistory(); return true; }
     if (settingsPage === "files" && fileEditor && !fileSaving) { void loadWorkspaceFiles(workspacePath); return true; }
     if (settingsPage === "home") { closeMenu(); return true; }
     setSettingsPage(subPageParents[settingsPage] || "home");

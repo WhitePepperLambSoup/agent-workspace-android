@@ -9,7 +9,7 @@
 
   function syncHomeToolsVisibility() {
     const section = $("homeToolsSection");
-    if (section) section.hidden = !homeToolsKept().length || !!fileEditor || workspacePath !== "";
+    if (section) section.hidden = !homeToolsKept().length || !!fileEditor || workspacePath !== "" || fileHistoryOpen();
   }
 
   function renderHomeTools(value = null) {

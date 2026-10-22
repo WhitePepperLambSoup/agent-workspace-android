@@ -29,10 +29,12 @@
       </div>
     </header>
     <div id="timelineArea">
-      <main id="timelineContainer" aria-live="polite">
+      <main id="timelineContainer">
         <div id="timelineList"><div class="empty-state"><span class="empty-state-icon" data-icon="sparkles"></span><strong>开始一个新任务</strong><span>描述你想完成的事情，Agent 会在当前工作区中执行。</span></div></div>
       </main>
       <button id="btnJumpLatest" class="icon-button" type="button" title="回到最新消息" aria-label="回到最新消息" hidden><span data-icon="arrow-down"></span></button>
+      <!-- What a screen reader says once: a finished reply, an approval to give (70-tasks.js announce). -->
+      <div id="srAnnouncer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
     </div>
     <div id="bottomDock">
     <section id="approvalShelf" class="hidden" hidden aria-labelledby="approvalTitle">
@@ -55,6 +57,7 @@
         <div id="attachmentList" aria-live="polite"></div>
         <input type="file" id="filePickerInput" hidden multiple>
         <textarea id="promptInput" rows="1" placeholder="给 Agent 布置任务…" aria-label="任务指令"></textarea>
+        <p id="costEstimate" class="cost-estimate" aria-live="polite" hidden></p>
         <div class="composer-toolbar">
           <button id="btnAttach" class="icon-button" type="button" title="附加文件" aria-label="附加文件" aria-haspopup="menu" aria-expanded="false"><span data-icon="paperclip"></span></button>
           <div id="attachMenu" class="attach-menu" role="menu" hidden>
@@ -149,6 +152,7 @@
       <button id="elderPhoto" type="button"><span data-icon="camera"></span>拍照问问</button>
       <button id="elderCall" type="button" hidden><span data-icon="phone"></span><span id="elderCallLabel">打给家人</span></button>
     </div>
+    <button id="elderSos" class="elder-sos" type="button" hidden><span data-icon="circle-alert"></span>求救</button>
     <div class="elder-foot">
       <button id="elderTypeToggle" class="elder-link" type="button">打字</button>
       <button id="elderExit" class="elder-exit" type="button"><span data-icon="log-out"></span>按住两秒退出</button>
@@ -338,7 +342,13 @@
       </div>
       <div id="settingsBackup" class="settings-page" hidden>
         <p class="setting-hint">备份包含全部会话、记忆、定时任务与流程、内置工作区的文件，以及模型和界面设置。不包含 API 密钥、已下载的本机模型和开发工具链；放在手机公共文件夹里的工作区本来就在你的文件中，也不会重复打包。</p>
-        <button id="btnCreateBackup" class="menu-row" type="button"><span data-icon="download"></span><span>创建备份<small>保存为一个 zip 文件，位置由你选择</small></span><span data-icon="chevron-right"></span></button>
+        <div class="management-section management-form">
+          <strong>备份口令（可选）</strong>
+          <input id="backupPassphrase" type="password" maxlength="200" autocomplete="new-password" placeholder="不填就不加密" aria-label="备份口令">
+          <input id="backupPassphraseAgain" type="password" maxlength="200" autocomplete="new-password" placeholder="再输入一次" aria-label="再输入一次备份口令">
+          <p class="setting-hint">设了口令，备份会加密成 .awbackup 文件，别人拿到也打不开；恢复时要输入同一个口令。口令不会保存在任何地方，忘了就无法恢复。</p>
+        </div>
+        <button id="btnCreateBackup" class="menu-row" type="button"><span data-icon="download"></span><span>创建备份<small>保存为一个文件，位置由你选择</small></span><span data-icon="chevron-right"></span></button>
         <button id="btnRestoreBackup" class="menu-row" type="button"><span data-icon="upload"></span><span>从备份恢复<small>用备份替换这台手机上的数据，引擎会重启</small></span><span data-icon="chevron-right"></span></button>
         <p id="backupStatus" class="page-status" role="status"></p>
         <p class="setting-hint">恢复前的数据会在手机里保留一份，直到下次恢复时被替换。恢复后请到模型设置里重新填写 API 密钥。</p>
@@ -377,6 +387,8 @@
           <label for="elderFamilyName">称呼</label><input id="elderFamilyName" type="text" maxlength="12" placeholder="例如：儿子、女儿" autocomplete="off">
           <label for="elderFamilyPhone">电话</label><input id="elderFamilyPhone" type="tel" maxlength="20" placeholder="点「打给家人」时拨这个号码" autocomplete="off">
           <p class="setting-hint">电话只存在这台手机上，不会发给 AI。称呼会告诉 AI，遇到像是骗局的事时，它会提醒先问家人。</p>
+          <p class="setting-hint">设了电话后，长辈界面会有「求救」按钮：按下后写好一条给家人的短信，由长辈自己按发送。</p>
+          <button id="btnElderLocation" class="menu-row" type="button" hidden><span data-icon="globe"></span><span>求救短信带上位置<small id="elderLocationState"></small></span><span data-icon="chevron-right"></span></button>
         </div>
         <label class="toggle-row" for="elderReadAloud"><span>自动读出回答</span><input id="elderReadAloud" type="checkbox" checked></label>
         <label class="toggle-row" for="elderSlowSpeech"><span>读得慢一点</span><input id="elderSlowSpeech" type="checkbox" checked></label>
@@ -396,6 +408,8 @@
         <p id="appCheckStatus" class="page-status" role="status"></p>
         <div id="appCheckList" class="app-check-list"></div>
         <details id="appCheckOthers" class="management-section" hidden><summary id="appCheckOthersTitle">其他应用</summary><div id="appCheckOtherList" class="app-check-list"></div></details>
+        <label class="toggle-row app-check-watch" for="appCheckInstalls"><span>新装应用有风险时提醒我</span><input id="appCheckInstalls" type="checkbox" checked></label>
+        <p class="setting-hint">大约每 30 分钟看一次：新装的应用拿到大权限，或已有的应用新拿到设备管理器、无障碍这类权限时，发一条通知，点开就是这一页。</p>
         <label class="toggle-row app-check-watch" for="appCheckWatch"><span>记录弹窗来源</span><input id="appCheckWatch" type="checkbox"></label>
         <p class="setting-hint">打开后，会记下哪个应用在你没点它时自己跳到前台，或用悬浮窗盖住大半个屏幕。只记应用和时间，保存 7 天，不离开这台手机；关闭时清除。需要开着本应用的无障碍服务。</p>
         <p id="appCheckWatchStatus" class="page-status" role="status"></p>
@@ -539,7 +553,7 @@
         </form>
       </div>
       <div id="settingsFiles" class="settings-page" hidden>
-        <div class="page-toolbar"><button id="btnFileParent" class="icon-button" type="button" title="上级目录" aria-label="上级目录" disabled><span data-icon="chevron-left"></span></button><span id="workspaceFilePath">工作区</span><button id="btnNewFolder" class="icon-button" type="button" title="新建文件夹" aria-label="新建文件夹"><span data-icon="plus"></span></button><button id="btnFilesRefresh" class="icon-button" type="button" title="刷新文件" aria-label="刷新文件"><span data-icon="refresh-cw"></span></button></div>
+        <div class="page-toolbar"><button id="btnFileParent" class="icon-button" type="button" title="上级目录" aria-label="上级目录" disabled><span data-icon="chevron-left"></span></button><span id="workspaceFilePath">工作区</span><button id="btnNewFolder" class="icon-button" type="button" title="新建文件夹" aria-label="新建文件夹"><span data-icon="plus"></span></button><button id="btnFileHistory" class="icon-button" type="button" title="最近改动" aria-label="最近改动"><span data-icon="history"></span></button><button id="btnFilesRefresh" class="icon-button" type="button" title="刷新文件" aria-label="刷新文件"><span data-icon="refresh-cw"></span></button></div>
         <p id="workspaceFilesStatus" class="page-status" role="status"></p>
         <section id="homeToolsSection" class="home-tools" aria-labelledby="homeToolsTitle" hidden>
           <h3 id="homeToolsTitle">桌面小工具</h3>
@@ -547,6 +561,12 @@
           <p id="homeToolsStatus" class="page-status" role="status"></p>
         </section>
         <div id="workspaceFilesList" class="workspace-files-list"></div>
+        <section id="fileHistoryPanel" class="file-history" aria-labelledby="fileHistoryTitle" hidden>
+          <div class="page-toolbar"><button id="btnFileHistoryClose" class="icon-button" type="button" title="返回" aria-label="返回"><span data-icon="chevron-left"></span></button><strong id="fileHistoryTitle">最近改动</strong></div>
+          <p class="setting-hint">AI 或你改动、删除文件之前，会先存一份旧内容，保留 30 天。还原时，现在的内容也会先存一份。</p>
+          <p id="fileHistoryStatus" class="page-status" role="status"></p>
+          <div id="fileHistoryList" class="file-history-list"></div>
+        </section>
         <div id="fileEditorPanel" hidden>
           <div class="page-toolbar file-editor-toolbar">
             <span id="fileEditorMeta"></span>
@@ -557,6 +577,7 @@
               <button id="btnFileHomeTool" class="icon-button" type="button" title="添加到桌面" aria-label="添加到桌面" hidden><span data-icon="app-window"></span></button>
             </div>
             <button id="btnFileToKnowledge" class="icon-button" type="button" title="加入知识库" aria-label="加入知识库" hidden><span data-icon="book-open"></span></button>
+            <button id="btnFileVersions" class="icon-button" type="button" title="历史版本" aria-label="历史版本"><span data-icon="history"></span></button>
             <button id="btnReloadFile" class="icon-button" type="button" title="重新读取文件" aria-label="重新读取文件"><span data-icon="refresh-cw"></span></button>
             <button id="btnDiscardFileDraft" class="icon-button" type="button" title="放弃文件草稿" aria-label="放弃文件草稿" hidden><span data-icon="trash-2"></span></button>
             <button id="btnSaveFile" class="icon-button" type="button" title="保存文件" aria-label="保存文件" disabled><span data-icon="save"></span></button>
@@ -675,6 +696,13 @@
           <button id="btnBatterySettings" class="menu-row" type="button"><span data-icon="activity"></span><span>电池优化设置</span><span data-icon="chevron-right"></span></button>
           <button id="btnBackgroundSettings" class="menu-row" type="button"><span data-icon="settings"></span><span>应用后台设置</span><span data-icon="chevron-right"></span></button>
         </div>
+        <div id="gpuReportSection" class="management-section" hidden>
+          <strong>GPU 兼容报告</strong>
+          <p class="setting-hint">本机模型的 GPU 加速目前只在高通 Adreno 7xx/8xx 上启用，其他 GPU 用 CPU。把报告发到项目的 GitHub Issues，可以帮忙补全兼容表。报告只有手机型号、芯片、GPU 和测速结果，不含账号、对话或文件。</p>
+          <dl id="gpuReportSummary" class="usage-summary"></dl>
+          <p id="gpuReportStatus" class="page-status" role="status"></p>
+          <div class="page-toolbar"><button id="btnGpuReport" class="button-secondary" type="button"><span data-icon="cpu"></span>生成报告</button><button id="btnGpuReportCopy" class="button-secondary" type="button" hidden><span data-icon="copy"></span>复制报告</button><button id="btnGpuReportIssues" class="button-secondary" type="button" hidden><span data-icon="link"></span>打开 Issues 页面</button></div>
+        </div>
       </div>
       <div id="settingsAbout" class="settings-page" hidden>
         <div class="management-section">
@@ -748,14 +776,14 @@
           <div id="triggersList" class="management-list"></div>
           <form id="triggerForm" class="management-form">
             <label for="triggerKind">什么时候</label>
-            <select id="triggerKind"><option value="charging">开始充电时</option><option value="wifi">连上 Wi‑Fi 时</option><option value="app_open">打开某个应用时</option></select>
+            <select id="triggerKind"><option value="charging">开始充电时</option><option value="wifi">连上 Wi‑Fi 时</option><option value="app_open">打开某个应用时</option><option value="battery_low">电量低于某个值时</option><option value="headset">连上耳机或蓝牙音频设备时</option><option value="unlock">解锁手机时</option><option value="calendar">日程开始前</option></select>
             <label for="triggerValue" id="triggerValueLabel">Wi‑Fi 名称（留空表示任意网络）</label>
             <input id="triggerValue" type="text" maxlength="200" autocomplete="off" list="triggerApps"><datalist id="triggerApps"></datalist>
             <label for="triggerWorkflow">做什么</label>
             <select id="triggerWorkflow"><option value="">执行下面的指令</option></select>
             <textarea id="triggerPrompt" rows="2" maxlength="4000" placeholder="例如：汇总一下今天的通知"></textarea>
             <label class="toggle-row" for="triggerPhone"><span>需要操作手机</span><input id="triggerPhone" type="checkbox"></label>
-            <label for="triggerCooldown">冷却时间</label>
+            <label for="triggerCooldown" id="triggerCooldownLabel">冷却时间</label>
             <select id="triggerCooldown"><option value="10">10 分钟</option><option value="30" selected>30 分钟</option><option value="60">1 小时</option><option value="240">4 小时</option><option value="1440">1 天</option></select>
             <button class="button-secondary" type="submit"><span data-icon="plus"></span>添加自动触发</button>
           </form>
@@ -792,6 +820,7 @@
           <div id="shortcutsList" class="management-list"></div>
           <button id="btnImportShortcut" class="button-secondary" type="button"><span data-icon="download"></span>导入分享码</button>
           <p id="shortcutsStatus" class="page-status" role="status"></p>
+          <p id="shareFingerprint" class="setting-hint" hidden></p>
         </div>
         <p id="workflowsStatus" class="page-status" role="status"></p><div id="workflowsList" class="management-list"></div>
         <form id="workflowForm" class="management-form">

@@ -131,6 +131,8 @@ class WebUiActivity : ComponentActivity() {
     private var deliveringShare = false
     private var pendingSessionId: String? = null
     private var deliveringSession = false
+    // A notification of the app check (AppAudit) opens its page once the console is ready.
+    private var pendingAppCheck = false
     /** A quick ask from the tile, floating ball or a launcher shortcut, as JSON for the page. */
     private var pendingQuickAsk: String? = null
     private var deliveringQuickAsk = false
@@ -620,8 +622,9 @@ class WebUiActivity : ComponentActivity() {
                 appLockAction = { enabled, minutes -> changeAppLock(enabled, minutes) },
                 reconnectEngineAction = { reconnectEngine() },
                 exportLogsAction = { appSupport.showLogExport() },
-                backupCreateAction = { web -> backups.create(web) },
+                backupCreateAction = { web, passphrase -> backups.create(web, passphrase) },
                 backupRestoreAction = { backups.restore() },
+                backupPassphraseAction = { passphrase -> backups.restoreWithPassphrase(passphrase) },
                 checkUpdatesAction = { appSupport.checkNow() },
                 stopEngineAction = {
                     startService(Intent(this@WebUiActivity, TermuxDaemonService::class.java).setAction(TermuxDaemonService.ACTION_STOP)
@@ -752,6 +755,7 @@ class WebUiActivity : ComponentActivity() {
                             dispatchWorkspaceStorageChanged()
                             dispatchShareInboxChanged()
                             deliverSessionNavigation()
+                            deliverAppCheck()
                             deliverSharedText()
                             deliverQuickAsk()
                             if (voicePending) { voicePending = false; launchVoiceInput() }
@@ -885,6 +889,7 @@ class WebUiActivity : ComponentActivity() {
         pendingSessionId = savedInstanceState?.getString("pending-session-id")
         savedInstanceState?.getStringArrayList("pending-shared-texts")?.forEach(sharedTexts::addLast)
         queueSessionNavigation(intent)
+        queueAppCheck(intent)
         pendingQuickAsk = savedInstanceState?.getString("pending-quick-ask")
         if (savedInstanceState == null) queueQuickAsk(intent)
         shareInbox.captureIntent(intent, incomingShareBatchId)
@@ -987,6 +992,7 @@ class WebUiActivity : ComponentActivity() {
         setIntent(intent)
         if (!::webView.isInitialized) return // WebView unavailable: only the help screen is shown
         queueSessionNavigation(intent)
+        queueAppCheck(intent)
         queueQuickAsk(intent)
         incomingShareBatchId = UUID.randomUUID().toString()
         shareInbox.captureIntent(intent, incomingShareBatchId)
@@ -1091,6 +1097,7 @@ class WebUiActivity : ComponentActivity() {
             dispatchShareInboxChanged()
             deliverWorkspaceFolderResults()
             deliverSessionNavigation()
+            deliverAppCheck()
             deliverSharedText()
             deliverQuickAsk()
             checkEngineOnResume()
@@ -1142,6 +1149,33 @@ class WebUiActivity : ComponentActivity() {
         incoming.removeExtra(TaskNotificationPublisher.EXTRA_SESSION_ID)
         pendingSessionId = session
         deliverSessionNavigation()
+    }
+
+    private fun queueAppCheck(incoming: Intent?) {
+        if (incoming?.action != com.agentworkspace.mobile.capabilities.AppAudit.ACTION_OPEN) return
+        incoming.action = null
+        pendingAppCheck = true
+        deliverAppCheck()
+    }
+
+    private fun deliverAppCheck() {
+        if (!pendingAppCheck || isDestroyed || isFinishing || webView.visibility != View.VISIBLE ||
+            !isTrustedConsoleUrl(webView.url ?: return)) return
+        val script = """
+            (function(){
+                var button = document.getElementById('btnAppCheckPage');
+                if (!button || !window.AgentMobileUi || !document.getElementById('sessionSelector')?.value) return false;
+                if (!document.getElementById('elderScreen')?.hidden) return true;
+                window.AgentMobileUi.openMenu();
+                button.click();
+                return true;
+            })()
+        """.trimIndent()
+        webView.evaluateJavascript(script) { accepted ->
+            if (isDestroyed || isFinishing) return@evaluateJavascript
+            if (accepted == "true") pendingAppCheck = false
+            else shareHandler.postDelayed({ deliverAppCheck() }, 500)
+        }
     }
 
     private fun deliverSessionNavigation() {

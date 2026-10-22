@@ -218,6 +218,42 @@ def elder_refusal(tool: str, arguments: Any) -> str | None:
     return None
 
 
+def _phone(bridge: str, request: dict[str, Any]) -> dict[str, Any]:
+    from java import jclass
+
+    return json.loads(str(jclass(f"com.agentworkspace.mobile.capabilities.{bridge}").execute(json.dumps(request))))
+
+
+def sos_message(location: dict[str, Any] | None) -> str:
+    """The text a call for help sends: where the phone is when its location is known."""
+    text = "我需要帮助，请尽快联系我。"
+    if not location or not isinstance(location.get("latitude"), (int, float)):
+        return text
+    latitude, longitude = float(location["latitude"]), float(location["longitude"])
+    where = str(location.get("address") or "").strip()[:120]
+    link = f"https://uri.amap.com/marker?position={longitude:.6f},{latitude:.6f}"
+    return f"{text}我现在在：{where + '，' if where else ''}{link}"
+
+
+def sos(phone_call: Any = _phone) -> dict[str, Any]:
+    """一键求救: a text message to the family member, with where the phone is when location is
+    allowed, opened in the Messages app for the older person to send. Nothing is sent by itself."""
+    value = settings()
+    number = value["family_phone"]
+    if not value["enabled"] or not number:
+        raise ValueError("elder mode needs a family phone number for a call for help")
+    location = None
+    try:
+        found = phone_call("AndroidPersonalInfo", {"action": "location"})
+        location = found if found.get("ok") is True else None
+    except Exception:
+        location = None
+    opened = phone_call("AndroidPersonalInfo", {"action": "compose_sms", "to": number, "body": sos_message(location)})
+    if opened.get("ok") is not True:
+        raise ValueError(str(opened.get("error") or "the Messages app could not be opened"))
+    return {"opened": True, "location": location is not None}
+
+
 def elder_session(session_id: Any) -> bool:
     """Whether a task in [session_id] runs for the older person: the mode is on and it is the mode's
     own conversation. Such tasks never ask them anything (mobile_approval)."""

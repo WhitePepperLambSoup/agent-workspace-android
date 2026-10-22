@@ -463,8 +463,24 @@ def write_workspace_file(runtime: Any, payload: Mapping[str, Any]) -> dict[str, 
             raise ConcurrentModificationError("file changed since it was opened")
     elif expected is not None:
         raise ConcurrentModificationError("file was deleted since it was opened")
+    _keep_history(paths, relative, "edit")
     target, digest = atomic_write(paths, target, encoded, expected)
     return {"path": paths.relative(target), "sha256": digest, "size": len(encoded)}
+
+
+def restore_workspace_version(runtime: Any, payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Put a kept version of a file back (mobile_file_history); what it replaces is kept too."""
+    import mobile_file_history
+
+    return mobile_file_history.restore(runtime_workspace(runtime), payload.get("id"))
+
+
+def _keep_history(paths: WorkspacePaths, relative: str, source: str) -> None:
+    """What the file (or the files of a folder) held before the user changes it (mobile_file_history)."""
+    import mobile_file_history
+
+    with suppress(OSError):
+        mobile_file_history.remember(paths.root, relative, source)
 
 
 def _existing_entry(runtime: Any, paths: WorkspacePaths, relative: str) -> tuple[Path, bool]:
@@ -498,6 +514,7 @@ def delete_workspace_path(runtime: Any, payload: Mapping[str, Any]) -> dict[str,
     relative = _relative_path(payload.get("path"))
     paths = WorkspacePaths(runtime_workspace(runtime))
     target, directory = _existing_entry(runtime, paths, relative)
+    _keep_history(paths, relative, "delete")
     if directory:
         if any(target in private.parents for private in runtime_private_paths(runtime)):
             raise ValueError("path holds internal runtime data")

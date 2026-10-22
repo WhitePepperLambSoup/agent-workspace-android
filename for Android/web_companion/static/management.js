@@ -147,6 +147,7 @@
 
   async function doctor(isCurrent = () => true) {
     loadBackgroundScreen(isCurrent).catch(() => {});
+    $("gpuReportSection").hidden = typeof native?.getGpuReport !== "function";
     const value = await ui.apiJson("/mobile/capabilities");
     if (!isCurrent()) return;
     const android = value.android || {};
@@ -237,6 +238,65 @@
     $("calendarAccessState").textContent = granted ? t("已允许：AI 可以查看和添加日程") : t("未允许：点这里授权");
   }
   window.addEventListener("agent-calendar-access-changed", calendarAccess);
+  // GPU compatibility report (Diagnostics): what people send in for the table of GPUs the local
+  // model runs on. Made on request: reading the GPU may start the engine's GPU check.
+  const gpuIssuesUrl = "https://github.com/WhitePepperLambSoup/agent-workspace-android/issues";
+  let gpuReportText = "";
+  // Short forms of acceleratorText for the report's table.
+  const gpuReportStates = {
+    available: t("用 GPU"), checking: t("正在检查 GPU，先用 CPU"), unchecked: t("还没检查 GPU，先用 CPU"),
+    unknown: t("本机模型运行中，稍后再生成"), unsupported_gpu: t("GPU 驱动较旧，用 CPU"), no_supported_gpu: t("GPU 暂不支持，用 CPU"),
+    check_failed: t("GPU 没通过检查，用 CPU"), driver_unavailable: t("GPU 驱动没有开放，用 CPU"), cpu_unsupported: t("处理器较旧，只用 CPU"),
+    failed: t("GPU 曾出错，已改用 CPU"),
+  };
+  // The GPU as the browser engine names it: also Mali or PowerVR, which OpenCL here does not list.
+  function webglRenderer() {
+    try {
+      const gl = document.createElement("canvas").getContext("webgl");
+      if (!gl) return "";
+      const info = gl.getExtension("WEBGL_debug_renderer_info");
+      const name = gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER);
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
+      return String(name || "").slice(0, 120);
+    } catch { return ""; }
+  }
+  function gpuReport() {
+    let value;
+    try { value = nativeResult("getGpuReport"); } catch (error) { status("gpuReportStatus", error.message, true); return; }
+    const device = value.device || {};
+    const gpu = value.accelerator || {};
+    const run = value.benchmark || {};
+    let version = "";
+    try { version = JSON.parse(native?.getUpdateSettings?.() || "{}").version || ""; } catch {}
+    const renderer = webglRenderer();
+    // Some makers already put their name in the model ("ZTE A2022P").
+    const maker = String(device.manufacturer || "");
+    const phone = String(device.model || "").toLowerCase().startsWith(maker.toLowerCase()) ? String(device.model || "")
+      : [maker, device.model].filter(Boolean).join(" ");
+    const android = `Android ${device.android || "?"} (API ${device.sdk || "?"})`;
+    const speed = Number.isFinite(run.tokens_per_second) && run.state === "completed"
+      ? `${run.accelerator === "gpu" ? "GPU" : "CPU"} · ${run.prompt_tokens_per_second?.toFixed(1) ?? "?"} / ${run.tokens_per_second.toFixed(1)} Token/s · ${run.model_id || ""}`.replace(/ · $/, "") : "";
+    terms("gpuReportSummary", [
+      [t("手机"), phone || t("未知")], [t("芯片"), device.soc || t("未知")], [t("系统"), android],
+      [t("GPU（OpenCL）"), [gpu.gpu_description, gpu.gpu_version].filter(Boolean).join(" · ") || gpu.gpu || t("未读到")],
+      [t("GPU（WebGL）"), renderer || t("未读到")],
+      [t("本机模型"), gpuReportStates[gpu.gpu_state] || t("本机引擎尚未就绪")],
+      [t("最近一次设备测试"), speed || t("还没有测过：在「本机模型」里运行设备测试后再生成")],
+    ]);
+    // Plain English keys, so reports in any language read the same.
+    gpuReportText = [
+      "Agent Workspace GPU report",
+      `App: ${version || "?"}`, `Phone: ${phone || "?"}`, `SoC: ${device.soc || "?"}`, `System: ${android} · ${device.abi || "?"}`,
+      `OpenCL GPU: ${[gpu.gpu_description, gpu.gpu_version].filter(Boolean).join(" · ") || "none"}`, `WebGL renderer: ${renderer || "?"}`,
+      `GPU state: ${gpu.gpu_state || "?"} · mode ${gpu.mode || "?"} · library ${gpu.library || "?"} · CPU build ${value.cpu_build || "?"}`,
+      ...(gpu.failure ? [`GPU failure: ${String(gpu.failure).slice(0, 300)}`] : []),
+      `Device test: ${speed ? `${speed} (prompt / generation) · context ${run.actual_context_size || "?"}` : "not run"}`,
+    ].join("\n");
+    $("btnGpuReportCopy").hidden = false;
+    $("btnGpuReportIssues").hidden = false;
+    status("gpuReportStatus", "");
+  }
+
   // Updates and logs had been at the bottom of 设备与工具, where users did not find them.
   async function about() {
     $("btnShareDiagnostics").disabled = typeof native?.shareDiagnostics !== "function";
@@ -1127,6 +1187,13 @@
     if (detail.state === "creating") status("backupStatus", t("正在创建备份..."));
     else if (detail.state === "saving") status("backupStatus", t("备份已生成（{0}），请选择保存位置", backupSize(detail.summary?.size)));
     else if (detail.state === "saved") status("backupStatus", t("备份已保存（{0}）", backupSize(detail.size)));
+    else if (detail.state === "passphrase_required" || detail.state === "passphrase_wrong") {
+      // A locked backup (.awbackup): its passphrase, asked again after a wrong one.
+      const passphrase = window.prompt(detail.state === "passphrase_wrong" ? t("口令不对，或者备份文件已损坏。请再输入一次备份口令：") : t("这个备份已加密，请输入备份口令："));
+      if (!passphrase) { status("backupStatus", t("已取消")); $("btnCreateBackup").disabled = false; $("btnRestoreBackup").disabled = false; return; }
+      const result = JSON.parse(native.restoreBackupPassphrase(passphrase));
+      if (!result.ok) status("backupStatus", localizeError(result.error) || t("操作失败"), true);
+    }
     else if (detail.state === "cancelled") status("backupStatus", t("已取消"));
     else if (detail.state === "restoring") status("backupStatus", t("正在检查并恢复备份..."));
     else if (detail.state === "failed") status("backupStatus", t("操作失败：{0}", localizeError(detail.error || "")), true);
@@ -1140,7 +1207,12 @@
   on("btnCreateBackup", "click", () => {
     const web = {};
     for (const key of backupStorageKeys) { try { const value = window.localStorage.getItem(key); if (value !== null) web[key] = value; } catch {} }
-    const result = JSON.parse(native.createBackup(JSON.stringify(web)));
+    const passphrase = $("backupPassphrase").value;
+    if (passphrase !== $("backupPassphraseAgain").value) throw new Error(t("两次输入的口令不一样"));
+    if (passphrase && typeof native.createLockedBackup !== "function") throw new Error(t("这个版本不能加密备份"));
+    const result = JSON.parse(passphrase ? native.createLockedBackup(JSON.stringify(web), passphrase) : native.createBackup(JSON.stringify(web)));
+    $("backupPassphrase").value = "";
+    $("backupPassphraseAgain").value = "";
     if (!result.ok) throw new Error(localizeError(result.error) || t("操作失败"));
   }, "backupStatus");
   on("btnRestoreBackup", "click", () => {
@@ -2012,6 +2084,13 @@
   });
   on("btnAutoStartSettings", "click", () => { native?.openAutoStartSettings?.(); rememberBackground({ autostart_opened: true }); }, "doctorStatus");
   on("btnCalendarAccess", "click", () => native?.requestCalendarAccess?.(), "doctorStatus");
+  on("btnGpuReport", "click", () => gpuReport(), "gpuReportStatus");
+  on("btnGpuReportCopy", "click", async () => {
+    if (typeof native?.copyToClipboard === "function") native.copyToClipboard(gpuReportText);
+    else await navigator.clipboard.writeText(gpuReportText);
+    status("gpuReportStatus", t("已复制：在 Issues 页面新建一个问题，粘贴进去就行。"));
+  }, "gpuReportStatus");
+  on("btnGpuReportIssues", "click", () => openServiceUrl(gpuIssuesUrl), "gpuReportStatus");
   on("btnShareDiagnostics", "click", () => {
     if (typeof native?.exportDiagnostics === "function") { native.exportDiagnostics(); status("diagnosticsStatus", t("请选择分享、保存到手机或提交到 GitHub")); return; }
     if (typeof native?.shareDiagnostics !== "function") throw new Error(t("当前版本不支持分享诊断日志"));

@@ -23,6 +23,10 @@ import org.json.JSONObject
  * accessibility, device admin and battery pages.
  */
 object AppAudit {
+    /** Opens the app at 应用体检 (WebUiActivity), from the notification below. */
+    const val ACTION_OPEN = "com.agentworkspace.mobile.OPEN_APP_CHECK"
+    private const val CHANNEL = "agent_app_check"
+
     @Volatile private var context: Context? = null
 
     @JvmStatic fun initialize(context: Context) { this.context = context.applicationContext }
@@ -46,6 +50,10 @@ object AppAudit {
                 "scan" -> scan(app)
                 "popups" -> JSONObject().put("ok", true).put("popups", PopupWatch.records(app)).put("watching", PopupWatch.enabled(app))
                 "watch" -> { PopupWatch.setEnabled(app, request.optBoolean("enabled")); JSONObject().put("ok", true).put("watching", PopupWatch.enabled(app)) }
+                // Both wordings come along; the app's language picks one.
+                "notify" -> notify(app,
+                    com.agentworkspace.mobile.UiText.of(app, request.optString("title_zh"), request.optString("title_en")).take(80),
+                    com.agentworkspace.mobile.UiText.of(app, request.optString("text_zh"), request.optString("text_en")).take(300))
                 "uninstall" -> uninstall(app, packageOf(app, request))
                 "open" -> open(app, packageOf(app, request), request.optString("page"))
                 else -> JSONObject(fail("invalid_arguments", "Unknown action"))
@@ -155,6 +163,29 @@ object AppAudit {
             .put("watching", PopupWatch.enabled(app)).put("scanned_at", System.currentTimeMillis())
             // Pop-ups are seen through the accessibility service: off, nothing is recorded.
             .put("watch_ready", com.agentworkspace.mobile.automation.AndroidSystemBridge.service != null)
+    }
+
+    /** A newly installed or changed app worth a look (mobile_app_audit.watch); tapping opens the check. */
+    private fun notify(app: Context, title: String, text: String): JSONObject {
+        require(title.isNotBlank()) { "title is required" }
+        if (!androidx.core.app.NotificationManagerCompat.from(app).areNotificationsEnabled()) {
+            return JSONObject().put("ok", true).put("posted", false)
+        }
+        val manager = app.getSystemService(android.app.NotificationManager::class.java)
+        manager.createNotificationChannel(android.app.NotificationChannel(CHANNEL,
+            com.agentworkspace.mobile.UiText.of(app, "应用体检", "App check"), android.app.NotificationManager.IMPORTANCE_DEFAULT))
+        val open = Intent(app, com.agentworkspace.mobile.WebUiActivity::class.java).setAction(ACTION_OPEN)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        manager.notify("agent-app-check", 3020, androidx.core.app.NotificationCompat.Builder(app, CHANNEL)
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setStyle(androidx.core.app.NotificationCompat.BigTextStyle().bigText(text))
+            .setAutoCancel(true)
+            .setContentIntent(android.app.PendingIntent.getActivity(app, 3020, open,
+                android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT))
+            .build())
+        return JSONObject().put("ok", true).put("posted", true)
     }
 
     /** Android's own confirmation; nothing is removed unless the user taps OK there. */

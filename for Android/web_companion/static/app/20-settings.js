@@ -12,6 +12,7 @@
     syncKeepScreenOn();
     // 长辈模式's big button speaks, or stops while an answer is coming (90-elder.js).
     if (elderShown()) renderElderButton();
+    syncCostEstimate();
     const hasInput = !!elements.promptInput.value.trim() || attachments.length > 0;
     // While a task runs, typing adds to it ("steering"): Send sits next to Stop once there is text.
     const steerable = canSteer();

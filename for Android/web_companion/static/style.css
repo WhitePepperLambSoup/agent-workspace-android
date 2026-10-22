@@ -136,6 +136,8 @@
 /* ---------- Base ---------- */
 * { box-sizing: border-box; }
 [hidden], .hidden { display: none !important; }
+/* Read by a screen reader, not shown. */
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 html, body { height: 100%; width: 100%; margin: 0; overflow: hidden; }
 body {
   background: var(--bg); color: var(--text); font-family: var(--font-sans); font-size: 14px; line-height: 1.5;
@@ -1997,7 +1999,15 @@ body.elder-mode #appShell { display: none; }
 /* Typing, or a question waiting for an answer: everything else steps aside. */
 .elder-screen.typing .elder-speak, .elder-screen.typing .elder-tiles, .elder-screen.typing .elder-foot,
 .elder-screen.approving .elder-speak, .elder-screen.approving .elder-type, .elder-screen.approving .elder-tiles,
-.elder-screen.approving .elder-foot { display: none; }
+.elder-screen.approving .elder-foot, .elder-screen.typing .elder-sos, .elder-screen.approving .elder-sos { display: none; }
+/* 一键求救: below the tiles, red so it is found, a separate row so it is not pressed by mistake. */
+.elder-sos {
+  display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 56px; border: 2px solid var(--danger); border-radius: 18px;
+  background: var(--danger-soft); color: var(--danger); font: inherit; font-size: 21px; font-weight: 700;
+}
+.elder-sos[hidden] { display: none; }
+.elder-sos svg { width: 26px; height: 26px; }
+.elder-tiles button.attention { border: 3px solid var(--accent); background: var(--accent-soft); }
 .button-primary.elder-start { display: inline-flex; align-items: center; gap: 8px; margin-top: 8px; }
 .home-tools { margin: 4px 0 14px; padding: 12px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface-2); }
 .home-tools[hidden] { display: none; }
@@ -2058,3 +2068,24 @@ body.elder-mode #appShell { display: none; }
 #appCheckOthers > summary { cursor: pointer; font-weight: 600; color: var(--text); }
 .app-check-watch { margin-top: 16px; }
 #btnAppCheckAsk { margin-top: 16px; }
+/* File history (42-file-history.js) */
+.file-history[hidden] { display: none; }
+.file-history > .page-toolbar strong { flex: 1 1 auto; font-size: 15px; }
+.file-history-list { display: grid; gap: 8px; margin-top: 8px; }
+.file-history-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface);
+}
+.file-history-body { display: grid; flex: 1 1 160px; gap: 2px; min-width: 0; }
+.file-history-body strong { font-size: 14px; overflow-wrap: anywhere; }
+.file-history-body small { color: var(--text-2); font-size: 12.5px; }
+.file-history-actions { display: flex; gap: 6px; }
+.file-history-actions button { min-height: 34px; padding: 0 12px; font-size: 13px; }
+.file-history-text {
+  flex: 1 1 100%; max-height: 260px; margin: 0; padding: 10px; overflow: auto; border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--text); font: 12px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.file-history-text[hidden] { display: none; }
+/* What a message will roughly cost (74-cost-estimate.js). */
+.cost-estimate { margin: 0; padding: 0 10px 2px; color: var(--text-3); font-size: 12px; line-height: 1.4; }
+.cost-estimate[hidden] { display: none; }

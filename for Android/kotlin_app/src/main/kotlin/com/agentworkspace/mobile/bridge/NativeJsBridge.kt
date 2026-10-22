@@ -48,8 +48,9 @@ class NativeJsBridge(
     private val restartEngineAction: () -> Unit = {},
     private val reconnectEngineAction: () -> Unit = {},
     private val exportLogsAction: (() -> Unit)? = null,
-    private val backupCreateAction: ((String) -> Unit)? = null,
+    private val backupCreateAction: ((String, String) -> Unit)? = null,
     private val backupRestoreAction: (() -> Unit)? = null,
+    private val backupPassphraseAction: ((String) -> Unit)? = null,
     private val checkUpdatesAction: () -> Unit = {},
     private val stopEngineAction: () -> Unit = {},
     private val openNotificationSettingsAction: () -> Unit = {
@@ -346,10 +347,24 @@ class NativeJsBridge(
 
     /** Back up conversations, workspace and settings; progress arrives as `agent-backup` events. */
     @JavascriptInterface
-    fun createBackup(webSettings: String): String {
+    fun createBackup(webSettings: String): String = createLockedBackup(webSettings, "")
+
+    /** The same, locked with [passphrase] when it is not empty (BackupCrypto). */
+    @JavascriptInterface
+    fun createLockedBackup(webSettings: String, passphrase: String): String {
         val action = backupCreateAction ?: return JSONObject().put("ok", false).put("error", "备份不可用").toString()
         if (webSettings.length > 4 * 1024 * 1024) return JSONObject().put("ok", false).put("error", "界面设置太大").toString()
-        Handler(Looper.getMainLooper()).post { action(webSettings) }
+        if (passphrase.length > 200) return JSONObject().put("ok", false).put("error", "passphrase is too long").toString()
+        Handler(Looper.getMainLooper()).post { action(webSettings, passphrase) }
+        return JSONObject().put("ok", true).toString()
+    }
+
+    /** The passphrase of a locked backup picked for restoring (after a `passphrase_required` event). */
+    @JavascriptInterface
+    fun restoreBackupPassphrase(passphrase: String): String {
+        val action = backupPassphraseAction ?: return JSONObject().put("ok", false).put("error", "恢复不可用").toString()
+        if (passphrase.isEmpty() || passphrase.length > 200) return JSONObject().put("ok", false).put("error", "passphrase is required").toString()
+        Handler(Looper.getMainLooper()).post { action(passphrase) }
         return JSONObject().put("ok", true).toString()
     }
 
@@ -573,6 +588,7 @@ class NativeJsBridge(
     @JavascriptInterface fun setLocalModelAccelerator(mode: String): String =
         localModelControl("set_accelerator", JSONObject().put("mode", mode).toString())
     @JavascriptInterface fun retryLocalModelGpu(): String = localModelControl("retry_gpu")
+    @JavascriptInterface fun getGpuReport(): String = localModelControl("gpu_report")
 
     @JavascriptInterface
     fun applyRuntimeSettings(settingsJson: String): String {
@@ -664,6 +680,27 @@ class NativeJsBridge(
         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         cm.setPrimaryClip(ClipData.newPlainText("AgentWorkspace", text))
         showToast(com.agentworkspace.mobile.UiText.of(context, "已复制到剪贴板", "Copied to clipboard"))
+    }
+
+    /** TalkBack or another screen reader that explores by touch is on: the page leaves reading aloud to it. */
+    @JavascriptInterface
+    fun isScreenReaderOn(): Boolean = runCatching {
+        context.getSystemService(android.view.accessibility.AccessibilityManager::class.java)
+            .let { it.isEnabled && it.isTouchExplorationEnabled }
+    }.getOrDefault(false)
+
+    /** Share codes (87-shortcuts.js): this install's signing key, a signature, and a check of one. */
+    @JavascriptInterface
+    fun shareIdentity(): String = com.agentworkspace.mobile.capabilities.ShareSignature.identity()
+
+    @JavascriptInterface
+    fun signShareCode(text: String): String = com.agentworkspace.mobile.capabilities.ShareSignature.sign(text)
+
+    @JavascriptInterface
+    fun verifyShareCode(text: String, signature: String, publicKey: String): String {
+        val signing = com.agentworkspace.mobile.capabilities.ShareSignature
+        return JSONObject().put("valid", signing.verify(text, signature.take(400), publicKey.take(400)))
+            .put("fingerprint", signing.fingerprint(publicKey.take(400))).toString()
     }
 
     /** Apps on the home screen (name and package), for choosing one in an automatic trigger. */

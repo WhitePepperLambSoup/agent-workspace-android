@@ -252,6 +252,82 @@ def assess(scan: dict[str, Any], marked: set[str] | None = None, now_ms: int | N
     }
 
 
+# ---- Watching for changes: a newly installed app, or one that newly holds a large power ----
+
+# The few words a notification gives for a reason, Chinese and English.
+_SHORT = {
+    "device_admin": ("设备管理器", "device admin"), "accessibility": ("无障碍服务", "accessibility service"),
+    "notification_listener": ("读取所有通知", "reads all notifications"), "sms": ("读短信", "reads SMS"),
+    "hidden_icon": ("没有桌面图标", "no home-screen icon"), "pops_up": ("自己弹出来", "pops up by itself"),
+    "old_target": ("安装时拿到全部权限", "got every permission at install"), "overlay": ("悬浮窗", "floating windows"),
+    "install_others": ("能安装其他应用", "installs other apps"), "manual_install": ("不是从应用商店装的", "not from an app store"),
+    "installed_by_app": ("由其他应用安装", "installed by another app"), "call_log": ("读通话记录", "reads the call log"),
+    "background_location": ("后台定位", "location in the background"), "usage_access": ("查看应用使用情况", "sees app usage"),
+    "keeps_running": ("开机自启", "starts with the phone"),
+}  # fmt: skip
+
+
+def watching() -> bool:
+    """Whether new and changed apps are watched (on unless turned off on the 应用体检 page)."""
+    with _LOCK:
+        return _load().get("watch_installs") is not False
+
+
+def set_watching_installs(value: bool) -> None:
+    with _LOCK:
+        state = _load()
+        state["watch_installs"] = bool(value)
+        if not value:
+            state.pop("seen", None)
+        _save(state)
+
+
+def changes(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """Apps to tell about since the last look, which this records: newly installed ones at 建议处理
+    or 留意, and ones that rose to 建议处理. The first look only records."""
+    with _LOCK:
+        state = _load()
+        seen = state.get("seen")
+        state["seen"] = {app["package"]: app["level"] for app in report["apps"]}
+        _save(state)
+    if not isinstance(seen, dict):
+        return []
+    return [app for app in report["apps"]
+            if (app["level"] == "high" and seen.get(app["package"]) != "high")
+            or (app["level"] == "medium" and app["package"] not in seen)]  # fmt: skip
+
+
+def notice(apps: list[dict[str, Any]]) -> dict[str, str]:
+    """The notification for [apps], in both languages."""
+    if len(apps) == 1:
+        app = apps[0]
+        reasons = [_SHORT[code] for code in app["signals"] if code in _SHORT][:3]
+        new = app.get("first_install") and time.time() * 1000 - app["first_install"] < 2 * _DAY_MS
+        return {
+            "title_zh": f"{'新装的' if new else ''}「{app['label']}」{'建议处理' if app['level'] == 'high' else '需要留意'}",
+            "title_en": f"{'Newly installed ' if new else ''}“{app['label']}” {'needs a look' if app['level'] == 'high' else 'may need a look'}",
+            "text_zh": "、".join(zh for zh, _ in reasons) + "。点开看看，可以卸载或收回权限。",
+            "text_en": ", ".join(en for _, en in reasons).capitalize() + ". Open to see it; you can remove it or take powers back.",
+        }
+    names = "、".join(app["label"] for app in apps[:4])
+    return {
+        "title_zh": f"{len(apps)} 个应用需要留意",
+        "title_en": f"{len(apps)} apps may need a look",
+        "text_zh": f"{names}。点开看看，可以卸载或收回权限。",
+        "text_en": ", ".join(app["label"] for app in apps[:4]) + ". Open to see them; you can remove them or take powers back.",
+    }
+
+
+def watch_once() -> list[dict[str, Any]]:
+    """One look (the engine's loop calls this about every 30 minutes): tells about what changed."""
+    if not watching() or not available():
+        return []
+    found = changes(scan_phone())
+    if found:
+        _call({"action": "notify", **notice(found)})
+    return found
+
+
 # ---- On the phone (AppAudit.kt) ----
 
 def _bridge() -> Any:
@@ -278,7 +354,7 @@ def _call(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def scan_phone() -> dict[str, Any]:
-    return assess(_call({"action": "scan"}))
+    return {**assess(_call({"action": "scan"})), "watch_installs": watching()}
 
 
 def set_watching(enabled: bool) -> bool:

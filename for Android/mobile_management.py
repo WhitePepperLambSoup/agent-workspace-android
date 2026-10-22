@@ -70,13 +70,27 @@ class MobileManagement:
         self._job = asyncio.create_task(self._run(), name="mobile-management")
 
     async def _run(self):
-        await asyncio.gather(self.schedules.run(), self.outbox.run(), self._mirror_loop())
+        await asyncio.gather(self.schedules.run(), self.outbox.run(), self._mirror_loop(), self._app_watch_loop(),
+                             self._calendar_loop())
 
     async def _mirror_loop(self):
         while True:
             with suppress(Exception):
                 self.mirror_schedules()
             await asyncio.sleep(30)
+
+    async def _app_watch_loop(self):
+        """应用体检 in the background: a newly installed app with large powers, or one that newly
+        holds one, is told about with a notification (mobile_app_audit.watch_once)."""
+        if os.getenv("AGENT_WORKSPACE_EMBEDDED_PYTHON") != "chaquopy":
+            return
+        import mobile_app_audit
+
+        await asyncio.sleep(90)
+        while True:
+            with suppress(Exception):
+                await asyncio.to_thread(mobile_app_audit.watch_once)
+            await asyncio.sleep(1800)
 
     def stop(self):
         if self._job:
@@ -274,10 +288,15 @@ class MobileManagement:
             return 400, {"error": str(error)}
         if path != "/mobile/triggers/fire":
             return 404, {"error": "unknown trigger route"}
+        fired = mobile_triggers.fire(str(payload.get("kind") or ""), str(payload.get("value") or ""),
+                                     previous=str(payload.get("previous") or ""))
+        return 200, {"started": await self._start_triggered(fired)}
+
+    async def _start_triggered(self, items):
         from mobile_protocol import parse_mobile_task_request
 
         started = []
-        for item in mobile_triggers.fire(str(payload.get("kind") or ""), str(payload.get("value") or "")):
+        for item in items:
             try:
                 if item.get("shortcut_id"):
                     self._start_shortcut(item["shortcut_id"])
@@ -285,15 +304,39 @@ class MobileManagement:
                 elif item.get("workflow_id"):
                     result = await self.workflows.start(item["workflow_id"], {"session_id": item["session_id"]}, self.controller, self.system)
                 else:
+                    prompt = item["prompt"]
+                    if item.get("event"):
+                        # Which event it is ("日程：周会，10:00–11:00，3 楼会议室"), in the phone's language.
+                        prompt += "\n\n" + str(item["event"].get("line") or item["event"].get("title") or "")[:500]
                     request = parse_mobile_task_request({
-                        "session_id": item["session_id"], "prompt": item["prompt"],
+                        "session_id": item["session_id"], "prompt": prompt,
                         "phone_control": bool(item.get("phone_control")),
                     })
                     result = (await self.controller.submit(request, preauthorized=True)).to_dict()
                 started.append({"trigger_id": item["trigger_id"], "result": result})
             except Exception as error:  # one trigger failing must not stop the others
                 started.append({"trigger_id": item["trigger_id"], "error": str(error)[:300]})
-        return 200, {"started": started}
+        return started
+
+    async def _calendar_loop(self):
+        """Calendar triggers: once a minute, while one is on, the events starting soon."""
+        if os.getenv("AGENT_WORKSPACE_EMBEDDED_PYTHON") != "chaquopy":
+            return
+        import json
+
+        import mobile_triggers
+        from java import jclass
+
+        calendar = jclass("com.agentworkspace.mobile.capabilities.AndroidClockCalendar")
+        while True:
+            await asyncio.sleep(60)
+            with suppress(Exception):
+                lead = mobile_triggers.calendar_lead()
+                if lead:
+                    found = json.loads(str(await asyncio.to_thread(calendar.upcoming, lead + 1)))
+                    due = mobile_triggers.calendar_due(found.get("events") or [])
+                    if due:
+                        await self._start_triggered(due)
 
     def _start_shortcut(self, shortcut_id):
         """Runs a shortcut in the background (mobile_shortcuts.run waits for every step); one at a
@@ -925,6 +968,16 @@ class MobileManagement:
                 return 400, {"error": str(error)}
             except Exception as error:
                 return 503, {"error": f"background screen unavailable: {error}"[:300]}
+        if path == "/mobile/elder/sos":
+            # 一键求救: the Messages app opens with a text to the family member; nothing is sent by itself.
+            import mobile_elder
+
+            try:
+                return 200, await asyncio.to_thread(mobile_elder.sos)
+            except ValueError as error:
+                return 400, {"error": str(error)}
+            except Exception as error:
+                return 503, {"error": f"{error}"[:300]}
         if path == "/mobile/elder":
             # 长辈模式 settings; turning it off or changing the PIN needs the PIN when one is set.
             import mobile_elder
@@ -941,6 +994,9 @@ class MobileManagement:
             try:
                 if action == "watch" and isinstance(payload.get("enabled"), bool):
                     return 200, {"watching": await asyncio.to_thread(audit.set_watching, payload["enabled"])}
+                if action == "watch_installs" and isinstance(payload.get("enabled"), bool):
+                    await asyncio.to_thread(audit.set_watching_installs, payload["enabled"])
+                    return 200, {"watch_installs": payload["enabled"]}
                 if action == "trust" and isinstance(payload.get("trusted"), bool):
                     await asyncio.to_thread(audit.set_trusted, payload.get("package_name"), payload["trusted"])
                     return 200, {"ok": True}
@@ -951,7 +1007,7 @@ class MobileManagement:
                 return 400, {"error": str(error)}
             except Exception as error:
                 return 503, {"error": f"{error}"[:300]}
-            return 400, {"error": "action must be watch, trust or open"}
+            return 400, {"error": "action must be watch, watch_installs, trust or open"}
         if path == "/mobile/app-notes":
             import mobile_app_notes as notes
 

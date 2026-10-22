@@ -136,6 +136,7 @@
         : report.medium ? t("检查了 {0} 个你装的应用：{1} 个可以留意。", report.checked, report.medium)
           : t("检查了 {0} 个你装的应用，没有发现明显的问题。", report.checked));
     $("appCheckWatch").checked = report.watching === true;
+    $("appCheckInstalls").checked = report.watch_installs !== false;
     pageStatus($("appCheckWatchStatus"), report.watching && !report.watch_ready
       ? t("本应用的无障碍服务没开，现在记录不到弹窗。可以在「设备与工具」里打开。") : "", report.watching && !report.watch_ready);
   }
@@ -148,6 +149,13 @@
     toggle.disabled = true;
     try { await appCheckPost({ action: "watch", enabled: toggle.checked }); await loadAppCheck(); }
     catch (error) { toggle.checked = !toggle.checked; pageStatus($("appCheckWatchStatus"), localizeError(error.message), true); }
+    finally { toggle.disabled = false; }
+  });
+  $("appCheckInstalls")?.addEventListener("change", async (event) => {
+    const toggle = event.target;
+    toggle.disabled = true;
+    try { await appCheckPost({ action: "watch_installs", enabled: toggle.checked }); }
+    catch (error) { toggle.checked = !toggle.checked; pageStatus($("appCheckStatus"), localizeError(error.message), true); }
     finally { toggle.disabled = false; }
   });
   $("btnAppCheckAsk")?.addEventListener("click", () => {

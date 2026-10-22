@@ -56,6 +56,10 @@
   async function loadShortcuts() {
     const status = $("shortcutsStatus");
     clearTimeout(shortcutPoll);
+    // What people who import this phone's shortcuts see as the signer.
+    const identity = shareIdentity();
+    $("shareFingerprint").hidden = !identity;
+    if (identity) $("shareFingerprint").textContent = t("你的分享指纹：{0}。别人导入你分享的快捷操作时会看到它，可以当面或打电话核对。", identity.fingerprint);
     try {
       const value = await apiJson("/mobile/shortcuts");
       if (disposed) return;
@@ -296,8 +300,13 @@
     task.card.appendChild(button);
   }
 
-  // ---- Share codes: a shortcut as text, checked for damage, reviewed before it is installed ------
+  // ---- Share codes: a shortcut as text, signed by the phone that made it, reviewed before it is
+  // installed. "AW-SHORTCUT-2.<body>.<public key>.<signature>" is signed with this install's key in
+  // the Android Keystore (ShareSignature.kt); "AW-SHORTCUT-1.<body>.<checksum>" (older versions)
+  // only catches a damaged code and says nothing about who made it.
   const codePrefix = "AW-SHORTCUT-1.";
+  const signedPrefix = "AW-SHORTCUT-2.";
+  const knownAuthorsKey = "agent-share-authors-v1";
   function codeChecksum(text) {
     let hash = 0x811c9dc5;  // FNV-1a: catches a damaged or cut-off code (not a signature)
     for (let index = 0; index < text.length; index += 1) { hash ^= text.charCodeAt(index); hash = Math.imul(hash, 0x01000193) >>> 0; }
@@ -306,40 +315,126 @@
   function shortcutCode(shortcut) {
     const json = JSON.stringify({ name: shortcut.name, app: shortcut.app || null, steps: shortcut.steps });
     const body = btoa(String.fromCharCode(...new TextEncoder().encode(json))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    if (typeof bridge?.signShareCode === "function") {
+      try {
+        const signed = JSON.parse(bridge.signShareCode(`${signedPrefix}${body}`) || "{}");
+        if (signed.ok) return `${signedPrefix}${body}.${signed.public_key}.${signed.signature}`;
+      } catch { /* An unsigned code below still shares the shortcut. */ }
+    }
     return `${codePrefix}${body}.${codeChecksum(body)}`;
   }
-  function readShortcutCode(text) {
-    const code = String(text || "").replace(/\s+/g, "");
-    const at = code.indexOf(codePrefix);
-    if (at < 0) throw new Error(t("这不是快捷操作的分享码"));
-    const [body, checksum] = code.slice(at + codePrefix.length).split(".");
-    if (!body || codeChecksum(body) !== checksum) throw new Error(t("分享码不完整或被改动过"));
+  function decodeShortcut(body) {
     const binary = atob(body.replace(/-/g, "+").replace(/_/g, "/"));
     const value = JSON.parse(new TextDecoder().decode(Uint8Array.from(binary, (char) => char.charCodeAt(0))));
     if (!value || typeof value.name !== "string" || !Array.isArray(value.steps) || !value.steps.length) throw new Error(t("分享码里没有可用的步骤"));
     return value;
+  }
+  function shareIdentity() {
+    if (shareIdentity.value === undefined) {
+      try { shareIdentity.value = typeof bridge?.shareIdentity === "function" ? JSON.parse(bridge.shareIdentity() || "{}") : null; }
+      catch { shareIdentity.value = null; }
+      if (!shareIdentity.value?.ok) shareIdentity.value = null;
+    }
+    return shareIdentity.value;
+  }
+  // The shortcut, and who signed it: signer is null for an unsigned code.
+  function readShortcutCode(text) {
+    const code = String(text || "").replace(/\s+/g, "");
+    const signedAt = code.indexOf(signedPrefix);
+    if (signedAt >= 0) {
+      const [body, key, signature] = code.slice(signedAt + signedPrefix.length).split(".");
+      if (!body || !key || !signature) throw new Error(t("分享码不完整或被改动过"));
+      if (typeof bridge?.verifyShareCode !== "function") throw new Error(t("这里核对不了签名：请在手机上的 App 里导入"));
+      let check = {};
+      try { check = JSON.parse(bridge.verifyShareCode(`${signedPrefix}${body}`, signature, key) || "{}"); } catch { check = {}; }
+      if (!check.valid) throw new Error(t("签名对不上：分享码在签名后被改动过"));
+      return { shortcut: decodeShortcut(body), signer: { fingerprint: check.fingerprint, own: shareIdentity()?.public_key === key } };
+    }
+    const at = code.indexOf(codePrefix);
+    if (at < 0) throw new Error(t("这不是快捷操作的分享码"));
+    const [body, checksum] = code.slice(at + codePrefix.length).split(".");
+    if (!body || codeChecksum(body) !== checksum) throw new Error(t("分享码不完整或被改动过"));
+    return { shortcut: decodeShortcut(body), signer: null };
+  }
+
+  // Authors whose shortcuts were imported here before (fingerprint → the first one's name).
+  function knownAuthors() {
+    try { return JSON.parse(localStorage.getItem(knownAuthorsKey) || "{}") || {}; } catch { return {}; }
+  }
+  function rememberAuthor(fingerprint, name) {
+    const known = knownAuthors();
+    if (known[fingerprint]) return;
+    known[fingerprint] = { name: String(name).slice(0, 40), at: Date.now() };
+    const kept = Object.entries(known).sort((a, b) => b[1].at - a[1].at).slice(0, 50);
+    try { localStorage.setItem(knownAuthorsKey, JSON.stringify(Object.fromEntries(kept))); } catch { /* Only a convenience. */ }
+  }
+  function signerLine(signer) {
+    if (!signer) return t("没有签名：看不出是谁做的，也不能确认没被改过");
+    if (signer.own) return t("签名：你自己的");
+    const known = knownAuthors()[signer.fingerprint];
+    return known ? t("签名：指纹 {0}，你导入过这个人的{1}", signer.fingerprint, shortcutQuote(known.name))
+      : t("签名：指纹 {0}，第一次见到。可以请对方在「可复用流程」页看自己的指纹，核对一致再装", signer.fingerprint);
+  }
+
+  // What a shared shortcut needs and touches, ahead of its steps.
+  const sensitivePages = new Set(["accessibility", "security", "developer", "vpn", "apps", "app_details"]);
+  const outsidePages = new Set(["url", "map", "web_search", "dial"]);
+  // The payment firewall's words (PaymentFirewall.kt): a run stops at such a button.
+  const moneyWords = /支付(?!宝)|付款|买单|转账|提现|充值|免密|提交订单|立即购买|确认购买|确认下单|^pay|payment|checkout|placeorder|buynow|transfer|withdraw|topup/i; // i18n-ignore: words on other apps' buttons
+  function shortcutNeeds(shortcut) {
+    const steps = shortcut.steps;
+    const list = (items) => items.join(t("、"));
+    const lines = [t("控制手机（无障碍服务）：按记下的步骤点击、输入和滑动")];
+    const packages = [...new Set(steps.filter((step) => step.kind === "launch").map((step) => step.package))];
+    if (packages.length) lines.push(t("打开应用：{0}", list(packages.map(appName))));
+    const installed = new Set(appsOnPhone().map((app) => app.package));
+    const missing = installed.size ? packages.filter((name) => !installed.has(name)) : [];
+    if (missing.length) lines.push(t("这台手机上没装：{0}", list(missing)));
+    const pages = steps.filter((step) => step.kind === "page").map((step) => step.request || {});
+    const settingsPages = [...new Set(pages.filter((page) => !outsidePages.has(page.page)).map((page) => shortcutPages[page.page] || page.page))];
+    if (settingsPages.length) lines.push(t("打开系统设置：{0}", list(settingsPages)));
+    const links = pages.filter((page) => page.page === "url").map((page) => String(page.url || "").slice(0, 120));
+    if (links.length) lines.push(t("打开网页：{0}", list(links)));
+    const numbers = pages.filter((page) => page.page === "dial").map((page) => String(page.number || "").slice(0, 30));
+    if (numbers.length) lines.push(t("填好号码打开拨号界面：{0}", list(numbers)));
+    const typing = steps.filter((step) => step.kind === "type").map((step) => shortcutQuote(step.text));
+    if (typing.length) lines.push(t("输入文字：{0}", list(typing)));
+    const warnings = [];
+    if (pages.some((page) => sensitivePages.has(page.page))) warnings.push(t("会打开安全相关的设置页，只在清楚它要做什么时安装"));
+    const paying = steps.filter((step) => (step.kind === "tap" || step.kind === "find")
+      && moneyWords.test(String(step.label || step.text || "").replace(/\s+/g, "")));
+    if (paying.length) warnings.push(t("有付款类按钮（{0}）：运行到这一步会被拦下，要你自己点", list(paying.map((step) => shortcutQuote(step.label || step.text)))));
+    return { lines, warnings };
   }
 
   $("btnImportShortcut").addEventListener("click", async () => {
     const status = $("shortcutsStatus");
     const text = window.prompt(t("粘贴快捷操作的分享码"), "");
     if (!text) return;
-    let shared;
-    try { shared = readShortcutCode(text); } catch (error) { status.textContent = error.message; return; }
-    // What it will do, in words, with every app it opens and anything it types.
-    const apps = [...new Set(shared.steps.filter((step) => step.kind === "launch").map((step) => appName(step.package)))];
-    const typing = shared.steps.filter((step) => step.kind === "type").map((step) => shortcutQuote(step.text));
+    let read;
+    try { read = readShortcutCode(text); } catch (error) { status.textContent = error.message; return; }
+    const shared = read.shortcut;
+    // Who made it, what it needs, then every step in words.
+    const needs = shortcutNeeds(shared);
     const review = [
-      t("快捷操作{0}，共 {1} 步：", shortcutQuote(shared.name), shared.steps.length),
+      t("快捷操作{0}，共 {1} 步", shortcutQuote(shared.name), shared.steps.length),
+      signerLine(read.signer),
+      "",
+      t("需要的权限和会做的事："),
+      ...needs.lines.map((line) => `· ${line}`),
+      ...needs.warnings.map((line) => `⚠ ${line}`),
+      "",
+      t("步骤："),
       ...shared.steps.slice(0, 30).map((step, index) => `${index + 1}. ${describeShortcutStep(step)}`),
-      apps.length ? t("会打开：{0}", apps.join(t("、"))) : "",
-      typing.length ? t("会输入：{0}", typing.join(t("、"))) : "",
+      shared.steps.length > 30 ? t("……还有 {0} 步", shared.steps.length - 30) : null,
+      "",
       t("只从你信任的人那里导入。确定安装？"),
-    ].filter(Boolean).join("\n");
+    ].filter((line) => line !== null).join("\n");
     if (!window.confirm(review)) return;
     try {
       await postShortcut("/mobile/shortcuts", { name: shared.name.slice(0, 40), app: shared.app || null, steps: shared.steps });
       if (disposed) return;
+      if (read.signer && !read.signer.own) rememberAuthor(read.signer.fingerprint, shared.name);
       status.textContent = t("已导入{0}", shortcutQuote(shared.name));
       void loadShortcuts();
     } catch (error) { if (!disposed) status.textContent = t("导入失败：{0}", error.message); }
