@@ -131,6 +131,29 @@
       </div>
     </section>
   </div>
+  <!-- 长辈模式: covers the app while it is on (90-elder.js). -->
+  <section id="elderScreen" class="elder-screen" aria-label="长辈模式" hidden>
+    <header class="elder-head"><strong id="elderToday"></strong></header>
+    <div id="elderTalk" class="elder-talk" aria-live="polite"></div>
+    <section id="elderApproval" class="elder-approval" aria-labelledby="elderApprovalText" hidden>
+      <p id="elderApprovalText"></p>
+      <div class="elder-approval-actions"><button id="elderReject" type="button">不要</button><button id="elderApprove" type="button">可以</button></div>
+    </section>
+    <p id="elderStatus" class="elder-status" role="status"></p>
+    <button id="elderSpeak" class="elder-speak" type="button"><span id="elderSpeakIcon" data-icon="mic"></span><span id="elderSpeakLabel">按一下，说话</span></button>
+    <form id="elderTypeForm" class="elder-type" hidden>
+      <textarea id="elderTypeInput" rows="2" maxlength="2000" placeholder="在这里打字" aria-label="打字提问"></textarea>
+      <div class="elder-type-actions"><button id="elderTypeCancel" type="button">不打了</button><button type="submit">发送</button></div>
+    </form>
+    <div class="elder-tiles">
+      <button id="elderPhoto" type="button"><span data-icon="camera"></span>拍照问问</button>
+      <button id="elderCall" type="button" hidden><span data-icon="phone"></span><span id="elderCallLabel">打给家人</span></button>
+    </div>
+    <div class="elder-foot">
+      <button id="elderTypeToggle" class="elder-link" type="button">打字</button>
+      <button id="elderExit" class="elder-exit" type="button"><span data-icon="log-out"></span>按住两秒退出</button>
+    </div>
+  </section>
   <div id="settingsOverlay" hidden>
     <button id="settingsBackdrop" type="button" aria-label="关闭菜单" tabindex="-1"></button>
     <aside id="settingsSheet" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
@@ -183,6 +206,7 @@
           <h3 id="menuSectionDevice" class="menu-section-title">设备与连接</h3>
           <div class="menu-group">
             <button id="btnDoctorPage" class="menu-row" type="button" data-keywords="无障碍 诊断 工具链 浏览器 电池优化 后台运行 闹钟 日历 日程 python git accessibility toolchain battery alarm calendar"><span data-icon="activity"></span><span>设备与工具</span><span data-icon="chevron-right"></span></button>
+            <button id="btnAppCheckPage" class="menu-row" type="button" data-keywords="杀毒 病毒 流氓软件 广告 弹窗 卸载 权限 安全 清理 antivirus virus malware adware popup ads uninstall permission security"><span data-icon="shield-check"></span><span>应用体检<small>找出乱弹窗、乱拿权限的应用</small></span><span data-icon="chevron-right"></span></button>
             <button id="btnServicesPage" class="menu-row" type="button"><span data-icon="server"></span><span>后台服务<small id="menuServicesSummary">AI 启动的、一直运行的程序</small></span><span data-icon="chevron-right"></span></button>
             <button id="btnSkillsPage" class="menu-row" type="button" data-keywords="技能包 导入 github 更新 skill skills pack import update"><span data-icon="sparkles"></span><span>技能</span><span data-icon="chevron-right"></span></button>
             <button id="btnExtensionsPage" class="menu-row" type="button"><span data-icon="puzzle"></span><span>MCP 与扩展</span><span data-icon="chevron-right"></span></button>
@@ -195,6 +219,7 @@
           <h3 id="menuSectionApp" class="menu-section-title">应用</h3>
           <div class="menu-group">
             <button id="btnAppearancePage" class="menu-row" type="button" data-keywords="主题 深色 浅色 字体 字号 语言 外观 快捷任务 theme dark font language"><span data-icon="palette"></span><span>界面偏好</span><span data-icon="chevron-right"></span></button>
+            <button id="btnElderPage" class="menu-row" type="button" data-keywords="老人 长辈 关怀 父母 大字 语音 读出来 elder senior parents large voice read aloud"><span data-icon="heart"></span><span>长辈模式<small>大按钮、说话提问、回答读出来</small></span><span data-icon="chevron-right"></span></button>
             <button id="btnGlobalEntryPage" class="menu-row" type="button" data-keywords="悬浮球 圈选 截屏 截图 提问 快捷设置 桌面快捷方式 floating bubble circle screenshot screen tile shortcut" hidden><span data-icon="sparkles"></span><span>全局入口<small>悬浮球、快捷设置开关、桌面图标快捷方式</small></span><span data-icon="chevron-right"></span></button>
             <button id="btnBackupPage" class="menu-row" type="button" data-keywords="导出 导入 迁移 换手机 backup restore" hidden><span data-icon="database-backup"></span><span>备份与恢复<small>换手机或重装前保存会话和设置</small></span><span data-icon="chevron-right"></span></button>
             <button id="btnProviderSettings" class="menu-row" type="button" data-keywords="API 密钥 地址 provider key url" hidden><span data-icon="settings"></span><span>服务商与 API 设置</span><span data-icon="chevron-right"></span></button>
@@ -344,6 +369,37 @@
           </div>
           <p id="notificationDigestStatus" class="page-status" role="status"></p>
         </div>
+      </div>
+      <div id="settingsElder" class="settings-page" hidden>
+        <p class="setting-hint">长辈模式把整个界面换成一个大大的「说话」按钮：按一下说出想问的事，AI 用简短的话回答，并读出来。设提醒、问手机怎么用，也都直接说。另有「拍照问问」和「打给家人」两个按钮。适合家里的老人用，最好由家人先在这里设置好。</p>
+        <div class="management-section">
+          <strong>家人</strong>
+          <label for="elderFamilyName">称呼</label><input id="elderFamilyName" type="text" maxlength="12" placeholder="例如：儿子、女儿" autocomplete="off">
+          <label for="elderFamilyPhone">电话</label><input id="elderFamilyPhone" type="tel" maxlength="20" placeholder="点「打给家人」时拨这个号码" autocomplete="off">
+          <p class="setting-hint">电话只存在这台手机上，不会发给 AI。称呼会告诉 AI，遇到像是骗局的事时，它会提醒先问家人。</p>
+        </div>
+        <label class="toggle-row" for="elderReadAloud"><span>自动读出回答</span><input id="elderReadAloud" type="checkbox" checked></label>
+        <label class="toggle-row" for="elderSlowSpeech"><span>读得慢一点</span><input id="elderSlowSpeech" type="checkbox" checked></label>
+        <div class="management-section">
+          <strong>退出密码</strong>
+          <p class="setting-hint">设了以后，退出长辈模式要输入这个数字密码，免得误操作退出。可以不设。</p>
+          <input id="elderPin" type="password" inputmode="numeric" maxlength="6" placeholder="4 到 6 位数字" aria-label="退出密码" autocomplete="off">
+          <div class="page-toolbar"><button id="btnElderPinSave" class="button-secondary" type="button">设置密码</button><button id="btnElderPinRemove" class="button-secondary" type="button" hidden>去掉密码</button></div>
+        </div>
+        <p id="elderSettingsStatus" class="page-status" role="status"></p>
+        <p class="setting-hint">进入后，长辈说的话会直接发给 AI 来回答，查天气、搜网页也不再每次询问；话里像有银行卡号、密码时，或 AI 要替长辈操作手机、发消息时，仍会先问。</p>
+        <button id="btnElderStart" class="button-primary elder-start" type="button"><span data-icon="heart"></span>进入长辈模式</button>
+      </div>
+      <div id="settingsAppCheck" class="settings-page" hidden>
+        <button id="btnAppCheckRefresh" data-header-action class="icon-button" type="button" aria-label="重新检查" title="重新检查"><span data-icon="refresh-cw"></span></button>
+        <p class="setting-hint">看看你自己装的应用拿了哪些大权限（读屏幕、读通知、设备管理器等），是不是从应用商店装的，有没有桌面图标，会不会自己弹出来。这不是病毒扫描，只看系统给出的事实，要不要处理由你决定。卸载时会弹出系统的确认框。</p>
+        <p id="appCheckStatus" class="page-status" role="status"></p>
+        <div id="appCheckList" class="app-check-list"></div>
+        <details id="appCheckOthers" class="management-section" hidden><summary id="appCheckOthersTitle">其他应用</summary><div id="appCheckOtherList" class="app-check-list"></div></details>
+        <label class="toggle-row app-check-watch" for="appCheckWatch"><span>记录弹窗来源</span><input id="appCheckWatch" type="checkbox"></label>
+        <p class="setting-hint">打开后，会记下哪个应用在你没点它时自己跳到前台，或用悬浮窗盖住大半个屏幕。只记应用和时间，保存 7 天，不离开这台手机；关闭时清除。需要开着本应用的无障碍服务。</p>
+        <p id="appCheckWatchStatus" class="page-status" role="status"></p>
+        <button id="btnAppCheckAsk" class="button-secondary" type="button"><span data-icon="sparkles"></span>让 AI 帮我处理</button>
       </div>
       <div id="settingsGlobalEntry" class="settings-page" hidden>
         <p class="setting-hint">在手机的任何地方都能快速开一个新对话。</p>
@@ -625,7 +681,7 @@
           <strong>版本与更新</strong>
           <p id="updateStatus" class="page-status" role="status"></p>
           <button id="btnCheckUpdates" class="menu-row" type="button"><span data-icon="download"></span><span>检查更新</span><span data-icon="chevron-right"></span></button>
-          <label class="toggle-row" for="autoUpdateToggle"><span>每天自动检查新版本</span><input id="autoUpdateToggle" type="checkbox"></label>
+          <label class="toggle-row" for="autoUpdateToggle"><span>自动检查新版本<small>每次打开应用时，以及大约每 12 小时</small></span><input id="autoUpdateToggle" type="checkbox"></label>
           <p class="setting-hint">关闭后不会在后台检查，仍可随时手动检查。从 GitHub 发布页下载，安装前会校验 SHA-256 和签名；安装需要你在系统安装界面确认。</p>
         </div>
         <div class="management-section">

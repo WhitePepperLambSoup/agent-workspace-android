@@ -266,6 +266,10 @@ def configure_android_registry(
 
     if personal_tools_available():
         factories.update(personal_tools())
+    from .app_audit_tools import app_audit_available, app_audit_tools
+
+    if app_audit_available():
+        factories.update(app_audit_tools())
     from .notification_tools import notification_tools, notification_tools_available
 
     if notification_tools_available():

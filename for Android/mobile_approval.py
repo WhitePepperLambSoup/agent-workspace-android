@@ -38,11 +38,12 @@ ApprovalRequestListener = Callable[[dict[str, Any]], Awaitable[None] | None]
 # request of the same task, until it ends, except the tools below.
 APPROVAL_SCOPES = frozenset({"once", "session", "task"})
 # A task-wide approval never covers deleting files, changing long-term memory (app notes too),
-# operating other apps or sending a message as the user: those still ask each time. The exception
-# is a task the user started from the phone control panel to operate the phone: there "allow for
-# this task" covers its taps and typing (never a reply sent from a notification).
+# operating other apps, removing an app or taking back its powers (manage_app), or sending a
+# message as the user: those still ask each time. The exception is a task the user started from
+# the phone control panel to operate the phone: there "allow for this task" covers its taps and
+# typing (never a reply sent from a notification).
 _ALWAYS_ASK_TOOLS = frozenset(
-    {"delete_path", "memory_write", "app_note", "android_action", "notification_reply"}
+    {"delete_path", "memory_write", "app_note", "android_action", "notification_reply", "manage_app"}
 )
 _PHONE_CONTROL_TOOLS = frozenset({"android_action"})
 # A message sent as the user: approved one at a time, whatever scope is picked (a "session" grant

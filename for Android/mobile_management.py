@@ -464,6 +464,17 @@ class MobileManagement:
             import mobile_step_tutorial
 
             return 200, {"frames": await asyncio.to_thread(mobile_step_tutorial.preview, query.get("task_id", [""])[0])}
+        if path == "/mobile/elder":
+            import mobile_elder
+
+            return 200, await asyncio.to_thread(mobile_elder.settings)
+        if path == "/mobile/app-audit":
+            import mobile_app_audit
+
+            try:
+                return 200, await asyncio.to_thread(mobile_app_audit.scan_phone)
+            except Exception as error:
+                return 503, {"error": f"could not check the apps: {error}"[:300]}
         if path == "/mobile/step-shots/tasks":
             import mobile_step_tutorial
 
@@ -807,8 +818,12 @@ class MobileManagement:
             text = " ".join(str(payload.get("text") or "").split())[:4000]
             if not text:
                 return 400, {"error": "nothing to read"}
+            rate = payload.get("rate", 1)
+            if isinstance(rate, bool) or not isinstance(rate, (int, float)) or not 0.5 <= rate <= 1.5:
+                return 400, {"error": "rate is a number from 0.5 to 1.5"}
             request_id = str(_uuid.uuid4())
-            return 200, {"request_id": request_id, **_json.loads(str(await asyncio.to_thread(speech.startSpeak, request_id, text)))}
+            started = await asyncio.to_thread(speech.startSpeakAt, request_id, text, float(rate))
+            return 200, {"request_id": request_id, **_json.loads(str(started))}
         if path == "/mobile/provider/extras":
             from android_adapter.provider_transport import save_extras
 
@@ -910,6 +925,33 @@ class MobileManagement:
                 return 400, {"error": str(error)}
             except Exception as error:
                 return 503, {"error": f"background screen unavailable: {error}"[:300]}
+        if path == "/mobile/elder":
+            # 长辈模式 settings; turning it off or changing the PIN needs the PIN when one is set.
+            import mobile_elder
+
+            try:
+                return 200, await asyncio.to_thread(mobile_elder.update, payload)
+            except ValueError as error:
+                return 400, {"error": str(error)}
+        if path == "/mobile/app-audit":
+            # 应用体检: the pop-up record, apps marked as fine, and the pages that undo an app's powers.
+            import mobile_app_audit as audit
+
+            action = payload.get("action")
+            try:
+                if action == "watch" and isinstance(payload.get("enabled"), bool):
+                    return 200, {"watching": await asyncio.to_thread(audit.set_watching, payload["enabled"])}
+                if action == "trust" and isinstance(payload.get("trusted"), bool):
+                    await asyncio.to_thread(audit.set_trusted, payload.get("package_name"), payload["trusted"])
+                    return 200, {"ok": True}
+                if action == "open":
+                    await asyncio.to_thread(audit.open_page, payload.get("package_name"), payload.get("page"))
+                    return 200, {"ok": True}
+            except ValueError as error:
+                return 400, {"error": str(error)}
+            except Exception as error:
+                return 503, {"error": f"{error}"[:300]}
+            return 400, {"error": "action must be watch, trust or open"}
         if path == "/mobile/app-notes":
             import mobile_app_notes as notes
 

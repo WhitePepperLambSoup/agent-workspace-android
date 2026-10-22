@@ -116,9 +116,17 @@ class AppSupportController(
 
     // ---- Updates ----
 
-    /** Once a day, a few seconds after launch, quietly ask GitHub for a newer release. */
-    fun autoCheckIfDue() {
-        if (!UpdateChecker.dueForAutoCheck(activity)) return
+    /**
+     * At each start of the app (not a re-creation), a few seconds in, quietly ask GitHub for a newer
+     * release; a newer one is offered every time until it is installed or skipped. The background
+     * check (UpdateCheckWorker) is scheduled from here, in the process WorkManager runs in.
+     */
+    fun autoCheckAtStart(freshStart: Boolean) {
+        UpdateCheckWorker.schedule(activity)
+        if (freshStart && UpdateChecker.dueAtStart(activity)) checkSoon()
+    }
+
+    private fun checkSoon() {
         scope.launch {
             delay(8000)
             if (updateJob?.isActive != true) check(manual = false)
@@ -254,6 +262,8 @@ class AppSupportController(
 
     /** Back from the "install unknown apps" screen: continue a verified update once it is allowed. */
     fun onResume() {
+        // Back in the app after twelve hours or more: check again, as the background check would.
+        if (UpdateChecker.dueForAutoCheck(activity) && updateJob?.isActive != true) checkSoon()
         val apk = pendingInstall ?: return
         if (Build.VERSION.SDK_INT >= 26 && !activity.packageManager.canRequestPackageInstalls()) return
         if (apk.isFile) install(apk) else pendingInstall = null

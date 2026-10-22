@@ -106,6 +106,7 @@ def _prompt_sections(session_id: str | None = None, registry: Any | None = None)
     """The parts of the Android system prompt that change over time."""
     if not os.getenv("AGENT_WORKSPACE_DATA_DIR"):
         return {}
+    from mobile_elder import elder_system_suffix
     from mobile_environment import environment_section
     from mobile_memory import memory_system_suffix
 
@@ -122,6 +123,8 @@ def _prompt_sections(session_id: str | None = None, registry: Any | None = None)
         "knowledge": knowledge_system_suffix(session_id),
         # Installed skills by name and purpose; use_skill loads one when a request matches.
         "skills": skills_system_suffix() if "use_skill" in tools else "",
+        # 长辈模式: short spoken replies and care with scams while it is on.
+        "elder": elder_system_suffix(),
     }
 
 
@@ -214,7 +217,7 @@ _PHONE_TOOLS = frozenset(
         "list_calendar_events", "add_calendar_event", "memory_search", "memory_write",
         "knowledge_search", "read_file", "write_file", "list_files", "use_skill", "save_skill",
         "system_status", "system_settings", "find_contacts", "current_location", "compose_sms",
-        "active_notifications", "notification_reply", "notification_open",
+        "active_notifications", "notification_reply", "notification_open", "app_audit", "manage_app",
     }
 )
 

@@ -2547,8 +2547,37 @@ class SQLiteEventStore:
                 if isinstance(start, int) and 0 < start < cast(int, row["sequence"]):
                     rewound.append((start, cast(int, row["sequence"])))
 
+            # A message the user declined to send (provider egress rejected, and nothing of that
+            # turn ever approved) never leaves later either: it stays out of the context.
+            declined = {
+                cast(int, row["sequence"])
+                for row in connection.execute(
+                    """
+                    SELECT message.sequence AS sequence
+                    FROM events AS message
+                    WHERE message.session_id = ? AND message.sequence > ?
+                      AND message.type = 'message.created'
+                      AND json_extract(message.data_json, '$.role') = 'user'
+                      AND message.correlation_id IS NOT NULL
+                      AND EXISTS (
+                        SELECT 1 FROM events AS decision
+                        WHERE decision.session_id = message.session_id
+                          AND decision.correlation_id = message.correlation_id
+                          AND decision.type = 'provider.egress.rejected'
+                      )
+                      AND NOT EXISTS (
+                        SELECT 1 FROM events AS decision
+                        WHERE decision.session_id = message.session_id
+                          AND decision.correlation_id = message.correlation_id
+                          AND decision.type = 'provider.egress.approved'
+                      )
+                    """,
+                    (session_id, boundary),
+                )
+            }
+
             def kept(sequence: int) -> bool:
-                return not any(start <= sequence < end for start, end in rewound)
+                return sequence not in declined and not any(start <= sequence < end for start, end in rewound)
 
             metadata = connection.execute(
                 f"""
@@ -2590,7 +2619,7 @@ class SQLiteEventStore:
                 """,
                 (session_id, selected_cutoff, boundary, *_CONTEXT_EVENT_TYPES),
             ).fetchall()
-            if rewound:
+            if rewound or declined:
                 rows = [row for row in rows if kept(cast(int, row["sequence"]))]
         return self._events_from_rows(rows)
 

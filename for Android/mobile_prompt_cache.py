@@ -18,7 +18,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 # Sections that may change during a conversation, in system prompt order.
-SECTIONS = ("date", "environment", "memory", "knowledge", "skills")
+SECTIONS = ("date", "environment", "memory", "knowledge", "skills", "elder")
 _VERSION = 1
 _SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
@@ -61,11 +61,11 @@ LANGUAGE_TAIL = (
 
 def assemble(base: str, sections: dict[str, str]) -> str:
     """The Android system prompt suffix: guidance and date, the environment, memory, knowledge,
-    installed skills, and the language rule last."""
+    installed skills, elder mode, and the language rule last."""
     date = sections.get("date", "")
     parts = [f"{base}\n{date}" if date else base, sections.get("environment", ""),
              sections.get("memory", ""), sections.get("knowledge", ""), sections.get("skills", ""),
-             LANGUAGE_TAIL]
+             sections.get("elder", ""), LANGUAGE_TAIL]
     return "\n\n".join(part for part in parts if part)
 
 
@@ -88,6 +88,10 @@ def _note(section: str, text: str) -> str:
             "Context update: the memory notes changed after this conversation started. This "
             "replaces the memory section of the system prompt:\n\n" + text
         )
+    if section == "elder":
+        if not text:
+            return "Context update: elder mode was turned off; answer as usual from now on."
+        return "Context update: elder mode was turned on for this phone.\n\n" + text
     if section == "skills":
         if not text:
             return "Context update: no skills are installed or turned on any more."

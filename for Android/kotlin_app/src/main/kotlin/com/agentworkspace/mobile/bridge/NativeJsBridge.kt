@@ -234,6 +234,23 @@ class NativeJsBridge(
     @JavascriptInterface
     fun workspaceFileAction(requestJson: String): String = workspaceFileActionHandler(requestJson)
 
+    /**
+     * 长辈模式's call button: the phone's dialer with the number filled in; the call itself is the
+     * user's tap there (no call permission is needed or asked for).
+     */
+    @JavascriptInterface
+    fun dialNumber(number: String): String {
+        val cleaned = number.trim()
+        if (!Regex("\\+?[0-9][0-9 -]{2,19}").matches(cleaned)) {
+            return JSONObject().put("ok", false).put("error", "This is not a phone number").toString()
+        }
+        return runCatching {
+            context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + cleaned.filter { it.isDigit() || it == '+' }))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            JSONObject().put("ok", true).toString()
+        }.getOrElse { JSONObject().put("ok", false).put("error", "This phone has no dialer").toString() }
+    }
+
     /** Home-screen tools (HomeTools): the list. A page becomes one through workspaceFileAction "home_tool". */
     @JavascriptInterface
     fun getHomeTools(): String = HomeTools.listJson(context)

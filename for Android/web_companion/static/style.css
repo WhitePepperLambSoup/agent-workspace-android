@@ -878,6 +878,7 @@ strong { font-weight: 600; }
   border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); font-size: 14px; cursor: pointer;
 }
 .toggle-row + .toggle-row { margin-top: 8px; }
+.toggle-row small { display: block; margin-top: 2px; color: var(--text-3); font-size: 12px; line-height: 1.45; }
 .toggle-row input[type="checkbox"], .management-row > input[type="checkbox"] {
   -webkit-appearance: none; appearance: none; position: relative; flex: 0 0 46px; width: 46px; height: 28px; margin: 0;
   border-radius: var(--radius-pill); background: var(--switch-off); cursor: pointer; transition: background-color .2s;
@@ -1920,6 +1921,82 @@ pre.card-pending { max-height: 3.2em; overflow: hidden; opacity: .55; }
 .compare-answer .message-body { font-size: 14.5px; line-height: 1.6; overflow-wrap: anywhere; }
 .compare-actions { display: flex; justify-content: flex-end; gap: 10px; padding: 0 4px; }
 .compare-actions [hidden] { display: none; }
+/* 长辈模式: one screen over the app, large type, few big buttons (90-elder.js). */
+.elder-screen {
+  position: fixed; inset: 0; z-index: 70; display: flex; flex-direction: column; gap: 14px;
+  padding: max(14px, env(safe-area-inset-top)) 16px max(10px, env(safe-area-inset-bottom));
+  background: var(--bg); color: var(--text); overflow: hidden;
+}
+.elder-screen[hidden] { display: none; }
+.elder-head strong { font-size: 22px; font-weight: 700; }
+.elder-talk { display: flex; flex: 1; flex-direction: column; min-height: 0; padding: 2px; overflow-y: auto; overscroll-behavior: contain; }
+.elder-exchange { display: flex; flex-direction: column; gap: 14px; }
+.elder-asked {
+  align-self: flex-end; max-width: 88%; margin: 0; padding: 10px 16px; border-radius: 20px;
+  background: var(--surface-2); font-size: 21px; line-height: 1.45; overflow-wrap: anywhere;
+}
+.elder-answer { font-size: 24px; line-height: 1.6; overflow-wrap: anywhere; }
+.elder-answer p, .elder-answer ul, .elder-answer ol { margin: 0 0 8px; }
+.elder-again {
+  display: flex; align-items: center; align-self: flex-start; gap: 8px; min-height: 52px; padding: 0 20px;
+  border: 1px solid var(--border-strong); border-radius: 26px; background: var(--surface); color: var(--text);
+  font: inherit; font-size: 20px; font-weight: 600;
+}
+.elder-again svg { width: 24px; height: 24px; }
+.elder-hint { margin: auto 0; text-align: center; }
+.elder-hint p { margin: 0; font-size: 23px; line-height: 1.5; text-wrap: balance; }
+.elder-hint .elder-examples { margin-top: 18px; color: var(--text-2); font-size: 20px; line-height: 1.7; white-space: pre-line; }
+.elder-status { min-height: 1.4em; margin: 0; color: var(--text-2); font-size: 20px; line-height: 1.4; text-align: center; }
+.elder-approval { padding: 16px; border: 2px solid var(--accent); border-radius: 20px; background: var(--surface); }
+.elder-approval[hidden] { display: none; }
+.elder-approval p { margin: 0 0 14px; font-size: 23px; line-height: 1.5; }
+.elder-approval-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.elder-approval-actions button {
+  min-height: 68px; border: 2px solid var(--border-strong); border-radius: 18px;
+  background: var(--surface); color: var(--text); font: inherit; font-size: 26px; font-weight: 700;
+}
+#elderApprove { border-color: var(--accent); background: var(--accent); color: var(--accent-contrast); }
+.elder-speak {
+  display: flex; align-items: center; justify-content: center; gap: 12px; min-height: 96px; border: 0; border-radius: 48px;
+  background: var(--accent); color: var(--accent-contrast); font: inherit; font-size: 28px; font-weight: 700;
+}
+.elder-speak.stop { border: 2px solid var(--border-strong); background: var(--surface-2); color: var(--text); }
+.elder-speak svg { width: 40px; height: 40px; }
+.elder-speak:active, .elder-tiles button:active, .elder-again:active { transform: scale(.98); }
+.elder-tiles { display: grid; grid-auto-columns: minmax(0, 1fr); grid-auto-flow: column; gap: 10px; }
+.elder-tiles button {
+  display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 64px; padding: 4px 8px;
+  border: 1px solid var(--border-strong); border-radius: 18px; background: var(--surface); color: var(--text);
+  font: inherit; font-size: 21px; font-weight: 600;
+}
+.elder-tiles button[hidden] { display: none; }
+.elder-tiles svg { flex: none; width: 26px; height: 26px; }
+.elder-type[hidden] { display: none; }
+.elder-type { display: flex; flex-direction: column; gap: 10px; }
+.elder-type textarea {
+  min-height: 96px; padding: 12px 14px; border: 2px solid var(--accent); border-radius: 18px;
+  background: var(--surface); color: var(--text); font: inherit; font-size: 22px; line-height: 1.45; resize: none;
+}
+.elder-type-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.elder-type-actions button {
+  min-height: 60px; border: 1px solid var(--border-strong); border-radius: 18px; background: var(--surface);
+  color: var(--text); font: inherit; font-size: 22px; font-weight: 700;
+}
+.elder-type-actions button[type="submit"] { border-color: var(--accent); background: var(--accent); color: var(--accent-contrast); }
+.elder-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.elder-link, .elder-exit {
+  display: flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 14px; border: 0; border-radius: 22px;
+  background: transparent; color: var(--text-2); font: inherit; font-size: 16px;
+}
+.elder-link { color: var(--accent); text-decoration: underline; text-underline-offset: 4px; }
+.elder-exit { touch-action: none; -webkit-touch-callout: none; user-select: none; }
+.elder-exit svg { width: 18px; height: 18px; }
+.elder-exit.holding { background: var(--surface-2); color: var(--accent); }
+/* Typing, or a question waiting for an answer: everything else steps aside. */
+.elder-screen.typing .elder-speak, .elder-screen.typing .elder-tiles, .elder-screen.typing .elder-foot,
+.elder-screen.approving .elder-speak, .elder-screen.approving .elder-type, .elder-screen.approving .elder-tiles,
+.elder-screen.approving .elder-foot { display: none; }
+.button-primary.elder-start { display: inline-flex; align-items: center; gap: 8px; margin-top: 8px; }
 .home-tools { margin: 4px 0 14px; padding: 12px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface-2); }
 .home-tools[hidden] { display: none; }
 .home-tools h3 { margin: 0 0 8px; font-size: 14px; }
@@ -1957,3 +2034,25 @@ pre.card-pending { max-height: 3.2em; overflow: hidden; opacity: .55; }
 .step-tutorial-foot small { flex: 1 1 100%; color: rgba(255, 255, 255, .6); }
 .step-tutorial-foot .step-tutorial-status { flex: 1 1 0; color: #fff; }
 .step-tutorial-foot .step-tutorial-status.error { color: #ff8a8a; }
+/* ---------- 应用体检 (91-app-check.js) ---------- */
+.app-check-list { display: grid; gap: 10px; margin-top: 12px; }
+.app-check-list:empty { display: none; }
+.app-check-card {
+  display: grid; gap: 6px; min-width: 0; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+.app-check-card[data-level="high"] { border-color: var(--danger); }
+.app-check-card[data-level="medium"] { border-color: var(--warning-border); }
+.app-check-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.app-check-head strong { flex: 1; min-width: 0; font-size: 15px; overflow-wrap: anywhere; }
+.app-check-level { flex: none; padding: 2px 8px; border-radius: 999px; background: var(--surface-2); color: var(--text-2); font-size: 12px; }
+.app-check-card[data-level="high"] .app-check-level { background: var(--danger-soft); color: var(--danger); }
+.app-check-card[data-level="medium"] .app-check-level { background: var(--warning-soft); color: var(--warning); }
+.app-check-meta { color: var(--text-3); font-size: 12px; overflow-wrap: anywhere; }
+.app-check-reasons { margin: 0; padding-left: 18px; color: var(--text-2); font-size: 13px; line-height: 1.55; }
+.app-check-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.app-check-actions button { min-height: 34px; padding: 0 12px; font-size: 13px; }
+.app-check-actions .app-check-primary { border-color: var(--danger); color: var(--danger); }
+#appCheckOthers > summary { cursor: pointer; font-weight: 600; color: var(--text); }
+.app-check-watch { margin-top: 16px; }
+#btnAppCheckAsk { margin-top: 16px; }

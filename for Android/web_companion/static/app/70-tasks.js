@@ -17,6 +17,7 @@
       if (onceOnly) elements.approvalScopeSelector.value = "once";
       elements.approvalScopeSelector.disabled = onceOnly;
     }
+    elderApproval(approval);
   }
 
   // Approval requests arrive as engine records; the shelf says in words where data goes and what a
@@ -44,6 +45,12 @@
       if (details.tool === "notification_reply") {
         if (argumentsValue.to) lines.push(t("发给：{0}", plain(argumentsValue.to)));
         lines.push(t("内容：{0}", plain(argumentsValue.text ?? "")));
+        return lines.join("\n");
+      }
+      // Removing an app or taking back a power: which app, and the system page that opens.
+      if (details.tool === "manage_app") {
+        lines.push(t("应用：{0}", plain(argumentsValue.package_name ?? "")));
+        lines.push(t("打开：{0}", appCheckActionName(argumentsValue.page)));
         return lines.join("\n");
       }
       for (const [name, value] of Object.entries(argumentsValue)) {
@@ -269,6 +276,7 @@
       notice("");
       if (task.state !== "cancelled") { offerPlanExecution(task); offerShortcut(task); offerStepShots(task); continueVoiceConversation(task); }
     }
+    elderTaskDone(task);
     activeTask = null;
     if (backgroundTasks.get(task.sessionId) === task) backgroundTasks.delete(task.sessionId);
     settleUnfinishedTools();

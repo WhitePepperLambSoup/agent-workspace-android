@@ -47,6 +47,10 @@
     <uses-permission android:name="android.permission.WRITE_SETTINGS" />
     <!-- The optional app lock: the system fingerprint/face/screen-lock prompt. -->
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <!-- The app check (AppAudit) lists every installed app and what it may do; removing one opens
+         Android's own uninstall confirmation. -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
 
     <queries>
         <!-- Makers' app-launch (auto-start) pages, opened from BackgroundRunGuide. -->

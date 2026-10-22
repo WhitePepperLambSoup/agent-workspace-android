@@ -479,6 +479,7 @@
         importPickedFiles();
         attachQuickShare();
         sendQuickNote();
+        sendElderPhoto();
         reportImportErrors();
         if (snapshot.capture_error) pageStatus(elements.shareInboxStatus, localizeError(String(snapshot.capture_error)), true);
       }

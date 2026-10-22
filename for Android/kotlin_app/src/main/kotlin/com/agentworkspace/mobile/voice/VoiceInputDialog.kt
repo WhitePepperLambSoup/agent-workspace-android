@@ -28,6 +28,10 @@ class VoiceInputDialog(private val activity: Activity, private val onText: (Stri
     private val dialog = Dialog(activity)
     private val dark = (activity.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
         Configuration.UI_MODE_NIGHT_YES
+    // 长辈模式 (mobile_elder.py, agent-data/elder-mode.json): the same panel in large type.
+    private val scale = if (runCatching {
+            org.json.JSONObject(java.io.File(activity.filesDir, "agent-data/elder-mode.json").readText()).optBoolean("enabled")
+        }.getOrDefault(false)) 1.45f else 1f
     private val textColor = if (dark) Color.WHITE else 0xFF18201E.toInt()
     private val muted = if (dark) 0xB3FFFFFF.toInt() else 0x99000000.toInt()
     private val accent = 0xFF0F766E.toInt()
@@ -54,12 +58,12 @@ class VoiceInputDialog(private val activity: Activity, private val onText: (Stri
             }
         }
         val header = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        title.apply { textSize = 18f; setTextColor(textColor) }
+        title.apply { textSize = 18f * scale; setTextColor(textColor) }
         header.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         header.addView(meter, LinearLayout.LayoutParams(dp(56), dp(28)))
         panel.addView(header)
         transcript.apply {
-            textSize = 16f
+            textSize = 16f * scale
             setTextColor(textColor)
             setHintTextColor(muted)
             hint = UiText.of(activity, "请说话，说完停顿一下会自动结束", "Speak; pausing at the end finishes")
@@ -70,7 +74,7 @@ class VoiceInputDialog(private val activity: Activity, private val onText: (Stri
         panel.addView(transcript, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         panel.addView(TextView(activity).apply {
             text = UiText.of(activity, "离线识别 · 录音只在手机上处理", "Offline · audio stays on this phone")
-            textSize = 12f
+            textSize = 12f * scale
             setTextColor(muted)
             setPadding(0, 0, 0, dp(10))
         })
@@ -102,10 +106,10 @@ class VoiceInputDialog(private val activity: Activity, private val onText: (Stri
     }
 
     private fun button(view: TextView, filled: Boolean): TextView = view.apply {
-        textSize = 15f
+        textSize = 15f * scale
         gravity = Gravity.CENTER
-        minWidth = dp(72)
-        setPadding(dp(16), dp(9), dp(16), dp(9))
+        minWidth = dp((72 * scale).toInt())
+        setPadding(dp((16 * scale).toInt()), dp((9 * scale).toInt()), dp((16 * scale).toInt()), dp((9 * scale).toInt()))
         setTextColor(if (filled) Color.WHITE else accent)
         background = GradientDrawable().apply {
             cornerRadius = dp(20).toFloat()

@@ -1,5 +1,7 @@
   function handleBack() {
     if (disposed) return false;
+    // 长辈模式 stays on the back key: it only stops the reading (leaving needs the exit button).
+    if (elderOn() && !$("elderScreen").hidden) { void stopReading(); return true; }
     if (closeAttachMenu()) return true;
     if (!$("sessionSheet").hidden) { closeSessionSheet(); return true; }
     if (closeModelSheet()) return true;
@@ -500,6 +502,8 @@
     if (disposed || typeof text !== "string") return false;
     if (!text.trim() || text.length > maxSharedTextLength) return false;
     if (!currentSessionId || isLoadingSession || isPreparingSubmission || !historyReady) return false;
+    // Said on the 长辈模式 screen: it goes out from there (90-elder.js).
+    if (elderHeard(text)) return true;
     const nextText = elements.promptInput.value
       ? `${elements.promptInput.value}\n\n${text}` : text;
     const draft = {

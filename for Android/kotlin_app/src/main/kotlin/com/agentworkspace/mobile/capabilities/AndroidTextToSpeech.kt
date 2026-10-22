@@ -118,10 +118,16 @@ object AndroidTextToSpeech {
     @JvmStatic fun diagnosticString(): String = getStatusJson()
 
     @JvmStatic
-    fun startSpeak(requestId: String, text: String): String {
+    fun startSpeak(requestId: String, text: String): String = startSpeakAt(requestId, text, 1f)
+
+    /** [rate]: 1 is the engine's normal speed; 长辈模式 reads a little slower. */
+    @JvmStatic
+    fun startSpeakAt(requestId: String, text: String, rate: Float): String {
         val speakingGeneration = synchronized(lock) {
             if (!ready || engine == null) return JSONObject().put("accepted", false).put("reason", reason).toString()
-            if (!requestId.matches(Regex("[a-zA-Z0-9-]{1,64}")) || text.isEmpty() || text.length > 2000 || text.contains('\u0000')) {
+            // Android takes up to 4000 characters at once (TextToSpeech.getMaxSpeechInputLength).
+            if (!requestId.matches(Regex("[a-zA-Z0-9-]{1,64}")) || text.isEmpty() || text.length > 4000 || text.contains('\u0000') ||
+                rate !in 0.5f..1.5f) {
                 return JSONObject().put("accepted", false).put("reason", "Invalid bounded speech request").toString()
             }
             if (activeUtterance != null) return JSONObject().put("accepted", false).put("reason", "Android speech is already in progress").toString()
@@ -133,6 +139,7 @@ object AndroidTextToSpeech {
         mainHandler.post {
             synchronized(lock) {
                 if (generation != speakingGeneration || activeUtterance != requestId) return@synchronized
+                engine?.setSpeechRate(rate)
                 val result = engine?.speak(text, TextToSpeech.QUEUE_FLUSH, null, requestId)
                 if (result != TextToSpeech.SUCCESS) update(speakingGeneration, requestId,
                     "failed", "Android TTS could not start speech", result)

@@ -4,5 +4,12 @@
   syncWidgetQuickTasks();
   resizeVisibleViewport();
   syncControls();
-  (async () => { await loadSettings(); if (!disposed) await loadWorkspaces(); if (!disposed) await loadSessions(selectedSessionId); if (!disposed) refreshShareInbox(); })();
+  (async () => {
+    await loadSettings();
+    if (!disposed) await loadWorkspaces();
+    if (!disposed) await loadSessions(selectedSessionId);
+    if (!disposed) refreshShareInbox();
+    // 长辈模式 opens straight on its own screen.
+    if (!disposed) await loadElder();
+  })();
 })();

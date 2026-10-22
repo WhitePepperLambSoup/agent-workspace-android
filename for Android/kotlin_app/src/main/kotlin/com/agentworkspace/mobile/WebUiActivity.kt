@@ -891,7 +891,7 @@ class WebUiActivity : ComponentActivity() {
         voicePending = intent?.getBooleanExtra("voice_input", false) == true || intent?.action in listOf(Intent.ACTION_ASSIST, Intent.ACTION_VOICE_COMMAND)
         QuickEntry.publishShortcuts(this)
         initAndLaunchEngine()
-        appSupport.autoCheckIfDue()
+        appSupport.autoCheckAtStart(freshStart = savedInstanceState == null)
         warnIfWebViewTooOld()
     }
 

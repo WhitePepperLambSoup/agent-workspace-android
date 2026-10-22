@@ -37,7 +37,10 @@ object UpdateChecker {
     /** The export provider only serves files inside UUID-named folders under generated-files. */
     private const val UPDATE_FOLDER = "0d1a6000-0000-4000-8000-000000000002"
     private const val PREFERENCES = "app-updates"
-    private const val AUTO_CHECK_INTERVAL_MS = 24L * 60 * 60 * 1000
+    /** Checked at every start of the app, and about every twelve hours (UpdateCheckWorker, or on return). */
+    private const val AUTO_CHECK_INTERVAL_MS = 12L * 60 * 60 * 1000
+    /** Starts closer together than this (a crash and reopen, the system restarting it) check once. */
+    private const val START_CHECK_GAP_MS = 5L * 60 * 1000
     private const val MAX_APK_BYTES = 512L * 1024 * 1024
     private val SHA256_IN_NOTES = Regex("(?i)sha-?256[^0-9a-f]{0,80}([0-9a-f]{64})")
 
@@ -47,10 +50,28 @@ object UpdateChecker {
 
     fun setAutoCheck(context: Context, enabled: Boolean) {
         preferences(context).edit().putBoolean("auto_check", enabled).apply()
+        if (enabled) UpdateCheckWorker.schedule(context) else UpdateCheckWorker.cancel(context)
     }
 
-    fun dueForAutoCheck(context: Context): Boolean =
-        autoCheckEnabled(context) && System.currentTimeMillis() - preferences(context).getLong("last_check_ms", 0) >= AUTO_CHECK_INTERVAL_MS
+    private fun sinceLastCheck(context: Context) = System.currentTimeMillis() - preferences(context).getLong("last_check_ms", 0)
+
+    /**
+     * Twelve hours since the last check (back in the app, or in the background). [slackMs]: the
+     * background run comes a little early or late; an hour less keeps it from waiting a whole period.
+     */
+    fun dueForAutoCheck(context: Context, slackMs: Long = 0): Boolean =
+        autoCheckEnabled(context) && sinceLastCheck(context) >= AUTO_CHECK_INTERVAL_MS - slackMs
+
+    /** At a start of the app: unless it was checked a few minutes ago. */
+    fun dueAtStart(context: Context): Boolean = autoCheckEnabled(context) && sinceLastCheck(context) >= START_CHECK_GAP_MS
+
+    /** A background check tells about a version once; opening the app offers it every time. */
+    fun shouldNotify(context: Context, version: String): Boolean =
+        skippedVersion(context) != version && preferences(context).getString("notified_version", null) != version
+
+    fun markNotified(context: Context, version: String) {
+        preferences(context).edit().putString("notified_version", version).apply()
+    }
 
     fun markChecked(context: Context, latest: String?) {
         preferences(context).edit().putLong("last_check_ms", System.currentTimeMillis())

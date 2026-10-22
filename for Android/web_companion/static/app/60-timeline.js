@@ -253,6 +253,9 @@
     use_skill: t("使用技能"), save_skill: t("保存技能"),
     run_subagents: t("分给子任务"),
     active_notifications: t("查看通知"), notification_reply: t("回复通知"), notification_open: t("打开通知"),
+    app_audit: t("应用体检"), manage_app: t("处理应用"),
+    compose_sms: t("写好短信"), system_settings: t("调整手机设置"), system_status: t("查看手机状态"),
+    find_contacts: t("查找联系人"), current_location: t("查看位置"),
   };
   // What each tool call was asked to do (from its proposal), for a step label in plain words.
   const toolArguments = new Map();
@@ -277,6 +280,7 @@
     if (args && name === "web_search" && args.query) return t("搜索「{0}」", short(args.query));
     if (args && name === "run_subagents" && Array.isArray(args.tasks)) return t("分给 {0} 个子任务", args.tasks.length);
     if (args && name === "notification_reply" && args.to) return t("回复「{0}」", short(args.to));
+    if (args && name === "manage_app" && args.page) return `${appCheckActionName(args.page)} · ${short(args.package_name)}`;
     if (args && ["read_file", "write_file", "append_file", "read_document", "create_pdf", "create_docx", "create_xlsx"].includes(name) && args.path) {
       return `${toolTitles[name]} · ${file(args.path)}`;
     }

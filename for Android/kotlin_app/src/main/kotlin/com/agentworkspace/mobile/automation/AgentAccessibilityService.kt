@@ -148,11 +148,25 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         if (display == Display.DEFAULT_DISPLAY || Build.VERSION.SDK_INT < 30) windows
         else windowsOnAllDisplays.get(display) ?: emptyList()
 
+    /** For PopupWatch: when the user last touched something, and when the agent last acted. */
+    @Volatile private var touchedAt = 0L
+    @Volatile private var agentActedAt = 0L
+    @Volatile private var overlayCheckPending = false
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         // Window events arrive late or for windows that end up where they were, so they only count as
         // content; whether the windows changed is decided by comparing them (windowSignature).
         contentEpoch.incrementAndGet()
-        if (event?.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED) lastScrollAt = SystemClock.uptimeMillis()
+        when (event?.eventType) {
+            AccessibilityEvent.TYPE_VIEW_SCROLLED -> lastScrollAt = SystemClock.uptimeMillis()
+            AccessibilityEvent.TYPE_VIEW_CLICKED, AccessibilityEvent.TYPE_VIEW_LONG_CLICKED,
+            AccessibilityEvent.TYPE_VIEW_CONTEXT_CLICKED, AccessibilityEvent.TYPE_TOUCH_INTERACTION_START,
+            AccessibilityEvent.TYPE_GESTURE_DETECTION_START -> touchedAt = SystemClock.uptimeMillis()
+            AccessibilityEvent.TYPE_WINDOWS_CHANGED -> if (!overlayCheckPending && PopupWatch.enabled(this)) {
+                overlayCheckPending = true
+                readerHandler.postDelayed({ overlayCheckPending = false; checkOverlays() }, 400)
+            }
+        }
         if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val packageName = bounded(event.packageName, 255)
             val className = bounded(event.className, 255)
@@ -162,10 +176,30 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
                 if (packageName != lastPackage && packageName != this.packageName) {
                     com.agentworkspace.mobile.embedded.TriggerEvents.appOpened(this, packageName)
                 }
+                if (packageName != lastPackage) PopupWatch.frontChanged(this, packageName, touchedAt, agentActedAt)
                 lastPackage = packageName
                 lastActivity = className
             }
         }
+    }
+
+    /** Floating windows over most of the phone's screen, by app (reader thread). */
+    private fun checkOverlays() {
+        val size = screen()
+        if (size.width <= 0 || size.height <= 0) return
+        val large = HashSet<String>()
+        val all = runCatching { screenWindows(Display.DEFAULT_DISPLAY) }.getOrDefault(emptyList())
+        try {
+            for (window in all) {
+                if (window.type != AccessibilityWindowInfo.TYPE_SYSTEM) continue
+                val bounds = Rect().also { window.getBoundsInScreen(it) }
+                if (!bounds.intersect(0, 0, size.width, size.height) ||
+                    bounds.width().toLong() * bounds.height() < size.width.toLong() * size.height * 2 / 5) continue
+                val root = window.root ?: continue
+                try { bounded(root.packageName, 255)?.let(large::add) } finally { recycle(root) }
+            }
+        } finally { all.forEach { recycle(it) } }
+        PopupWatch.overlays(this, large, lastPackage, agentActedAt)
     }
 
     override fun onInterrupt() {
@@ -624,6 +658,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
                 "read or use. Stop here and tell the user.").put("executed", response.optBoolean("executed"))
         } finally {
             screenId = outer
+            agentActedAt = SystemClock.uptimeMillis()
         }
     }
 
@@ -651,6 +686,8 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
     }
 
     private fun executeUnguarded(request: JSONObject, settle: Boolean): JSONObject = synchronized(executionLock) {
+        // An app the agent opens comes to the front while the action runs: not a pop-up (PopupWatch).
+        agentActedAt = SystemClock.uptimeMillis()
         var actionStarted = false
         var actionExecuted = false
         // Moving the screen or pressing a system key changes nothing in an app: when Android drops one
@@ -960,6 +997,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             if (app != null && now != null && now != app) return "the user left $app"
             val step = JSONObject(steps.getJSONObject(index).toString()).put("snapshot_version", snapshot.version)
             panel?.step(describeAction(step))
+            agentActedAt = SystemClock.uptimeMillis()
             val done = try { perform(step, snapshot) } catch (failure: AutomationFailure) {
                 when (failure.code) {
                     // A refused tap (something else under the finger) skips this round's step, as a person would.
