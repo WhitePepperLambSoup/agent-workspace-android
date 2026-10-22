@@ -98,7 +98,7 @@ Set up by a family member under Menu → Elder mode, for an older person in the 
 
 - **Cloud providers.** OpenAI-compatible APIs (OpenAI, DeepSeek, Qwen, Kimi, GLM, xAI …), Anthropic, Gemini and Ollama. With DeepSeek, OpenAI, Kimi, Qwen, GLM, Gemini, Grok, OpenRouter or Claude, every request only grows at the end, so the provider's context cache covers most of the input (about 95% in long DeepSeek tasks on a phone), billed at a lower price.
 - **Ollama on your network.** With Allow local network HTTP checked, the app connects over http to Ollama and similar servers at private addresses such as 192.168.x.x, 10.x.x.x and 172.16–31.x.x; see the next section.
-- **On-device models.** Download a Qwen3 / Qwen3.5 GGUF model and run it offline on the phone's CPU through llama.cpp, including image input with Qwen3.5. A new conversation starts answering in about 1–2 seconds; chips with dot-product instructions get an accelerated build, and inference slows down on its own when the phone runs hot. Models download from ModelScope (a mainland China CDN) or Hugging Face, and a paused download can continue from the other source; a grammar keeps small models' tool calls well-formed.
+- **On-device models.** Download a Qwen3 / Qwen3.5 GGUF model and run it offline on the phone through llama.cpp (on the CPU by default; Adreno 7-series and newer GPUs can use OpenCL acceleration, in testing), including image input with Qwen3.5. A new conversation starts answering in about 1–2 seconds; chips with dot-product instructions get an accelerated build, and inference slows down on its own when the phone runs hot. Models download from ModelScope (a mainland China CDN) or Hugging Face, and a paused download can continue from the other source; a grammar keeps small models' tool calls well-formed.
 - **Models by purpose.** Use cheaper models for operating the phone, for summarizing long conversations and for sub-tasks; providers take custom request headers and backup API keys that take over on errors.
 
 #### Ollama on your local network
@@ -158,14 +158,14 @@ The option applies to private IP addresses only: host names such as `.local` and
 | App shell | Kotlin, Android WebView, foreground service, WorkManager |
 | Interface | HTML / CSS / JavaScript (no framework), SVG-filter refraction for the glass style |
 | Agent engine | Python 3.12 embedded with Chaquopy, running the shared `agent_workspace` core in its own process |
-| Local inference | llama.cpp (pinned revision) through JNI, CPU only; an ARMv8.2 dot-product build is chosen per chip |
+| Local inference | llama.cpp (pinned revision) through JNI; CPU by default, with an ARMv8.2 dot-product build chosen per chip; OpenCL acceleration on Adreno 7-series and newer GPUs (in testing) |
 | Phone control | Accessibility service; on-screen text recognition with ML Kit (offline) |
 | Storage | SQLite event store in app-private storage; credentials encrypted with Android Keystore |
 | Optional tools | PRoot launcher with a pinned Alpine 3.22 toolchain |
 
 ## Build from Source
 
-Prerequisites: JDK 17, Python 3.12, [uv](https://docs.astral.sh/uv/), Android SDK 35 with NDK 27.3.13750724 and CMake 3.22.1.
+Prerequisites: JDK 17, Python 3.12, [uv](https://docs.astral.sh/uv/), Android SDK 36 with NDK 27.3.13750724 and CMake 3.22.1.
 
 ```bash
 git clone https://github.com/WhitePepperLambSoup/agent-workspace-android.git
@@ -225,7 +225,7 @@ agent-workspace-android/
 - Android and phone makers may still freeze or stop background work; the app recovers when reopened, but a task interrupted at that moment needs to be resumed. Background services stop when the engine restarts; those marked "Start with the engine" run again.
 - System Settings and some other screens hide the floating bubble; open the window in another app first and ask the agent to open Settings.
 - The built-in browser is a WebView that is not on screen, so the few pages that draw only on animation frames may render incompletely, and some phones cannot capture it as an image; the agent then reads the page text instead.
-- On-device models run on the CPU, so speed depends heavily on the phone. For reference, Qwen3.5 2B on a Snapdragon 888 processes about 28 prompt tokens and generates about 10 tokens per second; after switching to an on-device model the first conversation takes about a minute to start answering, later ones about 1–2 seconds; long tasks such as rewriting a whole web page or analysing a file of tens of KB take from ten to several tens of minutes, and slow down when the phone gets hot. 2B needs about 1.8 GB of available memory; phones with less should use 0.8B.
+- On-device models run mainly on the CPU, so speed depends heavily on the phone. GPU acceleration supports only Adreno 7-series and newer chips and has not been tested on such a phone yet, so reports are welcome; other GPUs such as Mali use the CPU. For reference, Qwen3.5 2B on a Snapdragon 888 processes about 28 prompt tokens and generates about 10 tokens per second; after switching to an on-device model the first conversation takes about a minute to start answering, later ones about 1–2 seconds; long tasks such as rewriting a whole web page or analysing a file of tens of KB take from ten to several tens of minutes, and slow down when the phone gets hot. 2B needs about 1.8 GB of available memory; phones with less should use 0.8B.
 - Small models handle questions, reading, writing, copying and appending to files and simple pages; for complex edits their code is often incomplete, and documents in a strict format (JSON, CSV, HTML) often come out wrong, so check them or use a cloud model.
 - The knowledge base searches by keyword and does not understand meaning: a question worded completely differently, outside the synonym list, may miss the relevant passage; add your own synonyms on the Knowledge base page. Scanned pages are read with offline text recognition, so names and numbers in them may be misread.
 - While the app is in the background, Android does not let it open the system Clock app, so alarms and timers arrive as a notification that you tap to finish.

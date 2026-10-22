@@ -98,7 +98,7 @@
 
 - **云端服务**：OpenAI 兼容接口（OpenAI、DeepSeek、通义千问、Kimi、智谱 GLM、xAI 等）、Anthropic、Gemini 和 Ollama。使用 DeepSeek、OpenAI、Kimi、通义千问、智谱 GLM、Gemini、Grok、OpenRouter 或 Claude 时，每次请求只在末尾追加内容，服务商的上下文缓存能覆盖大部分输入（DeepSeek 在手机上的长任务约 95%），缓存部分按更低的价格计费。
 - **局域网里的 Ollama**：勾选「允许局域网 HTTP」后，可以用 http 连接 192.168.x.x、10.x.x.x、172.16–31.x.x 这类内网地址上的 Ollama 等服务，设置方法见下一节。
-- **本机模型**：下载 Qwen3 / Qwen3.5 GGUF 模型，通过 llama.cpp 在手机 CPU 上离线运行，Qwen3.5 支持图片输入。新对话首字约 1–2 秒；支持点积指令的芯片自动使用加速版，手机发热时自动降速。模型可从 ModelScope 魔搭（国内 CDN）或 Hugging Face 下载，暂停后可换来源续传；工具调用有语法约束，小模型不会写出格式错误的调用。
+- **本机模型**：下载 Qwen3 / Qwen3.5 GGUF 模型，通过 llama.cpp 在手机上离线运行（默认用 CPU；Adreno 7 系及更新的 GPU 可用 OpenCL 加速，测试中），Qwen3.5 支持图片输入。新对话首字约 1–2 秒；支持点积指令的芯片自动使用加速版，手机发热时自动降速。模型可从 ModelScope 魔搭（国内 CDN）或 Hugging Face 下载，暂停后可换来源续传；工具调用有语法约束，小模型不会写出格式错误的调用。
 - **按用途分配模型**：操作手机、整理长对话摘要和子任务可以分别用更便宜的模型；服务商可以加自定义请求头和备用 API Key（出错自动切换）。
 
 #### 连接局域网电脑上的 Ollama
@@ -158,14 +158,14 @@
 | 应用外壳 | Kotlin、Android WebView、前台服务、WorkManager |
 | 界面 | 原生 HTML / CSS / JavaScript（无框架），液态玻璃用 SVG 滤镜实现折射 |
 | Agent 引擎 | 通过 Chaquopy 内嵌的 Python 3.12，在独立进程中运行共享的 `agent_workspace` 核心 |
-| 本地推理 | 固定版本的 llama.cpp，经 JNI 调用，仅用 CPU；ARMv8.2 点积加速版按芯片自动选用 |
+| 本地推理 | 固定版本的 llama.cpp，经 JNI 调用；默认用 CPU，ARMv8.2 点积加速版按芯片自动选用；Adreno 7 系及更新的 GPU 可用 OpenCL 加速（测试中） |
 | 操作手机 | 无障碍服务；屏幕文字识别用 ML Kit（离线） |
 | 存储 | 应用私有目录中的 SQLite 事件库；凭据由 Android Keystore 加密 |
 | 可选工具 | PRoot 启动器 + 固定版本的 Alpine 3.22 工具链 |
 
 ## 从源码构建
 
-需要：JDK 17、Python 3.12、[uv](https://docs.astral.sh/uv/)、Android SDK 35（含 NDK 27.3.13750724 与 CMake 3.22.1）。
+需要：JDK 17、Python 3.12、[uv](https://docs.astral.sh/uv/)、Android SDK 36（含 NDK 27.3.13750724 与 CMake 3.22.1）。
 
 ```bash
 git clone https://github.com/WhitePepperLambSoup/agent-workspace-android.git
@@ -225,7 +225,7 @@ agent-workspace-android/
 - 安卓系统和手机厂商仍可能冻结或停止后台运行；重新打开应用会自动恢复，但当时被中断的任务需要手动恢复。后台服务在引擎重启时会停止，勾选「随引擎启动」的会自动重新运行。
 - 系统设置等页面会隐藏悬浮球，可以先在别的应用里呼出小窗，再让 AI 打开设置去做。
 - 内置浏览器是不显示在屏幕上的 WebView，依赖动画帧渲染内容的少数网页可能显示不全；个别机型不能给它截图，这时 AI 会改为读取页面文字。
-- 本地模型只用 CPU 运行，速度很依赖手机性能。参考：骁龙 888 上的 Qwen3.5 2B 输入约 28 Token/秒、生成约 10 Token/秒；换用本机模型后的第一个对话首字约 1 分钟，之后的新对话约 1–2 秒；改写整个网页、分析几十 KB 的文件这类长任务需要十几到几十分钟，手机发热时会自动降速。2B 需要约 1.8 GB 可用内存，内存较小的手机建议用 0.8B。
+- 本地模型主要靠 CPU 运行，速度很依赖手机性能。GPU 加速只支持 Adreno 7 系及更新的芯片，还没有在这类手机上实测，遇到问题欢迎反馈；Mali 等其他 GPU 仍用 CPU。参考：骁龙 888 上的 Qwen3.5 2B 输入约 28 Token/秒、生成约 10 Token/秒；换用本机模型后的第一个对话首字约 1 分钟，之后的新对话约 1–2 秒；改写整个网页、分析几十 KB 的文件这类长任务需要十几到几十分钟，手机发热时会自动降速。2B 需要约 1.8 GB 可用内存，内存较小的手机建议用 0.8B。
 - 小模型适合问答、读写、复制和追加文件以及简单网页；复杂修改时写出的代码常常不完整，严格格式的文档（JSON、CSV、HTML）也常常出错，需要检查或换用云端模型。
 - 知识库按关键词检索，不理解语义：同义词表之外、用词完全不同的提问可能找不到相关段落，可以在知识库页补充同义词。扫描版 PDF 用离线文字识别读取，人名和数字可能识别错误。
 - 应用在后台时，安卓不允许直接打开系统时钟，设闹钟和计时会改为发通知，需要点一下才会生效。

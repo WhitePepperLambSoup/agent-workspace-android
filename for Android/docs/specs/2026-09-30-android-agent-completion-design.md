@@ -1,7 +1,7 @@
 # Android Agent Completion Design
 
-The user approved implementation of the recommendations in
-`for Android/docs/reviews/ANDROID_AGENT_GITHUB_COMPARISON_2026-09-30.md`.
+The user approved implementation of the recommendations of an earlier review
+of how other Android agent apps are commonly built.
 
 ## Scope
 
