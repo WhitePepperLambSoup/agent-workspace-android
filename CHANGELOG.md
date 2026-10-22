@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.3.0 — 2026-10-23
+
+2.3.0 新增长辈模式和应用体检，并更积极地检查更新。Agent Workspace 2.3.0 adds elder mode and an app check, and checks for updates more often.
+
+### 中文
+
+- 新增：长辈模式。家人在「菜单 → 长辈模式」里设置好后进入：整个界面换成一个大大的「说话」按钮，按一下说出想问的事，AI 用几句简短的话回答，并读出来（可以读慢一点）；回答下面有「再听一遍」。设提醒、问手机怎么用，也都直接说。另有「拍照问问」和「打给家人」两个按钮（设了家人电话才显示），说话不方便时可以打字。退出要按住两秒，家人可以设退出密码。
+- 长辈模式不让老人审批任何事：AI 直接回答、查询，也会直接替老人操作手机。下面这些会被自动拒绝，AI 会用大白话说明原因：输入或发送银行卡号、身份证号；在消息里发验证码；打开远程控制类应用（向日葵、ToDesk 等）；删除文件；卸载应用；以及 AI 读到的内容里像有人在指使它之后的操作。长辈模式开着时，AI 不会操作系统的应用安装界面和远程控制类应用；付款、转账在任何模式下都不做。建议把银行、支付类应用加到「不让 AI 操作的应用」里。
+- 长辈模式在配置不高的手机上也流畅：打开时下面的界面不再绘制，启动时先显示长辈界面，只带日常用得到的工具，每天换一个新对话，让每次请求和历史记录都保持很小；要记住的事放在手机的记忆里。
+- 新增：应用体检（「菜单 → 设备与连接 → 应用体检」）。列出你自己装的应用里拿了大权限的（设备管理器、无障碍、读取通知、读短信等）、没有桌面图标的、不是从应用商店装的，按「建议处理」和「留意」排好并说明原因；觉得没问题的可以标记。按钮直接打开系统的卸载确认，或收回权限的设置页。打开「记录弹窗来源」后，会记下哪个应用在你没点它的时候自己跳到前台，或用悬浮窗盖住大半个屏幕；只记应用和时间，保存 7 天，不离开手机。这不是病毒扫描。也可以让 AI 帮你做体检，卸载和收回权限每次都会先问你。
+- 改进：更积极地检查更新：每次打开应用都检查，后台大约每 12 小时检查一次，有新版本时通知一次。
+- 修复：你拒绝发送的消息，不会在之后的请求里被当作上下文发出去。
+- 新增两项权限：查看已安装的应用（应用体检用），请求卸载应用（弹出系统的卸载确认）。
+- 覆盖安装即可，数据会保留。
+
+### English
+
+- New: elder mode. Once a family member has set it up under Menu → Elder mode, the whole screen becomes one big Speak button: tap it, say what you want to ask, and the AI answers in a few plain sentences and reads them aloud (slower if chosen), with Hear it again under the answer. Reminders and questions about using the phone are simply said. There are two more buttons, Ask about a photo and Call family (shown once a family number is set), and typing for when speaking is hard. Leaving takes a two-second press, and the family can set an exit PIN.
+- Elder mode never asks the older person to approve anything: the AI answers, looks things up and also operates the phone for them directly. These are refused automatically, and the AI says why in plain words: typing or sending a bank card or ID number, sending a code in a message, opening remote-control apps (Sunlogin, ToDesk and the like), deleting files, removing apps, and any action after what the AI read looks like someone instructing it. While the mode is on, the AI does not operate Android's app installer or remote-control apps; payments and transfers are never made in any mode. Adding banking and payment apps to Apps the agent may not use is recommended.
+- Elder mode stays smooth on modest phones: the app underneath is not drawn while it is on, its screen appears first at start, it offers everyday tools only, and a fresh conversation each day keeps requests and history small; what should be remembered is kept in the phone's memory.
+- New: app check (Menu → Devices & connections → App check). It lists the apps you installed that hold large powers (device admin, accessibility, reading notifications or SMS and so on), have no home-screen icon or did not come from an app store, sorted into Act on this and Worth a look with the reasons; apps you trust can be marked as fine. Buttons open Android's own uninstall confirmation or the settings page that takes a power back. With Record where pop-ups come from on, it notes which app came to the front when you had not tapped it, or covered most of the screen with a floating window; only the app and the time are kept, for 7 days, on the phone. It is not a virus scan. The AI can run the check for you too; removing an app or taking back a power is asked every time.
+- Improved: updates are checked more often: at every app start and about every 12 hours in the background, with one notification per new version.
+- Fixed: a message you declined to send is no longer sent later as context.
+- Two new permissions: seeing the installed apps (for the app check) and requesting an app's removal (Android's uninstall confirmation).
+- Install over the existing app; your data is kept.
+
 ## 2.2.0 — 2026-10-22
 
 2.2.0 能把一次手机操作做成图文教程，能从任意一条消息分叉出新对话，能让另一个模型回答同一个问题并排对比，能把 AI 做的网页小工具放到桌面；新增实验性的后台操作，网页和长对话占用的上下文更少。Agent Workspace 2.2.0 turns a phone task into a picture guide, forks a conversation from any message, compares another model's answer to the same question, puts the small tools the AI makes on the home screen, adds an experimental background mode, and uses less context for web pages and long conversations.

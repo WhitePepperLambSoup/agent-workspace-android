@@ -12,14 +12,14 @@ An AI agent that runs on your Android phone. It plans and carries out multi-step
 
 ## Download
 
-Get `AgentWorkspace_2.2.0_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app (Menu → About and updates, or "Updates" on the loading screen). Changes in each version are listed in the [CHANGELOG](CHANGELOG.md).
+Get `AgentWorkspace_2.3.0_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app: it checks at every start and about every 12 hours, and you can check yourself under Menu → About and updates, or "Updates" on the loading screen. Changes in each version are listed in the [CHANGELOG](CHANGELOG.md).
 
 - Android 8.0 (API 26) or newer, 64-bit ARM (`arm64-v8a`) or `x86_64`; phones running a 32-bit-only system cannot install it.
 - The interface is shown by the system's Android System WebView, which must be Chromium 80 or newer. If WebView is disabled, missing or too old, the app explains why and links to the app store to update it.
 - Works on Android 15+ devices with 16 KB memory pages, foldables, split screen and external keyboards, and keeps its own colours under system or vendor "force dark" modes.
 - About 73 MB to install. Local models and the offline speech model are optional downloads inside the app.
 
-What changed in 2.0.2: Allow local network HTTP in Model settings connects to Ollama on a computer in your network (see [Ollama on your local network](#ollama-on-your-local-network)); cards that a model writes as a `json` code block now show as cards; native dialogs without a background on some phones, and an Operate phone window that kept the old language after a language switch, are fixed.
+What changed in 2.3.0: elder mode and an app check are new; updates are checked more often; a message you declined to send is no longer sent later as context.
 
 ## Features
 
@@ -68,6 +68,14 @@ This needs the app's accessibility service, which you turn on in system settings
   <img src="docs/screenshots/shortcut-en.png" width="250" alt="Editing a shortcut's steps">
   <img src="docs/screenshots/circle-en.png" width="250" alt="Actions offered for circled text">
 </p>
+
+### Elder mode
+
+Set up by a family member under Menu → Elder mode, for an older person in the family.
+
+- **One Speak button.** The whole screen becomes one big Speak button: tap it, say what you want to ask, and the AI answers in a few plain sentences and reads them aloud, with Hear it again under the answer. Only the latest question and answer stay on the screen; reminders and questions about the phone are simply said. Two more buttons, Ask about a photo and Call family, and typing for when speaking is hard; leaving takes a two-second press, and an exit PIN can be set.
+- **Nothing to approve.** The AI answers, looks things up and also operates the phone directly. Typing or sending a bank card or ID number, sending a code in a message, opening remote-control apps, deleting files, removing apps, and any action after content that looks like someone instructing the AI are refused automatically, and the AI says why in plain words; while the mode is on, it does not operate Android's app installer or remote-control apps either.
+- **Smooth on modest phones.** The app underneath is not drawn while the mode is on, its screen appears first at start, it offers everyday tools only, and a fresh conversation each day keeps requests and history small.
 
 ### Notification digest, briefing and automation
 
@@ -132,6 +140,7 @@ The option applies to private IP addresses only: host names such as `.local` and
 - **Optional developer toolchain.** A pinned Alpine toolchain (Git, Python, Node, Pyright, SSH, tmux) installs on demand and runs in an isolated PRoot process.
 - **Offline speech recognition.** With the SenseVoice Small speech model (about 239 MB) downloaded, the microphone recognises Chinese, English, Japanese, Korean and Cantonese on the phone without uploading audio, and the agent can transcribe recordings and videos in the workspace into timestamped text. A voice note records a meeting or a thought and turns it into minutes saved to the workspace and the knowledge base. Replies can be read aloud, and a voice conversation goes back and forth hands-free.
 - **Phone status and personal tools.** Read and set volume, brightness and Do Not Disturb and control playback; with your permission, look up contacts and the current location; draft a text message in the Messages app for you to send. ID card and bank card numbers trigger a reminder before a message goes to a cloud model, with the option to mask them.
+- **App check.** Lists the apps you installed that hold large powers (device admin, accessibility, reading notifications or SMS and so on), have no home-screen icon or did not come from an app store, sorted into Act on this and Worth a look with the reasons; buttons open Android's own uninstall confirmation or the settings page that takes a power back. With Record where pop-ups come from on, it notes which app came to the front when you had not tapped it, or covered most of the screen with a floating window. The AI can run the check too; removing an app or taking back a power is asked every time.
 - **Quick to start, recovers on its own.** A cold start takes about 3 seconds; if Android stops the engine, the app restarts it and reconnects; logs can be exported with secrets removed — shared, saved, or sent as a GitHub issue — even from the loading screen when the app cannot start.
 
 ## Quick Start
@@ -205,6 +214,8 @@ agent-workspace-android/
 - Phone-control step screenshots stay on the phone for the latest 20 tasks and at most 7 days; screens with passwords or other sensitive content are not captured.
 - A home-screen tool runs in a page of its own with no app interface, and all its network requests are blocked; what each tool saves belongs to it alone and is cleared when the tool is removed.
 - Background mode needs Shizuku to grant the app higher system permissions; turn it on only on your own phone, and when you do not use it, stop the service in Shizuku and turn off wireless debugging in the developer options.
+- In elder mode the older person is never asked to approve anything; what scams commonly need and what cannot be undone is refused automatically, and payments and transfers are never made in any mode. Adding banking and payment apps to Apps the agent may not use is recommended.
+- The app check reads only what Android reports about apps (source, permissions and special access) and scans no files; the pop-up record keeps only the app and the time, for 7 days, on the phone, and is cleared when turned off.
 - Backups never contain API keys.
 - Deleting a conversation erases its messages, tasks and images from the phone and cannot be undone; files it created in the workspace stay.
 - Offline speech recognition processes audio on the phone only; recordings are neither uploaded nor kept. Circle to ask sends only the screenshot you circled to the model, and takes no screenshot while a password field is on screen.
@@ -223,6 +234,9 @@ agent-workspace-android/
 - Web search uses the free DuckDuckGo and Bing pages, so results and availability depend on your network; some phrasings return nothing, and the agent then rephrases.
 - Background mode is experimental: an app cannot be used in front and in the background at the same time, sound from an app in the background plays from the phone's speaker, and Shizuku has to be started again after the phone restarts.
 - Android does not let an app remove a home-screen icon: after a home-screen tool is removed, its icon turns grey and can be removed with a long press.
+- The app check is not a virus scan: it looks only at what Android reports and does not recognise specific malware.
+- Elder mode starts a fresh conversation each day, so the previous day's conversation is not in it; what should be remembered goes to memory.
+- Some makers' auto-start control blocks the accessibility service: when Settings shows it on but it does nothing, allow the app to auto-start, then turn the service off and on again.
 - The English interface text was written by the developer; corrections are welcome.
 
 ## License
