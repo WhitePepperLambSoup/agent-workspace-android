@@ -23,6 +23,11 @@
   let stepSequence = 0;
   const stateNames = { available: t("可用"), pending: t("待发送"), sending: t("发送中"), submitted: t("已接收"), completed: t("已完成"), failed: t("失败"), cancelled: t("已取消"), uncertain: t("结果未知"), approved: t("已授权"), denied: t("已拒绝"), revoked: t("已撤销"), verified: t("已验证"), unverified: t("未验证"), running: t("运行中"), interrupted: t("已中断"), blocked: t("受阻"), success: t("目标已验证"), failure: t("失败"), takeover: t("已接管") };
   function status(id, message, error = false) { $(id).textContent = message || ""; $(id).classList.toggle("error", error); }
+  // Catalog titles end in a Chinese note ("Qwen3.5 2B · Q4_K_M · 更多能力"), translated here.
+  function modelTitle(title) {
+    return String(title || "").split(" · ").map((part) => /[一-鿿]/.test(part) ? t(part) : part).join(" · "); // i18n-ignore: a character range
+  }
+
   // Model download source: a per-device choice. Automatic tries the source nearest the user's
   // language first (ModelScope's mainland CDN for Chinese) and falls back to the other.
   const downloadSourceKey = "agent-model-download-source";
@@ -31,7 +36,7 @@
     const available = (model.download_sources || []).map((source) => source.id);
     return {
       source: available.includes(chosen) ? chosen : "auto",
-      prefer: window.MobileI18n?.language === "en" ? "huggingface" : "modelscope",
+      prefer: (window.MobileI18n?.language || "zh").startsWith("zh") ? "modelscope" : "huggingface",
     };
   }
   function sourceTitle(model) {
@@ -133,17 +138,75 @@
   function backgroundScreen(value) {
     $("backgroundScreenToggle").checked = value.enabled === true;
     $("backgroundScreenToggle").disabled = value.supported === false;
-    $("btnBackgroundPermission").hidden = value.reason !== "shizuku_permission";
     $("btnBackgroundLook").hidden = !(value.enabled && !value.reason);
     $("btnBackgroundToFront").hidden = value.active !== true;
     const reason = value.reason ? t(backgroundReasons[value.reason] || backgroundReasons.shizuku_stopped) : "";
     status("backgroundScreenStatus", value.enabled ? (reason || (value.active ? t("后台屏幕已打开") : t("可以使用：对话里的手机任务会在后台进行"))) : reason,
       !!(value.enabled && reason));
+    backgroundSetup(value);
+  }
+  // Setup steps, from installing Shizuku to letting this app use it; the first one not done is the
+  // one to do now. Shown while something is missing; open by itself once the switch is on.
+  function backgroundSetup(value) {
+    const setup = $("backgroundSetup");
+    setup.hidden = value.supported === false || !value.reason;
+    if (setup.hidden) return;
+    if (value.enabled) setup.open = true;
+    const running = value.shizuku_running === true;
+    const step = (name) => () => nativeResult("openShizukuStep", name);
+    const steps = [
+      { done: value.shizuku_installed || running, title: t("安装 Shizuku"), hint: t("Shizuku 把系统权限借给本应用，用来在后台屏幕上操作。从它的官网下载。"),
+        actions: [[t("打开 Shizuku 官网"), () => openServiceUrl("https://shizuku.rikka.app/download/")]] },
+      { done: value.developer_options === true || running, title: t("打开开发者选项"),
+        hint: t("在「关于手机」里连续点「版本号」7 次（有的手机叫「软件版本号」），按提示输入锁屏密码。"), actions: [[t("打开关于手机"), step("device_info")]] },
+      { done: value.wifi === true || running, title: t("连上 Wi‑Fi"), hint: t("Shizuku 通过无线调试启动，无线调试只在连着 Wi‑Fi 时能用。") },
+      { done: running, title: t("启动 Shizuku"),
+        hint: t("打开 Shizuku，点「通过无线调试启动」。第一次要先配对：按 Shizuku 的提示打开「开发者选项 → 无线调试 → 使用配对码配对设备」，把配对码填进 Shizuku 的通知里。手机重启后只需要重做这一步。"),
+        actions: [[t("打开 Shizuku"), step("shizuku")], [t("打开开发者选项"), step("developer")]] },
+      { done: value.permitted === true, title: t("允许本应用使用 Shizuku"), hint: t("Shizuku 会弹出询问，选「始终允许」。"),
+        actions: [[t("授权 Shizuku"), async () => {
+          backgroundScreen(await post("/mobile/background-screen", { action: "request_permission" }));
+          setTimeout(() => { if (!closed) loadBackgroundScreen().catch(() => {}); }, 4000);
+        }]] },
+    ];
+    const current = steps.findIndex((item) => !item.done);
+    $("backgroundSetupList").replaceChildren(...steps.map((item, index) => {
+      const row = document.createElement("li");
+      row.className = item.done ? "done" : index === current ? "current" : "";
+      const title = document.createElement("strong");
+      title.textContent = item.done ? t("{0}（已完成）", item.title) : item.title;
+      row.append(title);
+      if (index === current) {
+        const hint = document.createElement("p");
+        hint.textContent = item.hint;
+        row.append(hint);
+        if (item.actions?.length) {
+          const bar = document.createElement("div");
+          bar.className = "page-toolbar";
+          for (const [label, run] of item.actions) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "button-secondary";
+            button.textContent = label;
+            button.addEventListener("click", async () => {
+              try { await run(); } catch (error) { status("backgroundScreenStatus", error.message, true); }
+            });
+            bar.append(button);
+          }
+          row.append(bar);
+        }
+      }
+      return row;
+    }));
   }
   async function loadBackgroundScreen(isCurrent = () => true) {
     const value = await ui.apiJson("/mobile/background-screen");
     if (isCurrent()) backgroundScreen(value);
   }
+  // Back from Shizuku or the settings app: the steps move on by themselves.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && !closed && !$("settingsDoctor").hidden && !$("settingsOverlay").hidden) loadBackgroundScreen().catch(() => {});
+  });
 
   async function doctor(isCurrent = () => true) {
     loadBackgroundScreen(isCurrent).catch(() => {});
@@ -359,6 +422,10 @@
     [/^(.+): front matter needs a (name|description)$/, "$1：SKILL.md 开头缺少 $2"], // i18n-ignore: engine message
     [/^SKILL\.md must start with front matter.*$/s, "SKILL.md 必须以 --- 包住的 name、description 开头"], // i18n-ignore: engine message
     [/^the official skills have no release yet$/, "官方技能还没有发布"], // i18n-ignore: engine message
+    [/^only SKILL\.md skills can be shared as a code$/, "只有 SKILL.md 格式的技能能用分享码分享"], // i18n-ignore: engine message
+    [/^the skill is too large to share as a code; share its pack file instead$/, "技能太大，不能用分享码分享；请分享技能包文件"], // i18n-ignore: engine message
+    [/^the share code (?:has no skill name|holds no SKILL\.md|holds a file that is not a skill text file|is too large)$/, "分享码里的技能不完整，不能导入"], // i18n-ignore: engine message
+    [/^that skill is not in the pack$/, "技能包里没有这个技能"], // i18n-ignore: engine message
   ];
   function skillError(message) {
     const text = localizeError(message) || "";
@@ -373,8 +440,55 @@
       const where = source.channel === "release" ? t("Release {0}", source.tag) : t("分支 {0} · {1}", source.branch, skillVersion(source.revision));
       return `github.com/${source.repo} · ${where}${source.subpath ? ` · ${source.subpath}` : ""}`;
     }
+    if (source.kind === "shared") return source.signer ? t("分享码 · 签名指纹 {0}", source.signer) : t("分享码");
     return t("文件 {0}", source.file || "");
   }
+  // What a pack's instructions talk about (mobile_skills skill_mentions), for the preview.
+  const skillMentionLabels = { phone: "操作手机", messages: "发消息", payment: "付款、购买", delete: "删除或卸载", web: "上网", files: "写文件", personal: "联系人、位置、密码等个人信息", commands: "运行命令" }; // i18n-ignore: keys for t()
+
+  // ---- Skill share codes: one skill as text, signed with this phone's key (ShareSignature.kt) ----
+  const skillCodePrefix = "AW-SKILL-1.";
+  function fromBase64Url(body) {
+    const binary = atob(body.replace(/-/g, "+").replace(/_/g, "/"));
+    return new TextDecoder().decode(Uint8Array.from(binary, (char) => char.charCodeAt(0)));
+  }
+  function skillCode(skill) {
+    // Chunks keep String.fromCharCode under the argument limit for a large SKILL.md.
+    const bytes = new TextEncoder().encode(JSON.stringify(skill));
+    let binary = "";
+    for (let index = 0; index < bytes.length; index += 8192) binary += String.fromCharCode(...bytes.subarray(index, index + 8192));
+    const body = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    const signed = nativeResult("signShareCode", `${skillCodePrefix}${body}`);
+    return `${skillCodePrefix}${body}.${signed.public_key}.${signed.signature}`;
+  }
+  /** The skill in a code, and who signed it ({fingerprint, own}). Refuses changed codes. */
+  function readSkillCode(text) {
+    const code = String(text || "").replace(/\s+/g, "");
+    const at = code.indexOf(skillCodePrefix);
+    if (at < 0) throw new Error(t("这不是技能的分享码"));
+    const [body, key, signature] = code.slice(at + skillCodePrefix.length).split(".");
+    if (!body || !key || !signature) throw new Error(t("分享码不完整或被改动过"));
+    if (typeof native?.verifyShareCode !== "function") throw new Error(t("这里核对不了签名：请在手机上的 App 里导入"));
+    const check = JSON.parse(native.verifyShareCode(`${skillCodePrefix}${body}`, signature, key) || "{}");
+    if (!check.valid) throw new Error(t("签名对不上：分享码在签名后被改动过"));
+    let own = false;
+    try { own = JSON.parse(native.shareIdentity?.() || "{}").public_key === key; } catch {}
+    const skill = JSON.parse(fromBase64Url(body));
+    if (!skill || typeof skill.name !== "string" || !skill.files || typeof skill.files["SKILL.md"] !== "string") throw new Error(t("分享码里没有技能"));
+    return { skill, signer: { fingerprint: check.fingerprint, own } };
+  }
+  // The same list of known signers as shortcut share codes (87-shortcuts.js).
+  function knownSigner(fingerprint) {
+    try { return JSON.parse(localStorage.getItem("agent-share-authors-v1") || "{}")[fingerprint] || null; } catch { return null; }
+  }
+  function rememberSigner(fingerprint, name) {
+    try {
+      const known = JSON.parse(localStorage.getItem("agent-share-authors-v1") || "{}");
+      if (!known[fingerprint]) known[fingerprint] = { name: String(name).slice(0, 40), at: Date.now() };
+      localStorage.setItem("agent-share-authors-v1", JSON.stringify(known));
+    } catch { /* Only a convenience. */ }
+  }
+  let sharedSigner = null;
   async function skillsJob(job, message) {
     if (message) status("skillsStatus", message);
     for (let attempt = 0; attempt < 300 && !closed; attempt++) {
@@ -393,7 +507,13 @@
     $("skillsPreviewTitle").textContent = preview.replaces
       ? t("更新「{0}」：{1} → {2}", preview.name, skillVersion(preview.replaces.version), skillVersion(preview.version))
       : t("安装「{0}」{1}（{2} 个技能）", preview.name, skillVersion(preview.version), preview.skills.length);
+    const signer = preview.source?.kind === "shared" ? sharedSigner : null;
+    const known = signer && !signer.own ? knownSigner(signer.fingerprint) : null;
+    const mentions = (preview.mentions || []).map((kind) => t(skillMentionLabels[kind] || kind));
     $("skillsPreviewSource").textContent = [preview.official ? "" : t("非官方技能，没有经过本项目测试。请确认来源可信、每个技能的用途都符合预期再安装。"),
+      signer ? (signer.own ? t("签名：你自己的") : known ? t("签名：指纹 {0}，你导入过这个人的「{1}」", signer.fingerprint, known.name)
+        : t("签名：指纹 {0}，第一次见到。可以请对方在「可复用流程」页看自己的指纹，核对一致再装", signer.fingerprint)) : "",
+      mentions.length ? t("说明里提到：{0}。技能本身不执行操作，AI 的每一步仍按你的确认规则进行。", mentions.join(t("、"))) : "",
       skillSource(preview.source), preview.description].filter(Boolean).join("\n");
     $("skillsPreviewList").replaceChildren(...preview.skills.map((skill) => row(skill.name, skill.description)));
     $("skillsPreview").scrollIntoView({ block: "nearest" });
@@ -470,6 +590,14 @@
           catch (error) { box.checked = !box.checked; status("skillsStatus", skillError(error.message), true); }
         });
         child.append(box);
+        if (skill.kind !== "toml" && typeof native?.signShareCode === "function") action(child, "share-2", t("分享技能"), async () => {
+          const exported = await post("/mobile/skills/export", { pack_id: pack.id, skill_id: skill.id })
+            .catch((error) => { throw new Error(skillError(error.message)); });
+          const code = skillCode(exported);
+          native.copyToClipboard?.(code);
+          native.shareText?.(t("技能「{0}」", exported.name), code);
+          status("skillsStatus", t("分享码已复制：对方在「技能 → 导入其他技能 → 粘贴分享码」里导入"));
+        });
         if (mine) action(child, "trash-2", t("删除技能"), async () => {
           if (!window.confirm(t("删除技能「{0}」？", skill.name))) return;
           await skills(isCurrent, await post("/mobile/skills/delete-skill", { skill_id: skill.id }));
@@ -834,12 +962,34 @@
       status("knowledgeStatus", value.enabled === false ? t("知识库已关闭：对话中不会使用") : "");
     }
     void knowledgeChip();
+    const semanticBusy = knowledgeSemantic(value.semantic);
     window.clearTimeout(knowledgePoll);
-    if (allDocuments.some((document) => document.state === "queued" || document.state === "indexing")) {
+    if (semanticBusy || allDocuments.some((document) => document.state === "queued" || document.state === "indexing")) {
       knowledgePoll = window.setTimeout(() => {
         if (!closed && !$("settingsKnowledge").hidden && !$("settingsOverlay").hidden) knowledge(isCurrent).catch(() => {});
       }, 1500);
     }
+  }
+  // Searching by meaning (mobile_semantic): the switch, the model download and how far the
+  // passages are. Returns whether something is still under way (the page then looks again).
+  function knowledgeSemantic(semantic) {
+    const section = $("knowledgeSemanticSection");
+    section.hidden = !semantic;
+    if (!semantic) return false;
+    $("knowledgeSemanticToggle").checked = semantic.enabled !== false;
+    const download = semantic.download || {};
+    const downloading = ["queued", "downloading", "verifying"].includes(download.state);
+    $("btnKnowledgeSemanticDownload").hidden = semantic.installed || downloading || semantic.enabled === false;
+    $("btnKnowledgeSemanticRemove").hidden = !semantic.installed;
+    let text = "";
+    if (semantic.enabled === false) text = t("已关闭：只按关键词检索");
+    else if (downloading) text = t("正在下载模型：{0}%", Math.round((download.progress || 0) * 100));
+    else if (!semantic.installed) text = download.error ? t("下载没有完成：{0}", localizeError(download.error)) : t("还没有下载模型：现在只按关键词检索");
+    else if (semantic.error) text = t("暂时只能按关键词检索：{0}", localizeError(semantic.error));
+    else if (semantic.vectors < semantic.passages) text = t("正在整理文档（{0}/{1} 段），完成前先按关键词检索", semantic.vectors, semantic.passages);
+    else text = semantic.passages ? t("已就绪：{0} 段文字可以按意思检索", semantic.passages) : t("已就绪：添加文档后就能按意思检索");
+    status("knowledgeSemanticStatus", text, !!semantic.error || (!semantic.installed && !!download.error && !downloading));
+    return semantic.enabled !== false && (downloading || (semantic.installed && !semantic.error && semantic.vectors < semantic.passages));
   }
   async function uploadKnowledgeFiles(files) {
     if (!files.length || knowledgeUploading) return;
@@ -880,7 +1030,8 @@
     const value = await post("/mobile/knowledge/search", { query, ...(knowledgeFilter ? { collections: [knowledgeFilter] } : {}) });
     const results = Array.isArray(value.results) ? value.results : [];
     for (const result of results) {
-      const where = [result.document, result.page ? t("第 {0} 页", result.page) : "", result.section || ""].filter(Boolean).join(" · ");
+      const where = [result.document, result.page ? t("第 {0} 页", result.page) : "", result.section || "",
+        result.match === "meaning" ? t("意思相近") : ""].filter(Boolean).join(" · ");
       const element = row(where, result.passage);
       element.classList.add("knowledge-result");
       $("knowledgeResults").append(element);
@@ -1496,6 +1647,7 @@
 
   async function localModels(isCurrent = () => true) {
     const [value, capabilities] = await Promise.all([ui.apiJson("/mobile/local-models"), ui.apiJson("/mobile/capabilities")]); if (!isCurrent()) return;
+    for (const model of [...(value.models || []), ...(value.vision_components || []), ...(value.speech_models || [])]) model.title = modelTitle(model.title);
     const engine = value.native_engine || {}; const measurement = value.measurement || {};
     deviceEngineAvailable = !!engine.available;
     deviceModelChoices(value);
@@ -1700,6 +1852,21 @@
       catch (error) { $(id).checked = !$(id).checked; throw new Error(knowledgeMessage(error)); }
     }, "knowledgeStatus");
   }
+  on("knowledgeSemanticToggle", "change", async () => {
+    try { await knowledge(undefined, await post("/mobile/knowledge/semantic", { enabled: $("knowledgeSemanticToggle").checked })); }
+    catch (error) { $("knowledgeSemanticToggle").checked = !$("knowledgeSemanticToggle").checked; throw new Error(knowledgeMessage(error)); }
+  }, "knowledgeSemanticStatus");
+  on("btnKnowledgeSemanticDownload", "click", async () => {
+    // The same download as on the local models page (Hugging Face or ModelScope, checked against its SHA-256).
+    await post("/mobile/local-models/download", { model_id: "embeddinggemma-300m-q8-0", source: "auto",
+      prefer: downloadSource({}).prefer });
+    await knowledge();
+  }, "knowledgeSemanticStatus");
+  on("btnKnowledgeSemanticRemove", "click", async () => {
+    if (!window.confirm(t("移除按意思检索的模型？已整理好的文档要重新下载模型后才能再按意思检索。"))) return;
+    await post("/mobile/local-models/remove", { model_id: "embeddinggemma-300m-q8-0" });
+    await knowledge();
+  }, "knowledgeSemanticStatus");
   $("btnKnowledgeAdd").addEventListener("click", () => { if (!knowledgeUploading) $("knowledgeFileInput").click(); });
   // A link shared into a conversation: offer to save the page to the knowledge base as well.
   let linkClip = "";
@@ -1960,10 +2127,6 @@
     // Shizuku asks for permission in its own dialog; the answer shows a moment later.
     setTimeout(() => { if (!closed) loadBackgroundScreen().catch(() => {}); }, 4000);
   }, "backgroundScreenStatus");
-  on("btnBackgroundPermission", "click", async () => {
-    backgroundScreen(await post("/mobile/background-screen", { action: "request_permission" }));
-    setTimeout(() => { if (!closed) loadBackgroundScreen().catch(() => {}); }, 4000);
-  }, "backgroundScreenStatus");
   // Opens the background screen if needed and shows what is on it now.
   on("btnBackgroundLook", "click", async () => {
     const value = await post("/mobile/background-screen", { action: "open" });
@@ -2047,9 +2210,20 @@
     showSkillsPreview(null);
     await skills(undefined, await post("/mobile/skills/install", { token: preview.token }));
     $("skillsGithubInput").value = "";
+    if (preview.source?.kind === "shared" && sharedSigner && !sharedSigner.own) rememberSigner(sharedSigner.fingerprint, preview.name);
     status("skillsStatus", t("已安装「{0}」，新对话里 AI 会按需使用这些技能", preview.name));
   }), "skillsStatus");
   on("btnSkillsCancel", "click", () => { showSkillsPreview(null); status("skillsStatus", ""); }, "skillsStatus");
+  on("btnSkillsPasteCode", "click", async () => {
+    const text = window.prompt(t("粘贴技能的分享码"), "");
+    if (!text) return;
+    showSkillsPreview(null);
+    const read = readSkillCode(text);
+    sharedSigner = read.signer;
+    showSkillsPreview(await post("/mobile/skills/preview-shared", { name: read.skill.name, files: read.skill.files, signer: read.signer.fingerprint || null })
+      .catch((error) => { throw new Error(skillError(error.message)); }));
+    status("skillsStatus", t("请确认要安装的技能"));
+  }, "skillsStatus");
   on("btnSkillsOfficial", "click", () => skillCall(async () => {
     const record = await skillsJob(await post("/mobile/skills/install-official", {}), t("正在下载官方技能…"));
     await skills();

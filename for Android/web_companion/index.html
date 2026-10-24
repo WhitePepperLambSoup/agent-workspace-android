@@ -285,6 +285,14 @@
       </div>
       <div id="settingsPermission" class="settings-page" hidden>
         <label for="autonomySelector">执行模式</label><select id="autonomySelector" aria-label="执行模式"><option value="workspace">工作区</option><option value="yolo">YOLO</option><option value="full_access">完全访问</option></select><p id="autonomyHint" class="setting-hint"></p>
+        <div class="management-section">
+          <strong>个人信息和断网</strong>
+          <p class="setting-hint">用云端模型时才会用到。本机模型回答的消息不出手机；需要先在「本机模型」里下载一个。</p>
+          <label for="privacyNumbersRoute">消息里有身份证号、银行卡号时</label>
+          <select id="privacyNumbersRoute"><option value="ask">每次问我</option><option value="local">用本机模型回答</option><option value="mask">遮盖后发送</option></select>
+          <label for="privacyOfflineRoute">没有网络时发消息</label>
+          <select id="privacyOfflineRoute"><option value="ask">每次问我</option><option value="wait">联网后自动发送</option><option value="local">用本机模型回答</option></select>
+        </div>
       </div>
       <div id="settingsAppearance" class="settings-page" hidden>
         <label id="styleLabel">视觉风格</label>
@@ -324,7 +332,7 @@
           <button class="accent-swatch" type="button" role="radio" data-accent-option="amber" aria-label="琥珀" title="琥珀" style="--swatch: #b45309"></button>
           <button class="accent-swatch" type="button" role="radio" data-accent-option="rose" aria-label="玫瑰" title="玫瑰" style="--swatch: #e11d48"></button>
         </div>
-        <label for="languageSelector">语言</label><select id="languageSelector" aria-label="语言"><option value="auto">跟随系统</option><option value="zh">简体中文</option><option value="zh-Hant">繁體中文</option><option value="en">English</option></select>
+        <label for="languageSelector">语言</label><select id="languageSelector" aria-label="语言"><option value="auto">跟随系统</option><option value="zh">简体中文</option><option value="zh-Hant">繁體中文</option><option value="en">English</option><option value="ja">日本語</option><option value="ko">한국어</option></select>
         <p class="setting-hint">切换语言后界面会重新载入；对话内容与模型回复不会被翻译。</p>
         <label for="themeSelector">外观</label><select id="themeSelector" aria-label="外观"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select>
         <label for="motionSelector">动画</label><select id="motionSelector" aria-label="动画"><option value="auto">跟随系统</option><option value="full">完整</option><option value="reduced">精简</option><option value="off">关闭</option></select>
@@ -471,10 +479,16 @@
         <div class="page-toolbar"><button id="btnConversationKnowledgeDefault" class="button-secondary" type="button"><span data-icon="rotate-ccw"></span>恢复默认</button><button id="btnConversationKnowledgeManage" class="text-action" type="button">管理知识库</button></div>
       </div>
       <div id="settingsKnowledge" class="settings-page" hidden>
-        <p class="setting-hint">把说明书、合同、笔记、电子书等文档加进来，聊天时 AI 会从中找相关段落回答，并注明出自哪份文档、第几页。文档只保存在这台手机上，按关键词检索，不用下载模型，也不消耗额度。</p>
+        <p class="setting-hint">把说明书、合同、笔记、电子书等文档加进来，聊天时 AI 会从中找相关段落回答，并注明出自哪份文档、第几页。文档只保存在这台手机上，按关键词检索，不消耗额度；下载一个模型后还能按意思检索。</p>
         <label class="toggle-row" for="knowledgeEnabledToggle"><span>在对话中使用知识库</span><input id="knowledgeEnabledToggle" type="checkbox"></label>
         <label class="toggle-row" for="knowledgeAutoToggle"><span>提问时自动附上相关段落</span><input id="knowledgeAutoToggle" type="checkbox"></label>
         <p class="setting-hint">开启后，每次提问会先在知识库里找，找到相关段落就随问题一起发给模型；关闭后只在 AI 主动搜索时使用。</p>
+        <section id="knowledgeSemanticSection" class="management-section">
+          <label class="toggle-row" for="knowledgeSemanticToggle"><span>按意思检索</span><input id="knowledgeSemanticToggle" type="checkbox"></label>
+          <p class="setting-hint">换了说法也能找到相关段落，比如问“退租要提前多久说”，能找到“提前 30 日书面通知”。需要下载一个 334 MB 的模型，在手机上计算，文档不上传。</p>
+          <p id="knowledgeSemanticStatus" class="page-status" role="status"></p>
+          <div class="page-toolbar"><button id="btnKnowledgeSemanticDownload" class="button-secondary" type="button" hidden><span data-icon="download"></span>下载模型（334 MB）</button><button id="btnKnowledgeSemanticRemove" class="text-action" type="button" hidden>移除模型</button></div>
+        </section>
         <section id="knowledgeBasesSection" class="management-section" aria-labelledby="knowledgeBasesTitle">
           <strong id="knowledgeBasesTitle">分类知识库</strong>
           <p class="setting-hint">把文档分到不同的知识库，比如“工作”“学习”。每个对话可以选用其中几个：点输入框旁的“知识库”按钮，或在对话里直接说“这个对话只用学习知识库”。</p>
@@ -638,7 +652,11 @@
             <p>如果你没有开启过后台操作，却发现它是开着的，请立即关闭，并在 Shizuku 里撤销本应用的授权。</p>
           </details>
           <p id="backgroundScreenStatus" class="page-status" role="status"></p>
-          <div class="page-toolbar"><button id="btnBackgroundPermission" class="button-secondary" type="button" hidden>授权 Shizuku</button><button id="btnBackgroundLook" class="button-secondary" type="button" hidden>查看后台屏幕</button><button id="btnBackgroundToFront" class="button-secondary" type="button" hidden>把后台应用移到前台</button></div>
+          <details id="backgroundSetup" class="setup-steps" hidden>
+            <summary>设置步骤</summary>
+            <ol id="backgroundSetupList"></ol>
+          </details>
+          <div class="page-toolbar"><button id="btnBackgroundLook" class="button-secondary" type="button" hidden>查看后台屏幕</button><button id="btnBackgroundToFront" class="button-secondary" type="button" hidden>把后台应用移到前台</button></div>
           <img id="backgroundScreenPicture" class="background-screen-picture" alt="后台屏幕的画面" hidden>
         </div>
         <label class="toggle-row" for="liveScreenToggle"><span>实时画面</span><input id="liveScreenToggle" type="checkbox"></label>
@@ -736,7 +754,7 @@
           <form id="skillsImportForm" class="management-form">
             <label for="skillsGithubInput">从 GitHub 导入</label>
             <input id="skillsGithubInput" maxlength="300" autocomplete="off" spellcheck="false" placeholder="owner/repo 或 github.com 链接">
-            <div class="page-toolbar"><button id="btnSkillsFetch" class="button-secondary" type="submit"><span data-icon="download"></span>获取</button><button id="btnSkillsFile" class="button-secondary" type="button"><span data-icon="upload"></span>从文件导入</button></div>
+            <div class="page-toolbar"><button id="btnSkillsFetch" class="button-secondary" type="submit"><span data-icon="download"></span>获取</button><button id="btnSkillsFile" class="button-secondary" type="button"><span data-icon="upload"></span>从文件导入</button><button id="btnSkillsPasteCode" class="button-secondary" type="button"><span data-icon="clipboard-check"></span>粘贴分享码</button></div>
             <input id="skillsFileInput" type="file" accept=".zip,.tgz,.gz,.md,application/zip" hidden>
             <p class="setting-hint">优先使用仓库最新的 Release（附带的 .skillpack.zip，或源码包）；没有 Release 时用默认分支。文件可以是 zip、tar.gz 或单个 SKILL.md。</p>
           </form>
@@ -897,6 +915,7 @@
   <script src="/static/compat.js"></script>
   <script src="/static/mobile-vendor.js"></script>
   <script src="/static/i18n-zh-hant.js"></script>
+<script src="/static/i18n-extra.js"></script>
 <script src="/static/i18n.js"></script>
   <script src="/static/motion.js"></script>
   <script src="/static/app.js"></script>

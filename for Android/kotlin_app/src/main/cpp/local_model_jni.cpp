@@ -152,7 +152,16 @@ bool supported_model_id(const std::string & id) {
         id == "qwen3.5-2b-q4-k-m" || id == "qwen3.5-2b-q8-0" ||
         id == "qwen3.5-0.8b-agent-v1-q4-k-m" ||
         id == "qwen3.5-0.8b-agent-v2-q4-k-m" ||
-        id == "qwen3.5-0.8b-agent-v3-q4-k-m";
+        id == "qwen3.5-0.8b-agent-v3-q4-k-m" ||
+        id == "gemma-4-e2b-q4-0";
+}
+
+bool gemma_model(const std::string & id) { return id.rfind("gemma-4-", 0) == 0; }
+
+/** The longest context each family was trained for. */
+int family_context_limit(const std::string & id) {
+    if (gemma_model(id)) return 131072;
+    return id.rfind("qwen3.5-", 0) == 0 ? 262144 : 32768;
 }
 
 std::string dump(const json & value) {
@@ -413,7 +422,7 @@ json generate(const std::string & raw, const std::vector<std::string> & rgb_imag
             throw RequestFailure("invalid_request", "Invalid native inference request ID");
         const auto path = required_text(request, "model_path", 4096);
         const auto prompt = required_text(request, "prompt", MAX_PROMPT_BYTES);
-        const int model_context_limit = id.rfind("qwen3.5-", 0) == 0 ? 262144 : 32768;
+        const int model_context_limit = family_context_limit(id);
         const int n_context = required_int(request, "context_size", 512, model_context_limit);
         const int n_predict = required_int(request, "max_output_tokens", 1, 8192);
         const std::string memory_mode = request.contains("memory_mode")
@@ -486,10 +495,12 @@ json generate(const std::string & raw, const std::vector<std::string> & rgb_imag
                 failure("model_load_failed", "llama.cpp could not load the installed Qwen GGUF model");
             char architecture[64]{};
             llama_model_meta_val_str(model.get(), "general.architecture", architecture, sizeof(architecture));
-            const std::string expected_arch = id.rfind("qwen3.5-", 0) == 0 ? "qwen35" : "qwen3";
-            if (std::string(architecture) != expected_arch || llama_model_n_params(model.get()) > 2750000000ULL) {
+            const std::string expected_arch = gemma_model(id) ? "gemma4" : id.rfind("qwen3.5-", 0) == 0 ? "qwen35" : "qwen3";
+            // Gemma 4 E2B counts its per-layer embedding tables, which stay memory-mapped.
+            const uint64_t parameter_limit = gemma_model(id) ? 6000000000ULL : 2750000000ULL;
+            if (std::string(architecture) != expected_arch || llama_model_n_params(model.get()) > parameter_limit) {
                 free_model();
-                return failure("unsupported_model", "This CPU engine accepts only verified small Qwen3 or Qwen3.5 models");
+                return failure("unsupported_model", "This CPU engine accepts only verified small Qwen3, Qwen3.5 or Gemma 4 models");
             }
             model_file = std::move(file);
             std::lock_guard<std::mutex> lock(state_mutex);
@@ -740,7 +751,7 @@ json generate(const std::string & raw, const std::vector<std::string> & rgb_imag
             std::string prefix_path;
             if (reuse && partial) {
                 prefix_end = agent_prompt_cache::system_prefix_length(tokens,
-                    agent_prompt_cache::special_token(vocabulary, "<|im_start|>"));
+                    agent_prompt_cache::special_token(vocabulary, gemma_model(id) ? "<|turn>" : "<|im_start|>"));
                 if (prefix_end > 0) prefix_path = prefix_file(id, info, tokens, prefix_end);
             }
             if (reuse) {
@@ -1070,4 +1081,173 @@ Java_com_agentworkspace_mobile_localmodels_LocalModelBridge_nativeUnload(JNIEnv 
     cancelled.store(true);
     std::lock_guard<std::mutex> lock(engine_mutex);
     free_model();
+}
+
+namespace {
+// Sentence vectors for knowledge-base search (mobile_semantic): a small embedding model kept apart
+// from the chat model, with its own lock, so indexing never waits for a generation or the other
+// way round. LocalModelBridge frees it after a while unused.
+constexpr int EMBED_CONTEXT = 2048;
+constexpr int EMBED_SEQUENCES = 16;
+constexpr size_t MAX_EMBED_TEXTS = 64;
+constexpr size_t MAX_EMBED_REQUEST_BYTES = 2 * 1024 * 1024;
+std::mutex embed_mutex;
+std::unique_ptr<llama_model, decltype(&llama_model_free)> embed_model{nullptr, llama_model_free};
+std::unique_ptr<llama_context, decltype(&llama_free)> embed_context{nullptr, llama_free};
+std::unique_ptr<FILE, decltype(&fclose)> embed_file{nullptr, fclose};
+std::string embed_id;
+struct stat embed_stat{};
+int embed_threads = 0;
+
+bool supported_embedding_id(const std::string & id) { return id == "embeddinggemma-300m-q8-0"; }
+
+void free_embedding() {
+    embed_context.reset();
+    embed_model.reset();
+    embed_file.reset();
+    embed_id.clear();
+    embed_stat = {};
+    embed_threads = 0;
+}
+
+/** [texts] as unit vectors of their first [dims] values (the model is trained to allow this). */
+std::vector<float> embed_texts(const std::string & id, const std::string & path,
+                               const std::vector<std::string> & texts, int dims, int threads) {
+    struct stat info{};
+    std::unique_ptr<FILE, decltype(&fclose)> file(open_private_model(id, path, info), fclose);
+    const bool same = embed_model && embed_id == id && embed_stat.st_dev == info.st_dev &&
+        embed_stat.st_ino == info.st_ino && embed_stat.st_size == info.st_size && embed_stat.st_mtime == info.st_mtime;
+    if (!same) {
+        free_embedding();
+        llama_model_params params = llama_model_default_params();
+        params.n_gpu_layers = 0;
+        params.devices = no_gpu_devices;
+        params.load_mode = LLAMA_LOAD_MODE_MMAP;
+        embed_model.reset(llama_model_load_from_file_ptr(file.get(), params));
+        if (!embed_model) throw RequestFailure("model_load_failed", "llama.cpp could not load the embedding model");
+        char architecture[64]{};
+        llama_model_meta_val_str(embed_model.get(), "general.architecture", architecture, sizeof(architecture));
+        if (std::string(architecture) != "gemma-embedding" || llama_model_n_params(embed_model.get()) > 400000000ULL) {
+            free_embedding();
+            throw RequestFailure("unsupported_model", "This engine accepts only the verified EmbeddingGemma model");
+        }
+        embed_file = std::move(file);
+        embed_id = id;
+        embed_stat = info;
+    }
+    const int limit = thread_limit.load();
+    const int n_threads = std::max(1, limit > 0 ? std::min(threads, limit) : threads);
+    if (!embed_context || embed_threads != n_threads) {
+        embed_context.reset();
+        llama_context_params params = llama_context_default_params();
+        params.n_ctx = EMBED_CONTEXT;
+        params.n_batch = EMBED_CONTEXT;
+        params.n_ubatch = EMBED_CONTEXT;
+        params.n_seq_max = EMBED_SEQUENCES;
+        params.kv_unified = true;
+        params.embeddings = true;
+        params.n_threads = n_threads;
+        params.n_threads_batch = n_threads;
+        embed_context.reset(llama_init_from_model(embed_model.get(), params));
+        if (!embed_context) throw RequestFailure("insufficient_memory", "The embedding model could not allocate its context");
+        embed_threads = n_threads;
+    }
+    llama_context * context = embed_context.get();
+    if (llama_pooling_type(context) == LLAMA_POOLING_TYPE_NONE)
+        throw RequestFailure("unsupported_model", "The embedding model has no pooling");
+    const int n_out = llama_model_n_embd_out(embed_model.get());
+    if (dims < 64 || dims > n_out) throw RequestFailure("invalid_request", "Unsupported embedding size");
+    const auto * vocab = llama_model_get_vocab(embed_model.get());
+    std::vector<float> output(texts.size() * static_cast<size_t>(dims), 0.0f);
+    llama_batch batch = llama_batch_init(EMBED_CONTEXT, 0, 1);
+    struct BatchGuard { llama_batch & batch; ~BatchGuard() { llama_batch_free(batch); } } guard{batch};
+    size_t first = 0;
+    int sequences = 0;
+    const auto flush = [&]() {
+        if (!batch.n_tokens) return;
+        llama_memory_clear(llama_get_memory(context), true);
+        if (llama_decode(context, batch) < 0) throw RequestFailure("embedding_failed", "The embedding model could not process the text");
+        for (int sequence = 0; sequence < sequences; ++sequence) {
+            const float * vector = llama_get_embeddings_seq(context, sequence);
+            if (!vector) throw RequestFailure("embedding_failed", "The embedding model returned no vector");
+            double norm = 0;
+            for (int i = 0; i < dims; ++i) norm += static_cast<double>(vector[i]) * vector[i];
+            const float scale = norm > 0 ? static_cast<float>(1.0 / std::sqrt(norm)) : 0.0f;
+            float * out = output.data() + (first + sequence) * static_cast<size_t>(dims);
+            for (int i = 0; i < dims; ++i) out[i] = vector[i] * scale;
+        }
+        first += sequences;
+        sequences = 0;
+        batch.n_tokens = 0;
+    };
+    std::vector<llama_token> tokens(EMBED_CONTEXT);
+    for (const auto & text : texts) {
+        int count = llama_tokenize(vocab, text.data(), static_cast<int32_t>(text.size()), tokens.data(), EMBED_CONTEXT, true, false);
+        if (count < 0) {
+            // Longer than the context: the start says what a passage is about.
+            std::vector<llama_token> all(-count);
+            count = llama_tokenize(vocab, text.data(), static_cast<int32_t>(text.size()), all.data(), -count, true, false);
+            if (count < 0) throw RequestFailure("tokenization_failed", "Embedding tokenization failed");
+            count = std::min(count, EMBED_CONTEXT);
+            std::copy(all.begin(), all.begin() + count, tokens.begin());
+        }
+        if (count == 0) { tokens[0] = llama_vocab_bos(vocab); count = 1; }
+        if (batch.n_tokens + count > EMBED_CONTEXT || sequences >= EMBED_SEQUENCES) flush();
+        for (int i = 0; i < count; ++i) {
+            const int at = batch.n_tokens++;
+            batch.token[at] = tokens[i];
+            batch.pos[at] = i;
+            batch.n_seq_id[at] = 1;
+            batch.seq_id[at][0] = sequences;
+            batch.logits[at] = true;
+        }
+        ++sequences;
+    }
+    flush();
+    return output;
+}
+
+void throw_java(JNIEnv * env, const char * message) {
+    jclass type = env->FindClass("java/lang/IllegalStateException");
+    if (type) env->ThrowNew(type, message);
+}
+} // namespace
+
+/**
+ * {"model_id", "model_path", "texts": [...], "dims", "threads"} → the texts' unit vectors, dims
+ * floats each; an IllegalStateException says why not.
+ */
+extern "C" JNIEXPORT jfloatArray JNICALL
+Java_com_agentworkspace_mobile_localmodels_LocalModelBridge_nativeEmbed(JNIEnv * env, jobject, jbyteArray input) {
+    try {
+        if (!initialized) throw RequestFailure("engine_unavailable", "Native inference is not initialized");
+        const auto request = json::parse(bytes(env, input, MAX_EMBED_REQUEST_BYTES));
+        const auto id = required_text(request, "model_id", 64);
+        if (!supported_embedding_id(id)) throw RequestFailure("invalid_request", "Unsupported embedding model ID");
+        const auto path = required_text(request, "model_path", 4096);
+        const int dims = required_int(request, "dims", 64, 4096);
+        const int threads = required_int(request, "threads", 1, 16);
+        if (!request.contains("texts") || !request["texts"].is_array() || request["texts"].empty() ||
+            request["texts"].size() > MAX_EMBED_TEXTS)
+            throw RequestFailure("invalid_request", "Give 1 to 64 texts to embed");
+        std::vector<std::string> texts;
+        for (const auto & item : request["texts"]) {
+            if (!item.is_string()) throw RequestFailure("invalid_request", "Texts to embed must be strings");
+            texts.push_back(item.get<std::string>());
+        }
+        std::lock_guard<std::mutex> lock(embed_mutex);
+        const auto vectors = embed_texts(id, path, texts, dims, threads);
+        jfloatArray array = env->NewFloatArray(static_cast<jsize>(vectors.size()));
+        if (array) env->SetFloatArrayRegion(array, 0, static_cast<jsize>(vectors.size()), vectors.data());
+        return array;
+    } catch (const RequestFailure & error) { throw_java(env, error.what()); }
+    catch (const std::bad_alloc &) { throw_java(env, "The embedding model ran out of memory"); }
+    catch (const std::exception &) { throw_java(env, "Embedding request failed"); }
+    return nullptr;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_agentworkspace_mobile_localmodels_LocalModelBridge_nativeEmbedUnload(JNIEnv *, jobject) {
+    std::lock_guard<std::mutex> lock(embed_mutex);
+    free_embedding();
 }

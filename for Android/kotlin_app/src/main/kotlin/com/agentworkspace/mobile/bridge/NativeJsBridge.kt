@@ -107,13 +107,13 @@ class NativeJsBridge(
         return getVoiceInputSettings()
     }
 
-    /** The web UI's language choice ("auto", "zh", "zh-Hant" or "en") for native dialogs, notifications and toasts. */
+    /** The web UI's language choice ("auto", "zh", "zh-Hant", "en", "ja" or "ko") for native dialogs, notifications and toasts. */
     @JavascriptInterface
     fun setUiLanguage(value: String) {
-        val wasEnglish = com.agentworkspace.mobile.UiText.isEnglish(context)
+        val was = com.agentworkspace.mobile.UiText.language(context)
         com.agentworkspace.mobile.UiText.setPreference(context, value)
         QuickEntry.publishShortcuts(context)
-        if (wasEnglish != com.agentworkspace.mobile.UiText.isEnglish(context)) AgentWidgets.refreshAll(context)
+        if (was != com.agentworkspace.mobile.UiText.language(context)) AgentWidgets.refreshAll(context)
     }
 
     /** Floating ball, quick settings tile and home screen widget state for Settings → Global entry. */
@@ -408,6 +408,26 @@ class NativeJsBridge(
 
     @JavascriptInterface
     fun openAppBackgroundSettings() = openAppSettings()
+
+    /**
+     * The pages the background-operation setup steps point to: "device_info" (tap the build number
+     * there to turn on developer options), "developer" (wireless debugging), "shizuku" (the app).
+     */
+    @JavascriptInterface
+    fun openShizukuStep(step: String): String {
+        val intent = when (step) {
+            "device_info" -> Intent(android.provider.Settings.ACTION_DEVICE_INFO_SETTINGS)
+            "developer" -> Intent(android.provider.Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
+            "shizuku" -> context.packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")
+                ?: return JSONObject().put("ok", false).put("error", "Shizuku is not installed").toString()
+            else -> return JSONObject().put("ok", false).put("error", "unknown step").toString()
+        }.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        Handler(Looper.getMainLooper()).post {
+            runCatching { context.startActivity(intent) }
+                .onFailure { runCatching { context.startActivity(Intent(android.provider.Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } }
+        }
+        return JSONObject().put("ok", true).toString()
+    }
 
     private fun changeProvider(requireLocalEngine: Boolean, save: () -> Unit): String = try {
         providerChangeAction(requireLocalEngine, save)

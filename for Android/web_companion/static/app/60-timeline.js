@@ -744,7 +744,10 @@
 
   function updateAssistantCard(task) {
     if (task.sessionId !== currentSessionId || activeTask !== task) return;
-    if (!task.card) task.card = appendMessageCard("assistant", "Agent", t("正在执行..."));
+    if (!task.card) {
+      task.card = appendMessageCard("assistant", "Agent", t("正在执行..."));
+      if (task.onDevice) markOnDevice(task.card);
+    }
     const body = task.card.querySelector(".message-body");
     const text = task.text || (task.done ? t("执行完成") : t("正在执行..."));
     // Diagrams are drawn once the reply is complete, not on every streamed chunk.

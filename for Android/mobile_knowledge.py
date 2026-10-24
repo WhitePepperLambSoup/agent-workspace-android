@@ -760,7 +760,21 @@ _SCHEMA = (
     )
     """,
     "CREATE VIRTUAL TABLE IF NOT EXISTS passage_vocab USING fts5vocab(passage_index, 'row')",
+    # Sentence vectors for semantic search (mobile_semantic), filled in after indexing.
+    "CREATE TABLE IF NOT EXISTS passage_vectors (passage_id INTEGER PRIMARY KEY, vector BLOB NOT NULL)",
 )
+# Semantic search: passages scored this similar or more join an explicit search even without the
+# query's words; passages attached to a request on their own need more. A passage found only by
+# meaning must also be within SEMANTIC_MARGIN of the best one. Below SEMANTIC_SUPPORT a similarity
+# does not move a word match up the list. Measured with EmbeddingGemma (256 dims, int8) on the phone:
+# the right passage scored 0.43-0.55, unrelated ones up to 0.38, and one unrelated passage 0.45 when
+# the best scored 0.54.
+SEMANTIC_MIN_SEARCH = 0.42
+SEMANTIC_MIN_ATTACHED = 0.48
+SEMANTIC_MARGIN = 0.06
+SEMANTIC_SUPPORT = 0.35
+SEMANTIC_CANDIDATES = 40
+_RRF_K = 20
 _ACTIVE_STATES = ("queued", "indexing")
 
 
@@ -909,6 +923,12 @@ class KnowledgeStore:
                 (DEFAULT_COLLECTION, _now()),
             )
         self._recover()
+        # Passages still without vectors (the engine stopped midway, or the model came since).
+        threading.Thread(target=self._resume_semantic, name="knowledge-semantic", daemon=True).start()
+
+    def _resume_semantic(self) -> None:
+        with contextlib.suppress(Exception):
+            self.semantic_status()
 
     @contextlib.contextmanager
     def _connect(self):
@@ -1013,6 +1033,7 @@ class KnowledgeStore:
 
         return {
             **settings,
+            "semantic": self.semantic_status(),
             "collections": self.collections(),
             "documents": documents,
             "synonyms": self._synonym_text(),
@@ -1413,6 +1434,11 @@ class KnowledgeStore:
             "(SELECT id FROM passages WHERE document_id = ?)",
             (document_id,),
         )
+        db.execute(
+            "DELETE FROM passage_vectors WHERE passage_id IN "
+            "(SELECT id FROM passages WHERE document_id = ?)",
+            (document_id,),
+        )
         db.execute("DELETE FROM passages WHERE document_id = ?", (document_id,))
 
     def wait(self, document_id: str, timeout: float) -> dict[str, Any]:
@@ -1462,10 +1488,15 @@ class KnowledgeStore:
     def _work(self) -> None:
         while True:
             with self._lock:
-                if not self._queue:
-                    self._worker = None
-                    return
-                document_id = self._queue.pop(0)
+                document_id = self._queue.pop(0) if self._queue else None
+            if document_id is None:
+                # Nothing to index: passages without vectors get theirs (stops for new documents).
+                self._embed_missing()
+                with self._lock:
+                    if not self._queue:
+                        self._worker = None
+                        return
+                continue
             try:
                 self._index(document_id)
             finally:
@@ -1473,6 +1504,131 @@ class KnowledgeStore:
                     event = self._finished.pop(document_id, None)
                 if event is not None:
                     event.set()
+
+    # ---- semantic search (mobile_semantic) -------------------------------------------------------
+
+    _semantic_error: str | None = None
+
+    def _semantic_on(self) -> bool:
+        with self._connect() as db:
+            row = db.execute("SELECT value FROM settings WHERE key = 'semantic'").fetchone()
+        return row is None or row["value"] == "1"
+
+    def _embed_missing(self) -> None:
+        """Vectors for ready passages that have none (new documents, or the model was just
+        installed), a batch at a time; documents waiting to be indexed go first."""
+        import mobile_semantic
+
+        if not self._semantic_on() or not mobile_semantic.ready():
+            return
+        while True:
+            with self._lock:
+                if self._queue:
+                    return
+            with self._connect() as db:
+                rows = db.execute(
+                    "SELECT p.id, p.heading, p.text, d.title FROM passages AS p "
+                    "JOIN documents AS d ON d.id = p.document_id "
+                    "LEFT JOIN passage_vectors AS v ON v.passage_id = p.id "
+                    "WHERE d.state = 'ready' AND v.passage_id IS NULL ORDER BY p.id LIMIT ?",
+                    (mobile_semantic.BATCH,),
+                ).fetchall()
+            if not rows:
+                self._semantic_error = None
+                return
+            try:
+                vectors = mobile_semantic.embed([
+                    mobile_semantic.document_text(row["title"], row["heading"], row["text"]) for row in rows
+                ])
+            except Exception as exc:  # the engine says why; searching stays on BM25 meanwhile
+                self._semantic_error = " ".join(str(exc).split())[:300] or type(exc).__name__
+                return
+            with self._connect() as db:
+                db.executemany(
+                    "INSERT OR REPLACE INTO passage_vectors (passage_id, vector) "
+                    "SELECT ?, ? WHERE EXISTS (SELECT 1 FROM passages WHERE id = ?)",
+                    [(row["id"], vector, row["id"]) for row, vector in zip(rows, vectors, strict=True)],
+                )
+
+    def semantic_status(self) -> dict[str, Any]:
+        import mobile_semantic
+
+        with self._connect() as db:
+            on = self._semantic_on()
+            counts = db.execute(
+                "SELECT COUNT(p.id) AS passages, COUNT(v.passage_id) AS vectors FROM passages AS p "
+                "JOIN documents AS d ON d.id = p.document_id AND d.state = 'ready' "
+                "LEFT JOIN passage_vectors AS v ON v.passage_id = p.id"
+            ).fetchone()
+        installed = mobile_semantic.installed()
+        if on and installed and mobile_semantic.engine.available() and counts["vectors"] < counts["passages"]:
+            self._start_worker()
+        return {
+            "enabled": on,
+            "installed": installed,
+            "model_id": mobile_semantic.MODEL_ID,
+            "download": mobile_semantic.download_state(),
+            "passages": counts["passages"],
+            "vectors": counts["vectors"],
+            "error": self._semantic_error,
+        }
+
+    def set_semantic(self, enabled: object) -> dict[str, Any]:
+        if not isinstance(enabled, bool):
+            raise KnowledgeError("semantic must be true or false")
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO settings (key, value) VALUES ('semantic', ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                ("1" if enabled else "0",),
+            )
+        return self.snapshot()
+
+    def semantic_explain(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
+        """The passages nearest in meaning and their similarity, below the cut-offs too."""
+        hits = self._semantic_hits(query, None)[:limit]
+        if not hits:
+            return []
+        with self._connect() as db:
+            rows = {row["id"]: row for row in db.execute(
+                self._PASSAGE_ROWS + f"({', '.join('?' for _ in hits)})", [passage for passage, _ in hits]
+            ).fetchall()}
+        return [{"similarity": round(score, 3), "document": rows[passage]["title"],
+                 "passage": rows[passage]["text"][:80]} for passage, score in hits if passage in rows]
+
+    def _start_worker(self) -> None:
+        with self._lock:
+            if self._worker is None or not self._worker.is_alive():
+                self._worker = threading.Thread(target=self._work, name="knowledge-indexer", daemon=True)
+                self._worker.start()
+
+    def _semantic_hits(self, query: str, document_ids: list[str] | None) -> list[tuple[int, float]]:
+        """Passages most similar in meaning to the query, best first (empty without the model)."""
+        import mobile_semantic
+
+        if not self._semantic_on() or not mobile_semantic.ready():
+            return []
+        clauses, values = ["d.state = 'ready'"], []
+        if document_ids is not None:
+            clauses.append(f"p.document_id IN ({', '.join('?' for _ in document_ids)})")
+            values.extend(document_ids)
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT v.passage_id, v.vector FROM passage_vectors AS v "
+                "JOIN passages AS p ON p.id = v.passage_id JOIN documents AS d ON d.id = p.document_id "
+                "WHERE " + " AND ".join(clauses),
+                values,
+            ).fetchall()
+        if not rows:
+            return []
+        try:
+            question = mobile_semantic.embed([mobile_semantic.query_text(query)])[0]
+            scores = mobile_semantic.similarities(question, b"".join(row["vector"] for row in rows))
+        except Exception as exc:
+            self._semantic_error = " ".join(str(exc).split())[:300] or type(exc).__name__
+            return []
+        ranked = sorted(zip((row["passage_id"] for row in rows), scores, strict=True), key=lambda item: -item[1])
+        return ranked[:SEMANTIC_CANDIDATES]
 
     def _update(self, document_id: str, **values: Any) -> None:
         values["updated_at"] = _now()
@@ -1588,9 +1744,12 @@ class KnowledgeStore:
         characters: 房租 then finds passages about 租金 even without a synonym. That widens an
         explicit search; passages attached to a request on their own use exact and synonym
         matches only.
+
+        With the embedding model installed (mobile_semantic), passages close in meaning join the
+        word matches even without the query's words, the bar higher for attached passages.
         """
         concepts = _plan(str(query or ""), _lexicon(self._synonym_text()))
-        if not concepts:
+        if not concepts and not str(query or "").strip():
             return []
         within_collections = None if collections is None else list(collections)
         if within_collections == []:
@@ -1620,87 +1779,144 @@ class KnowledgeStore:
             total = db.execute("SELECT COUNT(*) FROM passages").fetchone()[0]
             if not total:
                 return []
-            needed = sorted(
-                {
-                    token
-                    for concept in concepts
-                    for alternative in concept.alternatives
-                    for token in tokens(alternative.word)
-                }
-            )
-            frequency = {
-                row["term"]: row["doc"]
-                for row in db.execute(
-                    "SELECT term, doc FROM passage_vocab WHERE term IN "
-                    f"({', '.join('?' for _ in needed)})",
-                    needed,
-                )
+            rows: list[sqlite3.Row] = []
+            rank: dict[int, float] = {}
+            if concepts:
+                rows, rank = self._lexical_rows(db, concepts, document_ids, fuzzy)
+        results = self._lexical_results(concepts, rows, rank, total, min_relevance) if rows else []
+        # Passages similar in meaning join and reorder the word matches (mobile_semantic).
+        semantic = self._semantic_hits(str(query or ""), document_ids)
+        if semantic:
+            results = self._fuse(results, semantic, SEMANTIC_MIN_SEARCH if fuzzy else SEMANTIC_MIN_ATTACHED)
+        chosen: list[dict[str, Any]] = []
+        counts: dict[str, int] = {}
+        for result in results:
+            if counts.get(result["document_id"], 0) >= per_document:
+                continue
+            counts[result["document_id"]] = counts.get(result["document_id"], 0) + 1
+            chosen.append(result)
+            if len(chosen) >= limit:
+                break
+        return chosen
+
+    _PASSAGE_ROWS = (
+        "SELECT p.id, p.document_id, p.ordinal, p.page, p.heading, p.text, d.title, "
+        "CASE WHEN d.origin = 'web' THEN d.origin_path END AS url "
+        "FROM passages AS p JOIN documents AS d ON d.id = p.document_id "
+        "WHERE d.state = 'ready' AND p.id IN "
+    )
+
+    def _fuse(self, results: list[dict[str, Any]], semantic: list[tuple[int, float]], floor: float) -> list[dict[str, Any]]:
+        """Word matches and passages close in meaning in one list (reciprocal rank fusion). A
+        passage only meaning found joins when its similarity reaches [floor] and is near the best."""
+        similarity = dict(semantic)
+        best = max(similarity.values())
+        lexical = {result["id"]: index for index, result in enumerate(results)}
+        meaning = {passage: index for index, (passage, score) in enumerate(semantic) if score >= SEMANTIC_SUPPORT}
+        extra_ids = [passage for passage, score in semantic
+                     if passage not in lexical and score >= max(floor, best - SEMANTIC_MARGIN)]
+        extra: list[dict[str, Any]] = []
+        if extra_ids:
+            with self._connect() as db:
+                rows = db.execute(
+                    self._PASSAGE_ROWS + f"({', '.join('?' for _ in extra_ids)})", extra_ids
+                ).fetchall()
+            extra = [{**dict(row), "relevance": round(similarity[row["id"]], 3), "terms": [], "semantic": True} for row in rows]
+
+        def score(result: dict[str, Any]) -> float:
+            value = 0.0
+            if result["id"] in lexical:
+                value += 1 / (_RRF_K + lexical[result["id"]])
+            if result["id"] in meaning:
+                value += 1 / (_RRF_K + meaning[result["id"]])
+            return value
+
+        return sorted([*results, *extra], key=score, reverse=True)
+
+    def _lexical_rows(self, db: sqlite3.Connection, concepts: list[_Concept], document_ids: list[str] | None,
+                      fuzzy: bool) -> tuple[list[sqlite3.Row], dict[int, float]]:
+        """BM25's candidates for the query's concepts, and their BM25 rank."""
+        needed = sorted(
+            {
+                token
+                for concept in concepts
+                for alternative in concept.alternatives
+                for token in tokens(alternative.word)
             }
-            for concept in concepts:
-                for alternative in concept.alternatives:
-                    if alternative.fts.endswith("*"):
-                        # A prefix (one CJK character, a long word) is as common as its most
-                        # common completion.
-                        alternative.found = (
-                            db.execute(
-                                "SELECT max(doc) FROM passage_vocab WHERE term >= ? AND term < ?",
-                                (alternative.word, alternative.word + "\U0010ffff"),
-                            ).fetchone()[0]
-                            or 0
-                        )
-                    else:
-                        # A phrase occurs at most as often as its rarest token.
-                        alternative.found = min(
-                            (frequency.get(token, 0) for token in tokens(alternative.word)),
-                            default=0,
-                        )
-                pair = concept.term
-                if (
-                    fuzzy
-                    and not any(alternative.found for alternative in concept.alternatives)
-                    and len(pair) == 2
-                    and re.fullmatch(f"[{_CJK}]+", pair)
-                    and not set(pair) & _FUNCTION_CHARS
-                ):
-                    concept.fuzzy = [
-                        character
-                        for character in pair
-                        if db.execute(
-                            "SELECT 1 FROM passage_vocab WHERE term >= ? AND term < ? LIMIT 1",
-                            (character, character + "\U0010ffff"),
-                        ).fetchone()
-                    ]
-            expressions = dict.fromkeys(
-                [alternative.fts for concept in concepts for alternative in concept.alternatives]
-                + [f'"{character}"*' for concept in concepts for character in concept.fuzzy]
+        )
+        frequency = {
+            row["term"]: row["doc"]
+            for row in db.execute(
+                "SELECT term, doc FROM passage_vocab WHERE term IN "
+                f"({', '.join('?' for _ in needed)})",
+                needed,
             )
-            within = ""
-            parameters: list[Any] = [" OR ".join(expressions)]
-            if document_ids is not None:
-                within = (
-                    " AND rowid IN (SELECT id FROM passages WHERE document_id IN ("
-                    + ", ".join("?" for _ in document_ids)
-                    + "))"
-                )
-                parameters.extend(document_ids)
-            # BM25 picks the candidates; each is then checked for how much of the query it
-            # covers, which is plain Python, so the candidate list stays short.
-            hits = db.execute(
-                "SELECT rowid, bm25(passage_index, 0.4, 1.0) AS rank FROM passage_index "
-                f"WHERE passage_index MATCH ?{within} ORDER BY rank LIMIT 80",
-                parameters,
-            ).fetchall()
-            if not hits:
-                return []
-            rank = {row["rowid"]: row["rank"] for row in hits}
-            ids = list(rank)
-            rows = db.execute(
-                "SELECT p.id, p.document_id, p.ordinal, p.page, p.heading, p.text, d.title, "
-                "CASE WHEN d.origin = 'web' THEN d.origin_path END AS url "
-                "FROM passages AS p JOIN documents AS d ON d.id = p.document_id "
-                f"WHERE d.state = 'ready' AND p.id IN ({', '.join('?' for _ in ids)})",
-                ids,
-            ).fetchall()
+        }
+        for concept in concepts:
+            for alternative in concept.alternatives:
+                if alternative.fts.endswith("*"):
+                    # A prefix (one CJK character, a long word) is as common as its most
+                    # common completion.
+                    alternative.found = (
+                        db.execute(
+                            "SELECT max(doc) FROM passage_vocab WHERE term >= ? AND term < ?",
+                            (alternative.word, alternative.word + "\U0010ffff"),
+                        ).fetchone()[0]
+                        or 0
+                    )
+                else:
+                    # A phrase occurs at most as often as its rarest token.
+                    alternative.found = min(
+                        (frequency.get(token, 0) for token in tokens(alternative.word)),
+                        default=0,
+                    )
+            pair = concept.term
+            if (
+                fuzzy
+                and not any(alternative.found for alternative in concept.alternatives)
+                and len(pair) == 2
+                and re.fullmatch(f"[{_CJK}]+", pair)
+                and not set(pair) & _FUNCTION_CHARS
+            ):
+                concept.fuzzy = [
+                    character
+                    for character in pair
+                    if db.execute(
+                        "SELECT 1 FROM passage_vocab WHERE term >= ? AND term < ? LIMIT 1",
+                        (character, character + "\U0010ffff"),
+                    ).fetchone()
+                ]
+        expressions = dict.fromkeys(
+            [alternative.fts for concept in concepts for alternative in concept.alternatives]
+            + [f'"{character}"*' for concept in concepts for character in concept.fuzzy]
+        )
+        within = ""
+        parameters: list[Any] = [" OR ".join(expressions)]
+        if document_ids is not None:
+            within = (
+                " AND rowid IN (SELECT id FROM passages WHERE document_id IN ("
+                + ", ".join("?" for _ in document_ids)
+                + "))"
+            )
+            parameters.extend(document_ids)
+        # BM25 picks the candidates; each is then checked for how much of the query it
+        # covers, which is plain Python, so the candidate list stays short.
+        hits = db.execute(
+            "SELECT rowid, bm25(passage_index, 0.4, 1.0) AS rank FROM passage_index "
+            f"WHERE passage_index MATCH ?{within} ORDER BY rank LIMIT 80",
+            parameters,
+        ).fetchall()
+        if not hits:
+            return [], {}
+        rank = {row["rowid"]: row["rank"] for row in hits}
+        ids = list(rank)
+        rows = db.execute(self._PASSAGE_ROWS + f"({', '.join('?' for _ in ids)})", ids).fetchall()
+        return rows, rank
+
+    @staticmethod
+    def _lexical_results(concepts: list[_Concept], rows: list[sqlite3.Row], rank: dict[int, float],
+                         total: int, min_relevance: float) -> list[dict[str, Any]]:
+        """The candidates that cover enough of the query's weight, in BM25 order."""
 
         def idf(found: int) -> float:
             return math.log(1 + (total - found + 0.5) / (found + 0.5))
@@ -1742,16 +1958,7 @@ class KnowledgeStore:
             if covered < minimum or relevance < min_relevance:
                 continue
             results.append({**dict(row), "relevance": round(relevance, 3), "terms": matched})
-        chosen: list[dict[str, Any]] = []
-        counts: dict[str, int] = {}
-        for result in results:
-            if counts.get(result["document_id"], 0) >= per_document:
-                continue
-            counts[result["document_id"]] = counts.get(result["document_id"], 0) + 1
-            chosen.append(result)
-            if len(chosen) >= limit:
-                break
-        return chosen
+        return results
 
     @staticmethod
     def public(result: dict[str, Any], excerpt: int | None = None) -> dict[str, Any]:
@@ -1770,6 +1977,8 @@ class KnowledgeStore:
         }
         if result.get("url"):
             public["url"] = result["url"]  # a saved web page: where it came from
+        if result.get("semantic"):
+            public["match"] = "meaning"  # found by meaning (mobile_semantic), not by its words
         return public
 
     # ---- prompt pieces -----------------------------------------------------------------------

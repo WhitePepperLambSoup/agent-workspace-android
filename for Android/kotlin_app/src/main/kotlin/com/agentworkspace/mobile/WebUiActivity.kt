@@ -132,7 +132,7 @@ class WebUiActivity : ComponentActivity() {
     private var pendingSessionId: String? = null
     private var deliveringSession = false
     // A notification of the app check (AppAudit) opens its page once the console is ready.
-    private var pendingAppCheck = false
+    private var pendingAppCheck: Pair<String, String>? = null
     /** A quick ask from the tile, floating ball or a launcher shortcut, as JSON for the page. */
     private var pendingQuickAsk: String? = null
     private var deliveringQuickAsk = false
@@ -1151,29 +1151,36 @@ class WebUiActivity : ComponentActivity() {
         deliverSessionNavigation()
     }
 
+    // A notification that opens a menu page: the page's button, and a section to show on it.
     private fun queueAppCheck(incoming: Intent?) {
-        if (incoming?.action != com.agentworkspace.mobile.capabilities.AppAudit.ACTION_OPEN) return
+        pendingAppCheck = when (incoming?.action) {
+            com.agentworkspace.mobile.capabilities.AppAudit.ACTION_OPEN -> "btnAppCheckPage" to ""
+            com.agentworkspace.mobile.automation.BackgroundScreen.ACTION_SETUP -> "btnDoctorPage" to "backgroundScreenSection"
+            else -> return
+        }
         incoming.action = null
-        pendingAppCheck = true
         deliverAppCheck()
     }
 
     private fun deliverAppCheck() {
-        if (!pendingAppCheck || isDestroyed || isFinishing || webView.visibility != View.VISIBLE ||
+        val (page, section) = pendingAppCheck ?: return
+        if (isDestroyed || isFinishing || webView.visibility != View.VISIBLE ||
             !isTrustedConsoleUrl(webView.url ?: return)) return
         val script = """
             (function(){
-                var button = document.getElementById('btnAppCheckPage');
+                var button = document.getElementById(${JSONObject.quote(page)});
                 if (!button || !window.AgentMobileUi || !document.getElementById('sessionSelector')?.value) return false;
                 if (!document.getElementById('elderScreen')?.hidden) return true;
                 window.AgentMobileUi.openMenu();
                 button.click();
+                var section = ${JSONObject.quote(section)} && document.getElementById(${JSONObject.quote(section)});
+                if (section) setTimeout(function(){ section.scrollIntoView({ block: 'start' }); }, 300);
                 return true;
             })()
         """.trimIndent()
         webView.evaluateJavascript(script) { accepted ->
             if (isDestroyed || isFinishing) return@evaluateJavascript
-            if (accepted == "true") pendingAppCheck = false
+            if (accepted == "true") pendingAppCheck = null
             else shareHandler.postDelayed({ deliverAppCheck() }, 500)
         }
     }

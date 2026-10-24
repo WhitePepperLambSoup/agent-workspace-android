@@ -141,6 +141,7 @@ data class MobileProviderSettings(
             "qwen3.5-2b-q4-k-m", "qwen3.5-2b-q8-0",
             "qwen3-0.6b-q4-k-m", "qwen3-0.6b-q8-0",
             "qwen3-1.7b-q4-k-m", "qwen3-1.7b-q8-0",
+            com.agentworkspace.mobile.localmodels.LocalModelContext.GEMMA_E2B,
         ) + listOfNotNull(TrainedLocalModel.spec?.id)
         private val embeddedQwenDigests = listOf(
             "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517",
@@ -151,6 +152,7 @@ data class MobileProviderSettings(
             "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
             "b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897",
             "061b54daade076b5d3362dac252678d17da8c68f07560be70818cace6590cb1a",
+            "8e30dff3ac4c8434c49a7036fa15564bdbb6044e42bf04550bf1a096ad7e6a52",
         ) + listOfNotNull(TrainedLocalModel.spec?.sha256)
 
         fun expectedLocalModelDigest(model: String): String? = embeddedQwenModels.indexOf(model)
@@ -316,10 +318,10 @@ data class MobileProviderSettings(
         fun validateLocalContext(baseUrl: String, model: String, contextTokens: Int) {
             require(validLocalContext(contextTokens)) { "Invalid local context size" }
             if (baseUrl.trimEnd('/') != EMBEDDED_QWEN_BASE_URL) return
-            require(model in embeddedQwenModels) { "Select a supported downloaded Qwen model" }
-            val maximum = if (model.startsWith("qwen3.5-")) 262144 else 32768
+            require(model in embeddedQwenModels) { "Select a supported downloaded local model" }
+            val maximum = com.agentworkspace.mobile.localmodels.LocalModelContext.modelMaximumTokens(model)
             require(contextTokens == 0 || contextTokens <= maximum) {
-                "Qwen3 本地上下文最多 32768 token。请先选择自动或不超过 32K。Qwen3.5 可选择到 262144 token。"
+                "本地上下文最多：Qwen3 32768、Gemma 4 131072、Qwen3.5 262144 token。请先选择自动或更小的上下文。"
             }
         }
 
@@ -345,7 +347,7 @@ data class MobileProviderSettings(
             validateLocalContext(baseUrl, model, contextTokens)
             if (baseUrl.trimEnd('/') == EMBEDDED_QWEN_BASE_URL) {
                 require(protocol == "openai-compatible" && model in embeddedQwenModels) {
-                    "Select a supported downloaded Qwen model"
+                    "Select a supported downloaded local model"
                 }
                 verifyLocalWeights(context, model)
             }

@@ -11,8 +11,6 @@ import json
 import re
 from pathlib import Path
 
-from opencc import OpenCC
-
 STATIC = Path(__file__).resolve().parent / "web_companion" / "static"
 # Same ranges as the i18n tests: ideographs, CJK punctuation and full-width forms.
 CJK = re.compile(r"[一-鿿　-〿＀-￯]")
@@ -32,14 +30,19 @@ def _strings(source: str, opening: str, keys: bool) -> list[str]:
     return found
 
 
-def main() -> None:
+def ui_texts() -> list[str]:
+    """Every Chinese UI string: the English catalog keys and the Chinese server error messages."""
     source = (STATIC / "i18n.js").read_text(encoding="utf-8")
     texts = _strings(source, "  const en = {", keys=True) + _strings(source, "  const serverErrorsZh = {", keys=False)
+    return [text for text in dict.fromkeys(texts) if CJK.search(text)]
+
+
+def main() -> None:
+    from opencc import OpenCC  # Only this script needs it; generate_ja_ko.py reuses the parser above.
+
+    texts = ui_texts()
     convert = OpenCC("s2twp").convert
-    catalog = {}
-    for text in texts:
-        if CJK.search(text):
-            catalog[text] = convert(text)
+    catalog = {text: convert(text) for text in texts}
     body = ",\n".join(
         f"    {json.dumps(key, ensure_ascii=False)}: {json.dumps(value, ensure_ascii=False)}"
         for key, value in catalog.items()

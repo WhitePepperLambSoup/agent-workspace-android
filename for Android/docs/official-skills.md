@@ -16,7 +16,7 @@ for Android/skills/
 └── tests/                      # 每个技能的真机测试记录（不打包）
 ```
 
-`skill-pack.json` 的 `version` 是技能包版本（1.0.0），Release 标签为 `skills-v1.0.0`。App 安装官方包时总是用 `agent-workspace-official` 这个 id，其他来源的包占不到这个位置；「我的技能」（`my-skills`）也只有 AI 按用户要求保存的技能才能写入。
+`skill-pack.json` 的 `version` 是技能包版本（目前 1.1.0），Release 标签为 `skills-v1.1.0`。App 安装官方包时总是用 `agent-workspace-official` 这个 id，其他来源的包占不到这个位置；「我的技能」（`my-skills`）也只有 AI 按用户要求保存的技能才能写入。
 
 ## SKILL.md
 
@@ -55,6 +55,10 @@ description: 用户要在多个 App 里签到、领每日奖励时使用；也�
 ## 更新
 
 「技能」页打开时最多每 6 小时查一次官方 Release；右上角刷新会立即检查。有新版本时显示「更新到 skills-vX.Y.Z」，用户点了才更新。用户关掉的单个技能更新后保持关闭；新版本里删掉的技能会从列表消失。
+
+## 分享码
+
+「技能」页每个 SKILL.md 技能都能「分享技能」：技能文件夹里的文本文件（合计最多 48 KB）编成 `AW-SKILL-1.<内容>.<公钥>.<签名>`，用手机 Android Keystore 里的密钥签名（`ShareSignature.kt`，和快捷操作的分享码同一把密钥）。对方在「导入其他技能 → 粘贴分享码」里导入：先核对签名，改动过的直接拒绝；预览里显示签名指纹（第一次见到、导入过这个人、你自己的）和说明里提到的操作（操作手机、发消息、付款、删除等，`mobile_skills.skill_mentions`），确认后作为「非官方」技能包安装，来源记为分享码。
 
 ## 限制
 

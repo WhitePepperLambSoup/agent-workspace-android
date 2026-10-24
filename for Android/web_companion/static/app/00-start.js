@@ -53,7 +53,7 @@
   const fileDraftsKey = "agent-mobile-file-drafts-v1";
   const workspaceKey = "agent-mobile-workspace-v1";
   const wallpaperKey = "agent-mobile-wallpaper-v1";
-  const effortLabels = { auto: t("自动"), none: t("关闭"), low: t("低"), medium: t("中"), high: t("高"), xhigh: t("极高"), max: t("最高") };
+  const effortLabels = { auto: t("自动"), none: t("不思考"), low: t("低"), medium: t("中"), high: t("高"), xhigh: t("极高"), max: t("最高") };
   const effortOrder = ["none", "low", "medium", "high", "xhigh", "max"];
   const autonomyLabels = { workspace: t("工作区"), yolo: "YOLO", full_access: t("完全访问") };
   const localContextOptions = [0, 4096, 8192, 16384, 32768, 65536, 131072, 262144];
@@ -125,7 +125,7 @@
 
   const appearanceChoices = {
     theme: ["system", "light", "dark"], textSize: ["small", "normal", "large"],
-    style: ["solid", "glass"], accent: ["teal", "blue", "violet", "amber", "rose"], motion: ["auto", "full", "reduced", "off"], language: ["auto", "zh", "zh-Hant", "en"],
+    style: ["solid", "glass"], accent: ["teal", "blue", "violet", "amber", "rose"], motion: ["auto", "full", "reduced", "off"], language: ["auto", "zh", "zh-Hant", "en", "ja", "ko"],
     backdrop: ["aurora", "sunset", "ocean", "meadow", "iris", "bokeh", "grid", "ribbon", "dusk", "graphite", "plain", "custom"],
   };
   const preferences = {

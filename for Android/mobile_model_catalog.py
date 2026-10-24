@@ -178,6 +178,64 @@ MODEL_CATALOG = (
 )
 
 
+def _gemma_model():
+    # Gemma 4 E2B (Google, Apache-2.0) as the llama.cpp project converted it; ModelScope's copy of
+    # the same repository has the same SHA-256 (checked 2026-10-25). Most of its 2.8 GB are
+    # per-layer embedding tables, read from the memory-mapped file as needed.
+    repository, revision, filename = (
+        "ggml-org/gemma-4-E2B-it-GGUF",
+        "6938c58e698502037401a5f19f6905f2fb2f7dee",
+        "gemma-4-E2B-it-Q4_0.gguf",
+    )
+    mirror_revision = "34e71d56791f98eab2930e45acf4e42132203d21"
+    size = 2841481184
+    return {
+        "model_id": "gemma-4-e2b-q4-0",
+        # Experimental: on an 8 GB phone with apps open it is slow (the agent's first ~24k-token
+        # prompt takes about 20 minutes at 18 tokens/s), and a ZTE A2022P killed the engine for
+        # its memory use before the first answer (2026-10-25).
+        "title": "Gemma 4 E2B · Q4_0 · 多语言 · 实验",
+        "repository": repository,
+        "revision": revision,
+        "filename": filename,
+        "size_bytes": size,
+        "sha256": "8e30dff3ac4c8434c49a7036fa15564bdbb6044e42bf04550bf1a096ad7e6a52",
+        "quantization": "Q4_0",
+        "publisher": "Google · ggml-org",
+        "official_weights": False,
+        "license": "Apache-2.0",
+        "source_page": f"https://huggingface.co/{repository}/tree/{revision}",
+        "download_url": f"https://huggingface.co/{repository}/resolve/{revision}/{filename}?download=true",
+        "download_sources": [
+            {
+                "id": "huggingface",
+                "title": "Hugging Face",
+                "url": f"https://huggingface.co/{repository}/resolve/{revision}/{filename}?download=true",
+            },
+            {
+                "id": "modelscope",
+                "title": "ModelScope",
+                "url": f"https://modelscope.cn/models/{repository}/resolve/{mirror_revision}/{filename}",
+            },
+        ],
+        # Weights, a 4096-token context (6 KiB/token plus 64 MiB of windows) and compute.
+        "minimum_available_ram_bytes": ((size + (384 + 24 + 64 + 24) * 1024**2 + 64 * 1024**2 - 1) // (64 * 1024**2)) * 64 * 1024**2,
+        "memory_note": (
+            "Conservative 4096-token baseline estimate; choose automatic or a larger "
+            "context in Local Models. Actual RAM and optional free swap are checked when loading."
+        ),
+        "supports_tools": True,
+        "kind": "model",
+        "supports_vision": False,
+        "vision_projector_id": None,
+        "family": "Gemma4",
+        "verified_at": "2026-10-25",
+    }
+
+
+MODEL_CATALOG = (*MODEL_CATALOG, _gemma_model())
+
+
 def _projection(model_family, repository, revision, size, digest):
     filename = "mmproj-F16.gguf"
     return {
@@ -246,6 +304,51 @@ def _speech_model():
 
 
 SPEECH_CATALOG = (_speech_model(),)
+
+
+def _embedding_model():
+    # EmbeddingGemma 300M (Google, Gemma Terms of Use) as the llama.cpp project converted it: sentence
+    # vectors for knowledge-base search in Chinese, English, Japanese, Korean and 100+ languages.
+    # ModelScope's copy of the same repository has the same SHA-256 (checked 2026-10-25).
+    repository, revision, filename = (
+        "ggml-org/embeddinggemma-300M-GGUF",
+        "0f741b5a6585bd53aeb15cd1372c56f2a0f65e12",
+        "embeddinggemma-300M-Q8_0.gguf",
+    )
+    mirror_revision = "e2fab2963ac0943b1dc320cf0e267bd0e06e2e97"
+    return {
+        "model_id": "embeddinggemma-300m-q8-0",
+        "kind": "embedding",
+        "title": "EmbeddingGemma 300M · 语义检索",
+        "repository": repository,
+        "revision": revision,
+        "filename": filename,
+        "size_bytes": 333590944,
+        "sha256": "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63",
+        "quantization": "Q8_0",
+        "publisher": "Google · ggml-org",
+        "official_weights": False,
+        "license": "Gemma Terms of Use",
+        "dimensions": 768,
+        "source_page": f"https://huggingface.co/{repository}/tree/{revision}",
+        "download_url": f"https://huggingface.co/{repository}/resolve/{revision}/{filename}?download=true",
+        "download_sources": [
+            {
+                "id": "huggingface",
+                "title": "Hugging Face",
+                "url": f"https://huggingface.co/{repository}/resolve/{revision}/{filename}?download=true",
+            },
+            {
+                "id": "modelscope",
+                "title": "ModelScope",
+                "url": f"https://modelscope.cn/models/{repository}/resolve/{mirror_revision}/{filename}",
+            },
+        ],
+        "verified_at": "2026-10-25",
+    }
+
+
+EMBEDDING_CATALOG = (_embedding_model(),)
 
 
 VISION_CATALOG = (

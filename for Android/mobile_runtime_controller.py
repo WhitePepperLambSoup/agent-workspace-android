@@ -9,7 +9,7 @@ import dataclasses
 import hashlib
 import json
 import os
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from copy import copy
 from pathlib import Path
 from typing import Any
@@ -51,6 +51,21 @@ from agent_workspace.core.models import ApprovalScope, Autonomy, ProviderEgressR
 from agent_workspace.providers.reasoning import supported_reasoning_efforts
 
 _TERMINAL_STATES = frozenset({TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED})
+_EMBEDDED_BASE_URL = "http://127.0.0.1:8080/embedded-qwen/v1"
+# A task sent with no network looks again this often.
+_NETWORK_RECHECK_SECONDS = 15
+
+
+def _network_ready() -> bool:
+    """Whether the phone has a working internet connection (always true off Android)."""
+    if os.getenv("AGENT_WORKSPACE_EMBEDDED_PYTHON") != "chaquopy":
+        return True
+    try:
+        from java import jclass
+
+        return bool(jclass("com.agentworkspace.mobile.embedded.TriggerEvents").online())
+    except Exception:
+        return True
 # Tools whose output is meant as instructions to the agent: not checked for injected instructions.
 _INSTRUCTION_TOOLS = frozenset({"use_skill"})
 # Keep the cursor below the HTTP server's 64 KiB request-line limit.
@@ -570,15 +585,25 @@ class MobileRuntimeController:
             if existing is not None:
                 return existing
         model = request.model or self.default_model or ("declarative-replay" if execution else None)
+        effort = request.reasoning_effort or self.default_reasoning_effort
+        on_device = request.on_device and not self._local_endpoint()
+        if on_device:
+            # Privacy routing: answered by an installed on-device model (mobile_privacy_route).
+            from mobile_privacy_route import local_model
+
+            chosen = await asyncio.to_thread(local_model)
+            if chosen is None:
+                raise ValueError("no on-device model is installed; download one under On-device models first")
+            model, effort = chosen["model_id"], "auto"
         if not model:
             raise ValueError("no model configured for the mobile task")
-        effort = request.reasoning_effort or self.default_reasoning_effort
         if not isinstance(effort, str) or effort not in REASONING_EFFORTS:
             raise ValueError("reasoning_effort is invalid")
         if (
             self.protocol is not None
             and self.base_url is not None
             and execution is None
+            and not on_device
             and effort not in supported_reasoning_efforts(self.protocol, self.base_url, model)
         ):
             raise ValueError(f"{model} does not support the selected reasoning_effort")
@@ -624,6 +649,10 @@ class MobileRuntimeController:
                 )
             if request.plan_mode:
                 self.tasks.append_event(task.task_id, "task.plan_mode", {})
+            if on_device:
+                self.tasks.append_event(task.task_id, "task.on_device", {"model": model})
+            elif request.wait_for_network and not self._local_endpoint():
+                self.tasks.append_event(task.task_id, "task.wait_network", {})
             if execution is not None:
                 self.tasks.append_event(
                     task.task_id, "task.execution.bound", {"execution_kind": execution_kind}
@@ -1056,9 +1085,15 @@ class MobileRuntimeController:
                     (event.payload for event in task_events if event.event_type == "task.phone_control"),
                     None,
                 )
+                on_device = next(
+                    (event.payload for event in task_events if event.event_type == "task.on_device"),
+                    None,
+                )
+                if any(event.event_type == "task.wait_network" for event in task_events):
+                    await self._wait_for_network(task_id)
                 # Models by purpose (Settings → models): a cheaper one for phone control.
-                local = (self.base_url or "").rstrip("/").endswith("/embedded-qwen/v1")
-                model = model_for_task(
+                local = on_device is not None or self._local_endpoint()
+                model = on_device["model"] if on_device is not None else model_for_task(
                     requested=task.model, default=self.default_model,
                     phone_control=phone is not None, local=local,
                 )
@@ -1127,7 +1162,9 @@ class MobileRuntimeController:
                 if before_run is not None:
                     await before_run()
                 options: dict[str, Any] = {
-                    "summarize_history": configured_mobile_context_summary(self.base_url)
+                    "summarize_history": configured_mobile_context_summary(
+                        _EMBEDDED_BASE_URL if on_device is not None else self.base_url
+                    )
                 }
                 summarizer = summary_model(local=local)
                 if summarizer and summarizer != model:
@@ -1138,7 +1175,7 @@ class MobileRuntimeController:
                 # as notes with the next message, and compaction moves in rare large steps.
                 context_notes: tuple[str, ...] = ()
                 registry = self._tool_registry()
-                if prefix_cache_endpoint(self.base_url, model):
+                if on_device is None and prefix_cache_endpoint(self.base_url, model):
                     options["prefix_stable"] = True
                     system_suffix, context_notes = self._frozen_prompts().prepare(
                         session.id,
@@ -1202,39 +1239,42 @@ class MobileRuntimeController:
                 # A conversation's task may use the background screen; a panel task is about the
                 # app on the phone's own screen (mobile_screen).
                 screen_token = bind_screen(phone is None)
-                if execution is not None:
-                    result = await execution(task)
-                elif self._execution_kind(task_id) == "workflow_replay":
-                    raise ValueError(
-                        "workflow replay callback is missing; use explicit workflow resume"
-                    )
-                elif has_persisted_input:
-                    result = await self.runtime.service.continue_run(
-                        session,
-                        model,
-                        reasoning_effort=task.reasoning_effort,
-                        system_suffix=system_suffix,
-                        continuation_prompt=(
-                            "Resume the interrupted Android task from its durable history. "
-                            "Reuse confirmed tool results and completed actions. "
-                            "Inspect the current "
-                            "state before retrying any action with an unknown outcome. "
-                            f"Original task: {task.prompt}"
-                        ),
-                        **options,
-                    )
-                else:
-                    result = await self.runtime.service.run(
-                        session,
-                        task.prompt,
-                        model,
-                        reasoning_effort=task.reasoning_effort,
-                        system_suffix=system_suffix,
-                        **({"images": images} if task.image_refs else {}),
-                        **({"context_notes": context_notes} if context_notes else {}),
-                        **(await _knowledge_passages(task.prompt, session.id)),
-                        **options,
-                    )
+                async with (
+                    self._on_device_provider(model) if on_device is not None else nullcontext()
+                ):
+                    if execution is not None:
+                        result = await execution(task)
+                    elif self._execution_kind(task_id) == "workflow_replay":
+                        raise ValueError(
+                            "workflow replay callback is missing; use explicit workflow resume"
+                        )
+                    elif has_persisted_input:
+                        result = await self.runtime.service.continue_run(
+                            session,
+                            model,
+                            reasoning_effort=task.reasoning_effort,
+                            system_suffix=system_suffix,
+                            continuation_prompt=(
+                                "Resume the interrupted Android task from its durable history. "
+                                "Reuse confirmed tool results and completed actions. "
+                                "Inspect the current "
+                                "state before retrying any action with an unknown outcome. "
+                                f"Original task: {task.prompt}"
+                            ),
+                            **options,
+                        )
+                    else:
+                        result = await self.runtime.service.run(
+                            session,
+                            task.prompt,
+                            model,
+                            reasoning_effort=task.reasoning_effort,
+                            system_suffix=system_suffix,
+                            **({"images": images} if task.image_refs else {}),
+                            **({"context_notes": context_notes} if context_notes else {}),
+                            **(await _knowledge_passages(task.prompt, session.id)),
+                            **options,
+                        )
                 # Adapted services may return without a terminal tool event.
                 await scope.finish_tool()
                 if after_run is not None:
@@ -1328,6 +1368,54 @@ class MobileRuntimeController:
             self._cancel_reasons.pop(task_id, None)
             self._execution_checks.pop(task_id, None)
             self._executions.pop(task_id, None)
+
+    def _local_endpoint(self) -> bool:
+        return (self.base_url or "").rstrip("/") == _EMBEDDED_BASE_URL
+
+    async def _wait_for_network(self, task_id: str) -> None:
+        """A task sent with no network starts once the phone is online (the task stays queued and
+        can be cancelled meanwhile)."""
+        said = False
+        while not await asyncio.to_thread(_network_ready):
+            if not said:
+                self.tasks.append_event(task_id, "task.waiting_network", {})
+                said = True
+            await asyncio.sleep(_NETWORK_RECHECK_SECONDS)
+        if said:
+            self.tasks.append_event(task_id, "task.network_ready", {})
+
+    @asynccontextmanager
+    async def _on_device_provider(self, model: str):
+        """This task only talks to the on-device model; the provider in use is put back after it.
+        Tasks run one at a time (_execution_lock), so no other task sees the swap."""
+        from agent_workspace.config import ProviderConfig, ProviderProtocol
+        from agent_workspace.providers import create_provider
+
+        service = self.runtime.service
+        runner = service.runner
+        saved = (runner._provider, service._provider, self.runtime.provider)
+        policy = getattr(runner, "_egress_policy", None)
+        provider = create_provider(ProviderConfig(
+            id="embedded-qwen", protocol=ProviderProtocol.OPENAI_COMPATIBLE,
+            base_url=_EMBEDDED_BASE_URL, model=model,
+        ))
+        runner._provider = service._provider = self.runtime.provider = provider
+        # The pause button holds this provider's requests too.
+        make_pausable(runner)
+        if policy is not None:
+            runner._egress_policy = policy.retarget(_EMBEDDED_BASE_URL)
+        runner._system_prompt_cache.clear()
+        try:
+            yield
+        finally:
+            runner._provider, service._provider, self.runtime.provider = saved
+            if policy is not None:
+                runner._egress_policy = policy
+            runner._system_prompt_cache.clear()
+            close = getattr(provider, "aclose", None)
+            if callable(close):
+                with suppress(Exception):
+                    await close()
 
     def _offer_step_shots(self, task_id: str) -> None:
         """Pictures of the phone after each action (step replay): the console offers to look back."""

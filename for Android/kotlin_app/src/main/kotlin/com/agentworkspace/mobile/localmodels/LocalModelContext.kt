@@ -28,11 +28,15 @@ object LocalModelContext {
         val visionReserveBytes: Long,
     )
 
+    /** Gemma 4 E2B (Google, Apache-2.0), the second model family the engine runs. */
+    const val GEMMA_E2B = "gemma-4-e2b-q4-0"
+
     fun modelMaximumTokens(modelId: String): Int = when {
         modelId == TrainedLocalModel.ID -> 262144
         Regex("qwen3\\.5-(0\\.8b|2b)-(q4-k-m|q8-0)").matches(modelId) -> 262144
         Regex("qwen3-(0\\.6b|1\\.7b)-(q4-k-m|q8-0)").matches(modelId) -> 32768
-        else -> throw IllegalArgumentException("Select a supported local Qwen model")
+        modelId == GEMMA_E2B -> 131072
+        else -> throw IllegalArgumentException("Select a supported local model")
     }
 
     fun plan(modelId: String, modelBytes: Long, installedSha256: String?, loadedModelId: String?,

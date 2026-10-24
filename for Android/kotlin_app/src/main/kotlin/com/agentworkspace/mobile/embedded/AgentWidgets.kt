@@ -356,14 +356,21 @@ object AgentWidgets {
     private fun timeLabel(context: Context, millis: Long): String {
         val zone = ZoneId.systemDefault()
         val moment = Instant.ofEpochMilli(millis).atZone(zone)
-        val english = UiText.isEnglish(context)
-        val clock = if (DateFormat.is24HourFormat(context)) "HH:mm" else if (english) "h:mm a" else "a h:mm"
+        val language = UiText.language(context)
+        val clock = if (DateFormat.is24HourFormat(context)) "HH:mm" else if (language == "en") "h:mm a" else "a h:mm"
         val pattern = when {
             moment.toLocalDate() == LocalDate.now(zone) -> clock
-            english -> "MMM d, $clock"
+            language == "en" -> "MMM d, $clock"
+            language == "ko" -> "M월 d일 $clock"
             else -> "M月d日 $clock"
         }
-        return moment.format(DateTimeFormatter.ofPattern(pattern, if (english) Locale.ENGLISH else Locale.CHINESE))
+        val locale = when (language) {
+            "en" -> Locale.ENGLISH
+            "ja" -> Locale.JAPANESE
+            "ko" -> Locale.KOREAN
+            else -> Locale.CHINESE
+        }
+        return moment.format(DateTimeFormatter.ofPattern(pattern, locale))
     }
 
     private val tileIds = listOf(

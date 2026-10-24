@@ -62,6 +62,17 @@ object TriggerEvents {
         }
     }
 
+    @Volatile private var appContext: Context? = null
+
+    /** Whether the phone has a validated internet connection (a task sent offline waits for it). */
+    @JvmStatic
+    fun online(): Boolean {
+        val connectivity = appContext?.getSystemService(ConnectivityManager::class.java) ?: return true
+        val capabilities = connectivity.getNetworkCapabilities(connectivity.activeNetwork) ?: return false
+        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    }
+
     /** The engine added, removed or paused a trigger: read them again at the next app opening. */
     @JvmStatic
     fun invalidate() { fetchedAt = 0L }
@@ -87,6 +98,7 @@ object TriggerEvents {
     /** Charging, Wi-Fi, battery, unlocking and audio devices, for as long as the engine service runs. */
     fun start(context: Context) {
         val app = context.applicationContext
+        appContext = app
         if (receiver == null) {
             receiver = object : BroadcastReceiver() {
                 override fun onReceive(context: Context, intent: Intent) = onBroadcast(app, intent)

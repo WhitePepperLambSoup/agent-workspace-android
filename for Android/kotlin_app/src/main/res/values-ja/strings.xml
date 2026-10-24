@@ -1,0 +1,26 @@
+<!-- Only strings the system shows before the app runs (other native text uses UiText). -->
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+    <string name="quick_tile_label">Agent に質問</string>
+    <string name="notification_listener_label">Agent Workspace 通知トリガー</string>
+    <string name="widget_quick_ask_label">クイック質問</string>
+    <string name="widget_quick_ask_description">検索バーのようにいつでも質問。音声や写真でも可能</string>
+    <string name="widget_tasks_label">タスクの状況</string>
+    <string name="widget_tasks_description">実行中と承認待ちのタスク</string>
+    <string name="widget_quick_tasks_label">よく使うタスク</string>
+    <string name="widget_quick_tasks_description">よく使うタスクをワンタップで開始</string>
+    <string name="widget_ask_hint">Agent に質問…</string>
+    <string name="widget_no_task">タスクはまだありません</string>
+    <string name="widget_ready">準備完了</string>
+    <string name="widget_task_summarize_title">要点をまとめる</string>
+    <string name="widget_task_summarize_detail">文書、ウェブページ、チャット履歴</string>
+    <string name="widget_task_translate_title">翻訳と推敲</string>
+    <string name="widget_task_translate_detail">日本語と英語を自然な語調で翻訳</string>
+    <string name="widget_task_web_page_title">ウェブページを作る</string>
+    <string name="widget_task_web_page_detail">すぐにプレビューできるページを作成</string>
+    <string name="widget_task_analyze_title">データを分析</string>
+    <string name="widget_task_analyze_detail">表や CSV から結論とグラフを出す</string>
+    <string name="android_system_accessibility_description">Agent Workspace が画面に表示されているコントロールを読み取り、あなたが同意した操作を行えるようにします。どのアプリでも、フローティングボタンの「スマホを操作」をタップすれば、AI にそこで何をするか直接伝えられます。Agent Workspace でいつでも一時停止したり、操作を引き継いだりできます。</string>
+    <string name="widget_card_label">AI カード</string>
+    <string name="widget_card_description">スケジュールの最新の結果（毎朝のブリーフィングなど）</string>
+    <string name="widget_card_empty">「スケジュール」でタスクの「ホーム画面のカードに表示」をタップすると、その最新の結果がここに表示されます。</string>
+</resources>

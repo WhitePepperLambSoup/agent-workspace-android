@@ -71,8 +71,10 @@ inline llama_token special_token(const llama_vocab * vocabulary, const std::stri
  * or 0 when there is none worth saving.
  */
 inline size_t system_prefix_length(const std::vector<llama_token> & tokens, llama_token im_start) {
-    if (im_start < 0 || tokens.empty() || tokens[0] != im_start) return 0;
-    for (size_t i = 1; i < tokens.size(); ++i)
+    // Gemma's prompts open with BOS before the first turn marker.
+    const size_t first = tokens.size() > 1 && tokens[0] != im_start && tokens[1] == im_start ? 1 : 0;
+    if (im_start < 0 || tokens.size() <= first || tokens[first] != im_start) return 0;
+    for (size_t i = first + 1; i < tokens.size(); ++i)
         if (tokens[i] == im_start) return i >= MIN_PREFIX_TOKENS ? i : 0;
     return 0;
 }

@@ -156,6 +156,10 @@ class MobileTaskRequest:
     # Plan mode: look around read-only and answer with a plan; nothing is changed until the user
     # approves it (the next message carries it out).
     plan_mode: bool = False
+    # Privacy routing (mobile_privacy_route): this task only is answered by the on-device model.
+    on_device: bool = False
+    # Sent with no network: the task waits in the queue until the phone is online again.
+    wait_for_network: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.image_refs, tuple) or any(
@@ -196,6 +200,8 @@ class MobileTaskRequest:
             **({"phone_tips": self.phone_tips} if self.phone_tips else {}),
             **({"phone_screen": self.phone_screen} if self.phone_screen else {}),
             **({"plan_mode": True} if self.plan_mode else {}),
+            **({"on_device": True} if self.on_device else {}),
+            **({"wait_for_network": True} if self.wait_for_network else {}),
         }
 
 
@@ -253,6 +259,12 @@ def parse_mobile_task_request(payload: Mapping[str, Any]) -> MobileTaskRequest:
         raise ValueError("plan_mode must be true or false")
     if plan_mode and auto_approve:
         raise ValueError("a plan_mode task changes nothing, so it has nothing to approve")
+    on_device = payload.get("on_device", False)
+    wait_for_network = payload.get("wait_for_network", False)
+    if not isinstance(on_device, bool) or not isinstance(wait_for_network, bool):
+        raise ValueError("on_device and wait_for_network must be true or false")
+    if on_device and wait_for_network:
+        raise ValueError("an on_device task needs no network to wait for")
     return MobileTaskRequest(
         session_id=session_id,
         prompt=prompt,
@@ -268,6 +280,8 @@ def parse_mobile_task_request(payload: Mapping[str, Any]) -> MobileTaskRequest:
         phone_tips=phone_tips,
         phone_screen=phone_screen,
         plan_mode=plan_mode,
+        on_device=on_device,
+        wait_for_network=wait_for_network,
     )
 
 

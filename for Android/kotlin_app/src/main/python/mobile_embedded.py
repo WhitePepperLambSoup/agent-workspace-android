@@ -57,6 +57,12 @@ def configure_environment(files_dir: str, provider_json: str) -> tuple[Path, Pat
     model = setting("model", default="gpt-4o-mini")
     if (
         base_url.rstrip("/") == "http://127.0.0.1:8080/embedded-qwen/v1"
+        and model.startswith("gemma-4-")
+        and context_tokens > 131072
+    ):
+        raise ValueError("Gemma 4 本地上下文最多 131072 token。请先选择自动或不超过 128K。")
+    if (
+        base_url.rstrip("/") == "http://127.0.0.1:8080/embedded-qwen/v1"
         and model.startswith("qwen3-")
         and context_tokens > 32768
     ):

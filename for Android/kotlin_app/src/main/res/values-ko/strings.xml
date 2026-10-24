@@ -1,0 +1,26 @@
+<!-- Only strings the system shows before the app runs (other native text uses UiText). -->
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+    <string name="quick_tile_label">Agent에게 묻기</string>
+    <string name="notification_listener_label">Agent Workspace 알림 트리거</string>
+    <string name="widget_quick_ask_label">빠른 질문</string>
+    <string name="widget_quick_ask_description">검색창처럼 언제든 질문, 음성이나 사진도 가능</string>
+    <string name="widget_tasks_label">작업 현황</string>
+    <string name="widget_tasks_description">실행 중이거나 승인 대기 중인 작업</string>
+    <string name="widget_quick_tasks_label">자주 쓰는 작업</string>
+    <string name="widget_quick_tasks_description">자주 쓰는 작업을 한 번에 시작</string>
+    <string name="widget_ask_hint">Agent에게 묻기…</string>
+    <string name="widget_no_task">아직 작업이 없습니다</string>
+    <string name="widget_ready">준비됨</string>
+    <string name="widget_task_summarize_title">요점 정리</string>
+    <string name="widget_task_summarize_detail">문서, 웹 페이지, 채팅 기록</string>
+    <string name="widget_task_translate_title">번역 및 다듬기</string>
+    <string name="widget_task_translate_detail">한국어 ↔ 영어, 자연스러운 어조</string>
+    <string name="widget_task_web_page_title">웹 페이지 만들기</string>
+    <string name="widget_task_web_page_detail">바로 미리 볼 수 있는 페이지 생성</string>
+    <string name="widget_task_analyze_title">데이터 분석</string>
+    <string name="widget_task_analyze_detail">표나 CSV에서 결론과 차트 도출</string>
+    <string name="android_system_accessibility_description">Agent Workspace가 화면에 보이는 컨트롤을 읽고, 동의한 작업을 수행하도록 허용합니다. 어떤 앱에서든 플로팅 버튼의 ‘휴대폰 조작’을 누르면 AI에게 그곳에서 할 일을 바로 말할 수 있습니다. Agent Workspace에서 언제든 일시 중지하거나 직접 넘겨받을 수 있습니다.</string>
+    <string name="widget_card_label">AI 카드</string>
+    <string name="widget_card_description">예약 작업의 최신 결과(예: 아침 브리핑)</string>
+    <string name="widget_card_empty">‘예약 작업’에서 작업의 ‘홈 화면 카드에 표시’를 누르면 그 최신 결과가 여기에 표시됩니다.</string>
+</resources>

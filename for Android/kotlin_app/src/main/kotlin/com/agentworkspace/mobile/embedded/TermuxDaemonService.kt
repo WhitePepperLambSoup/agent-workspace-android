@@ -96,6 +96,8 @@ class TermuxDaemonService : Service() {
         BackgroundRunGuide.startPauseMonitor(this)
         // Automatic triggers: charging started, Wi-Fi joined (app openings come from the accessibility service).
         TriggerEvents.start(this)
+        // Background operation is on but Shizuku stopped with the last restart: say so once.
+        com.agentworkspace.mobile.automation.BackgroundScreen.remindAfterBoot(this)
         // Why the previous engine process ended (an update, the user, the system), for diagnostics.
         Thread({ ProcessExits.record(this) }, "process-exits").start()
 

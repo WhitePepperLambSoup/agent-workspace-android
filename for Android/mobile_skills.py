@@ -25,6 +25,7 @@ import os
 import re
 import shutil
 import tarfile
+import tempfile
 import threading
 import time
 import urllib.error
@@ -77,6 +78,40 @@ _TEXT_SUFFIXES = {
 
 class SkillError(ValueError):
     """A pack or source the user should hear about (shown as is)."""
+
+
+# What a pack's text talks about, by kind, for the import preview. A skill runs nothing itself and
+# every step still follows the user's approval rules; this tells the user what to read closely.
+_MENTIONS = {
+    "phone": r"android_action|launch_app|操作手机|手机操控|打开[^。\n]{0,8}App|点击|滑动",
+    "messages": r"compose_sms|send_sms|notification_reply|发短信|发消息|发送消息|回复消息|send (?:a )?message",
+    "payment": r"付款|支付(?!宝)|转账|下单|购买|充值|checkout|payment",
+    "delete": r"delete_path|删除|清除|卸载|uninstall|rm -rf",
+    "web": r"web_fetch|web_search|联网|网页|https?://",
+    "files": r"write_file|apply_patch|create_docx|create_xlsx|create_pdf|保存为文件|存成文件|写入文件",
+    "personal": r"联系人|通讯录|定位|位置信息|验证码|密码|身份证|银行卡|contacts|password",
+    "commands": r"run_process|terminal|shell|终端|命令行",
+}
+# A shared skill travels as text (a share code): its files must stay small.
+MAX_SHARED_BYTES = 48 * 1024
+
+
+def skill_mentions(root: Path) -> list[str]:
+    """The kinds of _MENTIONS found in the text files below root (at most 512 KB read)."""
+    found: set[str] = set()
+    budget = 512 * 1024
+    for path in sorted(root.rglob("*")):
+        if budget <= 0:
+            break
+        if not path.is_file() or path.is_symlink() or path.suffix.lower() not in _TEXT_SUFFIXES:
+            continue
+        try:
+            text = path.read_bytes()[:budget].decode("utf-8", errors="replace")
+        except OSError:
+            continue
+        budget -= len(text.encode("utf-8"))
+        found.update(kind for kind, pattern in _MENTIONS.items() if re.search(pattern, text, re.IGNORECASE))
+    return sorted(found)
 
 
 def _slug(text: str, fallback: str = "skill") -> str:
@@ -702,6 +737,7 @@ class SkillStore:
             "version": version,
             "source": source,
             "skills": skills,
+            "mentions": skill_mentions(files),
         }
         with self._lock:
             installed = next((pack for pack in self._index()["packs"] if pack["id"] == pack_id), None)
@@ -729,6 +765,65 @@ class SkillStore:
             raise SkillError("the file is larger than 20 MB")
         stem = re.sub(r"(\.skillpack|\.skills)?\.(zip|tar\.gz|tgz|md)$", "", file_name or "", flags=re.I)
         return self._stage(data, {"kind": "file", "file": (file_name or "")[:200]}, name_hint=stem or "skills")
+
+    # sharing one skill as text (a share code the console signs and checks)
+    def export_skill(self, pack_id: object, skill_id: object) -> dict[str, Any]:
+        """A SKILL.md skill's text files, to share as a code."""
+        with self._lock:
+            pack = self._pack(self._index(), pack_id)
+        skill = next((item for item in pack.get("skills") or () if item["id"] == skill_id), None)
+        if skill is None:
+            raise SkillError("that skill is not in the pack")
+        if skill.get("kind") != "skill_md":
+            raise SkillError("only SKILL.md skills can be shared as a code")
+        pack_root = (self.packs_dir / pack["id"]).resolve()
+        folder = (pack_root / skill["path"]).resolve()
+        if folder != pack_root and pack_root not in folder.parents:
+            raise SkillError("skill files are outside their pack")
+        files: dict[str, str] = {}
+        total = 0
+        for path in sorted(folder.rglob("*")):
+            relative = path.relative_to(folder)
+            if any(part.startswith(".") for part in relative.parts) or not path.is_file() or path.is_symlink():
+                continue
+            if path.suffix.lower() not in _TEXT_SUFFIXES:
+                continue
+            text = _read_text(path, MAX_SHARED_BYTES)
+            total += len(text.encode("utf-8"))
+            if total > MAX_SHARED_BYTES:
+                raise SkillError("the skill is too large to share as a code; share its pack file instead")
+            files["SKILL.md" if relative.as_posix().lower() == "skill.md" else relative.as_posix()] = text
+        if "SKILL.md" not in files:
+            raise SkillError("the skill's SKILL.md is missing; reinstall the pack")
+        return {"name": skill["name"], "description": skill["description"], "files": files}
+
+    def preview_shared(self, name: object, files: object, signer: object) -> dict[str, Any]:
+        """A skill from a share code, staged like any other import; [signer] is the fingerprint of
+        the key that signed the code (the console checked it), or None for an unsigned code."""
+        if not isinstance(name, str) or not name.strip() or len(name) > 200:
+            raise SkillError("the share code has no skill name")
+        if signer is not None and (not isinstance(signer, str) or not re.fullmatch(r"[0-9A-F]{4}(-[0-9A-F]{4}){2}", signer)):
+            raise SkillError("invalid signer")
+        if not isinstance(files, dict) or "SKILL.md" not in files or len(files) > 50:
+            raise SkillError("the share code holds no SKILL.md")
+        total = 0
+        with tempfile.TemporaryDirectory(dir=self.root if self.root.is_dir() else None) as temporary:
+            folder = Path(temporary) / "skill"
+            for key, text in files.items():
+                member = _safe_member(key) if isinstance(key, str) else None
+                if member is None or not isinstance(text, str) or PurePosixPath(key).suffix.lower() not in _TEXT_SUFFIXES:
+                    raise SkillError("the share code holds a file that is not a skill text file")
+                total += len(text.encode("utf-8"))
+                if total > MAX_SHARED_BYTES:
+                    raise SkillError("the share code is too large")
+                target = folder / member
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text, encoding="utf-8")
+            digest = hashlib.sha256(name.strip().encode("utf-8")).hexdigest()[:10]
+            manifest = {"id": "shared-" + (_slug(name, "") or digest)[:50], "name": name.strip()[:120], "version": "1"}
+            (Path(temporary) / MANIFEST).write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+            return self._stage(None, {"kind": "shared", "signer": signer}, name_hint=name.strip(),
+                               directory=Path(temporary))
 
     def install(self, token: object) -> dict[str, Any]:
         if not isinstance(token, str) or not _TOKEN.fullmatch(token):

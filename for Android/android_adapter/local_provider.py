@@ -50,9 +50,22 @@ SUPPORTED_MODELS = frozenset(
         "qwen3.5-0.8b-q8-0",
         "qwen3.5-2b-q4-k-m",
         "qwen3.5-2b-q8-0",
+        "gemma-4-e2b-q4-0",
     }
     | {item["model_id"] for item in LOCAL_MODEL_CATALOG}
 )
+
+
+def _gemma(model: str) -> bool:
+    """Gemma 4 (Google): its own turn markers and tool-call notation (see _build_gemma4_prompt)."""
+    return model.startswith("gemma-4-")
+
+
+def family_context_limit(model: str) -> int:
+    """The longest context each family was trained for."""
+    if model.startswith("qwen3.5-"):
+        return 262144
+    return 131072 if _gemma(model) else 32768
 _MAX_PROMPT_BYTES = 4 * 1024 * 1024
 # Counting must admit large histories before the runner compacts them. This
 # transport guard is independent of the model context and generation guards.
@@ -288,11 +301,18 @@ def _error(message: str, *, context_exceeded: bool = False) -> ProviderError:
 _CALLED_NAME = re.compile(r'<function=([^>\s]{1,64})>|"name"\s*:\s*"([^"]{1,64})"')
 
 
+_CALL_FORMS = {
+    "qwen35": "<tool_call>\n<function=NAME>\n<parameter=KEY>\nVALUE\n</parameter>\n</function>\n</tool_call>",
+    "qwen3": '<tool_call>\n{"name": "NAME", "arguments": {...}}\n</tool_call>',
+    "gemma": '<|tool_call>call:NAME{KEY:<|"|>VALUE<|"|>}<tool_call|>',
+}
+
+
 def _call_error(
     message: str,
     raw: str,
     allowed: dict[str, Any],
-    qwen35: bool,
+    family: str,
     advertised: frozenset[str] | None = None,
 ) -> ProviderError:
     """A rejected tool proposal. Nothing runs; the runner asks the model once more with the reason.
@@ -307,11 +327,7 @@ def _call_error(
         message = f'{message}: "{name}" is not an available tool'
     error = _error(message)
     tools = ", ".join(sorted(allowed)) or "none"
-    form = (
-        "<tool_call>\n<function=NAME>\n<parameter=KEY>\nVALUE\n</parameter>\n</function>\n</tool_call>"
-        if qwen35
-        else '<tool_call>\n{"name": "NAME", "arguments": {...}}\n</tool_call>'
-    )
+    form = _CALL_FORMS[family]
     # A hidden tool's parameters were never shown, so a guessed call needs them for the retry.
     parameters = (
         f" Parameters of {name}: {_json(_local_tool(allowed[name])['function']['parameters'])}."
@@ -366,6 +382,8 @@ def build_qwen_prompt(request: ProviderRequest, *, enforce_size_limit: bool = Tr
             )
     if request.model.startswith("qwen3.5-"):
         return _build_qwen35_prompt(request, enforce_size_limit=enforce_size_limit)
+    if _gemma(request.model):
+        return _build_gemma4_prompt(request, enforce_size_limit=enforce_size_limit)
     parts: list[str] = []
     first_system = request.messages[0].role is Role.SYSTEM
     if request.tools:
@@ -537,6 +555,268 @@ def _build_qwen35_prompt(request: ProviderRequest, *, enforce_size_limit: bool =
     if enforce_size_limit and len(prompt.encode("utf-8")) > _MAX_PROMPT_BYTES:
         raise _error("Local Qwen prompt is too long for the phone", context_exceeded=True)
     return prompt
+
+
+# ---- Gemma 4 ------------------------------------------------------------------------------------
+# Gemma 4's chat template (google/gemma-4-E2B-it, chat_template.jinja): turns are
+# <|turn>ROLE\n...<turn|>, tools are declared in the system turn, and a call and its result stay
+# in the model's turn: <|tool_call>call:NAME{key:value}<tool_call|> then
+# <|tool_response>response:NAME{value:...}<tool_response|>. Strings are delimited by <|"|>.
+# llama.cpp ends a generation at <|tool_response> and <turn|>.
+_GEMMA_QUOTE = '<|"|>'
+_GEMMA_CALL = re.compile(r"<\|tool_call>call:([A-Za-z0-9_.-]{1,128})(.*?)<tool_call\|>", re.DOTALL)
+_GEMMA_THOUGHT = re.compile(r"<\|channel>(?:thought)?(.*?)<channel\|>", re.DOTALL)
+# Gemma's control tokens are lopsided (<|turn>, <turn|>, <|"|>) and include <bos>-style names;
+# the tokenizer reads them in the prompt, so text must not spell one.
+_GEMMA_SPECIAL = re.compile(r"<\||\|>|<(?=(?:bos|eos|pad|unk|mask|start_of_\w+|end_of_\w+)>)")
+
+
+def _gemma_content(value: str) -> str:
+    escaped = _chat_content(value)
+    return _GEMMA_SPECIAL.sub(lambda match: {"<|": "<¦", "|>": "¦>"}.get(match[0], "‹"), escaped)
+
+
+def _gemma_value(value: Any, *, quote_keys: bool = False) -> str:
+    """A value in Gemma's notation (the template's format_argument)."""
+    if value is None:
+        return "null"
+    if isinstance(value, str):
+        return _GEMMA_QUOTE + _gemma_content(value) + _GEMMA_QUOTE
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, dict):
+        return "{" + ",".join(
+            (_GEMMA_QUOTE + key + _GEMMA_QUOTE if quote_keys else key) + ":" + _gemma_value(item, quote_keys=quote_keys)
+            for key, item in sorted(value.items())
+        ) + "}"
+    if isinstance(value, (list, tuple)):
+        return "[" + ",".join(_gemma_value(item, quote_keys=quote_keys) for item in value) + "]"
+    return _json(value)
+
+
+def _gemma_type(schema: dict[str, Any]) -> tuple[str, bool]:
+    kind = schema.get("type", "string")
+    if isinstance(kind, list):
+        kinds = [item for item in kind if item != "null"]
+        return (str(kinds[0]) if kinds else "string").upper(), "null" in kind
+    return str(kind).upper(), bool(schema.get("nullable"))
+
+
+def _gemma_parameters(properties: dict[str, Any], required: Any) -> str:
+    """The template's format_parameters: each property's description, type and nested shape."""
+    parts = []
+    for key, schema in sorted(properties.items()):
+        if not isinstance(schema, dict):
+            continue
+        kind, nullable = _gemma_type(schema)
+        fields = []
+        if schema.get("description"):
+            fields.append("description:" + _gemma_value(str(schema["description"])))
+        if kind == "STRING" and schema.get("enum"):
+            fields.append("enum:" + _gemma_value(schema["enum"], quote_keys=True))
+        elif kind == "ARRAY" and isinstance(schema.get("items"), dict) and schema["items"]:
+            items = []
+            for item_key, item_value in sorted(schema["items"].items()):
+                if item_value is None:
+                    continue
+                if item_key == "properties" and isinstance(item_value, dict):
+                    items.append("properties:{" + _gemma_parameters(item_value, schema["items"].get("required", [])) + "}")
+                elif item_key == "required":
+                    items.append("required:[" + ",".join(_GEMMA_QUOTE + str(name) + _GEMMA_QUOTE for name in item_value) + "]")
+                elif item_key == "type":
+                    items.append("type:" + _gemma_value(
+                        item_value.upper() if isinstance(item_value, str) else [str(item).upper() for item in item_value],
+                        quote_keys=True))
+                else:
+                    items.append(f"{item_key}:" + _gemma_value(item_value, quote_keys=True))
+            fields.append("items:{" + ",".join(items) + "}")
+        if nullable:
+            fields.append("nullable:true")
+        if kind == "OBJECT":
+            if isinstance(schema.get("properties"), dict):
+                fields.append("properties:{" + _gemma_parameters(schema["properties"], schema.get("required", [])) + "}")
+            if schema.get("required"):
+                fields.append("required:[" + ",".join(_GEMMA_QUOTE + str(name) + _GEMMA_QUOTE for name in schema["required"]) + "]")
+        fields.append(f"type:{_GEMMA_QUOTE}{kind}{_GEMMA_QUOTE}")
+        parts.append(f"{key}:{{" + ",".join(fields) + "}")
+    return ",".join(parts)
+
+
+def _gemma_declaration(tool: Any) -> str:
+    function = _local_tool(tool)["function"]
+    if not re.fullmatch(_XML_NAME, function["name"]):
+        raise _error("Local Gemma tool name cannot be encoded in its template")
+    text = f"declaration:{function['name']}{{description:" + _gemma_value(str(function.get("description", "")))
+    parameters = function.get("parameters") or {}
+    if parameters:
+        text += ",parameters:{"
+        if parameters.get("properties"):
+            text += "properties:{" + _gemma_parameters(parameters["properties"], parameters.get("required")) + "},"
+        if parameters.get("required"):
+            text += "required:[" + ",".join(_GEMMA_QUOTE + name + _GEMMA_QUOTE for name in parameters["required"]) + "],"
+        text += f"type:{_GEMMA_QUOTE}{str(parameters.get('type', 'object')).upper()}{_GEMMA_QUOTE}}}"
+    return text + "}"
+
+
+def _build_gemma4_prompt(request: ProviderRequest, *, enforce_size_limit: bool = True) -> str:
+    """Gemma 4's text and tool template, without thinking."""
+    if not any(message.role is Role.USER for message in request.messages):
+        raise _error("Local Gemma requires a user query")
+    system = "\n\n".join(
+        _gemma_content(message.provider_content()).strip()
+        for message in request.messages
+        if message.role is Role.SYSTEM
+    )
+    parts = ["<bos>"]
+    if system or request.tools:
+        parts.append("<|turn>system\n" + system)
+        parts.extend("<|tool>" + _gemma_declaration(tool) + "<tool|>" for tool in request.tools)
+        parts.append("<turn|>\n")
+    names: dict[str, str] = {}
+    open_model_turn = False
+    for message in request.messages:
+        if message.role is Role.SYSTEM:
+            continue
+        raw = message.provider_content().strip()
+        content = _gemma_content(raw)
+        if message.role is Role.TOOL:
+            # A result belongs to the model turn that called it.
+            name = names.get(message.tool_call_id or "", "unknown")
+            parts.append(f"<|tool_response>response:{name}{{value:{_gemma_value(raw)}}}<tool_response|>")
+            continue
+        if message.role is Role.ASSISTANT:
+            if not open_model_turn:
+                parts.append("<|turn>model\n")
+            content = _GEMMA_THOUGHT.sub("", content).strip()
+            parts.append(content)
+            for call in message.tool_calls:
+                if not re.fullmatch(_XML_NAME, call.name):
+                    raise _error("Local Gemma tool call name cannot be encoded in its template")
+                names[call.id] = call.name
+                arguments = ",".join(f"{key}:{_gemma_value(value)}" for key, value in sorted(call.arguments.items()))
+                parts.append(f"<|tool_call>call:{call.name}{{{arguments}}}<tool_call|>")
+            if message.tool_calls:
+                open_model_turn = True
+            else:
+                parts.append("<turn|>\n")
+                open_model_turn = False
+            continue
+        if open_model_turn:
+            parts.append("<turn|>\n")
+            open_model_turn = False
+        parts.append(f"<|turn>user\n{content}<turn|>\n")
+    # After tool results the model goes on in the same turn.
+    if not open_model_turn:
+        parts.append("<|turn>model\n")
+    prompt = "".join(parts)
+    if enforce_size_limit and len(prompt.encode("utf-8")) > _MAX_PROMPT_BYTES:
+        raise _error("Local Gemma prompt is too long for the phone", context_exceeded=True)
+    return prompt
+
+
+class _GemmaArguments:
+    """Reads the {key:value,...} of a Gemma call: <|"|>strings<|"|>, numbers, true, false, null,
+    nested {...} and [...]; keys bare or quoted."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.at = 0
+
+    def parse(self) -> dict[str, Any]:
+        value = self._value()
+        self._space()
+        if not isinstance(value, dict) or self.at != len(self.text):
+            raise _error("Local Gemma tool call arguments are not a {key:value} object")
+        return value
+
+    def _space(self) -> None:
+        while self.at < len(self.text) and self.text[self.at] in " \t\r\n":
+            self.at += 1
+
+    def _value(self) -> Any:
+        self._space()
+        text = self.text
+        if text.startswith(_GEMMA_QUOTE, self.at):
+            end = text.find(_GEMMA_QUOTE, self.at + len(_GEMMA_QUOTE))
+            if end < 0:
+                raise _error("Local Gemma tool call has an unclosed string")
+            value = text[self.at + len(_GEMMA_QUOTE):end]
+            self.at = end + len(_GEMMA_QUOTE)
+            return value
+        if text.startswith("{", self.at):
+            self.at += 1
+            result: dict[str, Any] = {}
+            self._space()
+            if text.startswith("}", self.at):
+                self.at += 1
+                return result
+            while True:
+                self._space()
+                if text.startswith(_GEMMA_QUOTE, self.at):
+                    key = self._value()
+                else:
+                    end = text.find(":", self.at)
+                    if end < 0:
+                        raise _error("Local Gemma tool call has a key without a value")
+                    key = text[self.at:end].strip()
+                    self.at = end
+                self._space()
+                if not isinstance(key, str) or not key or not text.startswith(":", self.at):
+                    raise _error("Local Gemma tool call has an invalid key")
+                self.at += 1
+                if key in result:
+                    raise _error("Local Gemma tool call repeats a key")
+                result[key] = self._value()
+                self._space()
+                if text.startswith(",", self.at):
+                    self.at += 1
+                    continue
+                if text.startswith("}", self.at):
+                    self.at += 1
+                    return result
+                raise _error("Local Gemma tool call object is not closed")
+        if text.startswith("[", self.at):
+            self.at += 1
+            items: list[Any] = []
+            self._space()
+            if text.startswith("]", self.at):
+                self.at += 1
+                return items
+            while True:
+                items.append(self._value())
+                self._space()
+                if text.startswith(",", self.at):
+                    self.at += 1
+                    continue
+                if text.startswith("]", self.at):
+                    self.at += 1
+                    return items
+                raise _error("Local Gemma tool call list is not closed")
+        match = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null").match(text, self.at)
+        if match is None:
+            raise _error("Local Gemma tool call has a value it cannot read")
+        self.at = match.end()
+        return json.loads(match[0])
+
+
+def gemma_to_qwen3(text: str) -> tuple[str, str]:
+    """Gemma's output as Qwen3's JSON tool-call form, so one validation path checks both: the text
+    with each call rewritten, and its thinking (if any). An unreadable call stays a malformed
+    <tool_call> block, which the validation rejects with a retry hint."""
+    reasoning = " ".join(part.strip() for part in _GEMMA_THOUGHT.findall(text) if part.strip())
+    text = _GEMMA_THOUGHT.sub("", text)
+
+    def rewrite(match: re.Match[str]) -> str:
+        try:
+            arguments = _GemmaArguments(match[2]).parse()
+        except ProviderError:
+            return "<tool_call>\n" + f'{{"name": {json.dumps(match[1])}, "arguments": ' + match[2] + "\n</tool_call>"
+        return "<tool_call>\n" + _json({"name": match[1], "arguments": arguments}) + "\n</tool_call>"
+
+    converted = _GEMMA_CALL.sub(rewrite, text)
+    if "<|tool_call>" in converted or "<tool_call|>" in converted:
+        converted = converted.replace("<|tool_call>", "<tool_call>")  # an unfinished call
+    return converted, reasoning
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -900,7 +1180,8 @@ def tool_grammar(request: ProviderRequest) -> str:
     """A lazy GBNF grammar for this request's tool calls, or "" when there are none."""
     from .local_grammar import enabled, tool_call_grammar
 
-    if not request.tools or not enabled():
+    if not request.tools or not enabled() or _gemma(request.model):
+        # Gemma's calls are checked after generation (gemma_to_qwen3) rather than by a grammar.
         return ""
     tools = [
         (name, _local_tool(tool)["function"]["parameters"])
@@ -920,7 +1201,11 @@ def parse_qwen_output(
     if len(text.encode("utf-8")) > _MAX_RESPONSE_BYTES:
         raise _error("Local Qwen response exceeded the phone response limit")
     reasoning = ""
-    if text.lstrip().startswith("<think>"):
+    gemma = _gemma(request.model)
+    if gemma:
+        # Gemma's calls become Qwen3's JSON form; everything after is checked the same way.
+        text, reasoning = gemma_to_qwen3(text)
+    elif text.lstrip().startswith("<think>"):
         thought = text.lstrip()[len("<think>") :]
         if "</think>" not in thought:
             # A generation budget can end within thinking. This remains reasoning
@@ -937,12 +1222,13 @@ def parse_qwen_output(
     advertised = frozenset(tool.name for tool in request.tools)
     allowed = _callable_tools(request)
     qwen35 = request.model.startswith("qwen3.5-")
+    family = "gemma" if gemma else "qwen35" if qwen35 else "qwen3"
     if qwen35 and matches and text[matches[-1].end() :].strip():
         raise _call_error(
             "Local Qwen3.5 tool call must not contain a trailing suffix",
             matches[-1][1],
             allowed,
-            qwen35,
+            family,
             advertised,
         )
     calls: list[ToolCall] = []
@@ -968,7 +1254,7 @@ def parse_qwen_output(
                 ) from None
         except ProviderError as error:
             # Still never executed; the error now says what to fix for a bounded retry.
-            raise _call_error(str(error), raw, allowed, qwen35, advertised) from None
+            raise _call_error(str(error), raw, allowed, family, advertised) from None
         arguments = _repair_digest(_workspace_relative(arguments, workspace_root), schema, request)
         if allowed[name].side_effect in _REPEAT_GUARDED_EFFECTS and _just_succeeded(
             name, arguments, request
@@ -978,12 +1264,12 @@ def parse_qwen_output(
                 "above. Do not repeat it: do the next step of the task, or answer if it is done",
                 raw,
                 allowed,
-                qwen35,
+                family,
                 advertised,
             )
         problem = _content_problem(name, arguments, request, allowed)
         if problem is not None:
-            raise _call_error(problem, raw, allowed, qwen35, advertised)
+            raise _call_error(problem, raw, allowed, family, advertised)
         digest = hashlib.sha256((request_id + str(index) + _json(call)).encode()).hexdigest()[:24]
         calls.append(ToolCall("local_" + digest, name, arguments))
     deltas: list[ProviderDelta] = []
@@ -1033,7 +1319,7 @@ def _planned_context_size(plan: Any, model_id: str, configured_tokens: int) -> i
             return None
         raise _error(error["message"][:500])
     context = plan.get("context_size")
-    maximum = 262144 if model_id.startswith("qwen3.5-") else 32768
+    maximum = family_context_limit(model_id)
     installed_maximum = plan.get("model_max_context_tokens", maximum)
     if (
         type(installed_maximum) is not int
@@ -1236,7 +1522,7 @@ class EmbeddedQwenProvider:
         )
         if type(maximum) is not int or maximum <= 0:
             raise _error("Local Qwen output budget must be a positive integer")
-        model_limit = 262144 if request.model.startswith("qwen3.5-") else 32768
+        model_limit = family_context_limit(request.model)
         if self._context_size > model_limit:
             raise _error("Selected local context exceeds this model's supported context")
         temperature = request.temperature if request.temperature is not None else 0.7
@@ -1581,7 +1867,7 @@ def install_local_provider_factory() -> None:
             if not configured.isdecimal():
                 raise _error("Invalid local context setting")
             requested = int(configured)
-            model_maximum = 262144 if config.model.startswith("qwen3.5-") else 32768
+            model_maximum = family_context_limit(config.model)
             if requested != 0 and not 512 <= requested <= model_maximum:
                 raise _error("Unsupported local context setting")
             memory_mode = os.getenv("AGENT_WORKSPACE_LOCAL_MEMORY_MODE", "balanced")

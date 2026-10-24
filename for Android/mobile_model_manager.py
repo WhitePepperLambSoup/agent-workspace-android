@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
-from mobile_model_catalog import MODEL_CATALOG, SPEECH_CATALOG, VISION_CATALOG
+from mobile_model_catalog import EMBEDDING_CATALOG, MODEL_CATALOG, SPEECH_CATALOG, VISION_CATALOG
 from mobile_trained_model import LOCAL_MODEL_CATALOG
 
 _MANAGED_MODEL_FILES = ("installed.json", "partial.json")
@@ -66,7 +66,7 @@ class ModelManager:
         self.catalog = {
             item["model_id"]: dict(item)
             for item in (
-                (*MODEL_CATALOG, *LOCAL_MODEL_CATALOG, *VISION_CATALOG, *SPEECH_CATALOG)
+                (*MODEL_CATALOG, *LOCAL_MODEL_CATALOG, *VISION_CATALOG, *SPEECH_CATALOG, *EMBEDDING_CATALOG)
                 if catalog is None
                 else catalog
             )
@@ -245,7 +245,7 @@ class ModelManager:
                     for name in _managed_files(model)
                 ),
             }
-        models, components, speech = [], [], []
+        models, components, speech, embedding = [], [], [], []
         for record in records.values():
             if record.get("kind") == "vision_projection":
                 components.append(record)
@@ -253,6 +253,10 @@ class ModelManager:
             # Speech recognition weights are for voice input, never a chat model to select.
             if record.get("kind") == "speech_recognition":
                 speech.append(record)
+                continue
+            # Embedding weights are for knowledge-base search (mobile_semantic), never a chat model.
+            if record.get("kind") == "embedding":
+                embedding.append(record)
                 continue
             component = records.get(record.get("vision_projector_id"))
             models.append(
@@ -265,6 +269,7 @@ class ModelManager:
             "models": models,
             "vision_components": components,
             "speech_models": speech,
+            "embedding_models": embedding,
             "storage_free_bytes": self._disk_free(),
             "weights_bundled": False,
             "downloads_resumable": True,

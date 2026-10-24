@@ -1,19 +1,29 @@
 package com.agentworkspace.mobile.automation
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.hardware.display.DisplayManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import android.util.DisplayMetrics
 import android.view.Display
+import androidx.core.app.NotificationCompat
+import com.agentworkspace.mobile.UiText
+import com.agentworkspace.mobile.WebUiActivity
 import org.json.JSONObject
 import rikka.shizuku.Shizuku
 import java.io.File
@@ -81,7 +91,54 @@ object BackgroundScreen {
             .put("shizuku_installed", installed).put("shizuku_running", running).put("permitted", permitted)
             .put("active", displayId != -1 && remote?.asBinder()?.isBinderAlive == true)
             .put("display_id", displayId).put("reason", reason ?: JSONObject.NULL)
+            // For the setup steps: Shizuku starts through wireless debugging, which needs both.
+            .put("developer_options", globalFlag(context, Settings.Global.DEVELOPMENT_SETTINGS_ENABLED) ?: JSONObject.NULL)
+            .put("wifi", wifiConnected(context))
     }
+
+    private fun globalFlag(context: Context, name: String): Boolean? =
+        runCatching { Settings.Global.getInt(context.contentResolver, name) == 1 }.getOrNull()
+
+    private fun wifiConnected(context: Context): Boolean = runCatching {
+        val connectivity = context.getSystemService(ConnectivityManager::class.java)
+        connectivity.allNetworks.any { connectivity.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true }
+    }.getOrDefault(false)
+
+    /**
+     * After a restart Shizuku is stopped until the user starts it again through wireless debugging.
+     * When the background screen is on, say so once per boot (a quiet notification that opens the
+     * setup steps), so the first phone task does not just fall back to the phone's own screen.
+     */
+    fun remindAfterBoot(context: Context) {
+        val app = context.applicationContext
+        main.postDelayed({
+            Thread {
+                runCatching {
+                    if (Build.VERSION.SDK_INT < 30 || !enabled(app) || shizukuRunning()) return@Thread
+                    val boot = File("/proc/sys/kernel/random/boot_id").readText().trim()
+                    val marker = File(app.filesDir, "background_screen_reminded")
+                    if (marker.isFile && marker.readText() == boot) return@Thread
+                    marker.writeText(boot)
+                    val manager = app.getSystemService(NotificationManager::class.java)
+                    manager.createNotificationChannel(NotificationChannel(CHANNEL,
+                        UiText.of(app, "后台操作", "Background operation"), NotificationManager.IMPORTANCE_LOW))
+                    val open = Intent(app, WebUiActivity::class.java).setAction(ACTION_SETUP)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    manager.notify(NOTIFICATION_ID, NotificationCompat.Builder(app, CHANNEL)
+                        .setSmallIcon(android.R.drawable.ic_dialog_info)
+                        .setContentTitle(UiText.of(app, "后台操作需要重新启动 Shizuku", "Background operation needs Shizuku started again"))
+                        .setContentText(UiText.of(app, "手机重启后 Shizuku 会停止。点这里按步骤启动；不启动时，手机任务在前台进行。",
+                            "Shizuku stops when the phone restarts. Tap to start it again; until then phone tasks use the screen."))
+                        .setContentIntent(PendingIntent.getActivity(app, NOTIFICATION_ID, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
+                        .setAutoCancel(true).build())
+                }
+            }.start()
+        }, 90_000)
+    }
+
+    const val ACTION_SETUP = "com.agentworkspace.mobile.OPEN_BACKGROUND_SETUP"
+    private const val CHANNEL = "agent_background_screen"
+    private const val NOTIFICATION_ID = 3030
 
     /** Shizuku asks the user (its own dialog); the answer shows in [status]. */
     fun requestPermission(): Boolean = runCatching {

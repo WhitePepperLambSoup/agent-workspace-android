@@ -616,6 +616,17 @@
     "最近 7 天": "Last 7 days",
     "最近会话": "Recent",
     "最高": "Max",
+    "不思考": "Off",
+    "本机模型第一次回答要先处理一遍工具说明，可能要十几分钟；之后每次几十秒。": "The on-device model's first answer first works through the tool descriptions and can take over ten minutes; after that, answers take tens of seconds.",
+    // Notes at the end of on-device model titles (mobile_model_catalog.py), through modelTitle().
+    "轻量离线": "light, offline",
+    "更多能力": "more capable",
+    "官方 Q8_0": "official Q8_0",
+    "多语言": "multilingual",
+    "实验": "experimental",
+    "视觉组件": "vision component",
+    "语义检索": "search by meaning",
+    "Agent 文件工具训练 v3": "Agent file-tool tuned v3",
     "服务商与 API 设置": "Provider & API settings",
     "服务未返回工作区": "The service returned no workspace",
     "服务未返回有效任务 ID": "The service returned no valid task ID",
@@ -1145,7 +1156,6 @@
     "身份证号": "ID card number",
     "银行卡号": "Bank card number",
     "这条消息里有个人信息": "This message holds personal information",
-    "要发给云端模型的内容里有：{0}。遮盖后 AI 只看到前后几位。想完全不出手机，可以在「模型与思考」里换成本机模型。": "What is about to go to the cloud model holds: {0}. Masked, the AI sees only the first and last digits. To keep everything on the phone, switch to the on-device model under Models & reasoning.",
     "遮盖后发送": "Mask and send",
     "原样发送": "Send as is",
     "显示在桌面卡片": "Show on a home screen card",
@@ -1343,6 +1353,67 @@
     "查看位置": "Check the location",
     "应用：{0}": "App: {0}",
     "打开：{0}": "Opens: {0}",
+    "本地上下文最多：Qwen3 32768、Gemma 4 131072、Qwen3.5 262144 token。请先选择自动或更小的上下文。": "On-device context is at most 32768 tokens for Qwen3, 131072 for Gemma 4 and 262144 for Qwen3.5. Choose automatic or a smaller context.",
+    "把说明书、合同、笔记、电子书等文档加进来，聊天时 AI 会从中找相关段落回答，并注明出自哪份文档、第几页。文档只保存在这台手机上，按关键词检索，不消耗额度；下载一个模型后还能按意思检索。": "Add manuals, contracts, notes, e-books and other documents. When you chat, the AI looks up relevant passages and answers from them, naming the document and page. Documents stay on this phone and are searched by key words at no API cost; with a model downloaded, also by meaning.",
+    "按意思检索": "Search by meaning",
+    "换了说法也能找到相关段落，比如问“退租要提前多久说”，能找到“提前 30 日书面通知”。需要下载一个 334 MB 的模型，在手机上计算，文档不上传。": "Finds passages that say it in other words: asking “how early must I give notice to move out” finds “30 days' written notice”. Needs a 334 MB model; it runs on the phone and documents are not uploaded.",
+    "下载模型（334 MB）": "Download the model (334 MB)",
+    "已关闭：只按关键词检索": "Off: searching by key words only",
+    "正在下载模型：{0}%": "Downloading the model: {0}%",
+    "下载没有完成：{0}": "The download did not finish: {0}",
+    "还没有下载模型：现在只按关键词检索": "The model is not downloaded yet: searching by key words only",
+    "暂时只能按关键词检索：{0}": "Searching by key words only for now: {0}",
+    "正在整理文档（{0}/{1} 段），完成前先按关键词检索": "Preparing documents ({0}/{1} passages); key words until then",
+    "已就绪：{0} 段文字可以按意思检索": "Ready: {0} passages can be searched by meaning",
+    "已就绪：添加文档后就能按意思检索": "Ready: added documents can be searched by meaning",
+    "意思相近": "similar meaning",
+    "移除按意思检索的模型？已整理好的文档要重新下载模型后才能再按意思检索。": "Remove the search-by-meaning model? Documents can be searched by meaning again once it is downloaded again.",
+    "分享码 · 签名指纹 {0}": "Share code · signed, fingerprint {0}",
+    "分享码": "Share code",
+    "发消息": "sending messages",
+    "付款、购买": "paying or buying",
+    "删除或卸载": "deleting or uninstalling",
+    "上网": "going online",
+    "写文件": "writing files",
+    "联系人、位置、密码等个人信息": "contacts, location, passwords and other personal information",
+    "这不是技能的分享码": "This is not a skill share code",
+    "分享码里没有技能": "The share code holds no skill",
+    "签名：指纹 {0}，你导入过这个人的「{1}」": "Signed: fingerprint {0}; you imported “{1}” from them before",
+    "说明里提到：{0}。技能本身不执行操作，AI 的每一步仍按你的确认规则进行。": "Its instructions mention: {0}. A skill does nothing by itself; each step the AI takes still follows your approval rules.",
+    "分享技能": "Share skill",
+    "技能「{0}」": "Skill “{0}”",
+    "分享码已复制：对方在「技能 → 导入其他技能 → 粘贴分享码」里导入": "Share code copied: the other person imports it under Skills → Import other skills → Paste share code",
+    "粘贴技能的分享码": "Paste the skill's share code",
+    "粘贴分享码": "Paste share code",
+    "要发给云端模型的内容里有：{0}。可以让手机上的 {1} 回答，内容不出手机；或者遮盖后发给云端，AI 只看到前后几位。": "The message for the cloud model contains: {0}. {1} on this phone can answer instead, so nothing leaves the phone; or mask them and the AI sees only the first and last digits.",
+    "要发给云端模型的内容里有：{0}。遮盖后 AI 只看到前后几位。下载一个本机模型后，这类消息可以在手机上回答。": "The message for the cloud model contains: {0}. Masked, the AI sees only the first and last digits. With an on-device model downloaded, such messages can be answered on the phone.",
+    "用本机模型回答": "Answer on this phone",
+    "现在没有网络": "No network right now",
+    "可以等联网后自动发送（App 在后台也会发），或者现在让手机上的 {0} 回答。": "It can be sent as soon as the phone is online (also with the app in the background), or {0} on this phone can answer now.",
+    "联网后会自动发送，App 在后台也会发。": "It is sent as soon as the phone is online, also with the app in the background.",
+    "联网后自动发送": "Send when online",
+    "没有网络：联网后自动开始": "No network: starts when online",
+    "任务失败：没有网络。联网后会自动重试": "Task failed: no network. It is tried again once online",
+    "个人信息和断网": "Personal information and no network",
+    "用云端模型时才会用到。本机模型回答的消息不出手机；需要先在「本机模型」里下载一个。": "Only for cloud models. Messages answered by the on-device model stay on the phone; download one under On-device models first.",
+    "消息里有身份证号、银行卡号时": "When a message has an ID or bank card number",
+    "每次问我": "Ask me each time",
+    "没有网络时发消息": "Sending with no network",
+    "设置步骤": "Setup steps",
+    "安装 Shizuku": "Install Shizuku",
+    "Shizuku 把系统权限借给本应用，用来在后台屏幕上操作。从它的官网下载。": "Shizuku lends system rights to this app so it can work on the background screen. Get it from its website.",
+    "打开 Shizuku 官网": "Open the Shizuku website",
+    "打开开发者选项": "Turn on developer options",
+    "在「关于手机」里连续点「版本号」7 次（有的手机叫「软件版本号」），按提示输入锁屏密码。": "In About phone, tap Build number 7 times (some phones call it Software version), then enter the screen lock when asked.",
+    "打开关于手机": "Open About phone",
+    "连上 Wi‑Fi": "Connect to Wi‑Fi",
+    "Shizuku 通过无线调试启动，无线调试只在连着 Wi‑Fi 时能用。": "Shizuku starts through wireless debugging, which works only on Wi‑Fi.",
+    "启动 Shizuku": "Start Shizuku",
+    "打开 Shizuku，点「通过无线调试启动」。第一次要先配对：按 Shizuku 的提示打开「开发者选项 → 无线调试 → 使用配对码配对设备」，把配对码填进 Shizuku 的通知里。手机重启后只需要重做这一步。": "Open Shizuku and tap Start via wireless debugging. The first time, pair it: as Shizuku shows, open Developer options → Wireless debugging → Pair device with pairing code, and enter the code in Shizuku's notification. After the phone restarts, only this step needs doing again.",
+    "打开 Shizuku": "Open Shizuku",
+    "允许本应用使用 Shizuku": "Let this app use Shizuku",
+    "Shizuku 会弹出询问，选「始终允许」。": "Shizuku asks; choose Allow all the time.",
+    "{0}（已完成）": "{0} (done)",
     "用 GPU": "Uses the GPU",
     "正在检查 GPU，先用 CPU": "Checking the GPU; the CPU until then",
     "还没检查 GPU，先用 CPU": "GPU not checked yet; uses the CPU",
@@ -1518,7 +1589,6 @@
     "没有找到相关的功能或设置": "No matching features or settings",
     "知识库": "Knowledge base",
     "让 AI 查阅你的文档": "Let the AI look things up in your documents",
-    "把说明书、合同、笔记、电子书等文档加进来，聊天时 AI 会从中找相关段落回答，并注明出自哪份文档、第几页。文档只保存在这台手机上，按关键词检索，不用下载模型，也不消耗额度。": "Add manuals, contracts, notes, e-books and other documents. When you chat, the AI looks up relevant passages and answers from them, naming the document and page. Documents stay on this phone and are searched by key words: no model download, no API usage.",
     "在对话中使用知识库": "Use the knowledge base in conversations",
     "提问时自动附上相关段落": "Attach relevant passages to each question",
     "开启后，每次提问会先在知识库里找，找到相关段落就随问题一起发给模型；关闭后只在 AI 主动搜索时使用。": "When on, each question is first looked up in the knowledge base and matching passages are sent along with it. When off, the knowledge base is used only when the AI searches it.",
@@ -1982,7 +2052,6 @@
     "资源预留成功，但未收到有效的预留编号": "Resources were reserved but no valid reservation ID was returned",
     "当前内存估算偏紧；将尝试所选上下文，实际分配失败时会明确提示。": "Memory is tight by estimate; the selected context will be tried and an allocation failure will be reported clearly.",
     "本机设备设置不可用": "On-device settings are unavailable",
-    "Qwen3 本地上下文最多 32768 token。请先选择自动或不超过 32K。Qwen3.5 可选择到 262144 token。": "Qwen3 supports at most 32768 tokens of on-device context. Choose automatic or 32K or less. Qwen3.5 allows up to 262144 tokens.",
     "模型安装记录校验失败": "The model install record failed verification",
     "模型文件校验失败，请重新下载": "The model file failed verification; download it again",
     "请先在本地模型菜单下载并校验模型": "Download and verify a model in the Local models menu first",
@@ -2073,6 +2142,7 @@
     // Language names stay in their own script.
     "简体中文": "简体中文",
     "繁體中文": "繁體中文",
+    "日本語": "日本語",
     "切换语言后界面会重新载入；对话内容与模型回复不会被翻译。": "Changing the language reloads the interface; conversations and model replies are not translated.",
     "归档会话": "Archive conversation",
     "归档 {0}": "Archive {0}",
@@ -2142,14 +2212,20 @@
   let preference = "auto";
   try {
     const saved = JSON.parse(window.localStorage.getItem(settingsKey) || "{}");
-    if (["auto", "zh", "zh-Hant", "en"].includes(saved?.language)) preference = saved.language;
+    if (["auto", "zh", "zh-Hant", "en", "ja", "ko"].includes(saved?.language)) preference = saved.language;
   } catch { /* Private storage can be unavailable; follow the system language. */ }
   const systemLanguage = (navigator.languages && navigator.languages[0]) || navigator.language || "zh-CN";
-  // Traditional Chinese (Taiwan, Hong Kong, Macau) comes from i18n-zh-hant.js, loaded just before this file.
+  // Traditional Chinese (Taiwan, Hong Kong, Macau), Japanese and Korean come from i18n-zh-hant.js,
+  // i18n-ja.js and i18n-ko.js, loaded just before this file.
   const hant = window.MobileI18nHant || {};
+  const others = { ja: window.MobileI18nJa || {}, ko: window.MobileI18nKo || {} };
   const traditional = /^zh-(tw|hk|mo|hant)/i.test(systemLanguage) && Object.keys(hant).length > 0;
-  const language = preference === "auto" ? (/^zh\b/i.test(systemLanguage) ? (traditional ? "zh-Hant" : "zh") : "en") : preference;
-  const catalog = language === "en" ? en : language === "zh-Hant" ? hant : {};
+  const systemChoice = /^zh\b/i.test(systemLanguage) ? (traditional ? "zh-Hant" : "zh")
+    : /^(ja|ko)\b/i.test(systemLanguage) && Object.keys(others[systemLanguage.slice(0, 2).toLowerCase()]).length ? systemLanguage.slice(0, 2).toLowerCase()
+      : "en";
+  const language = preference === "auto" ? systemChoice : preference;
+  const catalog = language === "en" ? en : language === "zh-Hant" ? hant : others[language] || {};
+  const locales = { en: "en-US", "zh-Hant": "zh-TW", ja: "ja-JP", ko: "ko-KR", zh: "zh-CN" };
   const CJK = /[一-鿿　-〿＀-￯]/;
 
   function format(text, values) {
@@ -2165,8 +2241,12 @@
   function localizeError(message) {
     if (typeof message !== "string" || !message) return message;
     if (language === "en") return Object.prototype.hasOwnProperty.call(en, message) ? en[message] : message;
-    const zh = Object.prototype.hasOwnProperty.call(serverErrorsZh, message) ? serverErrorsZh[message] : message;
-    return language === "zh-Hant" && Object.prototype.hasOwnProperty.call(hant, zh) ? hant[zh] : zh;
+    const known = Object.prototype.hasOwnProperty.call(serverErrorsZh, message);
+    const zh = known ? serverErrorsZh[message] : message;
+    if (language === "zh") return zh;
+    if (Object.prototype.hasOwnProperty.call(catalog, zh)) return catalog[zh];
+    // Japanese and Korean have no copy of an unknown engine message: its English reads better than Chinese.
+    return language === "zh-Hant" ? zh : known ? message : zh;
   }
 
   // Static markup: text nodes and labelled attributes. User content is never inside index.html.
@@ -2187,14 +2267,14 @@
     }
   }
 
-  document.documentElement.lang = language === "en" ? "en" : language === "zh-Hant" ? "zh-TW" : "zh-CN";
+  document.documentElement.lang = language === "en" ? "en" : language === "zh" ? "zh-CN" : locales[language];
   if (language !== "zh") {
     document.title = "Agent Workspace";
     translateDocument(document.body);
   }
 
   window.MobileI18n = {
-    language, preference, locale: language === "en" ? "en-US" : language === "zh-Hant" ? "zh-TW" : "zh-CN",
+    language, preference, locale: locales[language] || "zh-CN",
     t, localizeError, translateDocument,
     // Exposed for the completeness test.
     catalogs: { en },

@@ -553,6 +553,11 @@ class MobileManagement:
             from mobile_app_notes import listing
 
             return 200, await asyncio.to_thread(listing)
+        if path == "/mobile/privacy-route":
+            # Whether a message can be answered by the on-device model instead (65-privacy.js).
+            from mobile_privacy_route import status as privacy_route
+
+            return 200, await asyncio.to_thread(privacy_route, self.models)
         if path == "/mobile/background-screen":
             from android_adapter.android_system import background_screen
 
@@ -723,6 +728,14 @@ class MobileManagement:
         if action == "delete-skill":
             await asyncio.to_thread(store.delete_user_skill, payload.get("skill_id"))
             return 200, await asyncio.to_thread(store.snapshot)
+        if action == "export":
+            # One skill as text for a share code (the console signs it).
+            return 200, await asyncio.to_thread(store.export_skill, payload.get("pack_id"), payload.get("skill_id"))
+        if action == "preview-shared":
+            # A share code the console checked: shown before it is installed, like any import.
+            return 200, await asyncio.to_thread(
+                store.preview_shared, payload.get("name"), payload.get("files"), payload.get("signer")
+            )
         if action == "check-updates":
             return 202, store.start_job("check", store.check_updates)
         if action == "update":
@@ -774,6 +787,9 @@ class MobileManagement:
             return 200, await asyncio.to_thread(
                 store.set_settings, enabled=payload.get("enabled"), auto=payload.get("auto")
             )
+        if action == "semantic":
+            # Searching by meaning (mobile_semantic): on or off; the model downloads as a local model.
+            return 200, await asyncio.to_thread(store.set_semantic, payload.get("enabled"))
         if action == "synonyms":
             return 200, await asyncio.to_thread(store.set_synonyms, payload.get("text"))
         if action == "url":
@@ -801,7 +817,11 @@ class MobileManagement:
             results = await asyncio.to_thread(
                 store.search, query, limit=8, collections=collections
             )
-            return 200, {"results": [store.public(result, excerpt=240) for result in results]}
+            answer = {"results": [store.public(result, excerpt=240) for result in results]}
+            if payload.get("explain") is True:
+                # How close in meaning the nearest passages are, whatever the cut-off (for tuning).
+                answer["semantic"] = await asyncio.to_thread(store.semantic_explain, query)
+            return 200, answer
         raise KeyError(action)
 
     async def post(self, path, payload):

@@ -84,6 +84,10 @@ def _load_mobile_assets(token: str) -> tuple[str, dict[str, tuple[str, bytes]]]:
         f'src="/static/i18n-zh-hant.js?token={encoded_token}"',
     )
     console_html = console_html.replace(
+        'src="/static/i18n-extra.js"',
+        f'src="/static/i18n-extra.js?token={encoded_token}"',
+    )
+    console_html = console_html.replace(
         'src="/static/i18n.js"', f'src="/static/i18n.js?token={encoded_token}"'
     )
     console_html = console_html.replace(
@@ -130,6 +134,14 @@ def _load_mobile_assets(token: str) -> tuple[str, dict[str, tuple[str, bytes]]]:
             "application/javascript; charset=utf-8",
             (web_root / "static" / "i18n.js").read_bytes(),
         ),
+        # Japanese and Korean: i18n-extra.js loads the one the page needs.
+        **{
+            f"/static/{name}": (
+                "application/javascript; charset=utf-8",
+                (web_root / "static" / name).read_bytes(),
+            )
+            for name in ("i18n-extra.js", "i18n-ja.js", "i18n-ko.js")
+        },
         "/static/liquid-glass.js": (
             "application/javascript; charset=utf-8",
             (web_root / "static" / "liquid-glass.js").read_bytes(),

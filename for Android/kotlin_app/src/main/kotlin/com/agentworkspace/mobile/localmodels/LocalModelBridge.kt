@@ -19,7 +19,7 @@ object LocalModelBridge {
     const val ENGINE_REVISION = "7fe450e19305b828c199d602c23a8337aaa1f03b"
     private val supportedIds = setOf("qwen3-0.6b-q4-k-m", "qwen3-1.7b-q4-k-m",
         "qwen3-0.6b-q8-0", "qwen3-1.7b-q8-0", "qwen3.5-0.8b-q4-k-m", "qwen3.5-0.8b-q8-0",
-        "qwen3.5-2b-q4-k-m", "qwen3.5-2b-q8-0") + listOfNotNull(TrainedLocalModel.spec?.id)
+        "qwen3.5-2b-q4-k-m", "qwen3.5-2b-q8-0", LocalModelContext.GEMMA_E2B) + listOfNotNull(TrainedLocalModel.spec?.id)
     @Volatile private var applicationContext: Context? = null
     @Volatile private var modelRoot: File? = null
     @Volatile private var libraryLoaded = false
@@ -638,7 +638,39 @@ object LocalModelBridge {
         }
     }
 
+    // ---- knowledge-base search (mobile_semantic.py) ------------------------------------------
+    private const val EMBEDDING_IDLE_MS = 3 * 60_000L
+    private val embeddingIdle = android.os.Handler(android.os.Looper.getMainLooper())
+    private val unloadEmbedding = Runnable {
+        Thread({ if (libraryLoaded) nativeEmbedUnload() }, "embedding-unload").start()
+    }
+
+    /**
+     * [texts] (a JSON array of strings) as int8 unit vectors of [dims] values each, from the
+     * installed embedding model [modelId]. The model stays loaded for a few minutes after the last
+     * call. Throws with the reason when it cannot.
+     */
+    @JvmStatic fun embed(modelId: String, texts: String, dims: Int): ByteArray {
+        check(libraryLoaded && initializationError == null) { initializationError ?: "Native inference is unavailable" }
+        val root = checkNotNull(modelRoot) { "Native inference has not been initialized" }
+        val request = JSONObject().put("model_id", modelId).put("model_path", File(root, "$modelId/model.gguf").path)
+            .put("texts", JSONArray(texts)).put("dims", dims)
+            .put("threads", minOf(4, Runtime.getRuntime().availableProcessors()))
+        embeddingIdle.removeCallbacks(unloadEmbedding)
+        try {
+            return KnowledgeVectors.quantize(nativeEmbed(request.toString().toByteArray(Charsets.UTF_8)))
+        } finally {
+            embeddingIdle.postDelayed(unloadEmbedding, EMBEDDING_IDLE_MS)
+        }
+    }
+
+    /** Cosine similarities of one int8 vector with many (KnowledgeVectors.scores), for Python. */
+    @JvmStatic fun similarities(query: ByteArray, matrix: ByteArray, dims: Int): FloatArray =
+        KnowledgeVectors.scores(query, matrix, dims)
+
     // UTF-8 byte arrays avoid JNI modified UTF-8 corrupting emoji and supplementary characters.
+    private external fun nativeEmbed(request: ByteArray): FloatArray
+    private external fun nativeEmbedUnload()
     private external fun nativeInitialize(root: ByteArray): ByteArray
     private external fun nativeStatus(): ByteArray
     private external fun nativeGenerate(request: ByteArray, images: Array<ByteArray>): ByteArray

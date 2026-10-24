@@ -129,6 +129,12 @@
       task.stepShots = Number(payload.count) || 0;
     } else if (event.event_type === "task.subagent.step") {
       showSubagentStep(payload);
+    } else if (event.event_type === "task.on_device") {
+      task.onDevice = true;
+      markOnDevice(task.card);
+    } else if (event.event_type === "task.waiting_network" || event.event_type === "task.network_ready") {
+      task.waitingNetwork = event.event_type === "task.waiting_network";
+      updateTaskStatus(task.waitingNetwork ? t("没有网络：联网后自动开始") : t("任务执行中"));
     } else if (event.event_type === "task.untrusted_content") {
       notice(t("AI 读到的内容（{0}）里有像是写给 AI 的指令。为了安全，这个任务接下来的每一步都会先问你。", toolTitles[payload.tool] || payload.tool || ""));
     } else if (event.event_type === "runtime.message.created" && payload.role === "assistant") {
@@ -225,7 +231,8 @@
         }
         // Long tasks show how full the context is; older history is compacted near 100%.
         const context = task.contextPercent >= 30 ? t(" · 上下文 {0}%", task.contextPercent) : "";
-        updateTaskStatus(task.stopping ? t("正在停止任务...") : (state === "waiting_approval" ? t("等待审批") : (state === "queued" ? t("任务排队中") : t("任务执行中") + context)));
+        updateTaskStatus(task.stopping ? t("正在停止任务...") : (state === "waiting_approval" ? t("等待审批")
+          : (state === "queued" ? (task.waitingNetwork ? t("没有网络：联网后自动开始") : t("任务排队中")) : t("任务执行中") + context)));
         if (["failed", "cancelled", "interrupted"].includes(state)) {
           task.error = state === "failed" ? (localizeError(snapshot.task.reason) || t("任务失败")) : null;
           task.interrupted = state === "interrupted" && snapshot.task.resume_available;
@@ -267,7 +274,9 @@
       showTaskError(t("任务失败: {0}", task.error));
       announce(t("任务失败: {0}", task.error));
       retryTask = task.prompt ? task : null;
-      updateTaskStatus(t("任务失败"), { retry: !!task.prompt, idle: true });
+      // Lost the network on the way: tried again once the phone is back online (65-privacy.js).
+      task.offlineFailure = navigator.onLine === false && !!task.prompt;
+      updateTaskStatus(task.offlineFailure ? t("任务失败：没有网络。联网后会自动重试") : t("任务失败"), { retry: !!task.prompt, idle: true });
       if (!elements.promptInput.value.trim() && task.inputText) {
         elements.promptInput.value = task.inputText;
         if (!attachments.length) attachments = task.attachments;
@@ -531,8 +540,13 @@
 
   async function sendPrompt(customText = null, attachmentOverride = []) {
     flushQuickEffort();
-    // Personal numbers typed for a cloud model: mask, send or cancel (65-privacy.js).
-    if (customText === null && privacyNeeded() && !(await privacyCheck())) return;
+    // Personal numbers typed for a cloud model, or no network: answered on the phone, masked, sent
+    // once online, or cancelled (65-privacy.js).
+    let route = {};
+    if (customText === null && privacyNeeded()) {
+      route = await privacyCheck();
+      if (!route) return;
+    }
     if (customText === null && canSteer()) { await steerActiveTask(); return; }
     if (customText === null && importsInFlight(currentSessionId)) { notice(t("附件还在导入，稍等片刻再发送"), "info"); return; }
     const requestedImports = customText === null ? [...attachments] : [...attachmentOverride];
@@ -561,7 +575,8 @@
     const payload = { session_id: sessionId, prompt: submittedPrompt, model: settings.model,
       reasoning_effort: settings.reasoning_effort, ...(imageRefs.length ? { image_refs: imageRefs } : {}),
       ...(rewind ? { rewind_from_event_id: rewind.eventId, rewind_reason: rewind.reason } : {}),
-      ...(planMode ? { plan_mode: true } : {}) };
+      ...(planMode ? { plan_mode: true } : {}),
+      ...(route.onDevice ? { on_device: true } : {}), ...(route.waitForNetwork ? { wait_for_network: true } : {}) };
     // The replaced turns disappear while the new one is submitted, and come back if it fails.
     const replacedCards = rewind ? cardsFrom(rewind.card) : [];
     replacedCards.forEach((card) => { card.hidden = true; });
@@ -589,6 +604,7 @@
     task.attachments = imports;
     task.requestId = requestId;
     task.planMode = payload.plan_mode === true;
+    task.onDevice = payload.on_device === true;
     task.voiceTurn = voiceTurnPending;
     voiceTurnPending = false;
     retryTask = null;

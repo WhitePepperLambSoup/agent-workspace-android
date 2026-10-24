@@ -30,6 +30,10 @@ object LocalModelMemory {
     ).apply {
         TrainedLocalModel.spec?.let { put(it.id, PinnedWeights(it.bytes, it.sha256)) }
     }
+    private val gemmaWeights = mapOf(
+        LocalModelContext.GEMMA_E2B to PinnedWeights(2841481184L,
+            "8e30dff3ac4c8434c49a7036fa15564bdbb6044e42bf04550bf1a096ad7e6a52"),
+    )
 
     data class Estimate(
         val weightsBytes: Long,
@@ -50,15 +54,35 @@ object LocalModelMemory {
         @Suppress("UNUSED_PARAMETER") loadedModelId: String?,
         installedSha256: String?,
     ): Estimate {
-        val maximum = if (modelId.startsWith("qwen3.5-")) 262144 else 32768
+        val maximum = when {
+            modelId.startsWith("qwen3.5-") -> 262144
+            modelId == LocalModelContext.GEMMA_E2B -> 131072
+            else -> 32768
+        }
         require(contextTokens in 512..maximum) { "Context is outside the model limits" }
         require(modelBytes in 16L..(3L * 1024 * MIB)) { "Weights exceed the phone file limits" }
+        val padded = (((contextTokens.toLong() + 255) / 256) * 256).toInt()
+        val gemma = gemmaWeights[modelId]
+        if (gemma != null) {
+            val shaped = gemma.bytes == modelBytes && gemma.sha256 == installedSha256
+            // Gemma 4 E2B: 35 layers, of which 20 reuse earlier layers' caches. Of the 15 with
+            // their own, 3 attend to the whole context (one KV head, 512 wide: F16 K+V cost
+            // 3 * 2 * 512 * 2 = 6 KiB/token) and 12 to a 512-token window (a fixed 12 MiB with
+            // the batch). Reserve 64 MiB for the windows and graph extras.
+            return Estimate(
+                weightsBytes = modelBytes,
+                paddedContextTokens = padded,
+                kvBytes = padded * if (shaped) 6L * 1024 else 128L * 1024,
+                recurrentReserveBytes = if (shaped) 64 * MIB else 0L,
+                computeReserveBytes = TEXT_COMPUTE_RESERVE_BYTES + padded * COMPUTE_BYTES_PER_TOKEN,
+                verifiedHybridShape = shaped,
+            )
+        }
         val pinned = hybridWeights[modelId]
         val verified = pinned != null && pinned.bytes == modelBytes && pinned.sha256 == installedSha256
         // Pinned llama.cpp pads CPU contexts to 256 tokens. Both Qwen3.5
         // families have six full-attention layers, two KV heads and 256-wide
         // K/V. F16 caches cost 6 * 2 * (256 + 256) * 2 = 12 KiB/token.
-        val padded = (((contextTokens.toLong() + 255) / 256) * 256).toInt()
         val kv = padded * if (verified) 12L * 1024 else 128L * 1024
         // The other 18 layers use a context-independent F32 recurrent state:
         // 18 * 4 * ((4 - 1) * (2048 + 2 * 16 * 128) + 128 * 2048)
