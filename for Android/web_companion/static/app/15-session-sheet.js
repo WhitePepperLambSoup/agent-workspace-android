@@ -123,7 +123,8 @@
     button.disabled = true;
     try {
       const result = await apiJson("/mobile/sessions/export", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: session.id, format, title: session.title || "" }) });
+        body: JSON.stringify({ session_id: session.id, format, title: session.title || "",
+          labels: { user: t("你"), agent: "Agent", empty: t("（这个对话还没有内容）") } }) });
       const mime = format === "md" ? "text/markdown" : format === "pdf" ? "application/pdf" : "image/jpeg";
       for (const path of result.paths || []) {
         await artifactAction({ path, mime_type: mime, workspaceId: workspaceOfSession(session.id) }, "share", button, status, true);

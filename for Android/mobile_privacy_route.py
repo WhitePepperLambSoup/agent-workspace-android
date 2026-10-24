@@ -47,7 +47,9 @@ def choose(models: list[dict[str, Any]], available: int | None) -> dict[str, Any
     for model in ranked:
         if int(model.get("minimum_available_ram_bytes") or 0) <= available:
             return model
-    return ranked[-1]
+    # The one that needs least memory: a model left out of the ranking (Gemma) can be the largest.
+    # Of two that need as much, the less capable one, which is the smaller.
+    return min(reversed(ranked), key=lambda model: int(model.get("minimum_available_ram_bytes") or 0))
 
 
 def local_model(manager: Any = None) -> dict[str, Any] | None:

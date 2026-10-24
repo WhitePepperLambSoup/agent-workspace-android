@@ -704,8 +704,19 @@ class WebUiActivity : ComponentActivity() {
                     if (result == null) return true
                     if (url == null || !isTrustedConsoleUrl(url) || isDestroyed || isFinishing) { result.cancel(); return true }
                     val builder = AlertDialog.Builder(this@WebUiActivity, pageDialogTheme())
+                    // The console asks for a secret (a backup passphrase, the elder-mode PIN) with one of
+                    // these default values: a hidden field, nothing filled in, nothing for the keyboard to learn.
+                    val secret = when (defaultValue) {
+                        "__agent_secret__" -> android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+                        "__agent_pin__" -> android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD
+                        else -> null
+                    }
                     // Built from the dialog's themed context: the activity's own text color is unreadable on it.
-                    val input = EditText(builder.context).apply { setText(defaultValue.orEmpty()); setSingleLine() }
+                    // setSingleLine first: it would replace a password field's hiding.
+                    val input = EditText(builder.context).apply {
+                        setSingleLine()
+                        if (secret != null) inputType = secret else setText(defaultValue.orEmpty())
+                    }
                     val margin = (20 * resources.displayMetrics.density).toInt()
                     val frame = android.widget.FrameLayout(builder.context).apply {
                         setPadding(margin, 0, margin, 0)

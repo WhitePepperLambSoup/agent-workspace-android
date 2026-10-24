@@ -1312,8 +1312,9 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             saved.targets.values.filter { it.visible && (it.clickable || it.longClickable) && it.bounds.contains(x, y) }
                 .minByOrNull { it.bounds.width().toLong() * it.bounds.height() }
         }
-        val label = target?.label?.filterNot { it.isWhitespace() }?.takeIf { it.isNotEmpty() && it.length <= 12 } ?: return null
-        return label.takeIf { CONSEQUENTIAL.containsMatchIn(it) }
+        return listOfNotNull(target?.label, request.optString("read_label").ifEmpty { null })
+            .map { label -> label.filterNot { it.isWhitespace() } }
+            .firstOrNull { it.isNotEmpty() && it.length <= 12 && CONSEQUENTIAL.containsMatchIn(it) }
     }
 
     /** Why the payment firewall stops this action, or null: a paying control, or anything on a payment screen. */
@@ -1327,8 +1328,9 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             saved.targets.values.filter { it.visible && (it.clickable || it.longClickable) && it.bounds.contains(x, y) }
                 .minByOrNull { it.bounds.width().toLong() * it.bounds.height() }
         }
-        val label = target?.label ?: return null
-        return if (PaymentFirewall.paysOrMovesMoney(label)) "“${label.trim().take(30)}” pays or moves money" else null
+        val label = listOfNotNull(target?.label, request.optString("read_label").ifEmpty { null })
+            .firstOrNull { PaymentFirewall.paysOrMovesMoney(it) } ?: return null
+        return "“${label.trim().take(30)}” pays or moves money"
     }
 
     private fun perform(request: JSONObject, saved: Snapshot): Boolean {
@@ -1501,7 +1503,10 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             ?: throw AutomationFailure("not_found", "Nothing on this screen shows “${wanted.take(60)}”" +
                 (if (read.isEmpty()) "" else " (also not in the words read off the screenshot)") +
                 "; scroll_to_text finds it further down a list")
+        // The words read there go with the tap: the control under them often has none of its own, and
+        // the payment firewall and the delete check must still see "立即支付" or "删除".
         request.put("action", "tap").put("x", line.second.centerX()).put("y", line.second.centerY())
+            .put("read_label", line.first)
         return JSONObject().put("label", line.first).put("via", "screenshot_text")
     }
 

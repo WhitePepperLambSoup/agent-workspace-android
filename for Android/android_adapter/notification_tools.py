@@ -143,6 +143,27 @@ class NotificationReplyTool(_Tool):
         capability=Capability.PROCESS_EXECUTE,
     )
 
+    def prepare_for_approval(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """The approval names who the reply really goes to, the notification's app and title as the
+        shade shows them, in place of the name the model gave."""
+        from mobile_notification_journal import mask_codes
+
+        key = _key(arguments)
+        try:
+            listed = json.loads(str(_bridge().execute(json.dumps({"action": "list"}))))
+        except Exception:
+            listed = {}
+        if not isinstance(listed, dict) or listed.get("ok") is not True:
+            return dict(arguments)  # The reply itself says what is wrong (access off, gone).
+        posted = next(
+            (item for item in listed.get("notifications") or [] if isinstance(item, dict) and item.get("key") == key),
+            None,
+        )
+        if posted is None:
+            raise ToolError("That notification is no longer shown; list them again with active_notifications")
+        to = " · ".join(str(part) for part in (posted.get("app"), mask_codes(str(posted.get("title") or ""))) if part)
+        return {**arguments, "to": to[:200]}
+
     async def execute(self, arguments: dict[str, Any]) -> str:
         text = arguments.get("text")
         if not isinstance(text, str) or not text.strip() or len(text) > 2000:

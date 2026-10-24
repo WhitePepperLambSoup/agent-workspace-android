@@ -7,6 +7,9 @@
     window.setTimeout(() => { region.textContent = String(text).slice(0, 600); }, 50);
   }
 
+  // mobile_approval._ALWAYS_ASK_TOOLS: the engine approves these once even when "session" is picked.
+  const askEachTools = new Set(["delete_path", "memory_write", "app_note", "android_action", "notification_reply", "manage_app"]);
+
   function showApproval(approval) {
     if (approval && activeTask?.resolvedApprovals.has(approval.request_id)) approval = null;
     const changed = approval?.request_id !== pendingApproval?.request_id;
@@ -25,6 +28,11 @@
       const onceOnly = approval.details?.tool === "notification_reply";
       if (onceOnly) elements.approvalScopeSelector.value = "once";
       elements.approvalScopeSelector.disabled = onceOnly;
+      // Deleting files, memory, operating other apps, removing an app: never for the whole conversation.
+      const askEach = askEachTools.has(approval.details?.tool);
+      const sessionOption = elements.approvalScopeSelector.querySelector('option[value="session"]');
+      if (sessionOption) sessionOption.disabled = askEach;
+      if (askEach && elements.approvalScopeSelector.value === "session") elements.approvalScopeSelector.value = "once";
       if (changed && !elderShown()) announce(t("需要你批准：{0}", elements.approvalTitle.textContent));
     }
     elderApproval(approval);

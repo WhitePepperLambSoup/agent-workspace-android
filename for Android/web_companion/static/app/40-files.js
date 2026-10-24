@@ -109,7 +109,7 @@
       if (task.state === "failed" && typeof task.reason === "string" && task.reason.trim()) {
         const reason = document.createElement("span");
         reason.className = "task-center-reason";
-        reason.textContent = task.reason.trim().slice(0, 300);
+        reason.textContent = String(localizeError(task.reason.trim())).slice(0, 300);
         meta.append(reason);
       }
       const actions = document.createElement("div");

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import sqlite3
 import time
 from pathlib import Path
 from urllib.parse import quote
@@ -250,13 +251,17 @@ class MobileOutbox:
 
     async def run(self):
         while True:
-            for entry in self._active():
+            try:
+                active = self._active()
+            except sqlite3.Error:
+                active = []  # a locked or full database: the next pass tries again
+            for entry in active:
                 try:
                     job = self.get(entry["delivery_id"])
                     if job["state"] == "pending":
                         await self.send(job["delivery_id"])
                     elif job["state"] in {"submitted", "uncertain"}:
                         await self.reconcile(job["delivery_id"])
-                except (KeyError, ValueError, httpx.HTTPError):
+                except (KeyError, ValueError, httpx.HTTPError, sqlite3.Error):
                     continue
             await asyncio.sleep(20)

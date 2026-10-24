@@ -233,7 +233,7 @@
       : (android.can_repair ? t("无障碍服务没开，点下面直接打开。") : t("无障碍服务没开，手机操作需要它。"));
     $("btnTakeover").disabled = typeof native?.requestSystemTakeover !== "function";
     $("doctorTools").replaceChildren();
-    for (const tool of value.tools || []) $("doctorTools").append(row(tool.name, tool.available ? t("可用") : tool.reason || t("不可用")));
+    for (const tool of value.tools || []) $("doctorTools").append(row(tool.name, tool.available ? t("可用") : localizeError(tool.reason) || t("不可用")));
     $("browserSection").hidden = !(value.tools || []).some((tool) => tool.name === "browser_view" && tool.available);
     status("doctorStatus", localizeError(android.reason) || "");
     let background = {};
@@ -1340,7 +1340,8 @@
     else if (detail.state === "saved") status("backupStatus", t("备份已保存（{0}）", backupSize(detail.size)));
     else if (detail.state === "passphrase_required" || detail.state === "passphrase_wrong") {
       // A locked backup (.awbackup): its passphrase, asked again after a wrong one.
-      const passphrase = window.prompt(detail.state === "passphrase_wrong" ? t("口令不对，或者备份文件已损坏。请再输入一次备份口令：") : t("这个备份已加密，请输入备份口令："));
+      // "__agent_secret__": the app's dialog hides what is typed (WebUiActivity.onJsPrompt).
+      const passphrase = window.prompt(detail.state === "passphrase_wrong" ? t("口令不对，或者备份文件已损坏。请再输入一次备份口令：") : t("这个备份已加密，请输入备份口令："), "__agent_secret__");
       if (!passphrase) { status("backupStatus", t("已取消")); $("btnCreateBackup").disabled = false; $("btnRestoreBackup").disabled = false; return; }
       const result = JSON.parse(native.restoreBackupPassphrase(passphrase));
       if (!result.ok) status("backupStatus", localizeError(result.error) || t("操作失败"), true);

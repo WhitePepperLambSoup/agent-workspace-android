@@ -218,12 +218,16 @@ _PLAN_NOTE = (
 )
 
 
+# Reading the web is looking too, though its effect is "network" (each fetch still asks).
+_LOOKUP_TOOLS = frozenset({"web_search", "web_fetch"})
+
+
 def _readonly_tools(registry: Any) -> frozenset[str]:
     """Tools that only look: no files written, no phone actions, nothing sent or saved."""
     tools = getattr(registry, "_tools", None) or {}
     return frozenset(
         name for name, tool in tools.items()
-        if getattr(getattr(tool, "spec", None), "side_effect", None) in ("none", "read")
+        if getattr(getattr(tool, "spec", None), "side_effect", None) in ("none", "read") or name in _LOOKUP_TOOLS
     )
 
 
@@ -336,6 +340,17 @@ _ELDER_ACTING_TOOLS = frozenset({
 })  # fmt: skip
 
 
+# What every later conversation reads (memory and app notes in the prompt, skills as instructions).
+# They change without a prompt, so once a task read outside content that talks to the agent they are
+# not changed in it: injected text must not outlive the task.
+_LASTING_TOOLS = frozenset({"memory_write", "app_note", "save_skill"})
+_LASTING_REFUSAL = (
+    "Not saved: this task read outside content that tries to instruct the assistant, so memory, app "
+    "notes and skills are not changed in it. Tell the user what you would have saved; they can add "
+    "it themselves on the Memory or Skills page."
+)
+
+
 class _ToolGuard:
     """Checked before every tool call in any execution mode, full access included (the policy's
     argument check). 长辈模式's refusals, for the mode's own conversation: what scams on older
@@ -364,6 +379,8 @@ class _ToolGuard:
                 refusal = _ELDER_REFUSAL
             if refusal is not None:
                 return False, refusal
+        if tool_name in _LASTING_TOOLS and task_id and controller.approvals.distrusted(task_id):
+            return False, _LASTING_REFUSAL
         if self._root is not None:
             import mobile_file_history
 
@@ -924,6 +941,27 @@ class MobileRuntimeController:
             None,
         )
 
+    def _check_outside_content(self, task_id: str, event: Event) -> None:
+        """Outside content (a web page, a file, a message, the screen) that talks to the agent: the
+        task's task-wide or hosted approval stops covering its tool calls (mobile_injection)."""
+        if (
+            event.type != "tool.settled"
+            or event.data.get("name") in _INSTRUCTION_TOOLS
+            or self.approvals.distrusted(task_id)
+        ):
+            return
+        found = assess_injection(event.data.get("result"))
+        tool = str(event.data.get("name") or "")
+        if found and self.approvals.distrust(task_id, f"{tool}: {found['sample']}"):
+            # The conversation's "allow in this conversation" grants are checked before the broker
+            # is asked; they go too (a helper's and its task's), so every later step asks.
+            policy = getattr(getattr(self.runtime.service, "runner", None), "_policy", None)
+            for session_id in {event.session_id, self._active_session_id}:
+                with suppress(Exception):
+                    policy.revoke_session_grant(session_id)
+            with suppress(KeyError):
+                self.tasks.append_event(task_id, "task.untrusted_content", {"tool": tool, **found})
+
     async def handle_runtime_event(self, event: Event) -> None:
         task_id = self._active_task_id
         if task_id is None:
@@ -940,6 +978,10 @@ class MobileRuntimeController:
                     "task.subagent.step",
                     {"session_id": event.session_id, "tool": str(event.data.get("name") or "")},
                 )
+        if helper:
+            # A helper's pages and files are the task's outside content too: its later web
+            # requests are covered by the task's approval.
+            self._check_outside_content(task_id, event)
         if event.session_id != self._active_session_id:
             return
         scope = self._artifact_scopes.get(task_id)
@@ -957,18 +999,7 @@ class MobileRuntimeController:
                 await scope.record_file_version(event.data.get("path"), event.data.get("sha256"))
             elif event.type in {"tool.settled", "tool.failed", "tool.cancelled", "tool.unknown"}:
                 checkpoint_allowed = await scope.finish_tool(str(attempt_id))
-        # Outside content (a web page, a file, a message, the screen) that talks to the agent: the
-        # task's task-wide or hosted approval stops covering its tool calls (mobile_injection).
-        if (
-            event.type == "tool.settled"
-            and event.data.get("name") not in _INSTRUCTION_TOOLS
-            and not self.approvals.distrusted(task_id)
-        ):
-            found = assess_injection(event.data.get("result"))
-            tool = str(event.data.get("name") or "")
-            if found and self.approvals.distrust(task_id, f"{tool}: {found['sample']}"):
-                with suppress(KeyError):
-                    self.tasks.append_event(task_id, "task.untrusted_content", {"tool": tool, **found})
+        self._check_outside_content(task_id, event)
         event_type = _mobile_event_type(event.type)
         payload = {
             "source_event_id": event.id,
@@ -1075,6 +1106,10 @@ class MobileRuntimeController:
         host_token = None
         screen_token = None
         try:
+            # A task sent with no network waits outside the lock, so the tasks behind it (an
+            # on-device answer, a schedule) are not held up until the phone is online.
+            if any(event.event_type == "task.wait_network" for event in self.events(task_id)):
+                await self._wait_for_network(task_id)
             async with self._artifact_execution_lock(task_id):
                 task = self.tasks.get(task_id)
                 if task.state is not TaskState.QUEUED:
@@ -1089,8 +1124,6 @@ class MobileRuntimeController:
                     (event.payload for event in task_events if event.event_type == "task.on_device"),
                     None,
                 )
-                if any(event.event_type == "task.wait_network" for event in task_events):
-                    await self._wait_for_network(task_id)
                 # Models by purpose (Settings → models): a cheaper one for phone control.
                 local = on_device is not None or self._local_endpoint()
                 model = on_device["model"] if on_device is not None else model_for_task(
@@ -1377,6 +1410,8 @@ class MobileRuntimeController:
         can be cancelled meanwhile)."""
         said = False
         while not await asyncio.to_thread(_network_ready):
+            if self.tasks.get(task_id).state is not TaskState.QUEUED:
+                return
             if not said:
                 self.tasks.append_event(task_id, "task.waiting_network", {})
                 said = True

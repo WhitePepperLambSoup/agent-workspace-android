@@ -64,13 +64,17 @@ object TriggerEvents {
 
     @Volatile private var appContext: Context? = null
 
-    /** Whether the phone has a validated internet connection (a task sent offline waits for it). */
+    /**
+     * Whether the phone has an internet connection (a task sent offline waits for it). Not
+     * "validated": where Android's connectivity check is blocked a working network never gets that
+     * mark, and the task would wait forever. A captive portal (a hotel sign-in page) is not online.
+     */
     @JvmStatic
     fun online(): Boolean {
         val connectivity = appContext?.getSystemService(ConnectivityManager::class.java) ?: return true
         val capabilities = connectivity.getNetworkCapabilities(connectivity.activeNetwork) ?: return false
         return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+            !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL)
     }
 
     /** The engine added, removed or paused a trigger: read them again at the next app opening. */

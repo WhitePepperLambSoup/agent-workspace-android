@@ -72,7 +72,9 @@
     if (payload.artifacts_error || payload.artifacts_truncated) {
       const warning = document.createElement("p");
       warning.className = "page-status error";
-      warning.textContent = payload.artifacts_error || t("文件较多，部分文件可在工作区查看");
+      // The engine's reason is an English diagnostic; the user is told what it means for them.
+      warning.textContent = payload.artifacts_error ? t("有些输出文件没能自动列出，请到工作区查看") : t("文件较多，部分文件可在工作区查看");
+      if (payload.artifacts_error) warning.title = String(payload.artifacts_error);
       panel.appendChild(warning);
     }
     if (!existing) container.insertBefore(panel, container.querySelector(".card-action-bar"));
@@ -256,6 +258,9 @@
     app_audit: t("应用体检"), manage_app: t("处理应用"),
     compose_sms: t("写好短信"), system_settings: t("调整手机设置"), system_status: t("查看手机状态"),
     find_contacts: t("查找联系人"), current_location: t("查看位置"),
+    // Tools that ask for approval: the shelf names them in words too.
+    android_action: t("操作手机"), speak_text: t("朗读"), copy_file: t("复制文件"), move_path: t("移动文件"),
+    apply_patch: t("修改文件"), download_file: t("下载文件"), http_request: t("发送网络请求"), run_process: t("运行程序"),
   };
   // What each tool call was asked to do (from its proposal), for a step label in plain words.
   const toolArguments = new Map();
@@ -564,7 +569,7 @@
         const canRetry = !!submissions[latest.task_id]?.prompt;
         if (canRetry) retryTask = makeTask(latest);
         // Say why the last task failed instead of a bare "failed".
-        const reason = typeof latest.reason === "string" ? latest.reason.trim().slice(0, 300) : "";
+        const reason = typeof latest.reason === "string" ? String(localizeError(latest.reason.trim())).slice(0, 300) : "";
         updateTaskStatus(reason ? t("任务失败：{0}", reason) : t("任务失败"), { retry: canRetry, idle: true });
       }
     } catch (error) {

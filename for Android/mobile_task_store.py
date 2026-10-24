@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import weakref
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -434,7 +435,7 @@ class MobileTaskStore:
         if after < 0:
             raise ValueError("after must be non-negative")
         result: list[MobileEvent] = []
-        for event in self.event_store.list_events(task.session_id):
+        for event in self._task_events(task.session_id, after):
             if event.sequence is None or event.sequence <= after:
                 continue
             if event.type == "mobile.task.created" or event.type.startswith("mobile.task."):
@@ -462,6 +463,21 @@ class MobileTaskStore:
                 )
             )
         return result
+
+    def _task_events(self, session_id: str, after: int) -> Iterator[Event]:
+        """A session's task events after a sequence, read by type and position where the store can.
+        The console polls a running task's events (the stream every 0.1 s): reading the whole
+        conversation each time decoded every message and tool result in it."""
+        replay = getattr(self.event_store, "replay_events", None)
+        if not callable(replay):
+            yield from self.event_store.list_events(session_id)
+            return
+        while True:
+            events, _oldest, _newest, has_more = self._replay_task_events(replay, session_id, after)
+            yield from events
+            if not has_more or not events:
+                return
+            after = events[-1].sequence or after
 
     def recover_after_restart(self) -> list[MobileTask]:
         recovered: list[MobileTask] = []

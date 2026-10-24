@@ -16,10 +16,24 @@ from typing import Any
 
 FORMATS = ("md", "pdf", "image")
 _UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
+# The words the export is written with; the console sends them in its language.
+LABELS = {"user": "你", "agent": "Agent", "empty": "（这个对话还没有内容）"}
 
 
-def conversation_markdown(title: str, events: list[Any]) -> str:
+def export_labels(value: Any) -> dict[str, str]:
+    """The console's labels over the defaults; anything else is ignored."""
+    labels = dict(LABELS)
+    if isinstance(value, dict):
+        for key in LABELS:
+            text = value.get(key)
+            if isinstance(text, str) and text.strip() and len(text) <= 60 and "\n" not in text:
+                labels[key] = text.strip()
+    return labels
+
+
+def conversation_markdown(title: str, events: list[Any], labels: dict[str, str] | None = None) -> str:
     """The conversation as Markdown: a title, then each message under who said it."""
+    labels = labels or LABELS
     lines = [f"# {title}", "", f"_{time.strftime('%Y-%m-%d %H:%M')} · Agent Workspace_"]
     said, speaker = 0, None
     for event in events:
@@ -32,12 +46,12 @@ def conversation_markdown(title: str, events: list[Any]) -> str:
             continue
         # Several replies in a row (notes between tool calls) sit under one heading.
         if role != speaker:
-            lines += ["", "### 你" if role == "user" else "### Agent"]
+            lines += ["", f"### {labels['user'] if role == 'user' else labels['agent']}"]
             speaker = role
         lines += ["", text]
         said += 1
     if not said:
-        lines += ["", "（这个对话还没有内容）"]
+        lines += ["", labels["empty"]]
     return "\n".join(lines) + "\n"
 
 
@@ -60,14 +74,16 @@ def _file_stem(title: str) -> str:
     return f"{cleaned[:40].strip()}-{time.strftime('%Y%m%d-%H%M%S')}"
 
 
-async def export_conversation(workspace: str | Path, title: str, events: list[Any], fmt: str) -> dict[str, Any]:
+async def export_conversation(
+    workspace: str | Path, title: str, events: list[Any], fmt: str, labels: dict[str, str] | None = None
+) -> dict[str, Any]:
     """Writes the export into <workspace>/exports and returns its workspace-relative paths."""
     if fmt not in FORMATS:
         raise ValueError(f"format must be one of {', '.join(FORMATS)}")
     root = Path(workspace)
     folder = root / "exports"
     folder.mkdir(parents=True, exist_ok=True)
-    markdown = conversation_markdown(title or "Agent Workspace", visible_events(events))
+    markdown = conversation_markdown(title or "Agent Workspace", visible_events(events), labels)
     stem = _file_stem(title or "conversation")
     if fmt == "md":
         target = folder / f"{stem}.md"

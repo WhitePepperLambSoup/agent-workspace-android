@@ -298,7 +298,10 @@ class MobileScheduleManager:
 
     async def run(self) -> None:
         while True:
-            await self.dispatch_due()
+            # One failed pass (a full disk when saving) must not end every schedule until the
+            # engine restarts; the next pass tries again.
+            with suppress(Exception):
+                await self.dispatch_due()
             await asyncio.sleep(15)
 
     def _get(self, schedule_id: str) -> dict[str, object]:

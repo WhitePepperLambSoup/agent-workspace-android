@@ -163,7 +163,10 @@ class MobileApprovalBroker:
             return False
         if scope not in APPROVAL_SCOPES:
             raise ValueError("scope must be once, session or task")
-        if pending.details.get("tool") in _ONCE_ONLY_TOOLS:
+        tool = pending.details.get("tool")
+        # A "session" grant is kept by the workspace policy and skips this broker for an hour, so it
+        # would cover what even "allow for this task" does not: these tools are approved once.
+        if tool in _ONCE_ONLY_TOOLS or (tool in _ALWAYS_ASK_TOOLS and scope == "session"):
             scope = "once"
         if (
             allowed

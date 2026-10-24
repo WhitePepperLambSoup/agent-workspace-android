@@ -371,7 +371,8 @@
   async function elderLeave() {
     let pin;
     if (elderState()?.has_pin) {
-      pin = window.prompt(t("请输入退出密码"));
+      // "__agent_pin__": the app's dialog hides the digits (WebUiActivity.onJsPrompt).
+      pin = window.prompt(t("请输入退出密码"), "__agent_pin__");
       if (pin === null) return;
     }
     try {
@@ -409,7 +410,7 @@
   async function elderPinChange(pin) {
     const changes = { pin };
     if (elderState()?.has_pin) {
-      const current = window.prompt(t("请输入现在的退出密码"));
+      const current = window.prompt(t("请输入现在的退出密码"), "__agent_pin__");
       if (current === null) return;
       changes.current_pin = current;
     }
