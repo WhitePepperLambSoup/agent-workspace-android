@@ -23,8 +23,8 @@ android {
         applicationId = "com.agentworkspace.mobile"
         minSdk = 26
         targetSdk = 36
-        versionCode = 20300
-        versionName = "2.3.0"
+        versionCode = 20400
+        versionName = "2.4.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Local test builds can inspect the console page over adb (chrome://inspect) while keeping

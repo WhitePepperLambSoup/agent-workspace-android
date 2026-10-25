@@ -1,5 +1,63 @@
 # Changelog
 
+## 2.4.0 — 2026-10-25
+
+2.4.0 新增文件历史、按意思检索知识库、隐私路由和日文、韩文界面，并修复了一次全面检查中发现的问题。Agent Workspace 2.4.0 adds file history, search by meaning in the knowledge base, privacy routing and Japanese and Korean, and fixes what a full review of the app found.
+
+### 中文
+
+- 新增：文件历史。AI 改写、删除或移动工作区里的文件之前，以及你在「文件」页保存或删除之前，原来的内容会先存一份，保留 30 天（每个文件最近 30 个版本，单个文件 10 MB 以内，共 300 MB）。打开文件后点「历史版本」列出旧版本，可以预览、一键还原，还原前的内容也会先存一份；「文件」页的「最近改动」列出整个工作区的改动。
+- 新增：按意思检索知识库。在知识库页下载可选的 EmbeddingGemma 模型（334 MB）后，用词不同也能找到相关段落，例如问“退租要提前多久说”能找到“提前 30 日书面通知”。计算在手机上进行，文档不上传。
+- 新增：隐私路由。发给云端模型的消息里有身份证号、银行卡号时，可以改由本机模型回答、遮盖后发送或原样发送。没有网络时发的消息会等联网后自动发出（应用在后台也会发），也可以让本机模型回答。本机模型第一次回答要先读完一遍很长的系统说明，在骁龙 888 上约 20 分钟，之后约 20 秒。
+- 新增：日文和韩文界面，默认跟随系统语言，可在「界面偏好」里切换。
+- 新增：Gemma 4 E2B 本机模型（实验）。需要约 3.5 GB 可用内存；内存不够的手机只能在“扩展”内存模式下手动设置上下文运行，而且很慢。
+- 新增：长辈模式的「求救」按钮。设了家人电话后，按下会写好一条给家人的短信，允许位置时带上所在位置，由长辈自己按发送。
+- 新增：备份口令。创建备份时可以设一个口令，备份用 AES-256 加密；恢复时要输入同一个口令，忘了就打不开。
+- 新增：发送前的费用预估。输入框下方按最近的任务估算这条消息大约要花多少。
+- 新增：更多自动触发：电量低于某个值时、连上耳机或蓝牙音频设备时、解锁手机时、日程开始前若干分钟。
+- 新增：应用体检在后台大约每 30 分钟看一次，新装的应用拿到大权限、或已有应用新拿到设备管理器、无障碍这类权限时发一条通知；可以在应用体检页关掉。
+- 新增：快捷操作和技能可以用带签名的分享码分享。导入前显示签名人；快捷操作逐步列出要做什么，技能标出说明里提到的发消息、付款、删除、个人信息等内容。
+- 新增：5 个官方技能：AA 分账、合同审阅、简历修改、防骗检查、一周饭菜。官方技能包 1.1.0 共 24 个技能。
+- 新增：后台操作的 Shizuku 设置步骤：「设备与工具」里写明从安装到启动的每一步，手机重启后会有通知提醒重新启动 Shizuku。
+- 新增：GPU 兼容报告（「设备与工具」）。可以复制，或直接提交到 GitHub Issues，只含手机型号、芯片、GPU 和测速结果。
+- 改进：读屏（TalkBack）。回复完成和需要你批准时各读一次，不再逐段朗读正在生成的回复。
+- 安全修复：对删除文件、在对话里操作其他应用、卸载应用这类每次都要询问的操作，「本会话」现在只算这一次；以前会变成一小时内不再询问。
+- 安全修复：AI 读到像是在指使它的内容后，这个对话已有的授权全部作废，之后每一步都询问；子任务读到的网页同样检查；这之后的任务里不再写入记忆、应用经验和技能。
+- 安全修复：日程触发的任务把日程标题当作外部内容；标题里有指令时，任务不会预先获得授权。回复通知的审批显示通知里真正的应用和发送人，而不是 AI 填写的名字。按屏幕截图上识别出的文字点按时，付款拦截和删除确认同样生效。
+- 修复：备份口令和长辈模式的退出密码输入时不再明文显示。
+- 修复：没有网络时排队的消息不再挡住后面的任务；系统没有验证通过、但不是登录认证页的网络，也算已联网。
+- 修复：磁盘写满之类的一次出错，不会再让定时任务停到下次启动。
+- 修复：计划模式可以联网搜索和读网页；对话导出按界面语言书写；内存不够时，隐私路由改选占内存最少的本机模型。
+- 修复：几处直接显示英文的提示改为界面语言：任务产出文件的提示、「设备与工具」里工具不可用的原因、本机模型内存不足；审批卡片上的工具都显示名称。
+- 覆盖安装即可，数据会保留。
+
+### English
+
+- New: file history. Before the AI rewrites, deletes or moves a workspace file, and before you save or delete one on the Files page, its content is kept for 30 days (the latest 30 versions of each file, files up to 10 MB, 300 MB in all). Earlier versions on a file lists them; preview one and restore it in one tap, and what it replaces is kept first. Recent changes on the Files page shows the whole workspace.
+- New: search by meaning in the knowledge base. With the optional EmbeddingGemma model (334 MB) downloaded on the Knowledge base page, passages are found even in other words: asking "how early must I say I'm moving out" finds "30 days' written notice". It runs on the phone; documents are not uploaded.
+- New: privacy routing. When a message to a cloud model holds an ID or bank card number, the on-device model can answer it instead, or it can be sent masked or as it is. A message sent with no network goes out once the phone is online, with the app in the background too, or the on-device model answers it. The first answer from an on-device model has to read a long system prompt once: about 20 minutes on a Snapdragon 888, about 20 seconds after that.
+- New: Japanese and Korean. The app follows the system language; change it under Appearance.
+- New: Gemma 4 E2B on-device model (experimental). It needs about 3.5 GB of free memory; phones with less can run it only in extended memory mode with a context set by hand, and slowly.
+- New: elder mode's Help button. Once a family number is set, it writes a text to the family member, with the phone's location when allowed, for the older person to send.
+- New: backup passphrase. A backup can be locked with a passphrase and is then encrypted with AES-256; restoring it needs the same passphrase, and a forgotten one cannot be recovered.
+- New: cost estimate before sending. Under the input box, what this message is likely to cost, from recent tasks.
+- New: more automatic triggers: battery below a level, headphones or a Bluetooth audio device connected, phone unlocked, and some minutes before a calendar event.
+- New: the app check looks again about every 30 minutes in the background and sends a notification when a newly installed app holds large powers, or an app newly gets device admin, accessibility or the like; it can be turned off on the App check page.
+- New: shortcuts and skills can be shared as signed share codes. Before importing, the signer is shown; a shortcut lists what it will do step by step, and a skill points out what its instructions say about sending messages, paying, deleting or personal data.
+- New: five official skills: bill splitting, contract review, résumé polishing, scam check and a week of meals. Official skill pack 1.1.0 has 24 skills.
+- New: Shizuku setup steps for background mode under Device & tools, from installing to starting it, and a notification after the phone restarts reminding you to start Shizuku again.
+- New: GPU compatibility report under Device & tools, to copy or file as a GitHub issue; it holds only the phone model, chip, GPU and benchmark results.
+- Improved: TalkBack. A finished reply and an approval to give are each read once, instead of every piece of a reply as it streams.
+- Security fix: for actions that are asked every time (deleting files, operating other apps from a conversation, removing an app), This conversation now approves only this one; it used to stop asking for an hour.
+- Security fix: when the AI reads content that looks like someone instructing it, every approval the conversation had is withdrawn and each later step is asked; pages read by helper agents are checked too; and nothing is saved to memory, app notes or skills for the rest of that task.
+- Security fix: a calendar trigger treats the event title as outside content, and a task whose title holds instructions is not approved in advance. A notification reply's approval shows the notification's real app and sender, not the name the AI gave. Tapping words found in a screenshot goes through the payment firewall and the delete confirmation too.
+- Fixed: the backup passphrase and elder mode's exit PIN are no longer shown while typed.
+- Fixed: a message waiting for the network no longer holds up the tasks behind it; a network Android has not validated counts as online unless it is a sign-in page.
+- Fixed: one error such as a full disk no longer stops schedules until the next start.
+- Fixed: plan mode can search and read the web; conversation exports are written in the interface language; with little free memory, privacy routing picks the on-device model that needs the least.
+- Fixed: messages that appeared in English whatever the language are translated: notes on a task's output files, why a tool is unavailable on Device & tools, and an on-device model running out of memory; the approval card names every tool.
+- Install over the existing app; your data is kept.
+
 ## 2.3.0 — 2026-10-23
 
 2.3.0 新增长辈模式和应用体检，并更积极地检查更新。Agent Workspace 2.3.0 adds elder mode and an app check, and checks for updates more often.
