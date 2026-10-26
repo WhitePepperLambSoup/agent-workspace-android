@@ -10,6 +10,7 @@
   let generation = 0;
   let selectedHost = null;
   let remoteSessions = [];
+  const remoteSessionTitles = new Map();
   let closed = false;
   let modelPoll = null;
   let toolchainPoll = null;
@@ -1414,18 +1415,62 @@
     // what still waits for the user.
     status("schedulesStatus", mode === "workspace" ? t("定时任务运行时自动允许本任务内的联网和工具调用；删除文件、写入长期记忆、操作其他应用仍会暂停并通知你批准。") : (value.status?.reason || ""));
   }
+  // The name a desktop lists this phone under: the model from the WebView's user agent.
+  function phoneName() {
+    const model = /Android [^;)]*;\s*([^;)]+?)(?:\s+Build\/[^;)]*)?[;)]/.exec(navigator.userAgent || "")?.[1]?.trim();
+    return model && model !== "K" ? model.slice(0, 60) : "Android";
+  }
+  // A computer's pairing link (its QR code, a scanner app, or pasted): the form shows what it holds
+  // and nothing is paired until the user taps Pair.
+  async function fillFromPairingLink(text) {
+    const parts = await post("/mobile/connections/link", { link: text });
+    $("pairAddress").value = parts.url;
+    $("pairCode").value = parts.code;
+    $("pairFingerprint").value = parts.fingerprint || "";
+    $("pairTarget").hidden = false;
+    $("pairTarget").textContent = t("要连接的电脑：{0}（{1}）。核对无误后点「配对」。", parts.name, parts.url);
+    status("connectionsStatus", "");
+  }
+  window.AgentDeviceLink = {
+    receive(link) {
+      if (closed || typeof link !== "string" || !link) return false;
+      if ($("settingsOverlay").hidden) ui.openMenu();
+      $("btnConnectionsPage").click();
+      void fillFromPairingLink(link).catch((error) => status("connectionsStatus", error.message, true));
+      return true;
+    },
+  };
+  window.addEventListener("agent-pairing-scan", (event) => {
+    const detail = event.detail || {};
+    if (detail.cancelled) { status("connectionsStatus", ""); return; }
+    if (!detail.ok || !detail.text) {
+      status("connectionsStatus", detail.camera === false
+        ? t("没有在这张图片里找到二维码。换一张二维码完整、清楚的截图再试。")
+        : t("没有在图片里找到二维码。靠近一点，让二维码占满大半个画面再拍一次。"), true);
+      return;
+    }
+    void fillFromPairingLink(detail.text).catch((error) => status("connectionsStatus", error.message, true));
+  });
+
   async function connections(isCurrent = () => true) {
     const value = await ui.apiJson("/mobile/connections"); if (!isCurrent()) return;
     $("connectionsList").replaceChildren();
+    if (!$("pairDeviceName").value) $("pairDeviceName").value = phoneName();
+    for (const scanner of ["btnScanPairing", "btnPickPairing"]) $(scanner).hidden = typeof native?.scanPairingQr !== "function";
     for (const host of value.hosts || []) {
-      const item = row(host.name, `${host.url}\n${host.api === "mobile" ? t("手机任务 API") : t("桌面 Serve API")}`);
+      const kind = host.api === "mobile" ? t("手机任务 API") : t("桌面 Serve API");
+      const item = row(host.name, `${host.url}\n${host.fingerprint ? t("{0} · 证书已核对：{1}", kind, host.fingerprint.slice(0, 16)) : kind}`);
       action(item, "link", t("打开远程工作区"), async () => {
+        // Another computer's conversations stay hidden until this one answers.
+        $("remoteSessionPanel").hidden = true; $("remoteHistory").hidden = true;
         selectedHost = host;
         const data = await ui.apiJson(`/mobile/connections/sessions?host_id=${encodeURIComponent(host.host_id)}`);
         remoteSessions = Array.isArray(data.sessions) ? data.sessions : [];
+        for (const session of remoteSessions) if (session.title) remoteSessionTitles.set(session.id, session.title);
         $("remoteSessionSelector").replaceChildren();
         for (const session of remoteSessions) { const option = document.createElement("option"); option.value = session.id; option.textContent = session.title || session.id; $("remoteSessionSelector").append(option); }
         $("remoteSessionPanel").hidden = false;
+        status("connectionsStatus", "");
         updateRemoteWorkspace();
         $("btnQueueHandoff").disabled = !remoteSessions.length;
       });
@@ -1436,10 +1481,13 @@
   }
   function updateRemoteWorkspace() { $("remoteWorkspace").textContent = t("数据保存在 {0}：{1}", selectedHost?.name || t("远程设备"), remoteSessions.find(item => item.id === $("remoteSessionSelector").value)?.workspace || ""); }
   async function outbox(isCurrent = () => true) {
-    const value = await ui.apiJson("/mobile/outbox"); if (!isCurrent()) return;
+    const [value, linked] = await Promise.all([ui.apiJson("/mobile/outbox"), ui.apiJson("/mobile/connections").catch(() => ({}))]); if (!isCurrent()) return;
+    const hostNames = new Map((linked.hosts || []).map(host => [host.host_id, host.name]));
     $("outboxList").replaceChildren();
     for (const delivery of value.deliveries || []) {
-      const item = row((delivery.payload?.prompt || "").slice(0, 100), `${stateNames[delivery.state] || delivery.state} · ${delivery.payload?.session_id || ""}\n${delivery.error || ""}`);
+      // Which computer and conversation, by name: a conversation's id means nothing to the user.
+      const where = [hostNames.get(delivery.host_id), remoteSessionTitles.get(delivery.payload?.session_id)].filter(Boolean);
+      const item = row((delivery.payload?.prompt || "").slice(0, 100), `${[stateNames[delivery.state] || delivery.state, ...where].join(" · ")}\n${delivery.error || ""}`);
       if (delivery.state === "pending") {
         action(item, "send", t("重试发送"), async () => { await post("/mobile/outbox/send", { delivery_id: delivery.delivery_id }); await outbox(); });
         action(item, "x", t("取消待发送"), async () => { await post("/mobile/outbox/cancel", { delivery_id: delivery.delivery_id }); await outbox(); });
@@ -2296,9 +2344,26 @@
     status("schedulesStatus", t("已添加：每天 8:00 在「每日早报」对话里给你简报，可以在上面暂停或删除"));
   }, "schedulesStatus");
   on("connectionForm", "submit", async () => {
-    await post("/mobile/connections", { name: $("connectionName").value.trim(), url: $("connectionUrl").value.trim(), token: $("connectionToken").value, allow_lan: $("connectionAllowLan").checked });
+    await post("/mobile/connections", { name: $("connectionName").value.trim(), url: $("connectionUrl").value.trim(), token: $("connectionToken").value, allow_lan: $("connectionAllowLan").checked, fingerprint: $("connectionFingerprint").value.trim() || null });
     $("connectionToken").value = ""; await connections();
   }, "connectionsStatus");
+  on("pairCodeForm", "submit", async () => {
+    const address = $("pairAddress").value.trim();
+    if (!address) throw new Error(t("先填电脑地址，或拍下电脑上的二维码"));
+    const target = /^agentworkspace:/i.test(address) ? { link: address }
+      : { url: address, code: $("pairCode").value, fingerprint: $("pairFingerprint").value.trim() || null };
+    const host = await post("/mobile/connections/pair-code", { ...target, device_name: $("pairDeviceName").value.trim() || phoneName() });
+    for (const id of ["pairAddress", "pairCode", "pairFingerprint"]) $(id).value = "";
+    $("pairTarget").hidden = true;
+    await connections();
+    status("connectionsStatus", (host.scopes || []).includes("tasks") ? t("已和 {0} 配对，可以把任务交给它", host.name) : t("已和 {0} 配对，可以查看它的对话", host.name));
+  }, "connectionsStatus");
+  on("pairAddress", "change", async () => {
+    // A pasted pairing link fills the code and fingerprint too.
+    if (/agentworkspace:\/\/pair\?/i.test($("pairAddress").value)) await fillFromPairingLink($("pairAddress").value);
+  }, "connectionsStatus");
+  on("btnScanPairing", "click", () => { nativeResult("scanPairingQr", true); }, "connectionsStatus");
+  on("btnPickPairing", "click", () => { nativeResult("scanPairingQr", false); }, "connectionsStatus");
   on("remoteSessionSelector", "change", updateRemoteWorkspace, "connectionsStatus");
   on("btnUseDraft", "click", () => { $("handoffPrompt").value = ui.context().draft; }, "connectionsStatus");
   on("btnQueueHandoff", "click", async () => {

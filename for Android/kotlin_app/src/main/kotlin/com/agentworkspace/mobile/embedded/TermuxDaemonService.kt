@@ -87,6 +87,7 @@ class TermuxDaemonService : Service() {
         com.agentworkspace.mobile.capabilities.AndroidSystemSettings.initialize(this)
         com.agentworkspace.mobile.capabilities.AndroidPersonalInfo.initialize(this)
         com.agentworkspace.mobile.capabilities.AppAudit.initialize(this)
+        DeviceLinkNotices.initialize(this)
         AgentWidgets.attach(this)
         com.agentworkspace.mobile.voice.AudioTranscriber.initialize(this)
         AndroidDocumentBridge.initialize(this)

@@ -81,6 +81,9 @@ class NativeJsBridge(
     private val requestCalendarAccessAction: () -> Unit = {},
     private val appLockAction: (Boolean, Int) -> Unit = { _, _ -> },
     private val personalAccessAction: (String) -> Unit = {},
+    private val pairingScanAction: (Boolean) -> String = {
+        JSONObject().put("ok", false).put("error", "QR scanning is unavailable").toString()
+    },
 ) {
     // The provider model list being read in the background (refreshProviderModels).
     private val modelListLock = Any()
@@ -231,6 +234,11 @@ class NativeJsBridge(
     /** Take a photo with the camera app and add it to the share inbox. */
     @JavascriptInterface
     fun captureShareInboxPhoto(): String = shareInboxCameraCapture()
+
+    /** Read a computer's pairing QR code from a camera photo or a picked picture; the page gets an
+     *  "agent-pairing-scan" event with the text. */
+    @JavascriptInterface
+    fun scanPairingQr(camera: Boolean): String = pairingScanAction(camera)
 
     @JavascriptInterface
     fun workspaceFileAction(requestJson: String): String = workspaceFileActionHandler(requestJson)

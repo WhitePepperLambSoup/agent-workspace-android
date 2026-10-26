@@ -200,6 +200,8 @@ tasks.named("preBuild") {
 
 dependencies {
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
+    // Reads a computer's pairing QR code from a photo (devices/PairingQr.kt); plain Java, offline.
+    implementation("com.google.zxing:core:3.5.3")
     // 3.50.4+: its native library is 16 KB page aligned (Android 15+ devices with 16 KB pages
     // refuse to load the 4 KB aligned 3.45.2 build, which stopped the engine at start-up).
     embeddedSqlite("mil.nga:sqlite-android:3500400@aar")

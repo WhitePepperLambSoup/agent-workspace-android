@@ -17,9 +17,11 @@ from mobile_protocol import parse_mobile_task_request
 
 
 class MobileOutbox:
-    def __init__(self, path: Path, connections: MobileConnections):
+    def __init__(self, path: Path, connections: MobileConnections, *, on_finished=None):
         self.path = path
         self.connections = connections
+        # Told about a handed-over task that finished on the other device (a notification).
+        self.on_finished = on_finished
         self._lock = asyncio.Lock()
         with connection_database(path) as db:
             db.execute(
@@ -238,7 +240,21 @@ class MobileOutbox:
             "cancelled": "cancelled",
             "interrupted": "uncertain",
         }.get(state, "submitted")
-        return self._update(delivery_id, target)
+        # What the other device answered (a desktop sends its last reply) or why it failed.
+        result = task.get("result") if target == "completed" and isinstance(task.get("result"), str) else None
+        error = task.get("error") if target != "completed" and isinstance(task.get("error"), str) else None
+        updated = self._update(
+            delivery_id,
+            target,
+            result=result[:65536] if result else None,
+            error=error[:2000] if error else None,
+        )
+        if target in {"completed", "failed", "cancelled"} and job["state"] != target and self.on_finished:
+            try:
+                self.on_finished(updated)
+            except Exception:
+                pass  # a notification that cannot be shown must not undo the reconcile
+        return updated
 
     def cancel(self, delivery_id):
         job = self.get(delivery_id)

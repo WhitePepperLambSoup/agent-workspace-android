@@ -11,7 +11,7 @@ from contextlib import suppress
 from pathlib import Path
 
 import httpx
-from mobile_connections import MobileConnections
+from mobile_connections import MobileConnections, unavailable_reason
 from mobile_delivery import MobileOutbox
 from mobile_evaluation import MobileEvaluations
 from mobile_local_models import (
@@ -36,7 +36,7 @@ class MobileManagement:
         self.models = get_model_manager(data / "local-models")
         path = data / "mobile-management.db"
         self.connections = MobileConnections(path)
-        self.outbox = MobileOutbox(path, self.connections)
+        self.outbox = MobileOutbox(path, self.connections, on_finished=self._handoff_finished)
         self.workflows = MobileWorkflows(path)
         self.evaluations = MobileEvaluations(path)
         self.schedules = MobileScheduleManager(controller, data / "mobile-schedules.json")
@@ -45,6 +45,29 @@ class MobileManagement:
         self._provider_change_lease = None
         self._provider_change_result = None
         self._provider_change_timer = None
+
+    def _handoff_finished(self, delivery):
+        """A task handed to another device finished there: a quiet notification on the phone."""
+        if os.getenv("AGENT_WORKSPACE_EMBEDDED_PYTHON") != "chaquopy":
+            return
+        import json
+
+        from java import jclass
+
+        try:
+            host = self.connections.get(delivery["host_id"])["name"]
+        except KeyError:
+            host = ""
+        prompt = " ".join(str((delivery.get("payload") or {}).get("prompt") or "").split())[:60]
+        done = delivery["state"] == "completed"
+        # The wording is the app's (DeviceLinkNotices, in the interface language); this gives the facts.
+        jclass("com.agentworkspace.mobile.embedded.DeviceLinkNotices").execute(json.dumps({
+            "action": "notify",
+            "id": delivery["delivery_id"],
+            "host": host,
+            "finished": done,
+            "text": str((delivery.get("result") if done else delivery.get("error")) or prompt)[:300],
+        }, ensure_ascii=False))
 
     @staticmethod
     async def system(request):
@@ -1150,6 +1173,13 @@ class MobileManagement:
             return 200, {**self.schedules.snapshot(), "dispatched": dispatched}
         if path == "/mobile/connections":
             return 201, await self.connections.pair(payload)
+        if path == "/mobile/connections/link":
+            # What a pairing link (a desktop's QR code) holds, to show before pairing.
+            from mobile_connections import pairing_link
+
+            return 200, pairing_link(payload.get("link"))
+        if path == "/mobile/connections/pair-code":
+            return 201, await self.connections.pair_with_code(payload)
         if path == "/mobile/connections/remove":
             if any(
                 job["host_id"] == payload.get("host_id")
@@ -1252,8 +1282,8 @@ class MobileManagement:
             return 404, {"error": "requested management record does not exist"}
         except (ValueError, TypeError) as exc:
             return 400, {"error": " ".join(str(exc).split())[:1500]}
-        except httpx.HTTPError:
-            return 503, {"error": "remote host is unavailable"}
+        except httpx.HTTPError as exc:
+            return 503, {"error": unavailable_reason(exc)}
         except Exception as exc:
             from mobile_toolchain import ToolchainError
 

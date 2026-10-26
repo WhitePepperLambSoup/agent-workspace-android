@@ -33,6 +33,7 @@ import android.widget.ArrayAdapter
 import android.widget.AutoCompleteTextView
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import com.agentworkspace.mobile.bridge.NativeJsBridge
 import com.agentworkspace.mobile.entry.FloatingBallService
@@ -187,6 +188,99 @@ class WebUiActivity : ComponentActivity() {
         } else {
             photo?.delete()
             dispatchShareInboxChanged()
+        }
+    }
+
+    // A computer's pairing QR code (Settings → Phone connection there): read from a photo taken with
+    // the camera app or from a picture, offline, then handed to the Device connections page, where
+    // the user confirms before anything is sent. The photo is deleted once read.
+    private var pendingPairingPhoto: String? = null
+    @Volatile private var pairingScanPending = false
+    private val pairingCamera = registerForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
+        val photo = pendingPairingPhoto?.let(::File)
+        pendingPairingPhoto = null
+        if (!saved || photo == null || !photo.isFile || photo.length() == 0L) {
+            photo?.delete()
+            pairingScanPending = false
+            dispatchPageEvent("agent-pairing-scan", JSONObject().put("ok", false).put("cancelled", true))
+            return@registerForActivityResult
+        }
+        readPairingQr(camera = true) { com.agentworkspace.mobile.devices.PairingQr.decodeFile(photo).also { photo.delete() } }
+    }
+    private val pairingPicture = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri == null) {
+            pairingScanPending = false
+            dispatchPageEvent("agent-pairing-scan", JSONObject().put("ok", false).put("cancelled", true))
+        } else {
+            readPairingQr(camera = false) { com.agentworkspace.mobile.devices.PairingQr.decodeUri(this, uri) }
+        }
+    }
+
+    private fun readPairingQr(camera: Boolean, read: () -> String?) {
+        activityScope.launch {
+            val text = withContext(Dispatchers.Default) { runCatching(read).getOrNull() }
+            pairingScanPending = false
+            dispatchPageEvent("agent-pairing-scan",
+                if (text != null) JSONObject().put("ok", true).put("text", text.take(4096))
+                else JSONObject().put("ok", false).put("camera", camera))
+        }
+    }
+
+    private fun scanPairingQr(camera: Boolean): String {
+        if (!trustedWorkspacePage || isDestroyed || isFinishing) {
+            return JSONObject().put("ok", false).put("error", "Open Device connections first").toString()
+        }
+        if (pairingScanPending) return JSONObject().put("ok", false).put("error", "A scan is already open").toString()
+        pairingScanPending = true
+        shareHandler.post {
+            try {
+                if (camera) {
+                    val folder = File(cacheDir, "camera").apply { mkdirs() }
+                    val photo = File(folder, "pairing-${System.currentTimeMillis()}.jpg")
+                    pendingPairingPhoto = photo.absolutePath
+                    pairingCamera.launch(androidx.core.content.FileProvider.getUriForFile(this, "$packageName.camera", photo))
+                } else {
+                    pairingPicture.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                }
+            } catch (failure: Exception) {
+                pairingScanPending = false
+                pendingPairingPhoto = null
+                val message = when {
+                    !camera -> UiText.of(this, "无法打开系统文件选择器", "Could not open the system file picker")
+                    failure is ActivityNotFoundException -> UiText.of(this, "手机上没有可用的相机应用", "No camera app is available")
+                    else -> UiText.of(this, "无法打开相机", "Could not open the camera")
+                }
+                android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_SHORT).show()
+                dispatchPageEvent("agent-pairing-scan", JSONObject().put("ok", false).put("cancelled", true))
+            }
+        }
+        return JSONObject().put("ok", true).toString()
+    }
+
+    // A pairing link opened from outside the app (a QR scanner or the camera app): the Device
+    // connections page shows what it holds; nothing is paired until the user taps Pair there.
+    private var pendingPairingLink: String? = null
+    private var deliveringPairingLink = false
+
+    private fun queuePairingLink(incoming: Intent?) {
+        val data = incoming?.data ?: return
+        if (incoming.action != Intent.ACTION_VIEW || data.scheme != "agentworkspace" || data.host != "pair") return
+        pendingPairingLink = data.toString().take(4096)
+        incoming.data = null
+        deliverPairingLink()
+    }
+
+    private fun deliverPairingLink() {
+        val link = pendingPairingLink ?: return
+        if (deliveringPairingLink || pendingSessionId != null || isDestroyed || isFinishing ||
+            webView.visibility != View.VISIBLE || !isTrustedConsoleUrl(webView.url ?: return)) return
+        deliveringPairingLink = true
+        webView.evaluateJavascript("(function(){return window.AgentDeviceLink?.receive?.(${JSONObject.quote(link)}) === true;})()") { accepted ->
+            deliveringPairingLink = false
+            if (isDestroyed || isFinishing) return@evaluateJavascript
+            if (pendingPairingLink != link) deliverPairingLink()
+            else if (accepted == "true") pendingPairingLink = null
+            else shareHandler.postDelayed({ deliverPairingLink() }, 500)
         }
     }
 
@@ -554,6 +648,9 @@ class WebUiActivity : ComponentActivity() {
         savedInstanceState?.getString("workspace-folder-uri")?.let { resolveWorkspaceFolder(Uri.parse(it)) }
         pendingCameraPhoto = savedInstanceState?.getString("pending-camera-photo")
         pendingPickBatch = savedInstanceState?.getString("pending-pick-batch")?.takeIf { runCatching { UUID.fromString(it) }.isSuccess }
+        pendingPairingPhoto = savedInstanceState?.getString("pending-pairing-photo")
+        pairingScanPending = pendingPairingPhoto != null
+        pendingPairingLink = savedInstanceState?.getString("pending-pairing-link")
         WindowCompat.setDecorFitsSystemWindows(window, false)
         workspaceFileActions = WorkspaceFileActionController(this, activityScope,
             trustedPage = { trustedWorkspacePage && !isDestroyed && !isFinishing },
@@ -659,6 +756,7 @@ class WebUiActivity : ComponentActivity() {
                 },
                 requestCalendarAccessAction = { requestCalendarAccess() },
                 personalAccessAction = { requestPersonalAccess(it) },
+                pairingScanAction = { camera -> scanPairingQr(camera) },
             ), "AndroidBridge")
 
             webChromeClient = object : WebChromeClient() {
@@ -769,6 +867,7 @@ class WebUiActivity : ComponentActivity() {
                             deliverAppCheck()
                             deliverSharedText()
                             deliverQuickAsk()
+                            deliverPairingLink()
                             if (voicePending) { voicePending = false; launchVoiceInput() }
                             requestTaskNotificationPermissionOnce()
                         }
@@ -901,6 +1000,7 @@ class WebUiActivity : ComponentActivity() {
         savedInstanceState?.getStringArrayList("pending-shared-texts")?.forEach(sharedTexts::addLast)
         queueSessionNavigation(intent)
         queueAppCheck(intent)
+        queuePairingLink(intent)
         pendingQuickAsk = savedInstanceState?.getString("pending-quick-ask")
         if (savedInstanceState == null) queueQuickAsk(intent)
         shareInbox.captureIntent(intent, incomingShareBatchId)
@@ -1004,6 +1104,7 @@ class WebUiActivity : ComponentActivity() {
         if (!::webView.isInitialized) return // WebView unavailable: only the help screen is shown
         queueSessionNavigation(intent)
         queueAppCheck(intent)
+        queuePairingLink(intent)
         queueQuickAsk(intent)
         incomingShareBatchId = UUID.randomUUID().toString()
         shareInbox.captureIntent(intent, incomingShareBatchId)
@@ -1032,6 +1133,8 @@ class WebUiActivity : ComponentActivity() {
         outState.putStringArrayList("workspace-folder-results", ArrayList(workspaceFolderResults.map { it.toString() }))
         outState.putString("workspace-folder-uri", pendingWorkspaceFolderUri)
         outState.putString("pending-camera-photo", pendingCameraPhoto)
+        outState.putString("pending-pairing-photo", pendingPairingPhoto)
+        outState.putString("pending-pairing-link", pendingPairingLink)
         outState.putString("pending-pick-batch", pendingPickBatch)
         if (::workspaceFileActions.isInitialized) workspaceFileActions.saveState()?.let {
             outState.putBundle("workspace-file-save", it)
@@ -1111,6 +1214,7 @@ class WebUiActivity : ComponentActivity() {
             deliverAppCheck()
             deliverSharedText()
             deliverQuickAsk()
+            deliverPairingLink()
             checkEngineOnResume()
             // Back from the overlay permission screen: show the ball now that it may draw.
             FloatingBallService.onAppResumed(this)
@@ -1167,6 +1271,7 @@ class WebUiActivity : ComponentActivity() {
         pendingAppCheck = when (incoming?.action) {
             com.agentworkspace.mobile.capabilities.AppAudit.ACTION_OPEN -> "btnAppCheckPage" to ""
             com.agentworkspace.mobile.automation.BackgroundScreen.ACTION_SETUP -> "btnDoctorPage" to "backgroundScreenSection"
+            com.agentworkspace.mobile.embedded.DeviceLinkNotices.ACTION_OPEN -> "btnOutboxPage" to ""
             else -> return
         }
         incoming.action = null

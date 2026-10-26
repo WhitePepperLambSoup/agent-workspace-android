@@ -15,6 +15,7 @@
 | Qwen3 / Qwen3.5 基础模型与 Qwen3.5 视觉组件 | `mobile_model_catalog.py` 的来源、固定 GGUF revision/文件/摘要 | Apache-2.0；用户可选下载，无权重打进 APK。Qwen3 Q8_0 来自 Qwen 官方 GGUF；Q4_K_M、Qwen3.5 Q4/Q8 及 F16 mmproj 来自 Unsloth 社区发布，不能称为 Qwen 官方 GGUF |
 | Gradle Wrapper 8.11.1 | Gradle 官方 `v8.11.1` 标准脚本/JAR及发布校验文件 | Apache-2.0；脚本保留原版权，摘要清单在 `gradle/wrapper/gradle-wrapper-verification.json` |
 | Chaquopy 17.0.0 | 官方 `chaquo/chaquopy/17.0.0/LICENSE.txt` | MIT，Copyright 2017–2025 Chaquo Ltd and contributors；完整文本及 SHA256 保存于 `licenses/Chaquopy-17.0.0-LICENSE.txt`，准备时校验并复制到 APK。嵌入的 CPython 和 Python 依赖仍保留各自许可 |
+| ZXing core 3.5.3 | `com.google.zxing:core:3.5.3`（在手机上离线识别电脑端的配对二维码） | Apache-2.0；保留上游 notices |
 | AndroidX、Kotlin、WorkManager、Shizuku API | Gradle 固定依赖 | Apache-2.0；保留各组件上游 notices。可选 Shizuku 服务需要用户另行安装/授权 |
 | SQLite Android 3500400 | `mil.nga:sqlite-android:3500400` | 该 Maven artifact 的 POM 声明 Public Domain，来源为 SQLite Fossil；保留上游版权/公共领域说明 |
 | 移动离线 Web bundle（Markdown、KaTeX 公式、图标） | `web_companion/static/mobile-vendor.js` | 保留相邻 `mobile-vendor.LICENSE.txt`（含 unified/remark/rehype、KaTeX、lucide 等各包许可） |

@@ -810,14 +810,29 @@
       </div>
       <div id="settingsConnections" class="settings-page" hidden>
         <p id="connectionsStatus" class="page-status" role="status"></p><div id="connectionsList" class="management-list"></div>
-        <form id="connectionForm" class="management-form">
-          <strong class="form-title">配对新设备</strong>
-          <label for="connectionName">设备名称</label><input id="connectionName" maxlength="100" required autocomplete="off">
-          <label for="connectionUrl">Serve API 地址</label><input id="connectionUrl" type="url" placeholder="https://" required autocomplete="off" spellcheck="false">
-          <label for="connectionToken">设备令牌</label><input id="connectionToken" type="password" required autocomplete="off">
-          <label class="toggle-row" for="connectionAllowLan"><span>允许私有局域网 HTTP</span><input id="connectionAllowLan" type="checkbox"></label>
-          <button id="btnPairHost" class="button-primary apply-button" type="submit"><span data-icon="link"></span>配对设备</button>
+        <form id="pairCodeForm" class="management-form">
+          <strong class="form-title">连接电脑</strong>
+          <p class="setting-hint">在电脑版 Agent Workspace 打开「设置 → 手机连接」，打开「允许手机连接这台电脑」，再点「显示配对二维码」。然后拍下二维码，或在下面填电脑的地址和配对码。</p>
+          <div class="page-toolbar"><button id="btnScanPairing" class="button-secondary" type="button"><span data-icon="camera"></span>拍二维码</button><button id="btnPickPairing" class="button-secondary" type="button"><span data-icon="image-plus"></span>从图片识别</button></div>
+          <label for="pairAddress">电脑地址或配对链接</label><input id="pairAddress" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="http://192.168.1.5:8765">
+          <label for="pairCode">配对码</label><input id="pairCode" maxlength="12" autocomplete="off" spellcheck="false" autocapitalize="characters" placeholder="ABCD-EFGH">
+          <label for="pairFingerprint">证书指纹（HTTPS 地址才需要）</label><input id="pairFingerprint" autocomplete="off" spellcheck="false" autocapitalize="off">
+          <label for="pairDeviceName">这台手机在电脑上显示的名字</label><input id="pairDeviceName" maxlength="60" autocomplete="off">
+          <p id="pairTarget" class="setting-hint" hidden></p>
+          <button id="btnPairCode" class="button-primary apply-button" type="submit"><span data-icon="monitor-smartphone"></span>配对</button>
         </form>
+        <details id="tokenPairing" class="management-section">
+          <summary>配对新设备（填地址和令牌）</summary>
+          <p class="setting-hint">电脑上「生成令牌」后，或连接其他运行 Agent Workspace Serve 的设备时使用。</p>
+          <form id="connectionForm" class="management-form">
+            <label for="connectionName">设备名称</label><input id="connectionName" maxlength="100" required autocomplete="off">
+            <label for="connectionUrl">Serve API 地址</label><input id="connectionUrl" type="url" placeholder="https://" required autocomplete="off" spellcheck="false">
+            <label for="connectionToken">设备令牌</label><input id="connectionToken" type="password" required autocomplete="off">
+            <label for="connectionFingerprint">证书指纹（可选，HTTPS 自签证书时填写）</label><input id="connectionFingerprint" autocomplete="off" spellcheck="false" autocapitalize="off">
+            <label class="toggle-row" for="connectionAllowLan"><span>允许私有局域网 HTTP</span><input id="connectionAllowLan" type="checkbox"></label>
+            <button id="btnPairHost" class="button-primary apply-button" type="submit"><span data-icon="link"></span>配对设备</button>
+          </form>
+        </details>
         <div id="remoteSessionPanel" class="management-form" hidden>
           <strong class="form-title">远程会话</strong>
           <label for="remoteSessionSelector">远程会话</label><select id="remoteSessionSelector"></select><p id="remoteWorkspace" class="page-status"></p>

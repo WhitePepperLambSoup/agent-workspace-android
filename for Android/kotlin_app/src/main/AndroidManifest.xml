@@ -115,6 +115,13 @@
                 <action android:name="android.intent.action.VOICE_COMMAND" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
+            <!-- A computer's pairing QR code opened by a scanner app: shown on Device connections, paired only when the user taps Pair. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="agentworkspace" android:host="pair" />
+            </intent-filter>
         </activity>
 
 
