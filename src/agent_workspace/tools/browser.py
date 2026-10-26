@@ -340,7 +340,10 @@ class BrowserTool:
     )
 
     def __init__(
-        self, workspace: WorkspacePaths | StrPath | None = None, *, cdp_url: str | None = None,
+        self,
+        workspace: WorkspacePaths | StrPath | None = None,
+        *,
+        cdp_url: str | None = None,
     ) -> None:
         if workspace is None:
             self.paths = None

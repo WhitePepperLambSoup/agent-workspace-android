@@ -219,6 +219,10 @@ class ApplicationService:
     ) -> TaskBudget:
         if budget is not None:
             return budget
+        return self.default_budget(model, reasoning_effort)
+
+    def default_budget(self, model: str, reasoning_effort: str | None = None) -> TaskBudget:
+        """The budget a turn gets when the caller sets none: the Provider's output allowance."""
         output_tokens = 8192
         recommendation = getattr(self._provider, "default_output_tokens", None)
         if callable(recommendation):

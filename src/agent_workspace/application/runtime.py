@@ -31,6 +31,12 @@ from agent_workspace.core.prompt_assembly import (
     PromptSection,
 )
 from agent_workspace.core.raw_trace import RawConversationTrace
+from agent_workspace.knowledge import (
+    KnowledgeStore,
+    knowledge_root,
+    knowledge_store,
+    knowledge_tools,
+)
 from agent_workspace.optimizations import (
     ModelOptimizationRegistry,
     ModelRequestOptimizer,
@@ -151,6 +157,8 @@ class ApplicationRuntime:
     jobs: BackgroundJobManager | None = None
     mcp: McpHost | None = None
     scheduler: ScheduledTaskHost | None = None
+    # The user's documents, shared by every workspace of this data directory.
+    knowledge: KnowledgeStore | None = None
     _closed: bool = False
     _closing: bool = False
     _close_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -473,6 +481,9 @@ def _build_runtime_core(
             ),
         )
         tools.register(CodeMapTool(workspace_path))
+        knowledge = knowledge_store(knowledge_root(database_path))
+        for tool in knowledge_tools(knowledge, workspace_path):
+            tools.register(tool)
         openapi_path = workspace_path / ".agent" / "openapi.json"
         if openapi_path.is_file():
             for operation in load_openapi_file(openapi_path):
@@ -541,6 +552,7 @@ def _build_runtime_core(
             sandbox=sandbox,
             jobs=jobs,
             mcp=mcp_host,
+            knowledge=knowledge,
             _scheduler_factory=scheduler_factory,
         )
         if scheduler_factory is not None:

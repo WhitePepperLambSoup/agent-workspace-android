@@ -631,29 +631,34 @@ class ScheduledTaskHost:
 
     async def _loop(self) -> None:
         while True:
-            # Check pending retries from restart / failure
-            for record in self._state_store.get_pending_retries():
-                if record.task_id in self._task_defs:
-                    task_def = self._task_defs[record.task_id]
-                    if self._state_store.claim(
-                        record.task_id, record.trigger_at, record.max_retries
-                    ):
-                        self._dispatch(task_def.id, record.trigger_at, task_def.prompt)
-
-            # Check cron triggers
-            due = self._scheduler.due()
-            for cron_task, trigger in due:
-                trigger_iso = trigger.isoformat()
-                if self._state_store.claim(cron_task.id, trigger_iso):
-                    self._dispatch(cron_task.id, trigger_iso, cron_task.prompt)
-
-            # Check one-time triggers
-            for one_time_task, trigger in self._one_time_scheduler.due():
-                trigger_iso = trigger.isoformat()
-                if self._state_store.claim(one_time_task.id, trigger_iso):
-                    self._dispatch(one_time_task.id, trigger_iso, one_time_task.prompt)
-
+            try:
+                self._dispatch_due()
+            except Exception:
+                # One failed pass (a state file that could not be read or written) must not
+                # stop every later schedule; the next pass tries again.
+                _LOGGER.exception("scheduled task pass failed")
             await asyncio.sleep(self._poll_seconds)
+
+    def _dispatch_due(self) -> None:
+        # Check pending retries from restart / failure
+        for record in self._state_store.get_pending_retries():
+            if record.task_id in self._task_defs:
+                task_def = self._task_defs[record.task_id]
+                if self._state_store.claim(record.task_id, record.trigger_at, record.max_retries):
+                    self._dispatch(task_def.id, record.trigger_at, task_def.prompt)
+
+        # Check cron triggers
+        due = self._scheduler.due()
+        for cron_task, trigger in due:
+            trigger_iso = trigger.isoformat()
+            if self._state_store.claim(cron_task.id, trigger_iso):
+                self._dispatch(cron_task.id, trigger_iso, cron_task.prompt)
+
+        # Check one-time triggers
+        for one_time_task, trigger in self._one_time_scheduler.due():
+            trigger_iso = trigger.isoformat()
+            if self._state_store.claim(one_time_task.id, trigger_iso):
+                self._dispatch(one_time_task.id, trigger_iso, one_time_task.prompt)
 
     def _dispatch(self, task_id: str, trigger_at: str, prompt: str) -> None:
         task = asyncio.create_task(
@@ -675,7 +680,11 @@ class ScheduledTaskHost:
                 raise
             except Exception as exc:
                 _LOGGER.exception("scheduled task %s failed", task_id)
-                self._state_store.mark_failed(task_id, trigger_at, error=str(exc))
+                try:
+                    self._state_store.mark_failed(task_id, trigger_at, error=str(exc))
+                except Exception:
+                    # The claim stays recorded; a restart retries it as an interrupted run.
+                    _LOGGER.exception("scheduled task %s failure could not be recorded", task_id)
 
 
 def build_scheduled_host(

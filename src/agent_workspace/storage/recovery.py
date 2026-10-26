@@ -1084,7 +1084,9 @@ def fork_session(
         raise KeyError(f"unknown session: {session_id}")
     chosen = list(events)
     stored = store.list_events(session_id)
-    if not chosen or [event.id for event in stored[: len(chosen)]] != [event.id for event in chosen]:
+    if not chosen or [event.id for event in stored[: len(chosen)]] != [
+        event.id for event in chosen
+    ]:
         raise ValueError("a fork copies the first events of the session, in order")
     in_turn = False
     for event in chosen:
@@ -1098,7 +1100,9 @@ def fork_session(
     event_ids = {event.id: str(uuid4()) for event in chosen}
     # The copy is numbered from 1 again; a rewind names the point it went back to by number.
     sequences = {event.sequence: position for position, event in enumerate(chosen, start=1)}
-    attempt_ids, tool_call_ids, todo_ids, citation_ids, idempotency_keys = _import_identifiers(chosen)
+    attempt_ids, tool_call_ids, todo_ids, citation_ids, idempotency_keys = _import_identifiers(
+        chosen
+    )
     replacements = {**attempt_ids, **tool_call_ids, **todo_ids, **citation_ids, **idempotency_keys}
     correlation_ids: dict[str, str] = {}
     external_causation_ids: dict[str, str] = {}
@@ -1142,7 +1146,9 @@ def fork_session(
                 type=event_type,
                 data=data,
                 schema_version=event.schema_version,
-                causation_id=_remap_event_link(event.causation_id, event_ids, external_causation_ids),
+                causation_id=_remap_event_link(
+                    event.causation_id, event_ids, external_causation_ids
+                ),
                 correlation_id=_remap_event_link(event.correlation_id, event_ids, correlation_ids),
                 created_at=event.created_at,
             )

@@ -73,19 +73,81 @@ class _TitleParser(HTMLParser):
 
 # Readable text of an HTML page (web_fetch without raw): what a reader sees, not the markup.
 _SKIP_TAGS = frozenset(
-    {"script", "style", "noscript", "template", "svg", "canvas", "iframe", "object", "embed",
-     "select", "datalist", "head", "math"}
+    {
+        "script",
+        "style",
+        "noscript",
+        "template",
+        "svg",
+        "canvas",
+        "iframe",
+        "object",
+        "embed",
+        "select",
+        "datalist",
+        "head",
+        "math",
+    }
 )
 _VOID_TAGS = frozenset(
-    {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+    {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "source",
+        "track",
+        "wbr",
+    }
 )
 _CHROME_TAGS = frozenset({"nav", "footer", "aside", "form", "header"})
 _MAIN_TAGS = frozenset({"main", "article"})
 _BLOCK_TAGS = frozenset(
-    {"p", "div", "section", "article", "main", "li", "ul", "ol", "dl", "dt", "dd", "h1", "h2", "h3",
-     "h4", "h5", "h6", "tr", "table", "thead", "tbody", "tfoot", "pre", "blockquote", "figure",
-     "figcaption", "br", "hr", "header", "footer", "nav", "aside", "form", "details", "summary",
-     "address", "caption"}
+    {
+        "p",
+        "div",
+        "section",
+        "article",
+        "main",
+        "li",
+        "ul",
+        "ol",
+        "dl",
+        "dt",
+        "dd",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "tr",
+        "table",
+        "thead",
+        "tbody",
+        "tfoot",
+        "pre",
+        "blockquote",
+        "figure",
+        "figcaption",
+        "br",
+        "hr",
+        "header",
+        "footer",
+        "nav",
+        "aside",
+        "form",
+        "details",
+        "summary",
+        "address",
+        "caption",
+    }
 )
 _MAX_HTML_READ_BYTES = 1024 * 1024
 _DEFAULT_TEXT_CHARS = 12_000
@@ -94,7 +156,7 @@ _MAX_LINKS = 30
 
 
 class _ReadableParser(HTMLParser):
-    """Lines of text with where they stood (the main content, page chrome, or the rest), and links."""
+    """Lines of text with where they stood (main content, page chrome or the rest), and links."""
 
     def __init__(self, base_url: str) -> None:
         super().__init__(convert_charrefs=True)
@@ -170,7 +232,11 @@ class _ReadableParser(HTMLParser):
             href, parts = self._link
             self._link = None
             words = " ".join("".join(parts).split())[:80]
-            if words and href and not href.startswith(("#", "javascript:", "mailto:", "tel:", "data:")):
+            if (
+                words
+                and href
+                and not href.startswith(("#", "javascript:", "mailto:", "tel:", "data:"))
+            ):
                 self.links.append((self._region(), words, urljoin(self._base, href)))
         if tag in _BLOCK_TAGS:
             self._flush()
@@ -454,10 +520,11 @@ def _web_fetch_sync(
                 "note": (
                     "Readable text of the page (markup, scripts and navigation removed). "
                     + ("Pass offset=next_offset to read on. " if more else "")
-                    + "If it is nearly empty (a page built by scripts), use raw=true or the browser."
+                    + "If it is nearly empty (a page built by scripts), "
+                    "use raw=true or the browser."
                 ),
             }
-        # The response digest covers what was received; reading the text in parts does not change it.
+        # The response digest covers what was received; reading the text in parts keeps it.
         observed = "complete" if len(body) <= maximum else "observed_prefix"
         if page:
             truncated = len(body) > maximum or page["next_offset"] is not None

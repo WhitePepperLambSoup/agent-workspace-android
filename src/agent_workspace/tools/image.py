@@ -46,13 +46,20 @@ def image_structure_problem(data: bytes, media_type: str) -> str | None:
         if media_type == "image/jpeg":
             return _jpeg_problem(data)
         if media_type == "image/gif":
-            width, height = int.from_bytes(data[6:8], "little"), int.from_bytes(data[8:10], "little")
+            width, height = (
+                int.from_bytes(data[6:8], "little"),
+                int.from_bytes(data[8:10], "little"),
+            )
             if len(data) < 14 or not width or not height:
                 return "GIF has no image size"
             return None if data.rstrip(b"\x00").endswith(b";") else "GIF is truncated"
         if media_type == "image/webp":
             declared = int.from_bytes(data[4:8], "little")
-            if declared < 12 or declared + 8 > len(data) or data[12:16] not in {b"VP8 ", b"VP8L", b"VP8X"}:
+            if (
+                declared < 12
+                or declared + 8 > len(data)
+                or data[12:16] not in {b"VP8 ", b"VP8L", b"VP8X"}
+            ):
                 return "WebP container is truncated or malformed"
             return None
     except (IndexError, ValueError):
@@ -63,21 +70,22 @@ def image_structure_problem(data: bytes, media_type: str) -> str | None:
 def _png_problem(data: bytes) -> str | None:
     import zlib
 
-    position, seen = 8, []
+    position = 8
+    seen: list[bytes] = []
     while position + 12 <= len(data):
-        length = int.from_bytes(data[position:position + 4], "big")
-        kind = data[position + 4:position + 8]
+        length = int.from_bytes(data[position : position + 4], "big")
+        kind = data[position + 4 : position + 8]
         end = position + 12 + length
         if length > 0x7FFFFFFF or end > len(data):
             return "PNG is truncated"
-        crc = int.from_bytes(data[end - 4:end], "big")
-        if zlib.crc32(data[position + 4:end - 4]) & 0xFFFFFFFF != crc:
+        crc = int.from_bytes(data[end - 4 : end], "big")
+        if zlib.crc32(data[position + 4 : end - 4]) & 0xFFFFFFFF != crc:
             return f"PNG chunk {kind.decode('latin-1', 'replace')} has a bad checksum"
         if not seen:
             if kind != b"IHDR" or length != 13:
                 return "PNG does not start with an image header"
-            width = int.from_bytes(data[position + 8:position + 12], "big")
-            height = int.from_bytes(data[position + 12:position + 16], "big")
+            width = int.from_bytes(data[position + 8 : position + 12], "big")
+            height = int.from_bytes(data[position + 12 : position + 16], "big")
             if not width or not height:
                 return "PNG has no image size"
         seen.append(kind)
@@ -101,12 +109,17 @@ def _jpeg_problem(data: bytes) -> str | None:
         if marker in {0x01, *range(0xD0, 0xD8)}:
             position += 2
             continue
-        length = int.from_bytes(data[position + 2:position + 4], "big")
+        length = int.from_bytes(data[position + 2 : position + 4], "big")
         if length < 2 or position + 2 + length > len(data):
             return "JPEG is truncated"
-        if marker in {*range(0xC0, 0xC4), *range(0xC5, 0xC8), *range(0xC9, 0xCC), *range(0xCD, 0xD0)}:
-            height = int.from_bytes(data[position + 5:position + 7], "big")
-            width = int.from_bytes(data[position + 7:position + 9], "big")
+        if marker in {
+            *range(0xC0, 0xC4),
+            *range(0xC5, 0xC8),
+            *range(0xC9, 0xCC),
+            *range(0xCD, 0xD0),
+        }:
+            height = int.from_bytes(data[position + 5 : position + 7], "big")
+            width = int.from_bytes(data[position + 7 : position + 9], "big")
             if not width or not height:
                 return "JPEG has no image size"
             frame = True

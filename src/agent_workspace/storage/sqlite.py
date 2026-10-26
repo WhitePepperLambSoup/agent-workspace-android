@@ -84,6 +84,10 @@ _MAX_SESSION_LOCKS = 4096
 _OPEN_VALIDATION_CACHE: dict[Path, tuple[int, int]] = {}
 _OPEN_VALIDATION_CACHE_LOCK = Lock()
 _MAX_OPEN_VALIDATION_CACHE_ENTRIES = 64
+# Files a full validation in this process passed, by file identity (volume,
+# file id); consulted only after trust_databases_validated_here().
+_VALIDATED_HERE: dict[Path, tuple[int, int]] = {}
+_TRUST_VALIDATED_HERE = False
 _MAX_IMPORT_ARTIFACT_BATCH_BYTES = 128 * 1024 * 1024
 _CONTEXT_EVENT_TYPES = (
     "message.created",
@@ -957,6 +961,40 @@ _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        24,
+        "queued_turn_xhigh_effort",
+        (
+            # A turn queued at "xhigh" effort was refused by the column check of version 22.
+            "DROP INDEX queued_turns_session_state_idx",
+            "ALTER TABLE queued_turns RENAME TO queued_turns_v23",
+            """
+            CREATE TABLE queued_turns (
+                turn_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE RESTRICT,
+                prompt TEXT NOT NULL,
+                references_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(references_json)),
+                state TEXT NOT NULL CHECK (
+                    state IN ('queued', 'running', 'completed', 'failed', 'cancelled')
+                ),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                exclude_image_digests_json TEXT NOT NULL DEFAULT '[]'
+                    CHECK (json_valid(exclude_image_digests_json)),
+                reasoning_effort TEXT CHECK (
+                    reasoning_effort IS NULL
+                    OR reasoning_effort IN ('off', 'low', 'medium', 'high', 'xhigh', 'max')
+                )
+            ) STRICT
+            """,
+            "INSERT INTO queued_turns SELECT * FROM queued_turns_v23",
+            "DROP TABLE queued_turns_v23",
+            """
+            CREATE INDEX queued_turns_session_state_idx
+            ON queued_turns (session_id, state, created_at, turn_id)
+            """,
+        ),
+    ),
 )
 
 CURRENT_SCHEMA_VERSION = _MIGRATIONS[-1][0]
@@ -988,6 +1026,31 @@ def _schema_definitions_by_version() -> dict[int, frozenset[str]]:
 
 
 SCHEMA_DEFINITIONS_BY_VERSION = _schema_definitions_by_version()
+
+
+def trust_databases_validated_here() -> None:
+    """Validate each database file once per process instead of on every open.
+
+    Every runtime opens its own store, and a live WAL (present while any store
+    of this process is open) bypasses the open-validation cache, so each
+    conversation switch replayed the whole history again: over a second per
+    open on a database with a few months of conversations, enough to miss the
+    host start deadline. A long-running process whose runtimes hold the writer
+    lock finds only changes made through the same checked write paths, its own
+    or those of a command that took the lock. A replaced file (a restore) has a
+    new identity and is validated again; quick_check still runs on every open.
+    """
+    global _TRUST_VALIDATED_HERE
+    _TRUST_VALIDATED_HERE = True
+
+
+def _file_identity(database: Path) -> tuple[int, int] | None:
+    try:
+        metadata = database.stat()
+    except OSError:
+        return None
+    # A file system without file ids cannot tell a replaced file apart.
+    return (metadata.st_dev, metadata.st_ino) if metadata.st_ino else None
 
 
 class SQLiteEventStore:
@@ -1569,9 +1632,7 @@ class SQLiteEventStore:
                         ).fetchone()
                         is not None
                     ):
-                        raise ValueError(
-                            f"deleting the conversations would leave rows in {table}"
-                        )
+                        raise ValueError(f"deleting the conversations would leave rows in {table}")
                 connection.commit()
             except BaseException:
                 if connection.in_transaction:
@@ -1883,7 +1944,9 @@ class SQLiteEventStore:
         type_filter = ""
         type_arguments: list[int | str] = []
         if type_prefixes:
-            type_filter = " AND (" + " OR ".join("substr(type, 1, ?) = ?" for _ in type_prefixes) + ")"
+            type_filter = (
+                " AND (" + " OR ".join("substr(type, 1, ?) = ?" for _ in type_prefixes) + ")"
+            )
             for prefix in type_prefixes:
                 type_arguments.extend((len(prefix), prefix))
         with self._lock:
@@ -2131,6 +2194,7 @@ class SQLiteEventStore:
             "low",
             "medium",
             "high",
+            "xhigh",
             "max",
         }:
             raise ValueError("queued turn reasoning effort is invalid")
@@ -2577,7 +2641,9 @@ class SQLiteEventStore:
             }
 
             def kept(sequence: int) -> bool:
-                return sequence not in declined and not any(start <= sequence < end for start, end in rewound)
+                return sequence not in declined and not any(
+                    start <= sequence < end for start, end in rewound
+                )
 
             metadata = connection.execute(
                 f"""
@@ -3173,19 +3239,27 @@ class SQLiteEventStore:
         database: Path,
         identity: tuple[int, int] | None,
     ) -> bool:
-        if identity is None:
-            return False
         with _OPEN_VALIDATION_CACHE_LOCK:
-            return _OPEN_VALIDATION_CACHE.get(database) == identity
+            if identity is not None and _OPEN_VALIDATION_CACHE.get(database) == identity:
+                return True
+            if not _TRUST_VALIDATED_HERE:
+                return False
+            known = _VALIDATED_HERE.get(database)
+        return known is not None and known == _file_identity(database)
 
     @staticmethod
     def _cache_open_validation(
         database: Path,
         identity: tuple[int, int] | None,
     ) -> None:
-        if identity is None:
-            return
+        file_identity = _file_identity(database) if _TRUST_VALIDATED_HERE else None
         with _OPEN_VALIDATION_CACHE_LOCK:
+            if file_identity is not None:
+                if len(_VALIDATED_HERE) >= _MAX_OPEN_VALIDATION_CACHE_ENTRIES:
+                    _VALIDATED_HERE.pop(next(iter(_VALIDATED_HERE)), None)
+                _VALIDATED_HERE[database] = file_identity
+            if identity is None:
+                return
             if len(_OPEN_VALIDATION_CACHE) >= _MAX_OPEN_VALIDATION_CACHE_ENTRIES:
                 oldest = next(iter(_OPEN_VALIDATION_CACHE))
                 _OPEN_VALIDATION_CACHE.pop(oldest, None)

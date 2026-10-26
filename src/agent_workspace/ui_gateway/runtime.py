@@ -20,7 +20,7 @@ from concurrent.futures import Future
 from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from dataclasses import field as dataclass_field
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Protocol, cast
@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from agent_workspace.application.agent_control import AgentControlError, AgentControlService
+from agent_workspace.application.cost_estimate import project, recent_calls
 from agent_workspace.application.github_delivery import GitHubDeliveryError, GitHubDeliveryService
 from agent_workspace.application.review_workflow import ReviewWorkflowError, ReviewWorkflowService
 from agent_workspace.application.runtime_host import RuntimeHost, RuntimeSettings
@@ -40,6 +41,12 @@ from agent_workspace.config import (
     is_loopback_endpoint,
 )
 from agent_workspace.core.background_jobs import BackgroundJobStatus
+from agent_workspace.core.budgets import (
+    MAX_TASK_COST_LIMIT_USD,
+    MAX_TASK_TOKEN_LIMIT,
+    TaskBudget,
+    TaskLimits,
+)
 from agent_workspace.core.cost import UNKNOWN_PRICING, resolve_pricing, session_cost
 from agent_workspace.core.durable_run_queue import DurableRunQueue, RunQueueStatus
 from agent_workspace.core.events import Event, validate_event_payload
@@ -85,6 +92,13 @@ from agent_workspace.core.skills import SkillError, load_skills
 from agent_workspace.core.task_graph import TaskGraph, classify_failure
 from agent_workspace.core.workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError
 from agent_workspace.credentials import credential_target
+from agent_workspace.knowledge import (
+    KnowledgeError,
+    KnowledgeStore,
+    knowledge_root,
+    knowledge_store,
+)
+from agent_workspace.knowledge import error_code as knowledge_error_code
 from agent_workspace.policy.redaction import Redactor
 from agent_workspace.providers import create_provider
 from agent_workspace.providers.health import ProviderHealthResult, provider_health_check
@@ -111,6 +125,13 @@ from agent_workspace.tools.filesystem import _open_identity_checked, atomic_writ
 from agent_workspace.tools.mcp_host import McpHostError, load_mcp_servers
 from agent_workspace.tools.paths import WorkspacePaths
 from agent_workspace.tools.terminal_sessions import TerminalSessionError
+from agent_workspace.ui_gateway.device_link import (
+    DeviceLink,
+    DeviceLinkError,
+    DeviceTask,
+    PairedDevice,
+)
+from agent_workspace.ui_gateway.fork import ForkError, comparison, fork_conversation, fork_marker
 from agent_workspace.ui_gateway.protocol import (
     MAX_MESSAGE_BYTES,
     PROTOCOL_VERSION,
@@ -154,6 +175,49 @@ _MAX_PROVIDER_MODEL_CHARS = 512
 _MAX_PROVIDER_CREDENTIAL_BYTES = 2_560
 _PROVIDER_TEST_TIMEOUT_SECONDS = 20.0
 _CONTEXT_ESTIMATE_BYTES_PER_TOKEN = 3
+# The composer's cost estimate draws on two weeks of tasks; with none, a desktop request (system
+# prompt and tool schemas) is about this large.
+_COST_ESTIMATE_DAYS = 14
+_TYPICAL_REQUEST_TOKENS = 7_000
+_DEVICE_COMMANDS = frozenset(
+    {
+        "devices.status",
+        "devices.configure",
+        "devices.pairing.start",
+        "devices.token.create",
+        "devices.revoke",
+    }
+)
+# A phone reads recent messages only; long replies are cut for the phone's screen.
+_DEVICE_EVENT_LIMIT = 200
+_DEVICE_CONTENT_CHARS = 20_000
+_DEVICE_RESULT_CHARS = 64 * 1024
+# A runtime started for a phone's task stops once its work is done and this long has passed.
+_DEVICE_HOST_GRACE_SECONDS = 15.0
+_DEVICE_TURN_ENDS = {
+    "turn.completed": "succeeded",
+    "turn.failed": "failed",
+    "turn.cancelled": "cancelled",
+}
+_KNOWLEDGE_COMMANDS = frozenset(
+    {
+        "knowledge.status",
+        "knowledge.configure",
+        "knowledge.add",
+        "knowledge.document.update",
+        "knowledge.document.delete",
+        "knowledge.collection.create",
+        "knowledge.collection.update",
+        "knowledge.collection.delete",
+        "knowledge.session.get",
+        "knowledge.session.set",
+        "knowledge.search",
+    }
+)
+# Files picked or dropped at once on the Knowledge page.
+_KNOWLEDGE_MAX_FILES = 50
+_KNOWLEDGE_SEARCH_LIMIT = 8
+_KNOWLEDGE_EXCERPT_CHARS = 600
 _TERMINAL_JOB_STATES = frozenset({"succeeded", "failed", "stopped", "interrupted"})
 _BOOTSTRAP_RESERVED_BYTES = 64 * 1024
 _SENSITIVE_KEYS = frozenset(
@@ -320,6 +384,8 @@ class Host(Protocol):
         *,
         exclude_image_digests: frozenset[str] = frozenset(),
         reasoning_effort: str | None = None,
+        model: str | None = None,
+        limits: TaskLimits | None = None,
     ) -> Future[None]: ...
 
     def optimize_prompt(
@@ -704,6 +770,8 @@ class GatewayRuntime:
         self._host_startup_lock = threading.Lock()
         self._host_startup_outcomes: dict[int, str] = {}
         self._next_wire_sequence = 1
+        # Set on a thread whose replies are never written (a phone's task): they take no sequence.
+        self._unsent_replies = threading.local()
         self._host: Host | None = None
         self._writer_lock_group = ProcessWriteLockGroup()
         self._session_hosts: dict[str, _SessionHostContext] = {}
@@ -778,6 +846,14 @@ class GatewayRuntime:
         self._autonomy_apply_pending = False
         self._skip_backup_next_stop = False
         self._load_session_presentation()
+        # Phones paired with this desktop (device_link). The endpoint stays off until the user
+        # turns it on; tasks handed over run in sessions of this gateway.
+        self._device_link = DeviceLink(self._database.with_name("device-link"), self)
+        self._device_hosted_sessions: dict[str, float] = {}
+        self._device_host_starting: set[str] = set()
+        self._settle_device_tasks_after_restart()
+        with suppress(Exception):  # a busy port is reported in the status, never at startup
+            self._device_link.start_if_enabled()
 
     def _apply_autonomy_in_background(
         self,
@@ -1110,10 +1186,20 @@ class GatewayRuntime:
 
     def _capture_session_host(self) -> _SessionHostContext:
         return _SessionHostContext(
-            self._host, self._workspace, self._provider, self._selected_session_id,
-            self._host_session_id, self._mode, self._autonomy, self._runtime_state,
-            self._active_turn, self._turn_requested, self._queued_turns,
-            self._ephemeral_queued_images, self._active_queue_id, self._turn_to_queue_id,
+            self._host,
+            self._workspace,
+            self._provider,
+            self._selected_session_id,
+            self._host_session_id,
+            self._mode,
+            self._autonomy,
+            self._runtime_state,
+            self._active_turn,
+            self._turn_requested,
+            self._queued_turns,
+            self._ephemeral_queued_images,
+            self._active_queue_id,
+            self._turn_to_queue_id,
         )
 
     def _apply_session_host(self, context: _SessionHostContext) -> None:
@@ -1152,15 +1238,22 @@ class GatewayRuntime:
     def _park_session_host(self) -> bool:
         with self._lock:
             session_id = self._host_session_id
-            if self._host is None or session_id is None or not (
-                self._busy or self._queued_turns
-                or getattr(self._host, "has_background_work", False)
+            if (
+                self._host is None
+                or session_id is None
+                or not (
+                    self._busy
+                    or self._queued_turns
+                    or getattr(self._host, "has_background_work", False)
+                )
             ):
                 return False
             context = self._capture_session_host()
             context.selected_session_id = session_id
             if context.runtime_state == "switching" and (
-                context.active_turn is not None or context.turn_requested or context.queued_turns
+                context.active_turn is not None
+                or context.turn_requested
+                or context.queued_turns
                 or getattr(context.host, "has_background_work", False)
             ):
                 context.runtime_state = "ready"
@@ -1258,11 +1351,12 @@ class GatewayRuntime:
         if command.type in {"session.open", "session.create"}:
             with self._lock:
                 reply = replace(
-                    reply, payload={
+                    reply,
+                    payload={
                         **reply.payload,
                         "runtime": self._session_runtime_document(),
                         "approvals": self._session_approval_documents(),
-                    }
+                    },
                 )
         if command.type.startswith(
             ("workspace.runs.", "workspace.plan.", "workspace.attention.", "workspace.review.")
@@ -1274,7 +1368,8 @@ class GatewayRuntime:
         return [
             {**entry.payload, "requestId": request_id, "sessionId": entry.session_id}
             for request_id, entry in self._approval_ledger.items()
-            if entry.state != "resolved" and (
+            if entry.state != "resolved"
+            and (
                 entry.session_id == self._selected_session_id
                 or (entry.session_id is None and entry.source_host is self._host)
             )
@@ -1289,9 +1384,17 @@ class GatewayRuntime:
         # wait rather than racing the host's startup transaction. Lifecycle
         # commands themselves remain non-blocking and can replace/cancel the
         # pending target.
-        background_control = command.type in {
-            "turn.start", "turn.steer", "turn.cancel", "jobs.logs", "jobs.stop",
-        } and command.session_id in self._session_hosts
+        background_control = (
+            command.type
+            in {
+                "turn.start",
+                "turn.steer",
+                "turn.cancel",
+                "jobs.logs",
+                "jobs.stop",
+            }
+            and command.session_id in self._session_hosts
+        )
         if not background_control and command.type not in {
             "app.handshake",
             "workspace.open",
@@ -1365,6 +1468,18 @@ class GatewayRuntime:
             return self._export_session(command)
         if command.type == "session.import":
             return self._import_session(command)
+        if command.type == "session.fork":
+            return self._fork_session(command)
+        if command.type == "session.compare":
+            return self._compare_session(command)
+        if command.type in {"limits.get", "limits.set"}:
+            return self._task_limits_command(command)
+        if command.type == "cost.estimate":
+            return self._estimate_cost(command)
+        if command.type in _DEVICE_COMMANDS:
+            return self._device_command(command)
+        if command.type in _KNOWLEDGE_COMMANDS:
+            return self._knowledge_command(command)
         if command.type == "session.usage":
             return self._session_usage(command)
         if command.type == "memory.list":
@@ -1605,6 +1720,8 @@ class GatewayRuntime:
             return documents
 
     def close(self) -> None:
+        # Outside the gateway lock: a phone request in flight may be waiting for it.
+        self._device_link.stop()
         with self._lock:
             self._begin_close()
             self._stop_run_hosts()
@@ -2798,8 +2915,11 @@ class GatewayRuntime:
             raise GatewayError("unknown_session")
         parked = self._session_hosts.get(session.id)
         if (
-            parked is not None and parked.host is not None and parked.host.is_alive()
-            and not self._session_switch_in_progress and self._workspace_switch_thread is None
+            parked is not None
+            and parked.host is not None
+            and parked.host.is_alive()
+            and not self._session_switch_in_progress
+            and self._workspace_switch_thread is None
         ):
             assert self._provider is not None
             self._replace_host(
@@ -3279,6 +3399,765 @@ class GatewayRuntime:
             session_id=None,
         )
 
+    def _fork_session(self, command: CommandEnvelope) -> GatewayReply:
+        """Continue a conversation from one of its user messages in a new session.
+
+        ``keepReply`` false keeps what came before the message's turn and returns the message
+        for the composer; true keeps that turn with its reply. ``compareModel`` makes a
+        comparison fork: the returned prompt is sent again in it with that model.
+        """
+        self._require_payload(
+            command,
+            {"sessionId", "messageId", "keepReply"},
+            optional={"title", "compareModel"},
+        )
+        if command.session_id is not None:
+            raise GatewayError("invalid_session")
+        session = self._workspace_session(command.payload.get("sessionId"))
+        message_id = command.payload.get("messageId")
+        if not isinstance(message_id, str) or not message_id or len(message_id) > 128:
+            raise GatewayError("invalid_message")
+        keep_reply = command.payload.get("keepReply")
+        if type(keep_reply) is not bool:
+            raise GatewayError("invalid_fork")
+        raw_title = command.payload.get("title", session.title)
+        if not isinstance(raw_title, str) or not raw_title.strip() or len(raw_title) > 200:
+            raise GatewayError("invalid_title")
+        compare_model = None
+        if "compareModel" in command.payload:
+            compare_model = self._turn_model_override(command.payload["compareModel"])
+            if keep_reply:
+                raise GatewayError("invalid_fork")
+        try:
+            with SQLiteEventStore(self._database) as store:
+                result = fork_conversation(
+                    store,
+                    session.id,
+                    message_id,
+                    keep_reply=keep_reply,
+                    title=raw_title.strip(),
+                    compare_model=compare_model,
+                )
+        except ForkError as error:
+            raise GatewayError(error.code) from None
+        except (OSError, KeyError, ValueError, RuntimeError, sqlite3.DatabaseError):
+            raise GatewayError("storage_unavailable") from None
+        forked = result.session
+        with self._lock:
+            self._pending_host_events.append(
+                Event(
+                    session_id=forked.id,
+                    type="session.created",
+                    data={
+                        "session_id": forked.id,
+                        "title": forked.title,
+                        "mode": forked.mode.value,
+                        "autonomy": forked.autonomy.value,
+                        "activated": False,
+                    },
+                )
+            )
+            document = self._session_document(forked)
+        payload: dict[str, object] = {
+            "epoch": self.epoch,
+            "session": document,
+            "sourceSessionId": session.id,
+            "prompt": result.prompt,
+        }
+        if result.source_model is not None:
+            payload["sourceModel"] = result.source_model
+        if compare_model is not None:
+            payload["compareModel"] = compare_model
+        return self._reply("session.fork.result", payload, session_id=None)
+
+    def _compare_session(self, command: CommandEnvelope) -> GatewayReply:
+        """Both answers of a comparison fork: the original model's and the other model's."""
+        self._require_payload(command, {"sessionId"})
+        if command.session_id is not None:
+            raise GatewayError("invalid_session")
+        fork = self._workspace_session(command.payload.get("sessionId"))
+        try:
+            fork_events = SQLiteEventStore.list_events_read_only(self._database, fork.id)
+            marker = fork_marker(fork_events)
+            source_id = marker[1].data.get("source_session_id") if marker is not None else None
+            source_events = (
+                SQLiteEventStore.list_events_read_only(self._database, source_id)
+                if isinstance(source_id, str) and self._stored_session(source_id) is not None
+                else []
+            )
+            document = cast(dict[str, object], _json_safe(comparison(source_events, fork_events)))
+        except ForkError as error:
+            raise GatewayError(error.code) from None
+        except (OSError, ValueError, sqlite3.DatabaseError):
+            raise GatewayError("storage_unavailable") from None
+        return self._reply(
+            "session.compare.result",
+            {"epoch": self.epoch, "sessionId": fork.id, **document},
+            session_id=None,
+        )
+
+    def _estimate_cost(self, command: CommandEnvelope) -> GatewayReply:
+        """A rough range for what the next task costs, for the composer while the user types."""
+        self._require_payload(command, {"messageChars"}, optional={"sessionId"})
+        if command.session_id is not None:
+            raise GatewayError("invalid_session")
+        chars = command.payload.get("messageChars")
+        if type(chars) is not int or not 0 <= chars <= _MAX_PROMPT_CHARS:
+            raise GatewayError("invalid_payload")
+        session_id = command.payload.get("sessionId")
+        if session_id is not None and (
+            not isinstance(session_id, str) or not session_id or len(session_id) > 128
+        ):
+            raise GatewayError("invalid_session")
+        with self._lock:
+            provider = self._provider
+            workspace = self._workspace
+        if provider is None or workspace is None:
+            raise GatewayError("runtime_unconfigured")
+        payload: dict[str, object] = {"epoch": self.epoch, "model": provider.model}
+        pricing = resolve_pricing(provider.model)
+        if pricing is UNKNOWN_PRICING:
+            return self._reply(
+                "cost.estimate.result", {**payload, "priced": False}, session_id=None
+            )
+        if not (pricing.input_usd_per_million or pricing.output_usd_per_million):
+            return self._reply(
+                "cost.estimate.result", {**payload, "priced": True, "free": True}, session_id=None
+            )
+        try:
+            calls = (
+                recent_calls(
+                    self._database,
+                    str(workspace),
+                    datetime.now(UTC) - timedelta(days=_COST_ESTIMATE_DAYS),
+                )
+                if self._database.is_file()
+                else []
+            )
+        except OSError:
+            raise GatewayError("storage_unavailable") from None
+        estimate = project(
+            calls,
+            session_id,
+            pricing,
+            chars,
+            default_context=_TYPICAL_REQUEST_TOKENS,
+        )
+        return self._reply(
+            "cost.estimate.result",
+            {**payload, "priced": True, "free": False, **estimate},
+            session_id=None,
+        )
+
+    def _device_command(self, command: CommandEnvelope) -> GatewayReply:
+        """Phone connections: their settings, pairing and the paired phones."""
+        if command.session_id is not None:
+            raise GatewayError("invalid_session")
+        link = self._device_link
+        try:
+            if command.type == "devices.status":
+                self._require_payload(command, set())
+                document = link.status()
+            elif command.type == "devices.configure":
+                self._require_payload(command, set(), optional={"enabled", "port", "secure"})
+                enabled = command.payload.get("enabled")
+                secure = command.payload.get("secure")
+                port = command.payload.get("port")
+                if (
+                    (enabled is not None and type(enabled) is not bool)
+                    or (secure is not None and type(secure) is not bool)
+                    or (port is not None and type(port) is not int)
+                ):
+                    raise GatewayError("invalid_command")
+                document = link.configure(enabled=enabled, port=port, secure=secure)
+            elif command.type == "devices.pairing.start":
+                self._require_payload(command, {"scopes"})
+                document = link.start_pairing(command.payload["scopes"])
+            elif command.type == "devices.token.create":
+                self._require_payload(command, {"name", "scopes"})
+                device, device_token = link.create_token(
+                    command.payload["name"], command.payload["scopes"]
+                )
+                # Shown once so the user can type it into the phone; only its hash is kept.
+                document = {
+                    **link.status(),
+                    "created": {"device": device.document(), "deviceToken": device_token},
+                }
+            else:
+                self._require_payload(command, {"deviceId"})
+                document = link.revoke(command.payload["deviceId"])
+        except DeviceLinkError as error:
+            raise GatewayError(error.code) from None
+        except OSError:
+            raise GatewayError("storage_unavailable") from None
+        return self._reply(
+            f"{command.type}.result", {"epoch": self.epoch, **document}, session_id=None
+        )
+
+    def _knowledge_command(self, command: CommandEnvelope) -> GatewayReply:
+        """The knowledge base: documents, knowledge bases and each conversation's choice."""
+        if command.session_id is not None:
+            raise GatewayError("invalid_session")
+        payload = command.payload
+        store = knowledge_store(knowledge_root(self._database))
+        added: dict[str, object] = {}
+        try:
+            if command.type == "knowledge.status":
+                self._require_payload(command, set())
+            elif command.type == "knowledge.configure":
+                self._require_payload(command, set(), optional={"enabled", "auto", "synonyms"})
+                if "enabled" in payload or "auto" in payload:
+                    store.set_settings(enabled=payload.get("enabled"), auto=payload.get("auto"))
+                if "synonyms" in payload:
+                    store.set_synonyms(payload["synonyms"])
+            elif command.type == "knowledge.add":
+                self._require_payload(command, set(), optional={"paths", "url", "collectionId"})
+                added = self._knowledge_add(store, payload)
+            elif command.type == "knowledge.document.update":
+                self._require_payload(command, {"documentId"}, optional={"title", "collectionId"})
+                if "title" in payload:
+                    store.rename(payload["documentId"], payload["title"])
+                if "collectionId" in payload:
+                    store.move_document(payload["documentId"], payload["collectionId"])
+            elif command.type == "knowledge.document.delete":
+                self._require_payload(command, {"documentId"})
+                store.delete(payload["documentId"])
+            elif command.type == "knowledge.collection.create":
+                self._require_payload(command, {"name"}, optional={"defaultOn"})
+                created = store.create_collection(
+                    payload["name"], default_on=payload.get("defaultOn", True)
+                )
+                added = {"collection": created}
+            elif command.type == "knowledge.collection.update":
+                self._require_payload(command, {"collectionId"}, optional={"name", "defaultOn"})
+                if "name" in payload:
+                    store.rename_collection(payload["collectionId"], payload["name"])
+                if "defaultOn" in payload:
+                    store.set_collection_default(payload["collectionId"], payload["defaultOn"])
+            elif command.type == "knowledge.collection.delete":
+                self._require_payload(command, {"collectionId"})
+                store.delete_collection(payload["collectionId"])
+            elif command.type == "knowledge.session.get":
+                self._require_payload(command, {"sessionId"})
+                selection = store.session_selection(payload["sessionId"])
+                return self._knowledge_reply(command, selection)
+            elif command.type == "knowledge.session.set":
+                self._require_payload(command, {"sessionId", "collections"})
+                selection = store.set_session_selection(
+                    payload["sessionId"], payload["collections"]
+                )
+                return self._knowledge_reply(command, selection)
+            else:
+                self._require_payload(command, {"query"}, optional={"collections"})
+                query, collections = payload["query"], payload.get("collections")
+                if not isinstance(query, str) or not query.strip() or len(query) > 500:
+                    raise GatewayError("invalid_command")
+                if collections is not None and (
+                    not isinstance(collections, list)
+                    or not all(isinstance(item, str) for item in collections)
+                ):
+                    raise GatewayError("invalid_command")
+                results = store.search(
+                    query, limit=_KNOWLEDGE_SEARCH_LIMIT, collections=collections
+                )
+                return self._knowledge_reply(
+                    command,
+                    {
+                        "results": [
+                            store.public(result, excerpt=_KNOWLEDGE_EXCERPT_CHARS)
+                            for result in results
+                        ]
+                    },
+                )
+            snapshot = store.snapshot()
+        except KnowledgeError as error:
+            raise GatewayError(f"knowledge_{knowledge_error_code(str(error))}") from None
+        except KeyError:
+            raise GatewayError("knowledge_not_found") from None
+        except (OSError, sqlite3.Error):
+            raise GatewayError("storage_unavailable") from None
+        for document in snapshot["documents"]:
+            if document.get("error"):
+                document["error_code"] = knowledge_error_code(document["error"])
+        return self._knowledge_reply(command, {**snapshot, **added})
+
+    @staticmethod
+    def _knowledge_add(store: KnowledgeStore, payload: Mapping[str, object]) -> dict[str, object]:
+        """Files picked on this computer, or one web page; each file is added on its own."""
+        paths, url = payload.get("paths"), payload.get("url")
+        collection_id = payload.get("collectionId")
+        if (paths is None) == (url is None) or (
+            collection_id is not None and not isinstance(collection_id, str)
+        ):
+            raise GatewayError("invalid_command")
+        if url is not None:
+            return {"added": [store.add_url(url, collection_id=collection_id)], "failed": []}
+        if (
+            not isinstance(paths, list)
+            or not paths
+            or len(paths) > _KNOWLEDGE_MAX_FILES
+            or not all(isinstance(path, str) and 0 < len(path) <= 4096 for path in paths)
+        ):
+            raise GatewayError("invalid_command")
+        documents: list[dict[str, Any]] = []
+        failed: list[dict[str, str]] = []
+        for raw in paths:
+            source = Path(raw)
+            try:
+                if not source.is_absolute() or not source.is_file():
+                    raise KnowledgeError("a file name is required")
+                documents.append(
+                    store.add_file(
+                        source, source.name, origin="upload", collection_id=collection_id
+                    )
+                )
+            except KnowledgeError as error:
+                failed.append({"name": source.name, "code": knowledge_error_code(str(error))})
+            except OSError:
+                failed.append({"name": source.name, "code": "unreadable"})
+        return {"added": documents, "failed": failed}
+
+    def _knowledge_reply(
+        self, command: CommandEnvelope, document: Mapping[str, object]
+    ) -> GatewayReply:
+        return self._reply(
+            f"{command.type}.result",
+            {"epoch": self.epoch, **cast(dict[str, object], _camel_keys(document))},
+            session_id=None,
+        )
+
+    def device_sessions(self) -> list[dict[str, object]]:
+        """The open folder's conversations, for a paired phone (archived ones left out)."""
+        with self._lock:
+            workspace = self._workspace
+            running = {
+                session_id
+                for session_id, context in self._session_hosts.items()
+                if context.active_turn is not None or context.turn_requested
+            }
+            if self._host_session_id is not None and (self._active_turn or self._turn_requested):
+                running.add(self._host_session_id)
+            presentations = self._workspace_presentations()
+        if workspace is None or not self._database.is_file():
+            return []
+        try:
+            sessions = SQLiteEventStore.list_sessions_read_only(
+                self._database, _MAX_SESSIONS, workspace=workspace, exclude_run_sessions=True
+            )
+        except (OSError, ValueError, sqlite3.DatabaseError):
+            raise DeviceLinkError("storage_unavailable", 503) from None
+        documents: list[dict[str, object]] = []
+        for session in sessions:
+            presentation = presentations.get(session.id, {})
+            if presentation.get("archived") is True:
+                continue
+            alias = presentation.get("alias")
+            documents.append(
+                {
+                    "id": session.id,
+                    "title": alias if isinstance(alias, str) and alias else session.title,
+                    "workspace": session.workspace,
+                    "updated_at": session.updated_at,
+                    "running": session.id in running,
+                }
+            )
+        return documents
+
+    def device_session_events(self, session_id: str) -> list[dict[str, object]] | None:
+        """A conversation's recent messages and failures, in the Serve API's event shape."""
+        try:
+            session = self._workspace_session(session_id)
+            events = SQLiteEventStore.list_session_events_of_types_read_only(
+                self._database, session.id, frozenset({"message.created", "turn.failed"})
+            )
+        except GatewayError:
+            return None
+        except (OSError, ValueError, sqlite3.DatabaseError):
+            raise DeviceLinkError("storage_unavailable", 503) from None
+        documents: list[dict[str, object]] = []
+        for event in events:
+            data: dict[str, object]
+            if event.type == "message.created":
+                role = event.data.get("role")
+                content = event.data.get("content")
+                if role not in {"user", "assistant"} or not isinstance(content, str):
+                    continue
+                if not content.strip():
+                    continue  # an assistant step that only called tools
+                data = {"role": role, "content": content[:_DEVICE_CONTENT_CHARS]}
+            else:
+                message = event.data.get("message")
+                data = {
+                    "error_type": str(event.data.get("error_type", ""))[:128],
+                    "message": Redactor().redact(message[:600]) if isinstance(message, str) else "",
+                }
+            documents.append(
+                {
+                    "id": event.id,
+                    "type": event.type,
+                    "sequence": event.sequence,
+                    "created_at": event.created_at,
+                    "data": data,
+                }
+            )
+        return documents[-_DEVICE_EVENT_LIMIT:]
+
+    def _device_session_autonomy(self, session: Session) -> Autonomy:
+        if session.id == self._host_session_id and self._host is not None:
+            return self._autonomy
+        context = self._session_hosts.get(session.id)
+        return context.autonomy if context is not None else session.autonomy
+
+    def device_submit(
+        self, device: PairedDevice, request_id: str, session_id: str, prompt: str
+    ) -> dict[str, object]:
+        """Run a phone's task in one of this desktop's conversations, once per request id.
+
+        A task from another device is an outside instruction: it never runs where this desktop
+        approves everything on its own (YOLO, full access), and its approvals are given here.
+        """
+        prompt = prompt.strip()
+        if not prompt or len(prompt) > _MAX_PROMPT_CHARS:
+            raise DeviceLinkError("invalid_prompt")
+        try:
+            session = self._workspace_session(session_id)
+        except GatewayError as error:
+            if str(error) == "unknown_session":
+                raise DeviceLinkError("unknown_session", 404) from None
+            raise DeviceLinkError(str(error), 503) from None
+        with self._lock:
+            if self._provider is None or self._closing:
+                raise DeviceLinkError("desktop_not_ready", 503)
+            autonomy = self._device_session_autonomy(session)
+        if autonomy in {Autonomy.YOLO, Autonomy.FULL_ACCESS}:
+            raise DeviceLinkError("desktop_autonomy_too_broad", 409)
+        tasks = self._device_link.tasks
+        task, created = tasks.create(device.device_id, request_id, session.id, prompt)
+        if created:
+            try:
+                self._dispatch_device_task(task, session)
+            except GatewayError as error:
+                # Nothing ran: the phone may send the same request again.
+                tasks.discard(task.task_id)
+                raise DeviceLinkError(str(error), 503) from None
+            tasks.update(task.task_id, state="queued")
+        refreshed = tasks.get(task.task_id)
+        assert refreshed is not None
+        return self._device_task_document(refreshed)
+
+    def device_task(self, device: PairedDevice, task_id: str) -> dict[str, object] | None:
+        task = self._device_link.tasks.get(task_id)
+        if task is None or task.device_id != device.device_id:
+            return None
+        return self._device_task_document(task)
+
+    def _dispatch_device_task(self, task: DeviceTask, session: Session) -> None:
+        command = CommandEnvelope(
+            PROTOCOL_VERSION,
+            f"device-{task.task_id}",
+            "turn.start",
+            {"prompt": task.prompt},
+            session.id,
+        )
+        with self._lock:
+            hosted = session.id in self._session_hosts and session.id != self._host_session_id
+        if not hosted:
+            self._await_lifecycle_settle()
+        with self._lock:
+            if self._closing:
+                raise GatewayError("runtime_unavailable")
+            if session.id == self._host_session_id and self._host is not None:
+                self._execute_unsent(command)
+                return
+            if session.id in self._session_hosts:
+                self._execute_unsent(command)
+                return
+        self._start_device_session_host(session, command)
+
+    @staticmethod
+    def _shutdown_quietly(host: Host) -> None:
+        with suppress(Exception):
+            if isinstance(host, RuntimeHost):
+                host.request_shutdown(create_backup=False)
+            else:
+                host.request_shutdown()
+
+    def _start_device_session_host(self, session: Session, command: CommandEnvelope) -> None:
+        """A background runtime for a conversation not open in the window, then the task."""
+        with self._lock:
+            if self._closing or self._provider is None:
+                raise GatewayError("runtime_unavailable")
+            if session.id in self._device_host_starting:
+                raise GatewayError("runtime_busy")
+            provider = self._provider
+            self._device_host_starting.add(session.id)
+        host: Host | None = None
+        try:
+            workspace = Path(session.workspace).resolve()
+            host = self._host_factory(
+                RuntimeSettings(
+                    workspace=workspace,
+                    database=self._database,
+                    provider=provider,
+                    mode=session.mode,
+                    autonomy=session.autonomy,
+                    session_id=session.id,
+                    writer_lock_group=self._writer_lock_group,
+                )
+            )
+            host.start()
+            startup: list[Event] = []
+            started = False
+            deadline = self._clock() + _START_TIMEOUT_SECONDS
+            while self._clock() < deadline:
+                events = host.drain_display_events()
+                startup.extend(events)
+                kinds = {event.type for event in events}
+                if kinds & {"runtime.failed", "approval.requested"}:
+                    break  # an extension approval at startup is answered in the window
+                if "runtime.started" in kinds:
+                    started = True
+                    break
+                if not host.is_alive() and getattr(host, "ident", True) is not None:
+                    break
+                self._sleeper(0.01)
+            if not started:
+                raise GatewayError("runtime_start_failed")
+            with self._lock:
+                if self._closing:
+                    raise GatewayError("runtime_unavailable")
+                if session.id in self._session_hosts or session.id == self._host_session_id:
+                    # Opened in the window meanwhile: that runtime takes the task.
+                    self._execute_unsent(command)
+                    return
+                self._session_hosts[session.id] = _SessionHostContext(
+                    host,
+                    workspace,
+                    provider,
+                    session.id,
+                    session.id,
+                    session.mode,
+                    session.autonomy,
+                    "ready",
+                    None,
+                    False,
+                    [],
+                    {},
+                    None,
+                    {},
+                )
+                self._device_hosted_sessions[session.id] = self._clock()
+                owned, host = host, None
+                self._queue_host_events(startup, source_host=owned)
+                self._execute_unsent(command)
+        finally:
+            if host is not None:
+                self._shutdown_quietly(host)
+            with self._lock:
+                self._device_host_starting.discard(session.id)
+
+    def _retire_idle_device_hosts(self) -> None:
+        """Stop runtimes started for phones' tasks once their work is done (gateway lock held)."""
+        for session_id, started_at in list(self._device_hosted_sessions.items()):
+            context = self._session_hosts.get(session_id)
+            if context is None or context.host is None:
+                self._device_hosted_sessions.pop(session_id, None)
+                continue
+            if self._clock() - started_at < _DEVICE_HOST_GRACE_SECONDS:
+                continue
+            busy = (
+                context.active_turn is not None
+                or context.turn_requested
+                or bool(context.queued_turns)
+                or getattr(context.host, "has_background_work", False)
+                or any(
+                    entry.session_id == session_id and entry.state != "resolved"
+                    for entry in self._approval_ledger.values()
+                )
+            )
+            if busy:
+                continue
+            self._session_hosts.pop(session_id, None)
+            self._device_hosted_sessions.pop(session_id, None)
+            self._shutdown_quietly(context.host)
+
+    def _refresh_device_task(self, task: DeviceTask) -> DeviceTask:
+        """Follow a handed-over task through its conversation's turn events."""
+        if task.state in {"succeeded", "failed", "cancelled", "interrupted", "dispatching"}:
+            return task
+        tasks = self._device_link.tasks
+        try:
+            events = SQLiteEventStore.list_session_events_of_types_read_only(
+                self._database,
+                task.session_id,
+                frozenset({"message.created", *_DEVICE_TURN_ENDS}),
+            )
+        except (OSError, ValueError, sqlite3.DatabaseError):
+            return task
+        correlation = task.correlation_id
+        if correlation is None:
+            claimed = tasks.claimed_messages(task.session_id)
+            for event in events:
+                if (
+                    event.type == "message.created"
+                    and event.data.get("role") == "user"
+                    and event.data.get("content") == task.prompt
+                    and event.created_at >= task.created_at
+                    and event.id not in claimed
+                    and event.correlation_id
+                ):
+                    correlation = event.correlation_id
+                    tasks.update(
+                        task.task_id,
+                        state="running",
+                        message_event_id=event.id,
+                        correlation_id=correlation,
+                    )
+                    break
+            if correlation is None:
+                return task
+        for event in events:
+            if event.correlation_id == correlation and event.type in _DEVICE_TURN_ENDS:
+                error = None
+                if event.type == "turn.failed":
+                    message = event.data.get("message")
+                    error = Redactor().redact(message[:600]) if isinstance(message, str) else None
+                tasks.update(task.task_id, state=_DEVICE_TURN_ENDS[event.type], error=error)
+                break
+        refreshed = tasks.get(task.task_id)
+        return refreshed if refreshed is not None else task
+
+    def _device_task_document(self, task: DeviceTask) -> dict[str, object]:
+        task = self._refresh_device_task(task)
+        document: dict[str, object] = {
+            "task_id": task.task_id,
+            "state": task.state,
+            "session_id": task.session_id,
+            "created_at": task.created_at,
+            "updated_at": task.updated_at,
+        }
+        if task.error:
+            document["error"] = task.error
+        if task.state == "succeeded" and task.correlation_id:
+            with suppress(OSError, ValueError, sqlite3.DatabaseError):
+                answers = [
+                    event.data.get("content")
+                    for event in SQLiteEventStore.list_session_events_of_types_read_only(
+                        self._database, task.session_id, frozenset({"message.created"})
+                    )
+                    if event.correlation_id == task.correlation_id
+                    and event.data.get("role") == "assistant"
+                    and isinstance(event.data.get("content"), str)
+                    and str(event.data.get("content")).strip()
+                ]
+                if answers:
+                    document["result"] = str(answers[-1])[:_DEVICE_RESULT_CHARS]
+        return document
+
+    def _settle_device_tasks_after_restart(self) -> None:
+        """Tasks a phone handed over before the desktop restarted: those that had not finished
+        are reported interrupted, and a queued copy of one never runs later by surprise."""
+        if not (self._database.with_name("device-link") / "tasks.db").is_file():
+            return
+        with suppress(OSError, sqlite3.DatabaseError):
+            tasks = self._device_link.tasks
+            for task in tasks.open_tasks():
+                if self._refresh_device_task(task).state in {
+                    "succeeded",
+                    "failed",
+                    "cancelled",
+                    "interrupted",
+                }:
+                    continue
+                tasks.update(
+                    task.task_id,
+                    state="interrupted",
+                    error="the desktop restarted before the task finished",
+                )
+                if not self._database.is_file():
+                    continue
+                with SQLiteEventStore(self._database) as store:
+                    for queued in store.list_queued_turns(task.session_id):
+                        if queued.prompt == task.prompt:
+                            store.mark_turn_state(queued.turn_id, "cancelled")
+                            break
+
+    def _task_limits_path(self) -> Path:
+        return self._database.with_name("task-limits.json")
+
+    def _task_limits(self) -> TaskLimits | None:
+        """The user's per-task spending limits, or None when none is set. Never raises."""
+        try:
+            document = json.loads(self._task_limits_path().read_text(encoding="utf-8"))
+            limits = TaskLimits(
+                max_cost_usd=document.get("maxCostUsd"),
+                max_total_tokens=document.get("maxTokens"),
+            )
+        except (OSError, ValueError, TypeError, AttributeError):
+            return None
+        if limits.max_cost_usd is None and limits.max_total_tokens is None:
+            return None
+        return limits
+
+    @staticmethod
+    def _task_limits_document(limits: TaskLimits | None) -> dict[str, object]:
+        return {
+            "maxCostUsd": limits.max_cost_usd if limits is not None else None,
+            "maxTokens": limits.max_total_tokens if limits is not None else None,
+            "maxCostLimitUsd": MAX_TASK_COST_LIMIT_USD,
+            "maxTokenLimit": MAX_TASK_TOKEN_LIMIT,
+            "defaultCostUsd": TaskBudget().max_cost_usd,
+        }
+
+    def _task_limits_command(self, command: CommandEnvelope) -> GatewayReply:
+        """Read or replace the spending limit every new task runs under (null clears one)."""
+        if command.session_id is not None:
+            raise GatewayError("invalid_session")
+        if command.type == "limits.get":
+            self._require_payload(command, set())
+            return self._reply(
+                "limits.get.result",
+                {"epoch": self.epoch, **self._task_limits_document(self._task_limits())},
+                session_id=None,
+            )
+        self._require_payload(command, {"maxCostUsd", "maxTokens"})
+        cost = command.payload.get("maxCostUsd")
+        tokens = command.payload.get("maxTokens")
+        if (
+            isinstance(cost, bool)
+            or isinstance(tokens, bool)
+            or not (cost is None or isinstance(cost, int | float))
+            or not (tokens is None or isinstance(tokens, int))
+        ):
+            raise GatewayError("invalid_limits")
+        try:
+            limits = TaskLimits(
+                max_cost_usd=None if cost is None else float(cost),
+                max_total_tokens=tokens,
+            )
+        except ValueError:
+            raise GatewayError("invalid_limits") from None
+        path = self._task_limits_path()
+        staging = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            staging.write_text(
+                json.dumps(
+                    {"maxCostUsd": limits.max_cost_usd, "maxTokens": limits.max_total_tokens}
+                ),
+                encoding="utf-8",
+            )
+            os.replace(staging, path)
+        except OSError:
+            raise GatewayError("storage_unavailable") from None
+        finally:
+            staging.unlink(missing_ok=True)
+        return self._reply(
+            "limits.set.result",
+            {"epoch": self.epoch, **self._task_limits_document(self._task_limits())},
+            session_id=None,
+        )
+
     def _session_usage(self, command: CommandEnvelope) -> GatewayReply:
         """Summarize recorded token usage and its estimated price for a session."""
         self._require_payload(command, {"sessionId"})
@@ -3287,10 +4166,16 @@ class GatewayRuntime:
         session = self._workspace_session(command.payload.get("sessionId"))
         try:
             events = SQLiteEventStore.list_session_events_of_types_read_only(
-                self._database, session.id, frozenset({"model.requested", "usage.updated"})
+                self._database,
+                session.id,
+                frozenset({"model.requested", "usage.updated", "session.forked"}),
             )
         except (OSError, ValueError, sqlite3.DatabaseError):
             raise GatewayError("storage_unavailable") from None
+        # A fork carries a copy of the original's history; its spending was the original's.
+        marker = fork_marker(events)
+        if marker is not None:
+            events = events[marker[0] + 1 :]
         cost = session_cost(events)
         priced = any(resolve_pricing(model) is not UNKNOWN_PRICING for model in cost.models)
         return self._reply(
@@ -7274,7 +8159,7 @@ class GatewayRuntime:
         self._require_payload(
             command,
             {"prompt"},
-            optional={"attachmentPaths", "excludeImageDigests", "reasoningEffort"},
+            optional={"attachmentPaths", "excludeImageDigests", "reasoningEffort", "model"},
         )
         self._require_selected_session(command.session_id, allow_unselected=True)
         if command.session_id != self._host_session_id:
@@ -7305,10 +8190,19 @@ class GatewayRuntime:
             ):
                 raise GatewayError("unsupported_reasoning_effort")
             reasoning_effort = selected_effort
+        model = (
+            self._turn_model_override(command.payload["model"])
+            if "model" in command.payload
+            else None
+        )
         prompt = prompt.strip()
         if references:
             prompt = f"{prompt}\n\n" + "\n".join(f"[File reference: {path}]" for path in references)
-        if self._active_turn is not None or self._turn_requested or len(self._queued_turns) > 0:
+        busy = self._active_turn is not None or self._turn_requested or len(self._queued_turns) > 0
+        if model is not None and (busy or self._busy):
+            # A queued turn keeps only what the queue stores; another model is asked at once.
+            raise GatewayError("runtime_busy")
+        if busy:
             if len(self._queued_turns) >= _MAX_TURN_QUEUE:
                 raise GatewayError("turn_queue_full")
             turn_id = f"turn-{uuid4()}"
@@ -7350,7 +8244,7 @@ class GatewayRuntime:
         self._require_host()
         try:
             self._submit_host_turn(
-                prompt, exclude_image_digests, reasoning_effort, images=images
+                prompt, exclude_image_digests, reasoning_effort, images=images, model=model
             )
         except RuntimeError:
             raise GatewayError("runtime_unavailable") from None
@@ -7371,6 +8265,7 @@ class GatewayRuntime:
         reasoning_effort: str | None = None,
         *,
         images: tuple[ImagePart, ...] = (),
+        model: str | None = None,
     ) -> Future[None]:
         """Submit a turn while keeping legacy test hosts compatible.
 
@@ -7392,7 +8287,24 @@ class GatewayRuntime:
             kwargs["exclude_image_digests"] = exclude_image_digests
         if reasoning_effort is not None:
             kwargs["reasoning_effort"] = reasoning_effort
+        if model is not None:
+            kwargs["model"] = model
+        limits = self._task_limits()
+        if limits is not None:
+            kwargs["limits"] = limits
         return host.submit_turn(prompt, **kwargs)
+
+    @staticmethod
+    def _turn_model_override(value: object) -> str:
+        """A model id for one turn on the current Provider (a comparison with another model)."""
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or len(value) > _MAX_PROVIDER_MODEL_CHARS
+            or any(ord(char) < 32 or char.isspace() for char in value.strip())
+        ):
+            raise GatewayError("invalid_model")
+        return value.strip()
 
     @staticmethod
     def _excluded_image_digests(value: object) -> frozenset[str]:
@@ -7475,7 +8387,13 @@ class GatewayRuntime:
                         if path.suffix.casefold() in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
                             raise GatewayError("invalid_image_attachment")
                         if path.suffix.casefold() in {
-                            ".bmp", ".tif", ".tiff", ".avif", ".heic", ".heif", ".ico"
+                            ".bmp",
+                            ".tif",
+                            ".tiff",
+                            ".avif",
+                            ".heic",
+                            ".heif",
+                            ".ico",
                         }:
                             raise GatewayError("unsupported_image_type")
                         continue
@@ -8283,9 +9201,8 @@ class GatewayRuntime:
             self._approval_ledger = {
                 request_id: entry
                 for request_id, entry in self._approval_ledger.items()
-                if entry.run_id is not None or (
-                    entry.source_host is not None and entry.source_host is not host
-                )
+                if entry.run_id is not None
+                or (entry.source_host is not None and entry.source_host is not host)
             }
             self._active_turn = None
             self._turn_requested = False
@@ -8311,7 +9228,8 @@ class GatewayRuntime:
             if context.host is not None:
                 context.host.join(timeout=max(0.0, deadline - self._clock()))
         self._session_hosts = {
-            session_id: context for session_id, context in self._session_hosts.items()
+            session_id: context
+            for session_id, context in self._session_hosts.items()
             if context.host is not None and context.host.is_alive()
         }
 
@@ -8406,9 +9324,8 @@ class GatewayRuntime:
                 self._approval_ledger = {
                     request_id: entry
                     for request_id, entry in self._approval_ledger.items()
-                    if entry.run_id is not None or (
-                        entry.source_host is not None and entry.source_host is not host
-                    )
+                    if entry.run_id is not None
+                    or (entry.source_host is not None and entry.source_host is not host)
                 }
                 self._active_turn = None
                 self._turn_requested = False
@@ -8465,15 +9382,19 @@ class GatewayRuntime:
             try:
                 events = host.drain_display_events()
             except Exception:
-                events = [Event(
-                    session_id=session_id, type="runtime.failed",
-                    data={"reason": "runtime event stream failed"},
-                )]
+                events = [
+                    Event(
+                        session_id=session_id,
+                        type="runtime.failed",
+                        data={"reason": "runtime event stream failed"},
+                    )
+                ]
             self._queue_host_events(events, source_host=host)
             if not host.is_alive():
                 with self._session_host_scope(context):
                     self._clear_turn_state_after_runtime_failure(session_id)
                 self._session_hosts.pop(session_id, None)
+        self._retire_idle_device_hosts()
 
     def _queue_host_events(
         self,
@@ -8483,10 +9404,14 @@ class GatewayRuntime:
         run_id: str | None = None,
     ) -> None:
         for event in events:
-            session_context = next(
-                (item for item in self._session_hosts.values() if item.host is source_host),
-                None,
-            ) if run_id is None and source_host is not None else None
+            session_context = (
+                next(
+                    (item for item in self._session_hosts.values() if item.host is source_host),
+                    None,
+                )
+                if run_id is None and source_host is not None
+                else None
+            )
             if (
                 run_id is None
                 and source_host is not None
@@ -8640,9 +9565,8 @@ class GatewayRuntime:
         for request_id in [
             key
             for key, entry in self._approval_ledger.items()
-            if entry.session_id in {session_id, None} and (
-                entry.source_host is self._host or entry.source_host is None
-            )
+            if entry.session_id in {session_id, None}
+            and (entry.source_host is self._host or entry.source_host is None)
         ]:
             del self._approval_ledger[request_id]
 
@@ -8680,19 +9604,24 @@ class GatewayRuntime:
                 source_host=source_host,
             )
             return
-        context = next(
-            (item for item in self._session_hosts.values() if item.host is source_host), None,
-        ) if source_host is not None and source_host is not self._host else None
+        context = (
+            next(
+                (item for item in self._session_hosts.values() if item.host is source_host),
+                None,
+            )
+            if source_host is not None and source_host is not self._host
+            else None
+        )
         if context is not None:
             with self._session_host_scope(context):
                 self._project_event(
-                    event_type, payload, session_id, source_host=source_host,
+                    event_type,
+                    payload,
+                    session_id,
+                    source_host=source_host,
                 )
             return
-        if (
-            source_host is not None
-            and source_host is not self._host
-        ):
+        if source_host is not None and source_host is not self._host:
             # Buffered events from a retired host still appear in its timeline;
             # execution bookkeeping belongs to the current host or a retained
             # session context, handled above.
@@ -8788,14 +9717,16 @@ class GatewayRuntime:
                     store.mark_turn_state(queue_turn_id, final_state)
             for entry in self._approval_ledger.values():
                 if (
-                    entry.state == "resolving" and entry.session_id in {terminal_session, None}
+                    entry.state == "resolving"
+                    and entry.session_id in {terminal_session, None}
                     and (entry.source_host is source_host or entry.source_host is None)
                 ):
                     entry.turn_terminal = True
             for request_id in [
                 key
                 for key, entry in self._approval_ledger.items()
-                if entry.state != "resolving" and entry.session_id in {session_id, None}
+                if entry.state != "resolving"
+                and entry.session_id in {session_id, None}
                 and (entry.source_host is source_host or entry.source_host is None)
             ]:
                 del self._approval_ledger[request_id]
@@ -8983,7 +9914,11 @@ class GatewayRuntime:
                     "Report concrete verification outcomes for each step; "
                     "do not claim unverified criteria passed."
                 )
-                entry.host.submit_turn(prompt)
+                limits = self._task_limits()
+                if limits is not None:
+                    entry.host.submit_turn(prompt, limits=limits)
+                else:
+                    entry.host.submit_turn(prompt)
                 entry.submitted = True
                 service.update_run(
                     run_id, state=AgentRunState.RUNNING, active_step_id=step.id if step else None
@@ -9132,7 +10067,11 @@ class GatewayRuntime:
                         "Stop only for a real approval, user-only decision, or hard resource limit."
                     )
                     try:
-                        entry.host.submit_turn(continuation)
+                        limits = self._task_limits()
+                        if limits is not None:
+                            entry.host.submit_turn(continuation, limits=limits)
+                        else:
+                            entry.host.submit_turn(continuation)
                         service.update_run(
                             run_id,
                             state=AgentRunState.RUNNING,
@@ -9255,12 +10194,18 @@ class GatewayRuntime:
             or self._turn_requested
             or self._active_turn is not None
             or any(
-                entry.state != "resolved" and entry.run_id is None
+                entry.state != "resolved"
+                and entry.run_id is None
                 and (
                     entry.source_host is self._host
-                    or (entry.source_host is None and entry.session_id in {
-                        self._host_session_id, None,
-                    })
+                    or (
+                        entry.source_host is None
+                        and entry.session_id
+                        in {
+                            self._host_session_id,
+                            None,
+                        }
+                    )
                 )
                 for entry in self._approval_ledger.values()
             )
@@ -9570,6 +10515,20 @@ class GatewayRuntime:
                     data["arguments"] = _json_safe(
                         {key: value for key, value in arguments.items() if key in allowed}
                     )
+        if event.type == "session.forked":
+            for key in ("source_session_id", "source_model", "compare_model", "keep_reply"):
+                value = event.data.get(key)
+                if isinstance(value, bool) or (
+                    isinstance(value, str) and len(value) <= _MAX_PROVIDER_MODEL_CHARS
+                ):
+                    data[_camel_case(key)] = value
+        elif event.type == "turn.failed":
+            error_type = event.data.get("error_type")
+            if isinstance(error_type, str) and len(error_type) <= 128:
+                data["errorType"] = error_type
+            message = event.data.get("message")
+            if isinstance(message, str):
+                data["message"] = Redactor().redact(message[:600])
         event_type = event.type
         input_id = event.data.get("input_id")
         if event_type == "turn.input.received":
@@ -9674,9 +10633,17 @@ class GatewayRuntime:
                 ),
             ),
             selected,
-            self._take_sequence(),
+            0 if getattr(self._unsent_replies, "active", False) else self._take_sequence(),
             should_stop,
         )
+
+    def _execute_unsent(self, command: CommandEnvelope) -> None:
+        """Run a command for something other than the window; its reply is never written."""
+        self._unsent_replies.active = True
+        try:
+            self._execute_session_command(command)
+        finally:
+            self._unsent_replies.active = False
 
     def _take_sequence(self) -> int:
         with self._wire_sequence_lock:
@@ -9688,6 +10655,15 @@ class GatewayRuntime:
 def _camel_case(value: str) -> str:
     head, *tail = value.split("_")
     return head + "".join(part[:1].upper() + part[1:] for part in tail)
+
+
+def _camel_keys(value: object) -> object:
+    """A document with every key in the desktop protocol's camelCase."""
+    if isinstance(value, Mapping):
+        return {_camel_case(str(key)): _camel_keys(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_camel_keys(item) for item in value]
+    return value
 
 
 def _json_safe(

@@ -75,3 +75,8 @@ for Android/**/*.pt
 # Scratch left by local test runs at the repository root
 /.test-tmp*/
 /.tmp*
+/tmp/
+/tmp-*
+/output/
+/node_modules/
+/.playwright-cli/

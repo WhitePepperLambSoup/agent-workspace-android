@@ -145,7 +145,15 @@ _CONTEXT_SUMMARY_CONTRACT_VERSION = 3
 _PREFIX_STABLE_RETAIN_RATIO = 0.3
 # Fixed per-result caps for excerpting a single oversized turn, largest first.
 _STABLE_TOOL_EXCERPT_LADDER = (
-    256 * 1024, 128 * 1024, 64 * 1024, 32 * 1024, 16 * 1024, 8 * 1024, 4 * 1024, 2 * 1024, 1024
+    256 * 1024,
+    128 * 1024,
+    64 * 1024,
+    32 * 1024,
+    16 * 1024,
+    8 * 1024,
+    4 * 1024,
+    2 * 1024,
+    1024,
 )
 _MAX_CONTEXT_NOTES_BYTES = 64 * 1024
 
@@ -3951,9 +3959,7 @@ def _fit_context_summary_fragment(
 
 def _history_recovery_guidance(tools: tuple[ToolSpec, ...]) -> str:
     return (
-        _HISTORY_RECOVERY_GUIDANCE
-        if any(tool.name == "session_history" for tool in tools)
-        else ""
+        _HISTORY_RECOVERY_GUIDANCE if any(tool.name == "session_history" for tool in tools) else ""
     )
 
 
@@ -4095,10 +4101,7 @@ def _bounded_provider_request(
                 message.trust is ContentTrust.UNTRUSTED_DATA
                 and message.content.startswith("[Earlier conversation summarized")
             )
-            or (
-                message.trust is ContentTrust.TRUSTED
-                and message.content == _COMPACTION_NOTICE
-            )
+            or (message.trust is ContentTrust.TRUSTED and message.content == _COMPACTION_NOTICE)
         )
         for message in messages
     ):

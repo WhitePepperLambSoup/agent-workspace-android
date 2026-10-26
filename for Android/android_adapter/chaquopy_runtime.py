@@ -357,6 +357,30 @@ def _check_each_tool_schema_once() -> None:
     registry.check_tool_schema = check_tool_schema
 
 
+def _keep_phone_knowledge_base() -> None:
+    """Leave the desktop's knowledge base out of the phone's runtimes.
+
+    The desktop keeps its knowledge base next to its database, in <data>/knowledge, which on the
+    phone is where the phone's own knowledge base (mobile_knowledge, the Knowledge page) keeps the
+    same knowledge.sqlite3. The phone's tools come from configure_android_registry and its passages
+    from the phone's context, so the desktop's store, tools and passages are not built here.
+    """
+    from agent_workspace.application import runtime
+
+    if getattr(runtime.knowledge_store, "_android_phone_store", False):
+        return
+
+    def knowledge_store(*_arguments: Any, **_options: Any) -> None:
+        return None
+
+    def knowledge_tools(*_arguments: Any, **_options: Any) -> tuple[()]:
+        return ()
+
+    knowledge_store._android_phone_store = True
+    runtime.knowledge_store = knowledge_store
+    runtime.knowledge_tools = knowledge_tools
+
+
 def install_android_runtime() -> None:
     import agent_workspace.credentials as credentials
 
@@ -409,6 +433,7 @@ def install_android_runtime() -> None:
     from .local_context import install_local_context_profile
 
     install_local_context_profile()
+    _keep_phone_knowledge_base()
     _validate_database_once_per_process()
     _check_each_tool_schema_once()
     _share_default_tls_context()

@@ -1,10 +1,45 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, replace
+
+# The user's per-task limits are bounded so a typo cannot disable the default safety budget.
+MAX_TASK_COST_LIMIT_USD = 1000.0
+MAX_TASK_TOKEN_LIMIT = 1_000_000_000
 
 
 class BudgetExceededError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class TaskLimits:
+    """Spending limits the user set for every task: cost in US dollars at list prices, and
+    input plus output tokens. None is no limit of the user's own (the default budget applies)."""
+
+    max_cost_usd: float | None = None
+    max_total_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        cost = self.max_cost_usd
+        if cost is not None and (
+            type(cost) not in (int, float)
+            or not math.isfinite(cost)
+            or not 0 < cost <= MAX_TASK_COST_LIMIT_USD
+        ):
+            raise ValueError("cost limit is out of range")
+        tokens = self.max_total_tokens
+        if tokens is not None and (
+            type(tokens) is not int or not 0 < tokens <= MAX_TASK_TOKEN_LIMIT
+        ):
+            raise ValueError("token limit is out of range")
+
+    def apply(self, budget: TaskBudget) -> TaskBudget:
+        if self.max_cost_usd is not None:
+            budget = replace(budget, max_cost_usd=float(self.max_cost_usd))
+        if self.max_total_tokens is not None:
+            budget = replace(budget, max_total_tokens=self.max_total_tokens)
+        return budget
 
 
 @dataclass(slots=True)
@@ -35,6 +70,8 @@ class TaskBudget:
     max_output_tokens_per_call: int = 8192
     max_reasoning_steps: int = 100
     max_cost_usd: float = 50.0
+    # Input plus output tokens of the whole task, cached input included; None is no limit.
+    max_total_tokens: int | None = None
     model_calls: int = 0
     provider_attempts: int = 0
     tool_calls: int = 0
@@ -63,6 +100,8 @@ class TaskBudget:
         }
         if any(value <= 0 for value in limits.values()):
             raise ValueError("task budget limits must be positive")
+        if self.max_total_tokens is not None and self.max_total_tokens <= 0:
+            raise ValueError("task budget limits must be positive")
 
     def consume_model_call(self) -> None:
         if self.model_calls >= self.max_model_calls:
@@ -88,6 +127,10 @@ class TaskBudget:
             raise BudgetExceededError("input token budget exhausted")
         if next_output > self.max_output_tokens:
             raise BudgetExceededError("output token budget exhausted")
+        if self.max_total_tokens is not None and next_input + next_output > self.max_total_tokens:
+            self.input_tokens = next_input
+            self.output_tokens = next_output
+            raise BudgetExceededError("task token limit reached")
         self.input_tokens = next_input
         self.output_tokens = next_output
 

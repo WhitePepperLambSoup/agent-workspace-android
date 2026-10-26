@@ -76,9 +76,7 @@ class TurnInputBuffer:
                 return previous
         pending_bytes = sum(len(str(e.data["prompt"]).encode("utf-8")) for e in self.pending)
         pending_image_bytes = sum(
-            len(image.data)
-            for event in self.pending
-            for image in self._images_for_receipt(event)
+            len(image.data) for event in self.pending for image in self._images_for_receipt(event)
         )
         if (
             len(self.pending) >= MAX_TURN_INPUTS

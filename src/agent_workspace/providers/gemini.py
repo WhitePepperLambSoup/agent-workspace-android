@@ -8,7 +8,6 @@ from urllib.parse import quote
 
 import httpx
 
-from agent_workspace.config import is_loopback_endpoint
 from agent_workspace.core.models import (
     ChatMessage,
     DeltaKind,
@@ -21,6 +20,7 @@ from agent_workspace.core.models import (
 from agent_workspace.providers.base import (
     ProviderError,
     encode_json_request,
+    provider_http_client,
     provider_request_error,
     response_http_error,
     stream_request_timeout,
@@ -50,7 +50,7 @@ class GeminiProvider:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._timeout = timeout
-        self._client = client or httpx.AsyncClient(trust_env=not is_loopback_endpoint(base_url))
+        self._client = client or provider_http_client(base_url)
         self._owns_client = client is None
 
     @property

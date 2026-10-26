@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import ssl
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 
 import httpx
 
+from agent_workspace.config import is_loopback_endpoint
 from agent_workspace.core.recovery import parse_retry_after
 
 _MAX_ERROR_BODY_BYTES = 16 * 1024
@@ -44,6 +47,24 @@ _BALANCE_EXCEEDED_MARKERS = (
     "payment_required",
     "billing hard limit",
 )
+_TLS_CONTEXTS: dict[bool, ssl.SSLContext] = {}
+_TLS_CONTEXTS_LOCK = threading.Lock()
+
+
+def provider_http_client(base_url: str) -> httpx.AsyncClient:
+    """Build the HTTP client for a provider endpoint around a shared TLS context.
+
+    Every conversation runtime builds its own provider client, and loading the
+    CA bundle into a fresh context took half a second of each conversation
+    switch; httpx recommends sharing one context. Proxy and certificate
+    environment settings apply except for a loopback endpoint.
+    """
+    trust_env = not is_loopback_endpoint(base_url)
+    with _TLS_CONTEXTS_LOCK:
+        context = _TLS_CONTEXTS.get(trust_env)
+        if context is None:
+            context = _TLS_CONTEXTS[trust_env] = httpx.create_ssl_context(trust_env=trust_env)
+    return httpx.AsyncClient(trust_env=trust_env, verify=context)
 
 
 class ProviderError(RuntimeError):

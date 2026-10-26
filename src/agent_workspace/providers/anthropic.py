@@ -8,7 +8,6 @@ from typing import Any, cast
 
 import httpx
 
-from agent_workspace.config import is_loopback_endpoint
 from agent_workspace.core.models import (
     ChatMessage,
     DeltaKind,
@@ -23,6 +22,7 @@ from agent_workspace.core.models import (
 from agent_workspace.providers.base import (
     ProviderError,
     encode_json_request,
+    provider_http_client,
     provider_request_error,
     response_http_error,
     stream_request_timeout,
@@ -76,7 +76,7 @@ class AnthropicProvider:
         self._endpoint = f"{base_url.rstrip('/')}/messages"
         self._api_key = api_key
         self._timeout = timeout
-        self._client = client or httpx.AsyncClient(trust_env=not is_loopback_endpoint(base_url))
+        self._client = client or provider_http_client(base_url)
         self._owns_client = client is None
 
     @property
@@ -391,9 +391,13 @@ def _mark_cache_breakpoints(body: dict[str, Any]) -> None:
     content = last.get("content")
     if isinstance(content, str) and content:
         last["content"] = [{"type": "text", "text": content, "cache_control": marker}]
-    elif isinstance(content, list) and content and isinstance(content[-1], dict):
-        if content[-1].get("type") not in {"thinking", "redacted_thinking"}:
-            content[-1] = {**content[-1], "cache_control": marker}
+    elif (
+        isinstance(content, list)
+        and content
+        and isinstance(content[-1], dict)
+        and content[-1].get("type") not in {"thinking", "redacted_thinking"}
+    ):
+        content[-1] = {**content[-1], "cache_control": marker}
 
 
 def _message_to_anthropic(

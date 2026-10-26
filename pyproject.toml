@@ -14,7 +14,7 @@ dependencies = [
   "cryptography>=50.0.0",
   "httpx>=0.27,<1",
   "jsonschema>=4.23,<5",
-  "pypdf>=6.16.1",
+  "pypdf>=6.21.2",
   "tomli-w>=1.2,<2",
   "websockets>=17.0.1",
 ]
@@ -49,7 +49,7 @@ addopts = "-ra"
 testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
-# Hard cap per test so a hung Qt event loop or thread wait fails loudly
+# Hard cap per test so a hung event loop or thread wait fails loudly
 # instead of stalling the suite indefinitely (thread method: Windows-safe).
 timeout = 120
 timeout_method = "thread"
@@ -60,9 +60,15 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# The Android app (`for Android/`) is a separate project with its own build and checks.
+extend-exclude = ["for Android", "GitHub sourse", "output", "artifacts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# A Chinese web page fixture: full-width punctuation and long lines inside one string.
+"tests/test_extended_tools.py" = ["E501", "RUF001"]
 
 [tool.mypy]
 python_version = "3.12"

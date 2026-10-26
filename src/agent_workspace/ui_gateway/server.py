@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 from collections.abc import Mapping
@@ -9,6 +10,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import BinaryIO
 
+from agent_workspace.storage.sqlite import trust_databases_validated_here
 from agent_workspace.ui_gateway.protocol import (
     MAX_MESSAGE_BYTES,
     CommandEnvelope,
@@ -107,6 +109,9 @@ class GatewayServer:
                 "workspace.deliveries.get",
                 "workspace.deliveries.cancel",
                 "workspace.deliveries.resume",
+                # Copying large files, or fetching a web page, would hold up the window.
+                "knowledge.add",
+                "knowledge.search",
             }
             and concurrent_commands
         ):
@@ -259,4 +264,10 @@ def _request_context(line: bytes) -> tuple[str, str | None]:
 
 
 def main() -> int:
+    # Long tool results of earlier tasks (a fetched page, a large file) go on to the model as
+    # their start only; the agent reads them again when it needs them. Set to 0 to keep them.
+    os.environ.setdefault("AGENT_WORKSPACE_TRIM_EARLIER_TOOL_RESULTS", "1")
+    # Conversation switches open the database again; replaying its whole history
+    # each time made them miss the host start deadline on a long history.
+    trust_databases_validated_here()
     return GatewayServer(sys.stdin.buffer, sys.stdout.buffer).run()

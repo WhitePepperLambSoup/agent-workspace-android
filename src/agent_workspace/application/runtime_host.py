@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import sqlite3
 import threading
 from collections import deque
 from concurrent.futures import Future
@@ -16,7 +17,8 @@ from agent_workspace.application.runtime import (
     ApplicationRuntime,
     build_runtime_async,
 )
-from agent_workspace.config import ProviderConfig
+from agent_workspace.config import ProviderConfig, is_loopback_endpoint
+from agent_workspace.core.budgets import TaskLimits
 from agent_workspace.core.events import Event
 from agent_workspace.core.models import (
     ApprovalScope,
@@ -32,6 +34,7 @@ from agent_workspace.core.models import (
     validate_image_parts,
 )
 from agent_workspace.core.session import Session
+from agent_workspace.knowledge import KnowledgeStore
 from agent_workspace.policy import (
     ApprovalResult,
     ExtensionApprovalCallback,
@@ -40,6 +43,7 @@ from agent_workspace.policy import (
 from agent_workspace.policy.approval_display import approval_display_arguments
 from agent_workspace.policy.permissions import WorkspacePolicy
 from agent_workspace.providers import create_provider
+from agent_workspace.providers.prefix_cache import prefix_cache_endpoint
 from agent_workspace.storage.lock import ProcessWriteLockGroup, ProcessWriteLockLease
 from agent_workspace.tools.terminal_sessions import TerminalSessionRegistry
 
@@ -67,6 +71,29 @@ _MUST_DELIVER_DISPLAY_EVENTS = frozenset(
     }
 )
 _OVERFLOW_DELIVER_DISPLAY_EVENTS = _MUST_DELIVER_DISPLAY_EVENTS - {"approval.requested"}
+
+
+def _loopback_endpoint(base_url: str) -> bool:
+    """A model served on this computer (llama.cpp, LM Studio, Ollama), usually with less context."""
+    try:
+        return is_loopback_endpoint(base_url)
+    except ValueError:
+        return False
+
+
+def _knowledge_context(
+    store: KnowledgeStore, prompt: str, session_id: str, local: bool
+) -> tuple[str, tuple[ChatMessage, ...]]:
+    """The knowledge-base section of the system prompt and the passages for this request."""
+    try:
+        return (
+            store.system_block(local=local, session_id=session_id),
+            store.supplement(prompt, local=local, session_id=session_id),
+        )
+    except (sqlite3.Error, OSError, ValueError):  # an unreadable store must not stop the turn
+        return "", ()
+
+
 _ONCE_ONLY_APPROVAL_TOOLS = frozenset(
     {
         "delete_path",
@@ -322,12 +349,23 @@ class RuntimeHost(threading.Thread):
         *,
         exclude_image_digests: frozenset[str] = frozenset(),
         reasoning_effort: str | None = None,
+        model: str | None = None,
+        limits: TaskLimits | None = None,
     ) -> Future[None]:
+        """Run one turn; ``model`` overrides the Provider's model for this turn only."""
         loop = self._loop
         if loop is None or loop.is_closed() or not self._accepting or self._closing:
             raise RuntimeError("runtime is not accepting commands")
         return asyncio.run_coroutine_threadsafe(
-            self._run_turn(prompt, images, exclude_image_digests, reasoning_effort), loop
+            self._run_turn(
+                prompt,
+                images,
+                exclude_image_digests,
+                reasoning_effort,
+                model=model,
+                limits=limits,
+            ),
+            loop,
         )
 
     def steer_turn(
@@ -357,8 +395,11 @@ class RuntimeHost(threading.Thread):
         runtime = self._runtime
         task = self._active_turn
         if (
-            runtime is None or task is None or task.done()
-            or self._session is None or self._session.id != session_id
+            runtime is None
+            or task is None
+            or task.done()
+            or self._session is None
+            or self._session.id != session_id
         ):
             raise RuntimeError("turn_not_active")
         return await runtime.service.runner.steer_turn(
@@ -676,6 +717,9 @@ class RuntimeHost(threading.Thread):
         images: tuple[ImagePart, ...] = (),
         exclude_image_digests: frozenset[str] = frozenset(),
         reasoning_effort: str | None = None,
+        *,
+        model: str | None = None,
+        limits: TaskLimits | None = None,
     ) -> None:
         if not self._accepting or self._closing:
             self._emit("runtime.command_rejected", {"reason": "runtime is stopping"})
@@ -733,14 +777,39 @@ class RuntimeHost(threading.Thread):
                         "autonomy": self._session.autonomy.value,
                     },
                 )
+            turn_model = model or self.settings.provider.model
+            options: dict[str, Any] = {}
+            if limits is not None:
+                options["budget"] = limits.apply(
+                    runtime.service.default_budget(turn_model, reasoning_effort)
+                )
+            # Providers that bill a cached prompt prefix cheaply get requests that only grow
+            # at the end, and compaction that moves in rare large steps.
+            if prefix_cache_endpoint(self.settings.provider.base_url, turn_model):
+                options["prefix_stable"] = True
+            if runtime.knowledge is not None:
+                # What the conversation can search in the user's documents, and the passages
+                # that match this request (untrusted data after it).
+                suffix, passages = await asyncio.to_thread(
+                    _knowledge_context,
+                    runtime.knowledge,
+                    prompt,
+                    self._session.id,
+                    _loopback_endpoint(self.settings.provider.base_url),
+                )
+                if suffix:
+                    options["system_suffix"] = suffix
+                if passages:
+                    options["supplemental_messages"] = passages
             task = asyncio.create_task(
                 runtime.service.run(
                     self._session,
                     prompt,
-                    self.settings.provider.model,
+                    turn_model,
                     images=images,
                     exclude_image_digests=exclude_image_digests,
                     reasoning_effort=reasoning_effort,
+                    **options,
                 )
             )
             self._active_turn = task
@@ -1025,7 +1094,8 @@ class RuntimeHost(threading.Thread):
         job_id = event.data.get("job_id")
         if event.type.startswith("background.job.") and isinstance(job_id, str):
             self._track_background_work(
-                "job", job_id,
+                "job",
+                job_id,
                 active=event.type in {"background.job.created", "background.job.started"},
             )
         if event.type == "turn.failed":

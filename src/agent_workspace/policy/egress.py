@@ -55,7 +55,9 @@ class ProviderEgressPolicy:
         key = self._linked.get((workspace, session_id), (workspace, session_id))
         return frozenset(self._session_grants.get(key, ()))
 
-    def carry_session_grant(self, workspace: str, session_id: str, categories: Iterable[str]) -> None:
+    def carry_session_grant(
+        self, workspace: str, session_id: str, categories: Iterable[str]
+    ) -> None:
         """A session approval given for a conversation, carried to one that continues it (a fork,
         whose tasks may run under another policy). Sensitive categories are never granted for a
         session, so none are carried."""
@@ -65,7 +67,7 @@ class ProviderEgressPolicy:
             self._session_grants.setdefault(key, set()).update(allowed)
 
     def retarget(self, endpoint: str) -> ProviderEgressPolicy:
-        """The same policy for another Provider endpoint; earlier session grants do not carry over."""
+        """The same policy for another Provider endpoint; earlier session grants stay behind."""
         return ProviderEgressPolicy(endpoint, self._autonomy, self._approval_callback)
 
     async def authorize(self, request: ProviderEgressRequest) -> ApprovalDecision:
