@@ -48,6 +48,8 @@
 
   window.AgentMobileUi = { openMenu, closeMenu, handleBack, notice, reloadForLanguage: () => window.location.reload(), receiveSharedText, openSession, quickAsk, apiJson, setSettingsPage, adoptTask,
     readLocalContextDraft, setLocalContextDraft,
+    // ID and bank card numbers in text going to a paired computer (management.js, device link 2.2).
+    privateParts: (text) => privateParts(text),
     setLocalContextBusy: (busy) => { localContextBusy = !!busy; syncControls(); },
     setLocalDeviceTestBusy: (busy) => { localDeviceTesting = !!busy; syncControls(); },
     context: () => ({ sessionId: currentSessionId, workspaceId: currentWorkspaceId, settings: { ...settings }, activeTask: !!activeTask || isPreparingSubmission || localDeviceTesting, draft: elements.promptInput.value,

@@ -666,6 +666,8 @@ class MobileRuntimeController:
                 )
             if request.plan_mode:
                 self.tasks.append_event(task.task_id, "task.plan_mode", {})
+            if request.source_note:
+                self.tasks.append_event(task.task_id, "task.source_note", {"text": request.source_note})
             if on_device:
                 self.tasks.append_event(task.task_id, "task.on_device", {"model": model})
             elif request.wait_for_network and not self._local_endpoint():
@@ -1232,6 +1234,10 @@ class MobileRuntimeController:
                     names = set(getattr(registry, "_tools", None) or {})
                     if names:
                         options["allowed_tools"] = frozenset(name for name in names if _elder_tool(name))
+                # Where the request came from (a paired computer's): for the model, not the conversation.
+                context_notes = (*context_notes, *(
+                    str(event.payload.get("text") or "") for event in task_events if event.event_type == "task.source_note"
+                ))
                 # Plan mode: read-only tools and a plan for an answer; the user approves before anything changes.
                 if any(event.event_type == "task.plan_mode" for event in task_events):
                     context_notes = (*context_notes, _PLAN_NOTE)

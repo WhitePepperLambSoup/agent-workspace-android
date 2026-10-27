@@ -160,6 +160,9 @@ class MobileTaskRequest:
     on_device: bool = False
     # Sent with no network: the task waits in the queue until the phone is online again.
     wait_for_network: bool = False
+    # Where the request came from (a paired computer's, which the user agreed to): told to the model
+    # as a note, so the conversation and notifications show the request's own words.
+    source_note: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.image_refs, tuple) or any(
@@ -202,6 +205,7 @@ class MobileTaskRequest:
             **({"plan_mode": True} if self.plan_mode else {}),
             **({"on_device": True} if self.on_device else {}),
             **({"wait_for_network": True} if self.wait_for_network else {}),
+            **({"source_note": self.source_note} if self.source_note else {}),
         }
 
 
@@ -265,6 +269,9 @@ def parse_mobile_task_request(payload: Mapping[str, Any]) -> MobileTaskRequest:
         raise ValueError("on_device and wait_for_network must be true or false")
     if on_device and wait_for_network:
         raise ValueError("an on_device task needs no network to wait for")
+    source_note = payload.get("source_note")
+    if source_note is not None:
+        source_note = _required_text(source_note, "source_note", max_length=1000)
     return MobileTaskRequest(
         session_id=session_id,
         prompt=prompt,
@@ -282,6 +289,7 @@ def parse_mobile_task_request(payload: Mapping[str, Any]) -> MobileTaskRequest:
         plan_mode=plan_mode,
         on_device=on_device,
         wait_for_network=wait_for_network,
+        source_note=source_note,
     )
 
 

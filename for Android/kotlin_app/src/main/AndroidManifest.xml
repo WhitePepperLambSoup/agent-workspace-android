@@ -124,6 +124,30 @@
             </intent-filter>
         </activity>
 
+        <!-- "Send to computer" in the share menu: files and text for a paired computer. The page asks
+             which computer and sends nothing until the user taps Send. -->
+        <activity-alias
+            android:name=".SendToComputer"
+            android:targetActivity=".WebUiActivity"
+            android:label="@string/send_to_computer_label"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- The "Copy" button on a notification with text a computer sent (DeviceLinkNotices). -->
+        <receiver
+            android:name=".embedded.DeviceLinkActionReceiver"
+            android:exported="false" />
+
 
         <!-- Tasks from other apps (Tasker, Shortcuts): asked about until the user allows them. -->
         <activity

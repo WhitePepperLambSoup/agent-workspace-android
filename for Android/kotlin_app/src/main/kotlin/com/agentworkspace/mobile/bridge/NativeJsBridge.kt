@@ -84,6 +84,15 @@ class NativeJsBridge(
     private val pairingScanAction: (Boolean) -> String = {
         JSONObject().put("ok", false).put("error", "QR scanning is unavailable").toString()
     },
+    // A paired computer (docs/DEVICE_LINK_V2.md): files picked for it, computers on this network,
+    // the clipboard's text for "send text".
+    private val computerPickAction: (String) -> String = {
+        JSONObject().put("ok", false).put("error", "Picking files is unavailable").toString()
+    },
+    private val computerDiscoverAction: () -> String = {
+        JSONObject().put("ok", false).put("error", "Finding computers is unavailable").toString()
+    },
+    private val clipboardTextAction: () -> String = { JSONObject().put("ok", false).put("text", "").toString() },
 ) {
     // The provider model list being read in the background (refreshProviderModels).
     private val modelListLock = Any()
@@ -239,6 +248,30 @@ class NativeJsBridge(
      *  "agent-pairing-scan" event with the text. */
     @JavascriptInterface
     fun scanPairingQr(camera: Boolean): String = pairingScanAction(camera)
+
+    /** Picks files ("files"), photos and videos ("photos") or takes a photo ("camera") for a paired
+     *  computer; they are staged on the phone and come back as an "agent-computer-files" event. */
+    @JavascriptInterface
+    fun pickForComputer(kind: String): String = computerPickAction(kind.take(10))
+
+    /** Removes staged files the user took out of a send (ComputerSend). */
+    @JavascriptInterface
+    fun discardComputerFiles(namesJson: String): String {
+        val names = runCatching { org.json.JSONArray(namesJson.take(20000)) }.getOrNull()
+            ?: return JSONObject().put("ok", false).toString()
+        com.agentworkspace.mobile.devices.ComputerSend.discard(context,
+            (0 until minOf(names.length(), 50)).mapNotNull { names.optString(it).takeIf(String::isNotEmpty) })
+        return JSONObject().put("ok", true).toString()
+    }
+
+    /** Looks for computers announcing the phone connection on this network; the result comes as an
+     *  "agent-computers-found" event. */
+    @JavascriptInterface
+    fun discoverComputers(): String = computerDiscoverAction()
+
+    /** The clipboard's text, for the computer page's "Paste" (read only while the app is in front). */
+    @JavascriptInterface
+    fun readClipboardText(): String = clipboardTextAction()
 
     @JavascriptInterface
     fun workspaceFileAction(requestJson: String): String = workspaceFileActionHandler(requestJson)

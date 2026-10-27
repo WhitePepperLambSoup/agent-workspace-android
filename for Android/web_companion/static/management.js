@@ -103,7 +103,7 @@
     else throw new Error(t("当前设备无法导出文本"));
     status(statusId, typeof native?.shareText === "function" ? t("已打开分享") : t("已复制到剪贴板"));
   }
-  function stopPolls() { window.clearTimeout(modelPoll); window.clearTimeout(toolchainPoll); window.clearTimeout(servicesPoll); window.clearTimeout(knowledgePoll); modelPoll = toolchainPoll = servicesPoll = knowledgePoll = null; }
+  function stopPolls() { window.clearTimeout(modelPoll); window.clearTimeout(toolchainPoll); window.clearTimeout(servicesPoll); window.clearTimeout(knowledgePoll); window.clearTimeout(computerPoll); modelPoll = toolchainPoll = servicesPoll = knowledgePoll = computerPoll = null; }
   async function post(path, body) { return ui.apiJson(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); }
   function followTask(result, statusId, message) {
     if (ui.adoptTask(result.task)) ui.closeMenu();
@@ -120,6 +120,8 @@
       finally {
         if (button?.isConnected) {
           if (["btnStartLocalBenchmark", "btnCancelLocalBenchmark", "btnUseLocalRecommendation"].includes(button.id)) deviceStatus();
+          // Usable again only while files wait to go (those that went have left the list).
+          else if (button.id === "btnComputerSendFiles") button.disabled = !outgoing.length;
           else button.disabled = false;
         }
       }
@@ -1422,11 +1424,15 @@
   }
   // A computer's pairing link (its QR code, a scanner app, or pasted): the form shows what it holds
   // and nothing is paired until the user taps Pair.
+  // The scanned or pasted pairing link: it also names the computer and its other addresses, so it is
+  // what goes when the form still shows what it filled in.
+  let pairingLink = null;
   async function fillFromPairingLink(text) {
     const parts = await post("/mobile/connections/link", { link: text });
     $("pairAddress").value = parts.url;
     $("pairCode").value = parts.code;
     $("pairFingerprint").value = parts.fingerprint || "";
+    pairingLink = { text, url: parts.url, code: parts.code, fingerprint: parts.fingerprint || "" };
     $("pairTarget").hidden = false;
     $("pairTarget").textContent = t("要连接的电脑：{0}（{1}）。核对无误后点「配对」。", parts.name, parts.url);
     status("connectionsStatus", "");
@@ -1437,6 +1443,21 @@
       if ($("settingsOverlay").hidden) ui.openMenu();
       $("btnConnectionsPage").click();
       void fillFromPairingLink(link).catch((error) => status("connectionsStatus", error.message, true));
+      return true;
+    },
+    // A notification about a paired computer: its page, at the section the notification is about.
+    openComputer(target) {
+      if (closed || !target || typeof target.host_id !== "string") return false;
+      if ($("settingsOverlay").hidden) ui.openMenu();
+      void openComputer(target.host_id, target.section || "").catch((error) => {
+        $("btnConnectionsPage").click(); status("connectionsStatus", error.message, true);
+      });
+      return true;
+    },
+    // Files or text shared to "Send to computer" from another app (staged by the app).
+    receiveShare(share) {
+      if (closed || !share || typeof share !== "object") return false;
+      void takeShare(share).catch((error) => status("connectionsStatus", error.message, true));
       return true;
     },
   };
@@ -1452,34 +1473,530 @@
     void fillFromPairingLink(detail.text).catch((error) => status("connectionsStatus", error.message, true));
   });
 
-  async function connections(isCurrent = () => true) {
+  // ---- Paired computers (device link 2: docs/DEVICE_LINK_V2.md in the Android source) ----------
+  const autonomyNames = { ask: t("每次询问"), workspace: t("工作区内自动"), yolo: t("自动批准一切"), full_access: t("完全访问") };
+  const broadAutonomy = new Set(["yolo", "full_access"]);
+  const scopeNames = { read: t("查看对话"), tasks: t("交任务"), approvals: t("审批"), broad_autonomy: t("向自动批准的对话交任务"), files: t("收发文件和文字"), knowledge: t("知识库") };
+  const activityNames = { paired: t("配对"), task_sent: t("交了任务"), task_finished: t("任务完成"), approval_decided: t("审批"), turn_stopped: t("停止了电脑上的任务"),
+    file_received: t("收到文件"), file_sent: t("发出文件"), text_received: t("收到文字"), text_sent: t("发出文字"), conversation_received: t("收到对话"), conversation_sent: t("发出对话"),
+    job_sent: t("电脑发来请求"), job_received: t("收到电脑的请求"), job_accepted: t("接受了电脑的请求"), job_rejected: t("拒绝了电脑的请求"), job_finished: t("完成了电脑的请求"),
+    job_failed: t("电脑的请求没有完成"), job_cancelled: t("电脑取消了请求"), knowledge_synced: t("同步了知识库"), wake_sent: t("发送了唤醒"), address_changed: t("换到新地址") };
+  const jobStates = { waiting: t("等你决定"), accepted: t("已接受"), running: t("正在做"), succeeded: t("已完成"), failed: t("没有完成"), rejected: t("已拒绝"), expired: t("已过期"), cancelled: t("电脑已取消") };
+  let computerPoll = null;
+  let connectionsPoll = null;
+  let computerState = null;
+  let outgoing = [];
+  let pendingShare = null;
+  let knowledgeLists = null;
+  let browsePath = "";
+  function has(host, feature) { return (host?.features || []).includes(feature); }
+  // A desktop of device link 1 does not report its scopes: what it did not refuse is allowed.
+  function allowed(host, scope) { return !(host?.scopes || []).length || host.scopes.includes(scope); }
+  function when(value) {
+    const time = typeof value === "number" ? new Date(value * 1000) : new Date(value || "");
+    return Number.isFinite(time.getTime()) ? time.toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
+  }
+  function textButton(parent, symbol, label, handler, primary = false) {
+    const button = namedAction(parent, symbol, label, handler);
+    if (primary) button.className = "button-primary model-action";
+    return button;
+  }
+  function requestId(prefix) { return window.crypto?.randomUUID?.() || `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
+  /** A choice to make before something goes to (or comes from) a computer: the risks in words, then buttons. */
+  function choose(title, text, buttons) {
+    return new Promise((resolve) => {
+      const panel = $("computerConfirm");
+      $("computerConfirmTitle").textContent = title;
+      $("computerConfirmText").textContent = text;
+      $("computerConfirmActions").replaceChildren(...buttons.map(([symbol, label, value, primary]) => {
+        const button = document.createElement("button"); button.type = "button";
+        button.className = primary ? "button-primary" : "button-secondary";
+        button.innerHTML = icon(symbol);
+        const caption = document.createElement("span"); caption.textContent = label; button.append(caption);
+        button.addEventListener("click", () => { panel.hidden = true; resolve(value); });
+        return button;
+      }));
+      panel.hidden = false;
+      panel.scrollIntoView?.({ block: "center" });
+    });
+  }
+  /** A long request (a transfer, a sync) runs on in the engine; this waits for it, saying so meanwhile. */
+  async function waitOperation(started, statusId, message) {
+    let state = started;
+    status(statusId, message);
+    for (let tries = 0; state?.state === "running" && tries < 1800 && !closed; tries++) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      state = await ui.apiJson(`/mobile/link/operation?id=${encodeURIComponent(state.operation_id)}`);
+    }
+    if (state?.state === "failed") throw new Error(localizeError(state.error) || t("操作失败"));
+    if (state?.state !== "done") throw new Error(t("还在进行，稍后再来看结果"));
+    return state.result;
+  }
+
+  async function connections(isCurrent = () => true, quiet = false) {
     const value = await ui.apiJson("/mobile/connections"); if (!isCurrent()) return;
     $("connectionsList").replaceChildren();
     if (!$("pairDeviceName").value) $("pairDeviceName").value = phoneName();
     for (const scanner of ["btnScanPairing", "btnPickPairing"]) $(scanner).hidden = typeof native?.scanPairingQr !== "function";
+    $("nearbyComputers").hidden = typeof native?.discoverComputers !== "function";
     for (const host of value.hosts || []) {
+      const link = host.link || {};
       const kind = host.api === "mobile" ? t("手机任务 API") : t("桌面 Serve API");
-      const item = row(host.name, `${host.url}\n${host.fingerprint ? t("{0} · 证书已核对：{1}", kind, host.fingerprint.slice(0, 16)) : kind}`);
-      action(item, "link", t("打开远程工作区"), async () => {
-        // Another computer's conversations stay hidden until this one answers.
-        $("remoteSessionPanel").hidden = true; $("remoteHistory").hidden = true;
-        selectedHost = host;
-        const data = await ui.apiJson(`/mobile/connections/sessions?host_id=${encodeURIComponent(host.host_id)}`);
-        remoteSessions = Array.isArray(data.sessions) ? data.sessions : [];
-        for (const session of remoteSessions) if (session.title) remoteSessionTitles.set(session.id, session.title);
-        $("remoteSessionSelector").replaceChildren();
-        for (const session of remoteSessions) { const option = document.createElement("option"); option.value = session.id; option.textContent = session.title || session.id; $("remoteSessionSelector").append(option); }
-        $("remoteSessionPanel").hidden = false;
-        status("connectionsStatus", "");
-        updateRemoteWorkspace();
-        $("btnQueueHandoff").disabled = !remoteSessions.length;
-      });
-      action(item, "trash-2", t("移除配对设备"), async () => { if (!window.confirm(t("移除 {0}？", host.name))) return; await post("/mobile/connections/remove", { host_id: host.host_id }); if (selectedHost?.host_id === host.host_id) { selectedHost = null; remoteSessions = []; $("remoteSessionPanel").hidden = true; $("remoteHistory").hidden = true; } await connections(); });
+      const reach = host.api !== "mobile" ? "" : link.online ? t("在线") : link.error ? t("连不上") : t("还没连过");
+      const waiting = [link.approvals ? t("{0} 项待审批", link.approvals) : "", link.jobs_waiting ? t("{0} 个请求待处理", link.jobs_waiting) : ""].filter(Boolean).join(" · ");
+      const item = row(host.name, [[host.url, reach].filter(Boolean).join(" · "),
+        host.fingerprint ? t("{0} · 证书已核对：{1}", kind, host.fingerprint.slice(0, 16)) : kind, waiting].filter(Boolean).join("\n"));
+      action(item, "chevron-right", t("打开这台电脑"), async () => { await openComputer(host.host_id); });
+      action(item, "trash-2", t("移除配对设备"), async () => removeComputer(host));
       $("connectionsList").append(item);
     }
-    status("connectionsStatus", t("本机工作区：{0}", value.workspace || t("手机")));
+    const hosts = value.hosts || [];
+    // A refresh (quiet) leaves whatever the page says, such as a pairing that just went through.
+    if (!quiet && pendingShare && hosts.length) status("connectionsStatus", t("选择要发给哪台电脑"));
+    else if (!quiet) status("connectionsStatus", t("本机工作区：{0}", value.workspace || t("手机")));
+    refreshRelay(hosts);
+    watchConnections(hosts);
   }
-  function updateRemoteWorkspace() { $("remoteWorkspace").textContent = t("数据保存在 {0}：{1}", selectedHost?.name || t("远程设备"), remoteSessions.find(item => item.id === $("remoteSessionSelector").value)?.workspace || ""); }
+
+  // While the list is open each computer's reach stays current: a few seconds after pairing (the
+  // first read of a new computer takes a moment), then now and then.
+  function watchConnections(hosts) {
+    window.clearTimeout(connectionsPoll);
+    connectionsPoll = null;
+    const linked = hosts.filter((host) => host.api === "mobile");
+    if (!linked.length) return;
+    const unread = linked.some((host) => !host.link?.online && !host.link?.error);
+    connectionsPoll = window.setTimeout(() => {
+      connectionsPoll = null;
+      if (closed || $("settingsOverlay").hidden || $("settingsConnections").hidden) return;
+      connections(() => !closed && !$("settingsConnections").hidden, true).catch(() => {});
+    }, unread ? 3000 : 20000);
+  }
+
+  async function removeComputer(host) {
+    if (!window.confirm(t("移除 {0}？电脑上的这台手机也会被移除。", host.name))) return;
+    let result = await post("/mobile/connections/remove", { host_id: host.host_id });
+    if (result.ok === false && result.unsettled) {
+      // Tasks handed to it whose result has not come back: removing it means they never will.
+      if (!window.confirm(t("交给 {0} 的 {1} 个任务还没有结果，移除后就收不到了。仍然移除？", host.name, result.unsettled))) return;
+      result = await post("/mobile/connections/remove", { host_id: host.host_id, force: true });
+    }
+    if (selectedHost?.host_id === host.host_id) { selectedHost = null; remoteSessions = []; }
+    if ($("settingsComputer").hidden === false) { ui.setSettingsPage("connections"); }
+    await connections();
+    status("connectionsStatus", result.computer_told ? t("已移除 {0}", host.name)
+      : t("已在手机上移除 {0}。电脑没连上，请在电脑的「手机连接」里也把这台手机移除。", host.name));
+  }
+
+  async function openComputer(hostId, section = "") {
+    const listed = (await ui.apiJson("/mobile/connections")).hosts || [];
+    const host = listed.find((item) => item.host_id === hostId);
+    if (!host) throw new Error(t("这台电脑已经移除了"));
+    if (!ui.setSettingsPage("computer")) return false;
+    stopPolls();
+    selectedHost = host; computerState = null; knowledgeLists = null; browsePath = "";
+    remoteSessions = [];
+    $("settingsTitle").textContent = host.name;
+    for (const id of ["remoteHistory", "computerConfirm"]) $(id).hidden = true;
+    $("computerBrowse").open = false; $("computerRemoteActivity").open = false;
+    if (pendingShare) { const share = pendingShare; pendingShare = null; addOutgoing(share.files || []); if (share.text) $("computerTextInput").value = share.text; }
+    renderOutgoing();
+    status("computerStatus", t("读取中..."));
+    const current = ++generation;
+    const isCurrent = () => !closed && current === generation && !$("settingsOverlay").hidden && !$("settingsComputer").hidden
+      && selectedHost?.host_id === hostId;
+    // The computer's state first, then its conversations: an error reading those is the one to show.
+    await renderComputer(isCurrent, true);
+    await loadRemoteSessions(isCurrent);
+    if (!isCurrent()) return true;
+    pollComputer(isCurrent);
+    const target = { approvals: "computerApprovals", jobs: "computerJobs", inbox: "computerInbox" }[section];
+    if (target) window.setTimeout(() => $(target)?.scrollIntoView?.({ block: "start" }), 300);
+    return true;
+  }
+
+  function pollComputer(isCurrent) {
+    window.clearTimeout(computerPoll);
+    computerPoll = window.setTimeout(async () => {
+      if (!isCurrent()) return;
+      try { await renderComputer(isCurrent, false); } catch { /* shown on the next successful read */ }
+      if (isCurrent()) pollComputer(isCurrent);
+    }, 5000);
+  }
+
+  async function loadRemoteSessions(isCurrent) {
+    const host = selectedHost;
+    let data = null;
+    try { data = await ui.apiJson(`/mobile/connections/sessions?host_id=${encodeURIComponent(host.host_id)}`); }
+    catch (error) { if (isCurrent()) status("computerStatus", error.message, true); }
+    if (!isCurrent()) return;
+    remoteSessions = Array.isArray(data?.sessions) ? data.sessions : [];
+    for (const session of remoteSessions) if (session.title) remoteSessionTitles.set(session.id, session.title);
+    const selector = $("remoteSessionSelector");
+    const previous = selector.value;
+    selector.replaceChildren();
+    if (host.api === "mobile" && has(host, "conversations")) {
+      const option = document.createElement("option"); option.value = ""; option.textContent = t("新对话"); selector.append(option);
+    }
+    for (const session of remoteSessions) {
+      const option = document.createElement("option"); option.value = session.id;
+      option.textContent = [session.title || session.id, broadAutonomy.has(session.autonomy) ? autonomyNames[session.autonomy] : "", session.running ? t("运行中") : ""].filter(Boolean).join(" · ");
+      selector.append(option);
+    }
+    if ([...selector.options].some((option) => option.value === previous)) selector.value = previous;
+    updateRemoteWorkspace();
+    $("btnQueueHandoff").disabled = !data || !selector.options.length;
+    renderRunning();
+  }
+  function selectedRemote() { const id = $("remoteSessionSelector").value; return id ? remoteSessions.find((item) => item.id === id) || null : null; }
+  /** The settings the task would run under on the computer: the conversation's, or a new one's. */
+  function targetAutonomy() {
+    const session = selectedRemote();
+    if (session) return session.autonomy || null;
+    return $("remoteSessionSelector").value === "" ? selectedHost?.new_conversation_autonomy || null : null;
+  }
+  function updateRemoteWorkspace() {
+    const session = selectedRemote();
+    $("remoteWorkspace").textContent = session ? t("数据保存在 {0}：{1}", selectedHost?.name || t("远程设备"), session.workspace || "")
+      : $("remoteSessionSelector").value === "" && $("remoteSessionSelector").options.length ? t("在 {0} 上新建一个对话", selectedHost?.name || t("电脑")) : "";
+    const autonomy = targetAutonomy();
+    const note = $("remoteAutonomy");
+    note.hidden = !broadAutonomy.has(autonomy);
+    if (note.hidden) return;
+    note.textContent = !has(selectedHost, "autonomy_ack")
+      ? t("这个对话在电脑上设为「{0}」，电脑上的版本还不接受手机交到这类对话的任务。", autonomyNames[autonomy])
+      : allowed(selectedHost, "broad_autonomy")
+        ? t("这个对话在电脑上设为「{0}」：交过去的任务会直接在电脑上执行，发送前会再提醒一次。", autonomyNames[autonomy])
+        : t("这个对话在电脑上设为「{0}」。电脑还没允许这台手机往这类对话交任务：要在电脑的「手机连接」里给这台手机勾上这项权限。", autonomyNames[autonomy]);
+  }
+
+  async function renderComputer(isCurrent, first) {
+    const host = selectedHost;
+    const linked = host.api === "mobile";
+    for (const id of ["computerApprovals", "computerJobs", "computerFiles", "computerText", "computerKnowledge", "computerRunning"]) if (!linked) $(id).hidden = true;
+    $("computerInbox").hidden = !linked;
+    if (!linked) {
+      renderSummary({ host, online: null });
+      renderDevice({ host, activity: [] });
+      if (first) status("computerStatus", "");
+      return;
+    }
+    const value = await ui.apiJson(`/mobile/link/computer?host_id=${encodeURIComponent(host.host_id)}`);
+    if (!isCurrent()) return;
+    computerState = value;
+    selectedHost = { ...host, ...value.host, link: host.link };
+    renderSummary(value);
+    renderApprovals(value);
+    renderJobs(value);
+    renderInbox(value);
+    renderSections(value);
+    renderDevice(value);
+    if (first) status("computerStatus", value.error ? localizeError(value.error) : "", !!value.error);
+  }
+
+  function renderSummary(value) {
+    const host = value.host || selectedHost;
+    const list = $("computerSummary"); list.replaceChildren();
+    const moved = /^found at (\S+)$/.exec(value.error || "");
+    const reach = value.online === null ? t("桌面 Serve API") : value.waking ? t("正在唤醒，等它上线…") : value.online ? t("在线")
+      : moved ? t("在 {0} 找到了这台电脑", moved[1]) : value.error ? t("连不上") : t("正在连接…");
+    const item = row(reach, [host.url, value.polled_at ? t("上次连上：{0}", when(value.polled_at)) : ""].filter(Boolean).join("\n"));
+    if (moved) textButton(item, "link", t("换到这个地址"), async () => {
+      await post("/mobile/link/use-address", { host_id: host.host_id, url: moved[1] });
+      await post("/mobile/link/refresh", { host_id: host.host_id });
+      status("computerStatus", t("已换到 {0}", moved[1]));
+    });
+    if (!value.online && host.wake && !value.waking) textButton(item, "zap", t("唤醒电脑"), async () => {
+      const sent = await post("/mobile/link/wake", { host_id: host.host_id });
+      status("computerStatus", t("已发送唤醒（{0} 个包），电脑上线后会通知你。只在手机和电脑在同一局域网时有效。", sent.sent));
+    });
+    list.append(item);
+    // Phones that freeze apps with the screen off: the computer's approvals and requests wait until
+    // the screen comes on. Said here, with the way to allow background running.
+    const run = value.online === null ? null : backgroundRunState();
+    if (run) {
+      const now = Date.now();
+      const lockedPause = (run.pauses || []).some((pause) => !pause.screen_on && now - pause.at_ms < 24 * 60 * 60 * 1000);
+      const note = !run.battery_optimization_exempt && (run.strict_maker || lockedPause)
+        ? row(t("锁屏时收不到电脑的消息"), t("锁屏后系统会暂停这个应用，这段时间电脑的审批、请求和任务完成通知都要等亮屏后才到。允许后台运行后，锁屏也能收到。"))
+        : run.battery_optimization_exempt && lockedPause && run.steps
+          ? row(t("锁屏时收不到电脑的消息"), t("锁屏时系统仍会暂停这个应用。还差一步：{0}", run.steps)) : null;
+      if (note) {
+        textButton(note, "shield", run.battery_optimization_exempt ? t("打开设置") : t("允许后台运行"), async () => {
+          if (run.battery_optimization_exempt) native?.openAutoStartSettings?.(); else native?.requestBackgroundRun?.();
+        });
+        list.append(note);
+      }
+    }
+  }
+
+  function renderApprovals(value) {
+    const host = selectedHost;
+    const approvals = (value.approvals || []).filter((item) => item && item.request_id);
+    $("computerApprovals").hidden = !(has(host, "approvals") && allowed(host, "approvals")) || !approvals.length;
+    const list = $("computerApprovalList"); list.replaceChildren();
+    for (const approval of approvals) {
+      const item = row(approval.summary || approval.tool || t("一个操作"), [approval.tool ? t("工具：{0}", approval.tool) : "", remoteSessionTitles.get(approval.session_id) || ""].filter(Boolean).join(" · "));
+      textButton(item, "check", t("允许"), async () => {
+        await post("/mobile/link/approve", { host_id: host.host_id, request_id: approval.request_id, decision: "approve" });
+        status("computerStatus", t("已允许"));
+        await renderComputer(() => true, false);
+      }, true);
+      textButton(item, "x", t("拒绝"), async () => {
+        await post("/mobile/link/approve", { host_id: host.host_id, request_id: approval.request_id, decision: "reject" });
+        status("computerStatus", t("已拒绝"));
+        await renderComputer(() => true, false);
+      });
+      list.append(item);
+    }
+  }
+
+  function renderJobs(value) {
+    const host = selectedHost;
+    $("computerJobs").hidden = !has(host, "phone_jobs");
+    $("computerJobsSetting").value = value.settings?.jobs || "ask";
+    const list = $("computerJobList"); list.replaceChildren();
+    for (const job of value.jobs || []) {
+      const detail = [jobStates[job.state] || job.state, job.title ? t("来自对话「{0}」", job.title) : "", job.operate_phone ? t("要操作手机") : "", when(job.created_at)].filter(Boolean).join(" · ");
+      const item = row(job.prompt.slice(0, 200), [detail, job.state === "failed" ? job.error || "" : ""].filter(Boolean).join("\n"));
+      if (job.state === "waiting") {
+        textButton(item, "x", t("拒绝"), async () => { await post("/mobile/link/job", { host_id: host.host_id, job_id: job.job_id, decision: "reject" }); await renderComputer(() => true, false); });
+        textButton(item, "check", t("允许，每一步询问我"), async () => {
+          await post("/mobile/link/job", { host_id: host.host_id, job_id: job.job_id, decision: "accept" });
+          status("computerStatus", t("已接受，手机正在做"));
+          await renderComputer(() => true, false);
+        }, true);
+        textButton(item, "shield", t("允许，放行这个任务的操作"), async () => {
+          const choice = await choose(t("放行这个任务的操作"), t("这个任务里，点屏幕、在其他应用里输入等操作不再逐条询问。删除文件、发消息、卸载应用仍逐条询问；银行卡号、身份证号、验证码仍会拦下。"),
+            [["check", t("放行并开始"), "go", true], ["x", t("取消"), "cancel"]]);
+          if (choice !== "go") return;
+          await post("/mobile/link/job", { host_id: host.host_id, job_id: job.job_id, decision: "accept", approve_all: true });
+          status("computerStatus", t("已接受，手机正在做"));
+          await renderComputer(() => true, false);
+        });
+      } else if (job.state === "succeeded" && job.result) {
+        const result = document.createElement("details"); const summary = document.createElement("summary"); summary.textContent = t("结果");
+        const body = document.createElement("pre"); body.className = "management-output"; body.textContent = job.result; result.append(summary, body); item.append(result);
+      }
+      list.append(item);
+    }
+  }
+
+  function renderRunning() {
+    const host = selectedHost;
+    const running = remoteSessions.filter((session) => session.running);
+    $("computerRunning").hidden = !running.length;
+    const list = $("computerRunningList"); list.replaceChildren();
+    for (const session of running) {
+      const item = row(session.title || session.id, session.workspace || "");
+      if (host?.api === "mobile" && has(host, "stop") && allowed(host, "tasks")) textButton(item, "square", t("停止"), async () => {
+        if (!window.confirm(t("停止电脑上「{0}」正在做的事？", session.title || session.id))) return;
+        await post("/mobile/link/stop", { host_id: host.host_id, session_id: session.id });
+        status("computerStatus", t("已停止"));
+        await loadRemoteSessions(() => selectedHost?.host_id === host.host_id);
+      });
+      list.append(item);
+    }
+  }
+
+  const mimeTypes = { pdf: "application/pdf", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp", txt: "text/plain", md: "text/markdown",
+    csv: "text/csv", html: "text/html", json: "application/json", zip: "application/zip", mp4: "video/mp4", mp3: "audio/mpeg",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation" };
+  function openReceived(path, sha256) {
+    if (typeof native?.workspaceFileAction !== "function" || !sha256) throw new Error(t("在「工作区文件」里打开：{0}", path));
+    const type = mimeTypes[(path.split(".").pop() || "").toLowerCase()] || "application/octet-stream";
+    const outcome = JSON.parse(native.workspaceFileAction(JSON.stringify({ request_id: requestId("open"), action: "open", path, sha256, mime_type: type })));
+    if (!outcome.ok) throw new Error(localizeError(outcome.error) || t("无法打开文件"));
+  }
+  function copyText(text) {
+    if (typeof native?.copyToClipboard === "function") native.copyToClipboard(text);
+    else if (navigator.clipboard?.writeText) void navigator.clipboard.writeText(text);
+    else throw new Error(t("当前设备无法复制"));
+    status("computerStatus", t("已复制到剪贴板"));
+  }
+
+  function renderInbox(value) {
+    const host = selectedHost;
+    const entries = [
+      ...(value.received || []).map((item) => ({ kind: "received", at: item.at, item })),
+      ...(value.runs || []).map((item) => ({ kind: "run", at: Date.parse(item.updated_at || item.due_at || "") / 1000 || 0, item })),
+      ...(value.turns || []).map((item) => ({ kind: "turn", at: Date.parse(item.finished_at || "") / 1000 || 0, item })),
+    ].sort((a, b) => b.at - a.at).slice(0, 60);
+    const list = $("computerInboxList"); list.replaceChildren();
+    if (!entries.length) { list.append(row(t("还没有内容"), t("电脑发来的文件、文字和任务结果会出现在这里"))); return; }
+    for (const { kind, item } of entries) {
+      if (kind === "received") {
+        if (item.state === "failed") {
+          const failed = row(item.name || t("没有收到"), [t("没有收到"), item.error || ""].filter(Boolean).join(" · "));
+          action(failed, "refresh-cw", t("重新接收"), async () => { await post("/mobile/link/retry-transfer", { host_id: host.host_id, transfer_id: item.transfer_id }); status("computerStatus", t("会在下次连上时重新接收")); });
+          list.append(failed);
+        } else if (item.kind === "file") {
+          const received = row(item.name, [t("收到的文件"), when(item.at), item.path].filter(Boolean).join(" · "));
+          textButton(received, "folder-open", t("打开"), async () => openReceived(item.path, item.sha256));
+          list.append(received);
+        } else if (item.kind === "text" || item.kind === "link") {
+          const received = row(item.text.slice(0, 200), [item.kind === "link" ? t("收到的链接") : t("收到的文字"), when(item.at)].join(" · "));
+          textButton(received, "copy", t("复制"), async () => copyText(item.text));
+          if (item.kind === "link" && /^https?:\/\//i.test(item.text.trim()) && typeof native?.openExternal === "function") textButton(received, "globe", t("打开"), async () => { native.openExternal(item.text.trim()); });
+          list.append(received);
+        } else if (item.kind === "conversation") {
+          const received = row(item.name || t("对话"), [t("收到的对话"), when(item.at)].join(" · "));
+          textButton(received, "chevron-right", t("打开对话"), async () => { if (!ui.openSession(item.session_id)) throw new Error(t("目标会话不存在或已删除")); });
+          list.append(received);
+        }
+      } else if (kind === "run") {
+        const done = item.state === "succeeded";
+        const entry = row(t("定时任务「{0}」", item.title || ""), [stateNames[item.state] || item.state, when(item.updated_at || item.due_at)].filter(Boolean).join(" · "));
+        const text = done ? item.result : item.error;
+        if (text) {
+          const details = document.createElement("details"); const summary = document.createElement("summary"); summary.textContent = done ? t("结果") : t("原因");
+          const body = document.createElement("pre"); body.className = "management-output"; body.textContent = text;
+          details.append(summary, body); entry.append(details);
+          details.addEventListener("toggle", () => { if (details.open && has(host, "inbox_read")) void post("/mobile/link/read-runs", { host_id: host.host_id, run_ids: [item.run_id] }).catch(() => {}); });
+          if (done) textButton(entry, "send", t("在手机上继续"), async () => {
+            if (!ui.quickAsk({ text: t("电脑上的定时任务「{0}」的结果：\n{1}\n\n", item.title || "", text.slice(0, 6000)) })) throw new Error(t("请稍后再试"));
+          });
+        }
+        list.append(entry);
+      } else {
+        const entry = row(t("电脑上的任务：{0}", item.title || ""), [stateNames[item.state === "succeeded" ? "completed" : item.state] || item.state, when(item.finished_at), item.summary || ""].filter(Boolean).join(" · "));
+        list.append(entry);
+      }
+    }
+  }
+
+  function renderSections(value) {
+    const host = selectedHost;
+    const files = has(host, "files") && allowed(host, "files");
+    $("computerFiles").hidden = !files;
+    $("computerText").hidden = !(has(host, "messages") && allowed(host, "files"));
+    for (const [id, method] of [["btnComputerPickFiles", "pickForComputer"], ["btnComputerPickPhotos", "pickForComputer"], ["btnComputerCamera", "pickForComputer"]]) $(id).hidden = typeof native?.[method] !== "function";
+    $("btnComputerPaste").hidden = typeof native?.readClipboardText !== "function";
+    const knowledge = has(host, "knowledge") && allowed(host, "knowledge");
+    $("computerKnowledge").hidden = !knowledge;
+    if (knowledge) {
+      const pairs = value.settings?.kb_pairs || [];
+      const list = $("computerKnowledgePairs"); list.replaceChildren();
+      const label = (side, id) => (knowledgeLists?.[side] || []).find((base) => base.id === id);
+      for (const pair of pairs) {
+        const computerBase = label("computer", pair.computer); const phoneBase = label("phone", pair.phone);
+        const item = row(t("电脑：{0} ↔ 手机：{1}", computerBase ? computerBase.name || t("默认知识库") : pair.computer, phoneBase ? phoneBase.label : pair.phone), "");
+        action(item, "x", t("取消对应"), async () => {
+          await post("/mobile/link/kb-pairs", { host_id: host.host_id, pairs: pairs.filter((other) => other !== pair) });
+          await renderComputer(() => true, false);
+        });
+        list.append(item);
+      }
+      const result = value.settings?.kb_result;
+      $("computerKbResult").textContent = value.settings?.kb_synced_at
+        ? t("上次同步：{0}，复制到手机 {1} 篇，复制到电脑 {2} 篇", when(value.settings.kb_synced_at), result?.to_phone ?? 0, result?.to_computer ?? 0)
+          + ((result?.errors || []).length ? "\n" + result.errors.join("\n") : "")
+        : "";
+      if (!knowledgeLists) void loadKnowledgeLists();
+    }
+  }
+
+  async function loadKnowledgeLists() {
+    const host = selectedHost;
+    knowledgeLists = { computer: [], phone: [] };
+    try { knowledgeLists = await ui.apiJson(`/mobile/link/knowledge?host_id=${encodeURIComponent(host.host_id)}`); }
+    catch (error) { status("computerStatus", error.message, true); return; }
+    if (selectedHost?.host_id !== host.host_id) return;
+    const fill = (id, items, text) => { $(id).replaceChildren(...items.map((item) => { const option = document.createElement("option"); option.value = item.id; option.textContent = text(item); return option; })); };
+    fill("computerKbComputer", knowledgeLists.computer || [], (item) => t("{0}（{1}）", item.name || t("默认知识库"), item.documents));
+    fill("computerKbPhone", knowledgeLists.phone || [], (item) => t("{0}（{1}）", item.label, item.documents));
+    if (computerState) renderSections(computerState);
+  }
+
+  function renderDevice(value) {
+    const host = value.host || selectedHost;
+    terms("computerFacts", [
+      [t("地址"), host.url],
+      [t("权限"), (host.scopes || []).length ? host.scopes.map((scope) => scopeNames[scope] || scope).join(t("、")) : t("未报告")],
+      [t("配对时间"), when(host.paired_at)],
+      [t("上次连上"), host.last_ok_at ? when(host.last_ok_at) : t("还没连过")],
+      ...(host.model ? [[t("电脑上的模型"), `${host.model.name} · ${host.model.location === "computer" ? t("在这台电脑上运行") : t("云端服务")}`]] : []),
+      ...(host.workspace ? [[t("电脑上打开的文件夹"), host.workspace]] : []),
+    ]);
+    const addresses = $("computerAddresses"); addresses.replaceChildren();
+    for (const address of host.addresses || []) {
+      addresses.append(row(address.url, [address.kind === "tailscale" ? "Tailscale" : t("局域网"), address.usable ? t("连不上当前地址时会试它") : t("需要电脑开启 HTTPS")].join(" · ")));
+    }
+    const activity = $("computerActivity"); activity.replaceChildren();
+    for (const entry of value.activity || []) activity.append(row(activityNames[entry.action] || entry.action, `${when(entry.at)} · ${entry.detail}`));
+    if (!(value.activity || []).length) activity.append(row(t("还没有记录"), ""));
+    $("computerRemoteActivity").hidden = !has(host, "device");
+  }
+
+  function addOutgoing(files) {
+    for (const file of files || []) if (file?.staged && !outgoing.some((item) => item.staged === file.staged)) outgoing.push({ staged: file.staged, name: file.name || file.staged, size: file.size || 0 });
+    renderOutgoing();
+  }
+  function renderOutgoing() {
+    const list = $("computerOutgoing"); list.replaceChildren();
+    for (const file of outgoing) {
+      const item = row(file.name, bytes(file.size));
+      action(item, "x", t("不发这个"), async () => {
+        outgoing = outgoing.filter((other) => other !== file);
+        if (typeof native?.discardComputerFiles === "function") native.discardComputerFiles(JSON.stringify([file.staged]));
+        renderOutgoing();
+      });
+      list.append(item);
+    }
+    $("btnComputerSendFiles").disabled = !outgoing.length;
+  }
+  async function takeShare(share) {
+    const listed = ((await ui.apiJson("/mobile/connections")).hosts || []).filter((host) => host.api === "mobile");
+    if ($("settingsOverlay").hidden) ui.openMenu();
+    if (!listed.length) {
+      if (typeof native?.discardComputerFiles === "function") native.discardComputerFiles(JSON.stringify((share.files || []).map((file) => file.staged)));
+      $("btnConnectionsPage").click();
+      status("connectionsStatus", t("还没有配对的电脑。先在这里连接电脑，再分享一次。"), true);
+      return;
+    }
+    if (listed.length === 1) { pendingShare = share; await openComputer(listed[0].host_id); }
+    else { pendingShare = share; $("btnConnectionsPage").click(); }
+    if ((share.errors || []).length) status(listed.length === 1 ? "computerStatus" : "connectionsStatus", t("有些内容没能读取：{0}", share.errors.join(t("；"))), true);
+  }
+
+  async function loadBrowse(path) {
+    const host = selectedHost;
+    const listing = await ui.apiJson(`/mobile/link/files?host_id=${encodeURIComponent(host.host_id)}&path=${encodeURIComponent(path)}`);
+    if (selectedHost?.host_id !== host.host_id) return;
+    browsePath = listing.path || "";
+    $("computerPath").textContent = `/${browsePath}`;
+    const list = $("computerFileList"); list.replaceChildren();
+    if (browsePath) {
+      const up = row("..", t("上一级"));
+      action(up, "chevron-left", t("上一级"), async () => loadBrowse(browsePath.split("/").slice(0, -1).join("/")));
+      list.append(up);
+    }
+    for (const entry of listing.entries || []) {
+      const child = browsePath ? `${browsePath}/${entry.name}` : entry.name;
+      const item = row(entry.name, entry.kind === "dir" ? t("文件夹") : [bytes(entry.size), when(entry.modified_at)].filter(Boolean).join(" · "));
+      if (entry.kind === "dir") action(item, "chevron-right", t("打开文件夹"), async () => loadBrowse(child));
+      else action(item, "download", t("下载到手机"), async () => {
+        const result = await waitOperation(await post("/mobile/link/download", { host_id: host.host_id, path: child }), "computerStatus", t("正在下载 {0}...", entry.name));
+        status("computerStatus", t("已存到 {0}", result.path));
+        textButton(item, "folder-open", t("打开"), async () => openReceived(result.path, result.sha256));
+      });
+      list.append(item);
+    }
+    if (listing.truncated) list.append(row(t("只列出前 500 项"), ""));
+  }
+
+  /** "Continue on the computer" on the conversation page: shown when a computer can take conversations. */
+  function refreshRelay(hosts) {
+    const able = (hosts || []).filter((host) => host.api === "mobile" && has(host, "conversations") && allowed(host, "tasks"));
+    $("relayToComputer").hidden = !able.length;
+    $("relayComputer").replaceChildren(...able.map((host) => { const option = document.createElement("option"); option.value = host.host_id; option.textContent = host.name; return option; }));
+  }
+  // At page load the engine may still be starting: asked again a few times.
+  (function loadRelay(attempt) {
+    ui.apiJson("/mobile/connections").then((value) => { if (!closed) refreshRelay(value.hosts || []); })
+      .catch(() => { if (!closed && attempt < 6) window.setTimeout(() => loadRelay(attempt + 1), 5000); });
+  })(0);
   async function outbox(isCurrent = () => true) {
     const [value, linked] = await Promise.all([ui.apiJson("/mobile/outbox"), ui.apiJson("/mobile/connections").catch(() => ({}))]); if (!isCurrent()) return;
     const hostNames = new Map((linked.hosts || []).map(host => [host.host_id, host.name]));
@@ -1487,7 +2004,9 @@
     for (const delivery of value.deliveries || []) {
       // Which computer and conversation, by name: a conversation's id means nothing to the user.
       const where = [hostNames.get(delivery.host_id), remoteSessionTitles.get(delivery.payload?.session_id)].filter(Boolean);
-      const item = row((delivery.payload?.prompt || "").slice(0, 100), `${[stateNames[delivery.state] || delivery.state, ...where].join(" · ")}\n${delivery.error || ""}`);
+      // A computer's running task says what it is doing now (device link 2).
+      const now = delivery.state === "submitted" && delivery.activity ? t("正在：{0}", delivery.activity) : "";
+      const item = row((delivery.payload?.prompt || "").slice(0, 100), `${[stateNames[delivery.state] || delivery.state, ...where].join(" · ")}\n${[now, delivery.error || ""].filter(Boolean).join("\n")}`);
       if (delivery.state === "pending") {
         action(item, "send", t("重试发送"), async () => { await post("/mobile/outbox/send", { delivery_id: delivery.delivery_id }); await outbox(); });
         action(item, "x", t("取消待发送"), async () => { await post("/mobile/outbox/cancel", { delivery_id: delivery.delivery_id }); await outbox(); });
@@ -1864,6 +2383,13 @@
     if (event.key === "Enter") $("menuSearchResults").querySelector(".menu-row")?.click();
     if (event.key === "Escape" && $("menuSearchInput").value) { event.stopPropagation(); $("menuSearchInput").value = ""; renderMenuSearch(); }
   });
+  // Back from a computer's page, the list shows what that page saw meanwhile (online, unreachable).
+  new MutationObserver((records) => {
+    const left = records.some((record) => record.oldValue === null);
+    if (left && $("settingsComputer").hidden && !$("settingsConnections").hidden) {
+      connections(() => !closed && !$("settingsConnections").hidden, true).catch(() => {});
+    }
+  }).observe($("settingsComputer"), { attributes: true, attributeFilter: ["hidden"], attributeOldValue: true });
   // A closed menu forgets its query, so the next open shows the full menu again.
   new MutationObserver(() => {
     if ($("settingsOverlay").hidden && $("menuSearchInput").value) { $("menuSearchInput").value = ""; renderMenuSearch(); }
@@ -2350,10 +2876,13 @@
   on("pairCodeForm", "submit", async () => {
     const address = $("pairAddress").value.trim();
     if (!address) throw new Error(t("先填电脑地址，或拍下电脑上的二维码"));
-    const target = /^agentworkspace:/i.test(address) ? { link: address }
+    const scanned = pairingLink && pairingLink.url === address && pairingLink.code === $("pairCode").value
+      && pairingLink.fingerprint === $("pairFingerprint").value.trim() ? pairingLink.text : null;
+    const target = /^agentworkspace:/i.test(address) ? { link: address } : scanned ? { link: scanned }
       : { url: address, code: $("pairCode").value, fingerprint: $("pairFingerprint").value.trim() || null };
     const host = await post("/mobile/connections/pair-code", { ...target, device_name: $("pairDeviceName").value.trim() || phoneName() });
     for (const id of ["pairAddress", "pairCode", "pairFingerprint"]) $(id).value = "";
+    pairingLink = null;
     $("pairTarget").hidden = true;
     await connections();
     status("connectionsStatus", (host.scopes || []).includes("tasks") ? t("已和 {0} 配对，可以把任务交给它", host.name) : t("已和 {0} 配对，可以查看它的对话", host.name));
@@ -2364,21 +2893,167 @@
   }, "connectionsStatus");
   on("btnScanPairing", "click", () => { nativeResult("scanPairingQr", true); }, "connectionsStatus");
   on("btnPickPairing", "click", () => { nativeResult("scanPairingQr", false); }, "connectionsStatus");
-  on("remoteSessionSelector", "change", updateRemoteWorkspace, "connectionsStatus");
-  on("btnUseDraft", "click", () => { $("handoffPrompt").value = ui.context().draft; }, "connectionsStatus");
+  on("remoteSessionSelector", "change", updateRemoteWorkspace, "computerStatus");
+  on("btnUseDraft", "click", () => { $("handoffPrompt").value = ui.context().draft; }, "computerStatus");
   on("btnQueueHandoff", "click", async () => {
-    if (!selectedHost) throw new Error(t("请先选择配对设备"));
+    const host = selectedHost;
+    if (!host) throw new Error(t("请先选择配对设备"));
     const context = ui.context(); let prompt = $("handoffPrompt").value.trim(); if (!prompt) throw new Error(t("请输入接力指令"));
     if ($("handoffContext").checked) prompt += t("\n\n用户选择附带的对话上下文：\n{0}", context.recentText);
-    await post("/mobile/outbox", { host_id: selectedHost.host_id, session_id: $("remoteSessionSelector").value, prompt, request_id: window.crypto?.randomUUID?.() || `handoff-${Date.now()}-${Math.random().toString(16).slice(2)}` });
-    status("connectionsStatus", t("已保存到待发送队列"));
-  }, "connectionsStatus");
+    const confirmed = {};
+    // Conversations that approve everything by themselves: told plainly, then the user's choice (2.1).
+    const autonomy = targetAutonomy();
+    if (broadAutonomy.has(autonomy)) {
+      if (!has(host, "autonomy_ack")) throw new Error(t("电脑上的版本还不接受交到这类对话的任务，请先更新电脑上的 Agent Workspace"));
+      if (!allowed(host, "broad_autonomy")) throw new Error(t("电脑还没允许这台手机往自动批准的对话交任务；在电脑的「手机连接」里给这台手机勾上这项权限"));
+      const choice = await choose(t("电脑会直接执行"),
+        t("电脑上这个对话设为「{0}」：交过去的任务里，运行命令、修改和删除文件、联网等操作都会直接在电脑上执行，不会再询问任何人。拿到这台手机配对令牌的人也能这样做。\n确定要交给它吗？", autonomyNames[autonomy]),
+        [["send", t("我了解风险，交给电脑"), "send", true], ["x", t("取消"), "cancel"]]);
+      if (choice !== "send") return;
+      confirmed.accept_autonomy = autonomy;
+    }
+    // ID and bank card numbers usually stay with the phone's own model (2.2): mask, send, or stop.
+    const found = typeof ui.privateParts === "function" ? ui.privateParts(prompt) : [];
+    if (found.length) {
+      const numbers = found.map((item) => `${item.kind} ${item.masked}`).join(t("、"));
+      const model = host.model ? t("{0}，{1}", host.model.name, host.model.location === "computer" ? t("在这台电脑上运行") : t("云端服务")) : t("电脑当前的模型");
+      const choice = await choose(t("这段内容里有个人信息"),
+        t("要交给电脑的内容里有：{0}。平时这类内容只交给手机上的模型。交给电脑后，内容会发到电脑，由电脑当前的模型（{1}）处理。", numbers, model),
+        [...(has(host, "private_ack") ? [["send", t("交给电脑"), "send"]] : []), ["shield", t("打码后交给电脑"), "mask", true], ["x", t("取消"), "cancel"]]);
+      if (choice === "cancel") return;
+      if (choice === "mask") for (const item of found) prompt = prompt.split(item.value).join(item.masked);
+      else { confirmed.on_device = true; confirmed.private_accepted = true; }
+    }
+    if (!$("remoteSessionSelector").value && host.api === "mobile") {
+      const created = await waitOperation(await post("/mobile/link/new-task", { host_id: host.host_id, prompt, confirmed }), "computerStatus", t("正在交给电脑..."));
+      status("computerStatus", t("已在 {0} 上新建对话「{1}」并开始，结果会出现在「待发送与接力」", host.name, created?.title || ""));
+    } else {
+      await post("/mobile/outbox", { host_id: host.host_id, session_id: $("remoteSessionSelector").value, prompt, request_id: requestId("handoff"), ...confirmed });
+      status("computerStatus", t("已保存到待发送队列"));
+    }
+    $("handoffPrompt").value = "";
+  }, "computerStatus");
   on("btnReadRemote", "click", async () => {
     if (!selectedHost) throw new Error(t("请先选择配对设备"));
+    if (!$("remoteSessionSelector").value) throw new Error(t("先选一个电脑上的对话"));
     const data = await ui.apiJson(`/mobile/connections/events?host_id=${encodeURIComponent(selectedHost.host_id)}&session_id=${encodeURIComponent($("remoteSessionSelector").value)}`);
     $("remoteHistory").hidden = false;
     $("remoteHistory").textContent = (data.events || []).filter(event => event.type === "message.created").map(event => `${event.data?.role || ""}: ${event.data?.content || ""}`).join("\n\n");
+  }, "computerStatus");
+  on("btnComputerRefresh", "click", async () => {
+    if (!selectedHost) return;
+    await post("/mobile/link/refresh", { host_id: selectedHost.host_id }).catch(() => {});
+    await renderComputer(() => true, true);
+    await loadRemoteSessions(() => true);
+  }, "computerStatus");
+  on("btnComputerRemove", "click", async () => { if (selectedHost) await removeComputer(selectedHost); }, "computerStatus");
+  on("computerJobsSetting", "change", async () => {
+    const host = selectedHost; const choice = $("computerJobsSetting").value;
+    if (choice === "auto") {
+      const answer = await choose(t("自动接受电脑交来的任务"),
+        t("{0} 交来的任务会直接在这台手机上开始，不再先问你。每一步仍按手机的审批规则：需要审批的操作会停下来等你，银行卡号、身份证号、验证码仍会拦下。", host.name),
+        [["check", t("自动接受"), "auto", true], ["x", t("取消"), "cancel"]]);
+      if (answer !== "auto") { $("computerJobsSetting").value = computerState?.settings?.jobs || "ask"; return; }
+    }
+    await post("/mobile/link/settings", { host_id: host.host_id, jobs: choice });
+    status("computerStatus", { ask: t("电脑交来的任务每次都会先问你"), auto: t("电脑交来的任务会自动开始"), off: t("不再接受电脑交来的任务") }[choice]);
+  }, "computerStatus");
+  for (const [id, kind] of [["btnComputerPickFiles", "files"], ["btnComputerPickPhotos", "photos"], ["btnComputerCamera", "camera"]]) {
+    on(id, "click", () => { nativeResult("pickForComputer", kind); }, "computerStatus");
+  }
+  window.addEventListener("agent-computer-files", (event) => {
+    const detail = event.detail || {};
+    if (detail.cancelled) return;
+    addOutgoing(detail.files || []);
+    if ((detail.errors || []).length) status("computerStatus", t("有些文件没能读取：{0}", detail.errors.join(t("；"))), true);
+  });
+  on("btnComputerSendFiles", "click", async () => {
+    const host = selectedHost;
+    if (!outgoing.length) throw new Error(t("先选要发送的文件"));
+    const files = outgoing.map((file) => ({ staged: file.staged, name: file.name }));
+    const instruction = $("computerInstruction").value.trim();
+    const result = await waitOperation(await post("/mobile/link/send-files", { host_id: host.host_id, files, instruction: instruction || null,
+      knowledge: $("computerToKnowledge").checked ? t("来自手机") : null }), "computerStatus", t("正在发送 {0} 个文件...", files.length));
+    // What went is no longer on the phone; what did not stays here to send again.
+    const went = new Set(result.sent.map((item) => item.staged));
+    outgoing = outgoing.filter((file) => !went.has(file.staged)); renderOutgoing();
+    const failed = (result.failed || []).map((item) => t("{0}：{1}", item.name, localizeError(item.error)));
+    if (result.task_error) status("computerStatus", t("已发送 {0} 个文件，但电脑没有开始处理：{1}", result.sent.length, localizeError(result.task_error)), true);
+    else if (failed.length) status("computerStatus", t("已发送 {0} 个文件；没发出去的：{1}", result.sent.length, failed.join(t("；"))), true);
+    else {
+      $("computerInstruction").value = "";
+      status("computerStatus", instruction ? t("已发送 {0} 个文件，电脑开始处理", result.sent.length) : t("已发送 {0} 个文件到电脑：{1}", result.sent.length, result.sent.map((item) => item.path).join(t("、"))));
+    }
+  }, "computerStatus");
+  $("computerBrowse").addEventListener("toggle", () => {
+    if ($("computerBrowse").open && selectedHost) void loadBrowse(browsePath).catch((error) => status("computerStatus", error.message, true));
+  });
+  on("btnComputerPaste", "click", () => {
+    const value = nativeResult("readClipboardText");
+    if (!value.text) throw new Error(t("剪贴板里没有文字"));
+    $("computerTextInput").value = value.text;
+  }, "computerStatus");
+  on("btnComputerSendText", "click", async () => {
+    const text = $("computerTextInput").value;
+    if (!text.trim()) throw new Error(t("先写要发送的文字"));
+    await post("/mobile/link/send-text", { host_id: selectedHost.host_id, text, kind: /^https?:\/\/\S+$/i.test(text.trim()) ? "link" : "text" });
+    $("computerTextInput").value = "";
+    status("computerStatus", t("已发到 {0}", selectedHost.name));
+  }, "computerStatus");
+  on("btnComputerKbAdd", "click", async () => {
+    const host = selectedHost;
+    const pair = { computer: $("computerKbComputer").value, phone: $("computerKbPhone").value };
+    if (!pair.computer || !pair.phone) throw new Error(t("两边各选一个知识库"));
+    const pairs = [...(computerState?.settings?.kb_pairs || []).filter((other) => other.computer !== pair.computer || other.phone !== pair.phone), pair];
+    await post("/mobile/link/kb-pairs", { host_id: host.host_id, pairs });
+    await renderComputer(() => true, false);
+    status("computerStatus", t("已对应，点「现在同步」开始"));
+  }, "computerStatus");
+  on("btnComputerKbSync", "click", async () => {
+    const host = selectedHost;
+    const result = await waitOperation(await post("/mobile/link/kb-sync", { host_id: host.host_id }), "computerStatus", t("正在同步知识库..."));
+    status("computerStatus", t("同步完成：复制到手机 {0} 篇，复制到电脑 {1} 篇", result.to_phone, result.to_computer), (result.errors || []).length > 0);
+    await renderComputer(() => true, false);
+  }, "computerStatus");
+  $("computerRemoteActivity").addEventListener("toggle", async () => {
+    if (!$("computerRemoteActivity").open || !selectedHost) return;
+    const list = $("computerRemoteActivityList"); list.replaceChildren(row(t("读取中..."), ""));
+    try {
+      const device = await ui.apiJson(`/mobile/link/device?host_id=${encodeURIComponent(selectedHost.host_id)}`);
+      list.replaceChildren(...(device.activity || []).map((entry) => row(activityNames[entry.action] || entry.action, `${when(entry.at)} · ${entry.detail || ""}`)));
+      if (!(device.activity || []).length) list.replaceChildren(row(t("还没有记录"), ""));
+    } catch (error) { list.replaceChildren(row(error.message, "")); }
+  });
+  on("btnFindComputers", "click", () => {
+    nativeResult("discoverComputers");
+    $("nearbyList").replaceChildren(row(t("正在查找…"), ""));
   }, "connectionsStatus");
+  window.addEventListener("agent-computers-found", (event) => {
+    const found = event.detail?.computers || [];
+    const list = $("nearbyList"); list.replaceChildren();
+    if (!found.length) { list.append(row(t("没有找到"), t("确认电脑上打开了「允许手机连接这台电脑」，并且手机和电脑在同一个网络"))); return; }
+    for (const computer of found) {
+      const short = computer.fingerprint ? computer.fingerprint.slice(0, 16).match(/.{4}/g).join(" ") : "";
+      const item = row(computer.name, [computer.url, computer.pairing ? t("正在等待配对") : "", short ? t("证书指纹 {0}", short) : ""].filter(Boolean).join(" · "));
+      textButton(item, "check", t("填入"), async () => {
+        $("pairAddress").value = computer.url;
+        $("pairFingerprint").value = computer.fingerprint || "";
+        $("pairCompare").hidden = !short;
+        $("pairCompare").textContent = short ? t("核对电脑屏幕上配对码旁的证书指纹是否为 {0}。一致再输入配对码；不一致说明这不是你的电脑，不要配对。", short) : "";
+        $("pairTarget").hidden = true;
+        $("pairCode").focus();
+      }, computer.pairing);
+      list.append(item);
+    }
+  });
+  on("btnRelayToComputer", "click", async () => {
+    const hostId = $("relayComputer").value;
+    const sessionId = ui.context().sessionId;
+    if (!hostId || !sessionId) throw new Error(t("先选一台电脑"));
+    const created = await waitOperation(await post("/mobile/link/relay", { host_id: hostId, session_id: sessionId, prompt: $("relayPrompt").value.trim() || null }), "relayStatus", t("正在发到电脑..."));
+    $("relayPrompt").value = "";
+    status("relayStatus", t("已在电脑上新建对话「{0}」{1}", created?.title || "", created?.delivery ? t("，结果会出现在「待发送与接力」") : ""));
+  }, "relayStatus");
   on("workflowForm", "submit", async () => {
     const original = $("workflowForm")._original || {};
     const assertions = { ...original.assertions }; for (const [key, id] of [["package", "workflowExpectedPackage"], ["text_contains", "workflowExpectedText"]]) { if ($(id).value.trim()) assertions[key] = $(id).value.trim(); else delete assertions[key]; }

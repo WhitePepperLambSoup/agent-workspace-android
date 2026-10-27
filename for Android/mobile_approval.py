@@ -45,7 +45,9 @@ APPROVAL_SCOPES = frozenset({"once", "session", "task"})
 # the phone control panel to operate the phone: there "allow for this task" covers its taps and
 # typing (never a reply sent from a notification).
 _ALWAYS_ASK_TOOLS = frozenset(
-    {"delete_path", "memory_write", "app_note", "android_action", "notification_reply", "manage_app"}
+    {"delete_path", "memory_write", "app_note", "android_action", "notification_reply", "manage_app",
+     # Sends the task's words to the paired computer, each call (android_adapter.computer_tools).
+     "ask_computer"}
 )
 _PHONE_CONTROL_TOOLS = frozenset({"android_action"})
 # A message sent as the user: approved one at a time, whatever scope is picked (a "session" grant

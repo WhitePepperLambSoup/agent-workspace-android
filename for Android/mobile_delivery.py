@@ -16,6 +16,51 @@ from mobile_connections import MobileConnections, RemoteHTTPError, connection_da
 from mobile_protocol import parse_mobile_task_request
 
 
+_BROAD_AUTONOMY = frozenset({"yolo", "full_access"})
+
+
+def acknowledgements(payload: dict) -> dict:
+    """What the user confirmed on the phone before handing a task to a desktop (docs/DEVICE_LINK_V2.md):
+    running in a conversation that approves everything by itself (2.1), and sending numbers that
+    usually stay with the on-device model (2.2)."""
+    found: dict = {}
+    autonomy = payload.get("accept_autonomy")
+    if autonomy is not None:
+        if autonomy not in _BROAD_AUTONOMY:
+            raise ValueError("accept_autonomy must be yolo or full_access")
+        found["accept_autonomy"] = autonomy
+    if payload.get("private_accepted") is not None or payload.get("on_device") is not None:
+        if payload.get("private_accepted") is not True or payload.get("on_device") is not True:
+            raise ValueError("private content goes to a computer only with on_device and private_accepted")
+        found.update(on_device=True, private_accepted=True)
+    return found
+
+
+_REFUSALS = {
+    "desktop_autonomy_too_broad": (
+        "this conversation on the computer approves everything by itself; confirm on the phone to hand tasks to it"
+    ),
+    "autonomy_changed": (
+        "the conversation's settings on the computer changed; check them and confirm again before handing it over"
+    ),
+    "scope_denied": (
+        "the computer has not allowed this phone to do this; allow it for this phone under Phone connection on the computer"
+    ),
+    "unsupported_task": "the computer does not take this kind of task",
+    "unknown_session": "the conversation no longer exists on the computer",
+    "no_workspace": "no folder is open on the computer; open one there first",
+}
+
+
+def refused(error: RemoteHTTPError) -> bool:
+    """A definite no from the desktop (not a busy or lost request)."""
+    return 400 <= error.status_code < 500 and error.status_code not in {408, 429} or error.code == "no_workspace"
+
+
+def refusal_reason(error: RemoteHTTPError) -> str:
+    return _REFUSALS.get(error.code or "", str(error))
+
+
 class MobileOutbox:
     def __init__(self, path: Path, connections: MobileConnections, *, on_finished=None):
         self.path = path
@@ -34,6 +79,9 @@ class MobileOutbox:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(mobile_outbox)")}
             if "dispatch_api" not in columns:
                 db.execute("ALTER TABLE mobile_outbox ADD COLUMN dispatch_api TEXT")
+            # What the desktop says its running task is doing now (device link 2).
+            if "activity" not in columns:
+                db.execute("ALTER TABLE mobile_outbox ADD COLUMN activity TEXT")
             db.execute(
                 "UPDATE mobile_outbox SET state='uncertain', "
                 "error='interrupted during dispatch' WHERE state='sending'"
@@ -93,6 +141,7 @@ class MobileOutbox:
             "prompt": request.prompt,
             "model": request.model,
             "reasoning_effort": request.reasoning_effort,
+            **acknowledgements(payload),
         }
         serialized = json.dumps(document, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256((host["host_id"] + serialized).encode()).hexdigest()
@@ -113,6 +162,31 @@ class MobileOutbox:
             )
         return self.get(delivery_id)
 
+    def record_submitted(self, host_id, request_id, payload, remote_task_id):
+        """A task the desktop already accepted another way (a new conversation with its first
+        prompt): kept here like a handed-over one, so its result comes back the same way."""
+        host = self.connections.get(host_id)
+        document = {
+            "session_id": payload.get("session_id"),
+            "prompt": payload.get("prompt"),
+            "model": None,
+            "reasoning_effort": None,
+            **acknowledgements(payload),
+        }
+        serialized = json.dumps(document, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256((host["host_id"] + serialized).encode()).hexdigest()
+        now, delivery_id = time.time(), str(uuid4())
+        with connection_database(self.path) as db:
+            existing = db.execute("SELECT * FROM mobile_outbox WHERE request_id=?", (request_id,)).fetchone()
+            if existing:
+                return self._public(existing)
+            db.execute(
+                "INSERT INTO mobile_outbox (delivery_id,request_id,digest,host_id,payload,state,remote_task_id,"
+                "created_at,updated_at,dispatch_api) VALUES (?,?,?,?,?,'submitted',?,?,?,'mobile')",
+                (delivery_id, request_id, digest, host["host_id"], serialized, remote_task_id, now, now),
+            )
+        return self.get(delivery_id)
+
     def _update(
         self,
         delivery_id,
@@ -122,12 +196,13 @@ class MobileOutbox:
         result=None,
         error=None,
         expected_state=None,
+        activity=None,
     ):
         query = (
             "UPDATE mobile_outbox SET state=?, remote_task_id=COALESCE(?,remote_task_id), "
-            "result=COALESCE(?,result), error=?, updated_at=? WHERE delivery_id=?"
+            "result=COALESCE(?,result), error=?, activity=?, updated_at=? WHERE delivery_id=?"
         )
-        values = (state, remote_task_id, result, error, time.time(), delivery_id)
+        values = (state, remote_task_id, result, error, activity, time.time(), delivery_id)
         if expected_state is not None:
             query += " AND state=?"
             values += (expected_state,)
@@ -206,6 +281,9 @@ class MobileOutbox:
                     and previous_state == "pending"
                 ):
                     return self._update(delivery_id, "failed", error=str(exc))
+                if isinstance(exc, RemoteHTTPError) and mobile and refused(exc):
+                    # The desktop answered and said no: sending again would get the same answer.
+                    return self._update(delivery_id, "failed", error=refusal_reason(exc))
                 return self._update(
                     delivery_id,
                     "uncertain",
@@ -243,11 +321,13 @@ class MobileOutbox:
         # What the other device answered (a desktop sends its last reply) or why it failed.
         result = task.get("result") if target == "completed" and isinstance(task.get("result"), str) else None
         error = task.get("error") if target != "completed" and isinstance(task.get("error"), str) else None
+        activity = task.get("activity") if target == "submitted" and isinstance(task.get("activity"), str) else None
         updated = self._update(
             delivery_id,
             target,
             result=result[:65536] if result else None,
             error=error[:2000] if error else None,
+            activity=" ".join(activity.split())[:120] if activity else None,
         )
         if target in {"completed", "failed", "cancelled"} and job["state"] != target and self.on_finished:
             try:
@@ -255,6 +335,24 @@ class MobileOutbox:
             except Exception:
                 pass  # a notification that cannot be shown must not undo the reconcile
         return updated
+
+    def abandon(self, host_id, reason="the computer was removed before the result came back"):
+        """Requests still waiting on a device that is being removed: they end here, with the reason
+        (they would otherwise wait for a device that is gone, and keep it from being removed)."""
+        with connection_database(self.path) as db:
+            return db.execute(
+                "UPDATE mobile_outbox SET state='failed', error=?, activity=NULL, updated_at=? "
+                "WHERE host_id=? AND state IN ('pending','sending','submitted','uncertain')",
+                (reason, time.time(), host_id),
+            ).rowcount
+
+    def unsettled(self, host_id):
+        with connection_database(self.path) as db:
+            return db.execute(
+                "SELECT COUNT(*) FROM mobile_outbox WHERE host_id=? "
+                "AND state IN ('pending','sending','submitted','uncertain')",
+                (host_id,),
+            ).fetchone()[0]
 
     def cancel(self, delivery_id):
         job = self.get(delivery_id)
@@ -267,17 +365,27 @@ class MobileOutbox:
 
     async def run(self):
         while True:
-            try:
-                active = self._active()
-            except sqlite3.Error:
-                active = []  # a locked or full database: the next pass tries again
-            for entry in active:
-                try:
-                    job = self.get(entry["delivery_id"])
-                    if job["state"] == "pending":
-                        await self.send(job["delivery_id"])
-                    elif job["state"] in {"submitted", "uncertain"}:
-                        await self.reconcile(job["delivery_id"])
-                except (KeyError, ValueError, httpx.HTTPError, sqlite3.Error):
-                    continue
+            await self.run_once()
             await asyncio.sleep(20)
+
+    async def run_once(self):
+        try:
+            active = self._active()
+            known = {host["host_id"] for host in self.connections.list()}
+        except sqlite3.Error:
+            return  # a locked or full database: the next pass tries again
+        for entry in active:
+            if entry["host_id"] not in known:
+                # Its device was removed (by an older version, which left these behind).
+                self.abandon(entry["host_id"])
+                continue
+            try:
+                job = self.get(entry["delivery_id"])
+                if job["state"] == "pending":
+                    await self.send(job["delivery_id"])
+                elif job["state"] in {"submitted", "uncertain"}:
+                    await self.reconcile(job["delivery_id"])
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue  # one request that cannot be handled now must not stop the others

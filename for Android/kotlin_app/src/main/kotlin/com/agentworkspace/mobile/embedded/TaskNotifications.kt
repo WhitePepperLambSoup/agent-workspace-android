@@ -177,7 +177,10 @@ class TaskNotificationPublisher(private val context: Context) {
 
     fun apply(change: TaskNotificationChange) {
         if (change.kind == TaskNotificationChange.Kind.CANCEL) manager.cancel(tag(change.task.taskId), NOTIFICATION_ID)
-        else manager.notify(tag(change.task.taskId), NOTIFICATION_ID, buildNotification(change.task))
+        else {
+            com.agentworkspace.mobile.notifications.NotificationBudget.makeRoom(manager)
+            manager.notify(tag(change.task.taskId), NOTIFICATION_ID, buildNotification(change.task))
+        }
     }
 
     fun buildNotification(task: TaskNotificationSnapshot): Notification {

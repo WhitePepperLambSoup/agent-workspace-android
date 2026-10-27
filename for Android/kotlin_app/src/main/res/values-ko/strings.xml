@@ -23,4 +23,6 @@
     <string name="widget_card_label">AI 카드</string>
     <string name="widget_card_description">예약 작업의 최신 결과(예: 아침 브리핑)</string>
     <string name="widget_card_empty">‘예약 작업’에서 작업의 ‘홈 화면 카드에 표시’를 누르면 그 최신 결과가 여기에 표시됩니다.</string>
+    <!-- The share menu entry that sends files and text to a paired computer (device link). -->
+    <string name="send_to_computer_label">컴퓨터로 보내기</string>
 </resources>

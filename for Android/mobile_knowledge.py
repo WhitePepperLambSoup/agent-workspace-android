@@ -1350,6 +1350,96 @@ class KnowledgeStore:
             self._enqueue(document_id)
         return self.document(document_id)
 
+    # ---- another device's knowledge base (mobile_link, docs/DEVICE_LINK_V2.md 2.14) ----------------
+
+    def extracted(self, document_id: object) -> dict[str, Any]:
+        """A ready document's passages, as a paired computer's knowledge base takes them: the original
+        file is not kept after indexing, so the passages are what is shared."""
+        document = self.document(document_id)
+        if document["state"] != "ready":
+            raise KnowledgeError("this document is not ready yet")
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT page, heading, text FROM passages WHERE document_id = ? ORDER BY ordinal",
+                (document["id"],),
+            ).fetchall()
+        return {
+            "id": document["id"],
+            "title": document["title"],
+            "sha256": document["sha256"],
+            "origin": document["origin"],
+            "origin_path": document["origin_path"],
+            "pages": document["pages"],
+            "passages": [{"page": row["page"], "heading": row["heading"], "text": row["text"]} for row in rows],
+        }
+
+    def add_extracted(self, source: object, *, collection_id: object = None, origin: str = "computer") -> dict[str, Any]:
+        """A document from a paired computer, already split into passages: added ready (no file to
+        read), its sentence vectors computed afterwards like any other's."""
+        if not isinstance(source, dict):
+            raise KnowledgeError("the document from the computer is malformed")
+        title = " ".join(str(source.get("title") or "").split())[:300]
+        sha256 = str(source.get("sha256") or "").lower()
+        passages = source.get("passages")
+        if not title or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+            raise KnowledgeError("the document from the computer is malformed")
+        if not isinstance(passages, list) or not passages or len(passages) > 100_000:
+            raise KnowledgeError("the document from the computer has no passages")
+        rows: list[tuple[int | None, str, str]] = []
+        chars = 0
+        for item in passages:
+            if not isinstance(item, dict) or not isinstance(item.get("text"), str) or not item["text"].strip():
+                raise KnowledgeError("the document from the computer is malformed")
+            page = item.get("page")
+            if page is not None and (not isinstance(page, int) or isinstance(page, bool) or page < 0):
+                raise KnowledgeError("the document from the computer is malformed")
+            heading = " ".join(str(item.get("heading") or "").split())[:300]
+            chars += len(item["text"])
+            if chars > MAX_DOCUMENT_CHARS:
+                raise KnowledgeError("the document from the computer is too long")
+            rows.append((page, heading, item["text"]))
+        pages = source.get("pages") if isinstance(source.get("pages"), int) and not isinstance(source.get("pages"), bool) else None
+        origin_path = source.get("origin_path") if isinstance(source.get("origin_path"), str) else None
+        collection_id = collection_id or DEFAULT_COLLECTION
+        with self._lock:
+            with self._connect() as db:
+                if db.execute("SELECT 1 FROM collections WHERE id = ?", (collection_id,)).fetchone() is None:
+                    raise KnowledgeError("there is no such knowledge base")
+                existing = db.execute(
+                    "SELECT * FROM documents WHERE sha256 = ? AND state != 'failed'", (sha256,)
+                ).fetchone()
+                if existing is not None:
+                    return {**self._document(existing), "duplicate": True}
+                count = db.execute("SELECT COUNT(*) FROM documents WHERE state != 'failed'").fetchone()[0]
+                if count >= MAX_DOCUMENTS:
+                    raise KnowledgeError(
+                        f"the knowledge base is full ({MAX_DOCUMENTS} documents); remove some first"
+                    )
+                document_id = "k" + uuid.uuid4().hex[:12]
+                stamp = _now()
+                db.execute(
+                    """
+                    INSERT INTO documents (id, title, filename, suffix, media_type, size_bytes, sha256, origin,
+                        origin_path, state, progress, pages, passages, chars, created_at, updated_at, collection_id)
+                    VALUES (?, ?, ?, '', 'text/plain', ?, ?, ?, ?, 'ready', 1, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        document_id, title, title, sum(len(text.encode("utf-8")) for _, _, text in rows), sha256,
+                        origin, origin_path, pages, len(rows), chars, stamp, stamp, collection_id,
+                    ),
+                )  # fmt: skip
+                for ordinal, (page, heading, text) in enumerate(rows):
+                    cursor = db.execute(
+                        "INSERT INTO passages (document_id, ordinal, page, heading, text) VALUES (?, ?, ?, ?, ?)",
+                        (document_id, ordinal, page, heading, text),
+                    )
+                    db.execute(
+                        "INSERT INTO passage_index (rowid, title, body) VALUES (?, ?, ?)",
+                        (cursor.lastrowid, " ".join(tokens(f"{title} {heading}")), " ".join(tokens(text))),
+                    )
+        threading.Thread(target=self._resume_semantic, name="knowledge-semantic", daemon=True).start()
+        return self.document(document_id)
+
     def add_url(
         self,
         url: object,

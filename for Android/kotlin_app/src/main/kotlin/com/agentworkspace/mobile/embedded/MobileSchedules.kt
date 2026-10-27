@@ -147,6 +147,7 @@ class MobileScheduleCoordinator @JvmOverloads constructor(private val context: C
             .setData(Uri.parse("agentworkspace://schedule/${Uri.encode(id)}"))
             .putExtra("session_id", item.optString("session_id"))
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        com.agentworkspace.mobile.notifications.NotificationBudget.makeRoom(manager)
         manager.notify("agent-schedule:$id", 3002, NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_popup_reminder).setContentTitle(item.optString("title").ifBlank { com.agentworkspace.mobile.UiText.of(context, "定时任务", "Scheduled task") })
             .setContentText(com.agentworkspace.mobile.UiText.of(context, "打开 Agent Workspace 以运行到期的任务", "Open Agent Workspace to run the due task"))

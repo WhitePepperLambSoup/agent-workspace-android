@@ -30,4 +30,6 @@
     <string name="widget_card_label">AI 卡片</string>
     <string name="widget_card_description">定时任务的最新结果，比如每日早报</string>
     <string name="widget_card_empty">在「定时任务」里给一个任务点「显示在桌面卡片」，它的最新结果会显示在这里。</string>
+    <!-- The share menu entry that sends files and text to a paired computer (device link). -->
+    <string name="send_to_computer_label">发到电脑</string>
 </resources>

@@ -605,6 +605,14 @@
         <label for="sessionTitleInput">会话名称</label><input id="sessionTitleInput" type="text" maxlength="200" autocomplete="off" aria-label="会话名称">
         <button id="btnRenameSession" class="button-primary apply-button" type="button" disabled><span data-icon="check"></span>保存名称</button>
         <p id="sessionRenameStatus" class="page-status" role="status"></p>
+        <details id="relayToComputer" class="management-section" hidden>
+          <summary>在电脑上继续</summary>
+          <p class="setting-hint">把这段对话的文字和图片发到电脑，在电脑上新建一个对话接着做。</p>
+          <label for="relayComputer">电脑</label><select id="relayComputer"></select>
+          <label for="relayPrompt">让电脑接着做什么（可选）</label><textarea id="relayPrompt" rows="2" maxlength="20000"></textarea>
+          <button id="btnRelayToComputer" class="button-primary apply-button" type="button"><span data-icon="monitor-smartphone"></span>在电脑上继续</button>
+          <p id="relayStatus" class="page-status" role="status"></p>
+        </details>
         <button id="btnArchiveSession" class="button-secondary apply-button" type="button"><span data-icon="archive"></span>归档会话</button>
         <button id="btnDeleteSession" class="button-secondary apply-button danger-button" type="button"><span data-icon="trash-2"></span>删除会话</button>
         <p class="setting-hint">归档只是从列表隐藏，可随时恢复；删除会彻底清除这段对话的聊天记录、任务和图片，无法恢复。在工作区里生成的文件不受影响。</p>
@@ -810,6 +818,12 @@
       </div>
       <div id="settingsConnections" class="settings-page" hidden>
         <p id="connectionsStatus" class="page-status" role="status"></p><div id="connectionsList" class="management-list"></div>
+        <div id="nearbyComputers" class="management-form" hidden>
+          <strong class="form-title">附近的电脑</strong>
+          <p class="setting-hint">列出同一网络里打开了「允许手机连接这台电脑」的电脑。点一台会填好地址，再输入电脑上显示的配对码。</p>
+          <button id="btnFindComputers" class="button-secondary" type="button"><span data-icon="search"></span>查找附近的电脑</button>
+          <div id="nearbyList" class="management-list"></div>
+        </div>
         <form id="pairCodeForm" class="management-form">
           <strong class="form-title">连接电脑</strong>
           <p class="setting-hint">在电脑版 Agent Workspace 打开「设置 → 手机连接」，打开「允许手机连接这台电脑」，再点「显示配对二维码」。然后拍下二维码，或在下面填电脑的地址和配对码。</p>
@@ -817,6 +831,7 @@
           <label for="pairAddress">电脑地址或配对链接</label><input id="pairAddress" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="http://192.168.1.5:8765">
           <label for="pairCode">配对码</label><input id="pairCode" maxlength="12" autocomplete="off" spellcheck="false" autocapitalize="characters" placeholder="ABCD-EFGH">
           <label for="pairFingerprint">证书指纹（HTTPS 地址才需要）</label><input id="pairFingerprint" autocomplete="off" spellcheck="false" autocapitalize="off">
+          <p id="pairCompare" class="setting-hint" hidden></p>
           <label for="pairDeviceName">这台手机在电脑上显示的名字</label><input id="pairDeviceName" maxlength="60" autocomplete="off">
           <p id="pairTarget" class="setting-hint" hidden></p>
           <button id="btnPairCode" class="button-primary apply-button" type="submit"><span data-icon="monitor-smartphone"></span>配对</button>
@@ -833,14 +848,83 @@
             <button id="btnPairHost" class="button-primary apply-button" type="submit"><span data-icon="link"></span>配对设备</button>
           </form>
         </details>
-        <div id="remoteSessionPanel" class="management-form" hidden>
-          <strong class="form-title">远程会话</strong>
-          <label for="remoteSessionSelector">远程会话</label><select id="remoteSessionSelector"></select><p id="remoteWorkspace" class="page-status"></p>
+      </div>
+      <!-- One paired computer (device link, docs/DEVICE_LINK_V2.md in the Android source). -->
+      <div id="settingsComputer" class="settings-page" hidden>
+        <button id="btnComputerRefresh" data-header-action class="icon-button" type="button" aria-label="刷新电脑" title="刷新电脑"><span data-icon="refresh-cw"></span></button>
+        <p id="computerStatus" class="page-status" role="status"></p>
+        <div id="computerConfirm" class="management-form confirm-panel" role="alertdialog" hidden>
+          <strong id="computerConfirmTitle" class="form-title"></strong>
+          <p id="computerConfirmText" class="setting-hint"></p>
+          <div id="computerConfirmActions" class="page-toolbar"></div>
+        </div>
+        <div id="computerSummary" class="management-list"></div>
+        <section id="computerApprovals" class="management-form" hidden>
+          <strong class="form-title">等你审批</strong>
+          <p class="setting-hint">电脑上的任务要做这些操作，在这里允许或拒绝，和在电脑上点一样。每次只放行这一个操作。</p>
+          <div id="computerApprovalList" class="management-list"></div>
+        </section>
+        <section id="computerJobs" class="management-form" hidden>
+          <strong class="form-title">电脑交来的任务</strong>
+          <div id="computerJobList" class="management-list"></div>
+          <label for="computerJobsSetting">电脑想在这台手机上做事时</label>
+          <select id="computerJobsSetting"><option value="ask">每次询问</option><option value="auto">自动接受</option><option value="off">不接受</option></select>
+          <p class="setting-hint">由手机自己的 AI 执行，手机的保护规则照常生效：银行卡号、身份证号、验证码、卸载应用等仍会拦下，删除文件和发消息仍逐条询问。</p>
+        </section>
+        <div id="remoteSessionPanel" class="management-form">
+          <strong class="form-title">交任务给电脑</strong>
+          <label for="remoteSessionSelector">电脑上的对话</label><select id="remoteSessionSelector"></select>
+          <p id="remoteWorkspace" class="page-status"></p><p id="remoteAutonomy" class="setting-hint" hidden></p>
           <label for="handoffPrompt">接力指令</label><textarea id="handoffPrompt" rows="3" maxlength="65536"></textarea>
           <label class="toggle-row" for="handoffContext"><span>附带当前会话最近对话</span><input id="handoffContext" type="checkbox"></label>
           <div class="page-toolbar"><button id="btnUseDraft" class="button-secondary" type="button">使用当前草稿</button><button id="btnQueueHandoff" class="button-primary" type="button"><span data-icon="send"></span>发送到此设备</button></div>
           <button id="btnReadRemote" class="menu-row" type="button"><span data-icon="file-text"></span><span>查看远程对话</span><span data-icon="chevron-right"></span></button><pre id="remoteHistory" class="management-output" hidden></pre>
         </div>
+        <section id="computerRunning" class="management-form" hidden>
+          <strong class="form-title">正在运行</strong>
+          <div id="computerRunningList" class="management-list"></div>
+        </section>
+        <section id="computerInbox" class="management-form">
+          <strong class="form-title">收件箱</strong>
+          <p class="setting-hint">电脑上任务的结果、定时任务的结果，以及电脑发到这台手机的文件、文字和对话。收到的文件放在工作区的「来自电脑」文件夹。</p>
+          <div id="computerInboxList" class="management-list"></div>
+        </section>
+        <section id="computerFiles" class="management-form" hidden>
+          <strong class="form-title">发文件到电脑</strong>
+          <p class="setting-hint">文件放进电脑上打开的文件夹里的「来自手机」。也可以在其他应用里分享到「发到电脑」。</p>
+          <div class="page-toolbar"><button id="btnComputerPickFiles" class="button-secondary" type="button"><span data-icon="paperclip"></span>选文件</button><button id="btnComputerPickPhotos" class="button-secondary" type="button"><span data-icon="image-plus"></span>选照片</button><button id="btnComputerCamera" class="button-secondary" type="button"><span data-icon="camera"></span>拍照</button></div>
+          <div id="computerOutgoing" class="management-list"></div>
+          <label for="computerInstruction">让电脑处理（可选）</label><textarea id="computerInstruction" rows="2" maxlength="20000" placeholder="例如：把这几张发票整理成表格"></textarea>
+          <label class="toggle-row" for="computerToKnowledge"><span>同时加入电脑的知识库</span><input id="computerToKnowledge" type="checkbox"></label>
+          <button id="btnComputerSendFiles" class="button-primary apply-button" type="button" disabled><span data-icon="upload"></span>发送到电脑</button>
+          <details id="computerBrowse" class="management-section">
+            <summary>浏览电脑上的文件</summary>
+            <p id="computerPath" class="page-status"></p>
+            <div id="computerFileList" class="management-list"></div>
+          </details>
+        </section>
+        <section id="computerText" class="management-form" hidden>
+          <strong class="form-title">发文字</strong>
+          <textarea id="computerTextInput" rows="3" maxlength="65536" aria-label="发给电脑的文字"></textarea>
+          <div class="page-toolbar"><button id="btnComputerPaste" class="button-secondary" type="button"><span data-icon="clipboard-check"></span>粘贴剪贴板</button><button id="btnComputerSendText" class="button-primary" type="button"><span data-icon="send"></span>发送</button></div>
+        </section>
+        <section id="computerKnowledge" class="management-form" hidden>
+          <strong class="form-title">知识库同步</strong>
+          <p class="setting-hint">对应起来的两个知识库互相补齐对方没有的文档，按内容去重，之后每 6 小时自动同步一次。删除文档不会同步。</p>
+          <div id="computerKnowledgePairs" class="management-list"></div>
+          <label for="computerKbComputer">电脑的知识库</label><select id="computerKbComputer"></select>
+          <label for="computerKbPhone">手机的知识库</label><select id="computerKbPhone"></select>
+          <div class="page-toolbar"><button id="btnComputerKbAdd" class="button-secondary" type="button"><span data-icon="link"></span>对应起来</button><button id="btnComputerKbSync" class="button-primary" type="button"><span data-icon="refresh-cw"></span>现在同步</button></div>
+          <p id="computerKbResult" class="page-status"></p>
+        </section>
+        <section id="computerDevice" class="management-form">
+          <strong class="form-title">设备</strong>
+          <dl id="computerFacts" class="usage-summary"></dl>
+          <div id="computerAddresses" class="management-list"></div>
+          <details id="computerActivityDetails" class="management-section"><summary>这台手机的记录</summary><div id="computerActivity" class="management-list"></div></details>
+          <details id="computerRemoteActivity" class="management-section" hidden><summary>电脑上的记录</summary><div id="computerRemoteActivityList" class="management-list"></div></details>
+          <button id="btnComputerRemove" class="button-secondary apply-button danger-button" type="button"><span data-icon="trash-2"></span>移除这台电脑</button>
+        </section>
       </div>
       <div id="settingsOutbox" class="settings-page" hidden>
         <button id="btnOutboxRefresh" data-header-action class="icon-button" type="button" aria-label="刷新待发送" title="刷新待发送"><span data-icon="refresh-cw"></span></button>

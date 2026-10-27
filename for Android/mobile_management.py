@@ -14,6 +14,7 @@ import httpx
 from mobile_connections import MobileConnections, unavailable_reason
 from mobile_delivery import MobileOutbox
 from mobile_evaluation import MobileEvaluations
+from mobile_link import MobileLink
 from mobile_local_models import (
     get_local_engine_bridge,
     local_model_diagnostics,
@@ -37,6 +38,12 @@ class MobileManagement:
         path = data / "mobile-management.db"
         self.connections = MobileConnections(path)
         self.outbox = MobileOutbox(path, self.connections, on_finished=self._handoff_finished)
+        # Device link 2: what paired computers send this phone, and what is done with them from here.
+        self.link = MobileLink(
+            path, self.connections, self.outbox, workspace=root, data=data, runtime=runtime,
+            controller=controller, notify=self._link_notice, knowledge=self.knowledge,
+            discover=self._discover_computers,
+        )
         self.workflows = MobileWorkflows(path)
         self.evaluations = MobileEvaluations(path)
         self.schedules = MobileScheduleManager(controller, data / "mobile-schedules.json")
@@ -70,6 +77,77 @@ class MobileManagement:
         }, ensure_ascii=False))
 
     @staticmethod
+    def _link_notice(notice):
+        """What a paired computer sent, shown as a quiet notification (DeviceLinkNotices words it)."""
+        if os.getenv("AGENT_WORKSPACE_EMBEDDED_PYTHON") != "chaquopy":
+            return
+        import json
+
+        from java import jclass
+
+        with suppress(Exception):
+            jclass("com.agentworkspace.mobile.embedded.DeviceLinkNotices").execute(json.dumps(notice, ensure_ascii=False))
+
+    @staticmethod
+    def _discover_computers(seconds):
+        """Computers announcing the phone connection on this network (ComputerDiscovery, NSD)."""
+        if os.getenv("AGENT_WORKSPACE_EMBEDDED_PYTHON") != "chaquopy":
+            return []
+        import json
+
+        from java import jclass
+
+        found = json.loads(str(jclass("com.agentworkspace.mobile.devices.ComputerDiscovery").discoverJson(
+            int(seconds * 1000))))
+        return [item for item in found if isinstance(item, dict)] if isinstance(found, list) else []
+
+    async def _link_post(self, action, payload):
+        """Device link 2 requests from the computer pages (docs/DEVICE_LINK_V2.md)."""
+        link, host_id = self.link, payload.get("host_id")
+        if action == "refresh":
+            return 200, link.refresh(host_id)
+        if action == "approve":
+            return 200, await link.approve(host_id, payload.get("request_id"), payload.get("decision"))
+        if action == "stop":
+            return 200, await link.stop(host_id, payload.get("session_id"))
+        # Transfers and syncing can outlast a page request: they run on, and the page asks how far
+        # they got (GET /mobile/link/operation).
+        if action == "download":
+            return 202, link.start(host_id, action, lambda: link.download(host_id, payload.get("path")))
+        if action == "send-files":
+            return 202, link.start(host_id, action, lambda: link.send_files(
+                host_id, payload.get("files"), knowledge=payload.get("knowledge"),
+                instruction=payload.get("instruction"), session_id=payload.get("session_id"),
+            ))
+        if action == "send-text":
+            return 200, await link.send_text(host_id, payload.get("text"), payload.get("kind", "text"))
+        if action == "relay":
+            return 202, link.start(host_id, action, lambda: link.relay(
+                host_id, payload.get("session_id"), payload.get("prompt")))
+        if action == "new-task":
+            return 202, link.start(host_id, action, lambda: link.new_task(
+                host_id, payload.get("prompt"), payload.get("confirmed")))
+        if action == "job":
+            return 200, await link.decide_job(
+                host_id, payload.get("job_id"), payload.get("decision"), approve_all=payload.get("approve_all") is True
+            )
+        if action == "settings":
+            return 200, await link.set_jobs(host_id, payload.get("jobs"))
+        if action == "kb-pairs":
+            return 200, link.set_pairs(host_id, payload.get("pairs"))
+        if action == "kb-sync":
+            return 202, link.start(host_id, action, lambda: link.sync_knowledge(host_id))
+        if action == "read-runs":
+            return 200, await link.read_runs(host_id, payload.get("run_ids"))
+        if action == "wake":
+            return 200, await link.wake(host_id)
+        if action == "use-address":
+            return 200, self.connections.use_address(host_id, payload.get("url"))
+        if action == "retry-transfer":
+            return 200, link.retry_transfer(host_id, payload.get("transfer_id"))
+        return None
+
+    @staticmethod
     async def system(request):
         from android_adapter.android_system import execute_android_system_request
 
@@ -93,8 +171,26 @@ class MobileManagement:
         self._job = asyncio.create_task(self._run(), name="mobile-management")
 
     async def _run(self):
-        await asyncio.gather(self.schedules.run(), self.outbox.run(), self._mirror_loop(), self._app_watch_loop(),
-                             self._calendar_loop())
+        await asyncio.gather(*(self._keep(loop) for loop in (
+            self.schedules.run, self.outbox.run, self.link.run, self._mirror_loop, self._app_watch_loop,
+            self._calendar_loop,
+        )))
+
+    @staticmethod
+    async def _keep(loop):
+        """A background loop that stops on an unexpected error starts again after a pause; it would
+        otherwise stay stopped (no handed-over results, no computer read) until the engine restarts."""
+        while True:
+            try:
+                await loop()
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                import logging
+
+                logging.getLogger(__name__).exception("background loop %s stopped; starting it again", loop.__name__)
+                await asyncio.sleep(10)
 
     async def _mirror_loop(self):
         while True:
@@ -462,11 +558,25 @@ class MobileManagement:
         if path == "/mobile/schedules":
             return 200, self.schedules.snapshot()
         if path == "/mobile/connections":
+            status = self.link.summary()
             return 200, {
-                "hosts": self.connections.list(),
+                "hosts": [{**host, "link": status.get(host["host_id"])} for host in self.connections.list()],
                 "data_location": "phone",
                 "workspace": str(self.runtime.service._execution_workspace),
             }
+        if path.startswith("/mobile/link/"):
+            host_id = query.get("host_id", [""])[0]
+            action = path.removeprefix("/mobile/link/")
+            if action == "computer":
+                return 200, self.link.computer(host_id)
+            if action == "operation":
+                return 200, self.link.operation(query.get("id", [""])[0])
+            if action == "files":
+                return 200, await self.link.browse(host_id, query.get("path", [""])[0])
+            if action == "knowledge":
+                return 200, await self.link.knowledge_bases(host_id)
+            if action == "device":
+                return 200, await self.link.remote_device(host_id)
         if path == "/mobile/connections/sessions":
             return 200, await self.connections.sessions(query.get("host_id", [""])[0])
         if path == "/mobile/connections/events":
@@ -1181,13 +1291,20 @@ class MobileManagement:
         if path == "/mobile/connections/pair-code":
             return 201, await self.connections.pair_with_code(payload)
         if path == "/mobile/connections/remove":
-            if any(
-                job["host_id"] == payload.get("host_id")
-                and job["state"] in {"pending", "sending", "submitted", "uncertain"}
-                for job in self.outbox.list()
-            ):
-                raise ValueError("cancel or reconcile outgoing requests before removing the host")
-            return 200, {"ok": self.connections.remove(payload.get("host_id"))}
+            host_id = payload.get("host_id")
+            self.connections.get(host_id)
+            waiting = self.outbox.unsettled(host_id)
+            if waiting and payload.get("force") is not True:
+                # Said first: removing it means those results never come back. The page asks.
+                return 200, {"ok": False, "unsettled": waiting}
+            # The computer forgets this phone too when it can be told; otherwise the user is told to.
+            told = await self.connections.unpair_remote(host_id)
+            self.outbox.abandon(host_id)
+            removed = self.connections.remove(host_id)
+            self.link.forget(host_id)
+            return 200, {"ok": removed, "computer_told": told}
+        if path.startswith("/mobile/link/"):
+            return await self._link_post(path.removeprefix("/mobile/link/"), payload)
         if path == "/mobile/outbox":
             return 201, self.outbox.enqueue(payload)
         if path == "/mobile/outbox/send":

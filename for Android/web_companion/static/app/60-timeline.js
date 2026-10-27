@@ -253,7 +253,7 @@
     web_search: t("联网搜索"), web_fetch: t("读取网页"), read_document: t("读取文档"), render_pdf: t("查看 PDF 页面"),
     create_pdf: t("生成 PDF"), create_docx: t("生成 Word 文档"), create_xlsx: t("生成表格"),
     use_skill: t("使用技能"), save_skill: t("保存技能"),
-    run_subagents: t("分给子任务"),
+    run_subagents: t("分给子任务"), ask_computer: t("交给电脑做"),
     active_notifications: t("查看通知"), notification_reply: t("回复通知"), notification_open: t("打开通知"),
     app_audit: t("应用体检"), manage_app: t("处理应用"),
     compose_sms: t("写好短信"), system_settings: t("调整手机设置"), system_status: t("查看手机状态"),
@@ -284,6 +284,7 @@
     if (args && name === "use_skill" && args.skill) return t("使用技能「{0}」", short(args.skill));
     if (args && name === "web_search" && args.query) return t("搜索「{0}」", short(args.query));
     if (args && name === "run_subagents" && Array.isArray(args.tasks)) return t("分给 {0} 个子任务", args.tasks.length);
+    if (args && name === "ask_computer" && args.task) return t("让电脑做：{0}", short(args.task, 40));
     if (args && name === "notification_reply" && args.to) return t("回复「{0}」", short(args.to));
     if (args && name === "manage_app" && args.page) return `${appCheckActionName(args.page)} · ${short(args.package_name)}`;
     if (args && ["read_file", "write_file", "append_file", "read_document", "create_pdf", "create_docx", "create_xlsx"].includes(name) && args.path) {

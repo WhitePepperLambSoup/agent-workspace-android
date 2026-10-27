@@ -306,6 +306,11 @@ def configure_android_registry(
         from mobile_subagents import RunSubagentsTool
 
         factories["run_subagents"] = RunSubagentsTool
+        # A part of the task handed to a paired computer (mobile_link, docs/DEVICE_LINK_V2.md 2.10).
+        from .computer_tools import AskComputerTool, computer_tools_available
+
+        if computer_tools_available():
+            factories["ask_computer"] = AskComputerTool
         if workspace is not None:
             factories["knowledge_add"] = lambda: KnowledgeAddTool(workspace)
     documents = document_status()

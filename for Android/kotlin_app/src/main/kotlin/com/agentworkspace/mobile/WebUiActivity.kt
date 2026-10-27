@@ -284,6 +284,160 @@ class WebUiActivity : ComponentActivity() {
         }
     }
 
+    // Files for a paired computer (docs/DEVICE_LINK_V2.md 2.7): picked, photographed, or shared to
+    // "Send to computer" from another app. ComputerSend stages them; the computer page lists them and
+    // the user sends them there. Nothing leaves the phone from here.
+    @Volatile private var computerPickPending = false
+    private var pendingComputerPhoto: String? = null
+    private val computerFiles = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        stageForComputer(uris)
+    }
+    private val computerPhotos = registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(20)) { uris ->
+        stageForComputer(uris)
+    }
+    private val computerCamera = registerForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
+        val photo = pendingComputerPhoto?.let(::File)
+        pendingComputerPhoto = null
+        if (!saved || photo == null || !photo.isFile || photo.length() == 0L) {
+            photo?.delete()
+            stageForComputer(emptyList())
+            return@registerForActivityResult
+        }
+        stageForComputer(emptyList(), photo)
+    }
+
+    private fun stageForComputer(uris: List<Uri>, photo: File? = null) {
+        if (uris.isEmpty() && photo == null) {
+            computerPickPending = false
+            dispatchPageEvent("agent-computer-files", JSONObject().put("ok", false).put("cancelled", true))
+            return
+        }
+        activityScope.launch {
+            val staged = withContext(Dispatchers.IO) {
+                runCatching { com.agentworkspace.mobile.devices.ComputerSend.stage(this@WebUiActivity, uris, photo) }
+                    .getOrElse { JSONObject().put("ok", false).put("error", it.message ?: "unreadable") }
+            }
+            computerPickPending = false
+            dispatchPageEvent("agent-computer-files", staged)
+        }
+    }
+
+    private fun pickForComputer(kind: String): String {
+        if (!trustedWorkspacePage || isDestroyed || isFinishing) {
+            return JSONObject().put("ok", false).put("error", "Open Device connections first").toString()
+        }
+        if (computerPickPending) return JSONObject().put("ok", false).put("error", "A picker is already open").toString()
+        computerPickPending = true
+        shareHandler.post {
+            try {
+                when (kind) {
+                    "camera" -> {
+                        val folder = File(cacheDir, "camera").apply { mkdirs() }
+                        val photo = File(folder, "photo-${System.currentTimeMillis()}.jpg")
+                        pendingComputerPhoto = photo.absolutePath
+                        computerCamera.launch(androidx.core.content.FileProvider.getUriForFile(this, "$packageName.camera", photo))
+                    }
+                    "photos" -> computerPhotos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                    else -> computerFiles.launch(arrayOf("*/*"))
+                }
+            } catch (failure: Exception) {
+                computerPickPending = false
+                pendingComputerPhoto = null
+                val message = when {
+                    kind != "camera" -> UiText.of(this, "无法打开系统文件选择器", "Could not open the system file picker")
+                    failure is ActivityNotFoundException -> UiText.of(this, "手机上没有可用的相机应用", "No camera app is available")
+                    else -> UiText.of(this, "无法打开相机", "Could not open the camera")
+                }
+                android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_SHORT).show()
+                dispatchPageEvent("agent-computer-files", JSONObject().put("ok", false).put("cancelled", true))
+            }
+        }
+        return JSONObject().put("ok", true).toString()
+    }
+
+    // Shared to "Send to computer" (an alias of this activity in the share menu): staged here, then
+    // the page asks which computer and what to do with it.
+    private var pendingComputerShare: String? = null
+    private var deliveringComputerShare = false
+
+    private fun queueComputerShare(incoming: Intent?): Boolean {
+        if (incoming?.component?.className?.endsWith(".SendToComputer") != true) return false
+        if (incoming.action !in setOf(Intent.ACTION_SEND, Intent.ACTION_SEND_MULTIPLE)) return false
+        val sources = runCatching { com.agentworkspace.mobile.sharing.ShareInboxIntents.readWithWarning(incoming) }.getOrNull()
+        // Handled once; a recreated activity must not stage the same share again.
+        incoming.action = Intent.ACTION_MAIN
+        if (sources == null) return true
+        activityScope.launch {
+            val staged = withContext(Dispatchers.IO) {
+                runCatching { com.agentworkspace.mobile.devices.ComputerSend.stage(this@WebUiActivity, sources.uris) }
+                    .getOrElse { JSONObject().put("ok", false).put("files", org.json.JSONArray()) }
+            }
+            sources.text?.let { staged.put("text", it.take(65536)) }
+            pendingComputerShare = staged.toString()
+            deliverComputerShare()
+        }
+        return true
+    }
+
+    private fun deliverComputerShare() {
+        val share = pendingComputerShare ?: return
+        if (deliveringComputerShare || pendingSessionId != null || isDestroyed || isFinishing ||
+            webView.visibility != View.VISIBLE || !isTrustedConsoleUrl(webView.url ?: return)) return
+        deliveringComputerShare = true
+        webView.evaluateJavascript("(function(){return window.AgentDeviceLink?.receiveShare?.($share) === true;})()") { accepted ->
+            deliveringComputerShare = false
+            if (isDestroyed || isFinishing) return@evaluateJavascript
+            if (pendingComputerShare != share) deliverComputerShare()
+            else if (accepted == "true") pendingComputerShare = null
+            else shareHandler.postDelayed({ deliverComputerShare() }, 500)
+        }
+    }
+
+    // A notification about a paired computer: its page, at the section the notification is about.
+    private var pendingComputer: String? = null
+    private var deliveringComputer = false
+
+    private fun queueComputer(incoming: Intent?) {
+        if (incoming?.action != com.agentworkspace.mobile.embedded.DeviceLinkNotices.ACTION_OPEN_COMPUTER) return
+        val host = runCatching { incoming.getStringExtra(com.agentworkspace.mobile.embedded.DeviceLinkNotices.EXTRA_HOST) }
+            .getOrNull()?.takeIf { it.length in 1..128 } ?: return
+        val section = runCatching { incoming.getStringExtra(com.agentworkspace.mobile.embedded.DeviceLinkNotices.EXTRA_SECTION) }
+            .getOrNull()?.take(20) ?: ""
+        incoming.action = null
+        pendingComputer = JSONObject().put("host_id", host).put("section", section).toString()
+        deliverComputer()
+    }
+
+    private fun deliverComputer() {
+        val target = pendingComputer ?: return
+        if (deliveringComputer || pendingSessionId != null || isDestroyed || isFinishing ||
+            webView.visibility != View.VISIBLE || !isTrustedConsoleUrl(webView.url ?: return)) return
+        deliveringComputer = true
+        webView.evaluateJavascript("(function(){return window.AgentDeviceLink?.openComputer?.($target) === true;})()") { accepted ->
+            deliveringComputer = false
+            if (isDestroyed || isFinishing) return@evaluateJavascript
+            if (pendingComputer != target) deliverComputer()
+            else if (accepted == "true") pendingComputer = null
+            else shareHandler.postDelayed({ deliverComputer() }, 500)
+        }
+    }
+
+    private fun discoverComputers(): String {
+        if (!trustedWorkspacePage || isDestroyed || isFinishing) {
+            return JSONObject().put("ok", false).put("error", "Open Device connections first").toString()
+        }
+        com.agentworkspace.mobile.devices.ComputerDiscovery.discover(this, 5000) { found ->
+            dispatchPageEvent("agent-computers-found", JSONObject().put("computers", org.json.JSONArray(found.map { it.json() })))
+        }
+        return JSONObject().put("ok", true).toString()
+    }
+
+    private fun readClipboardText(): String {
+        val clip = runCatching { getSystemService(android.content.ClipboardManager::class.java)?.primaryClip }.getOrNull()
+        val text = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString()?.take(65536)
+        return JSONObject().put("ok", text != null).put("text", text ?: "").toString()
+    }
+
     private fun queueCameraCapture(): String = shareInboxAccess {
         val batch = UUID.randomUUID().toString()
         synchronized(shareInboxPickerLock) {
@@ -651,6 +805,10 @@ class WebUiActivity : ComponentActivity() {
         pendingPairingPhoto = savedInstanceState?.getString("pending-pairing-photo")
         pairingScanPending = pendingPairingPhoto != null
         pendingPairingLink = savedInstanceState?.getString("pending-pairing-link")
+        pendingComputerPhoto = savedInstanceState?.getString("pending-computer-photo")
+        computerPickPending = pendingComputerPhoto != null
+        pendingComputerShare = savedInstanceState?.getString("pending-computer-share")
+        pendingComputer = savedInstanceState?.getString("pending-computer")
         WindowCompat.setDecorFitsSystemWindows(window, false)
         workspaceFileActions = WorkspaceFileActionController(this, activityScope,
             trustedPage = { trustedWorkspacePage && !isDestroyed && !isFinishing },
@@ -757,6 +915,9 @@ class WebUiActivity : ComponentActivity() {
                 requestCalendarAccessAction = { requestCalendarAccess() },
                 personalAccessAction = { requestPersonalAccess(it) },
                 pairingScanAction = { camera -> scanPairingQr(camera) },
+                computerPickAction = { kind -> pickForComputer(kind) },
+                computerDiscoverAction = { discoverComputers() },
+                clipboardTextAction = { readClipboardText() },
             ), "AndroidBridge")
 
             webChromeClient = object : WebChromeClient() {
@@ -868,6 +1029,8 @@ class WebUiActivity : ComponentActivity() {
                             deliverSharedText()
                             deliverQuickAsk()
                             deliverPairingLink()
+                            deliverComputerShare()
+                            deliverComputer()
                             if (voicePending) { voicePending = false; launchVoiceInput() }
                             requestTaskNotificationPermissionOnce()
                         }
@@ -1001,9 +1164,10 @@ class WebUiActivity : ComponentActivity() {
         queueSessionNavigation(intent)
         queueAppCheck(intent)
         queuePairingLink(intent)
+        queueComputer(intent)
         pendingQuickAsk = savedInstanceState?.getString("pending-quick-ask")
         if (savedInstanceState == null) queueQuickAsk(intent)
-        shareInbox.captureIntent(intent, incomingShareBatchId)
+        if (!queueComputerShare(intent)) shareInbox.captureIntent(intent, incomingShareBatchId)
         voicePending = intent?.getBooleanExtra("voice_input", false) == true || intent?.action in listOf(Intent.ACTION_ASSIST, Intent.ACTION_VOICE_COMMAND)
         QuickEntry.publishShortcuts(this)
         initAndLaunchEngine()
@@ -1105,9 +1269,10 @@ class WebUiActivity : ComponentActivity() {
         queueSessionNavigation(intent)
         queueAppCheck(intent)
         queuePairingLink(intent)
+        queueComputer(intent)
         queueQuickAsk(intent)
         incomingShareBatchId = UUID.randomUUID().toString()
-        shareInbox.captureIntent(intent, incomingShareBatchId)
+        if (!queueComputerShare(intent)) shareInbox.captureIntent(intent, incomingShareBatchId)
         if (intent.getBooleanExtra("voice_input", false) || intent.action in listOf(Intent.ACTION_ASSIST, Intent.ACTION_VOICE_COMMAND)) {
             if (webView.visibility == View.VISIBLE) launchVoiceInput() else voicePending = true
         }
@@ -1135,6 +1300,9 @@ class WebUiActivity : ComponentActivity() {
         outState.putString("pending-camera-photo", pendingCameraPhoto)
         outState.putString("pending-pairing-photo", pendingPairingPhoto)
         outState.putString("pending-pairing-link", pendingPairingLink)
+        outState.putString("pending-computer-photo", pendingComputerPhoto)
+        outState.putString("pending-computer-share", pendingComputerShare)
+        outState.putString("pending-computer", pendingComputer)
         outState.putString("pending-pick-batch", pendingPickBatch)
         if (::workspaceFileActions.isInitialized) workspaceFileActions.saveState()?.let {
             outState.putBundle("workspace-file-save", it)
@@ -1215,6 +1383,8 @@ class WebUiActivity : ComponentActivity() {
             deliverSharedText()
             deliverQuickAsk()
             deliverPairingLink()
+            deliverComputerShare()
+            deliverComputer()
             checkEngineOnResume()
             // Back from the overlay permission screen: show the ball now that it may draw.
             FloatingBallService.onAppResumed(this)
