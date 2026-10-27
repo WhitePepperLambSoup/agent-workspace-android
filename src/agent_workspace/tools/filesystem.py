@@ -16,6 +16,7 @@ from uuid import uuid4
 from agent_workspace.core.events import Event
 from agent_workspace.core.models import Capability, FileCheckpoint, ToolSpec
 from agent_workspace.storage.durable import durable_replace, fsync_directory
+from agent_workspace.storage.file_versions import FileVersions
 
 if TYPE_CHECKING:
     from agent_workspace.application.ports import ToolExecutionContext
@@ -638,8 +639,12 @@ class WriteFileTool:
         durable_preimage_checkpoint=True,
     )
 
-    def __init__(self, workspace: WorkspacePaths | StrPath) -> None:
+    def __init__(
+        self, workspace: WorkspacePaths | StrPath, versions: FileVersions | None = None
+    ) -> None:
         self.paths = _workspace_paths(workspace)
+        # Where replaced content is kept, so files can be put back to before a message.
+        self.versions = versions
 
     @property
     def spec(self) -> ToolSpec:
@@ -660,6 +665,8 @@ class WriteFileTool:
         expected = expected_sha256(arguments)
         path = self.paths.resolve(raw_path)
         preimage = _read_preimage(path, expected, _MAX_EDIT_BYTES)
+        if self.versions is not None and preimage is not None:
+            await asyncio.to_thread(self.versions.keep, preimage)
         relative = self.paths.relative(path)
         postimage_digest = sha256_bytes(content)
         await context.prepare_file_checkpoint(
@@ -685,6 +692,7 @@ class WriteFileTool:
                     "path": relative,
                     "sha256": postimage_digest,
                     "bytes": len(content),
+                    "previous_sha256": expected,
                 },
                 causation_id=context.started_event_id,
                 correlation_id=context.correlation_id,

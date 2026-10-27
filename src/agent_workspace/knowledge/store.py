@@ -10,7 +10,7 @@ available; other text is indexed as words. Search ranks passages with BM25, then
 cover enough of the query's informative terms, so an unrelated request does not drag random
 passages into the prompt.
 
-This is the engine of the Android app's knowledge base (``for Android/mobile_knowledge.py``)
+This is the engine of the Android app's knowledge base (``mobile_knowledge.py`` in its sources)
 without its on-device embedding model; scanned PDF pages are read when an OCR function is given.
 """
 
@@ -1427,6 +1427,131 @@ class KnowledgeStore:
             )
         finally:
             draft.unlink(missing_ok=True)
+
+    def extracted(self, document_id: object) -> dict[str, Any]:
+        """A ready document's passages, as a paired phone's knowledge base takes them: the
+        original file is not kept after indexing, so the passages are what is shared."""
+        document = self.document(document_id)
+        if document["state"] != "ready":
+            raise KnowledgeError("this document is not ready yet")
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT page, heading, text FROM passages WHERE document_id = ? ORDER BY ordinal",
+                (document["id"],),
+            ).fetchall()
+        return {
+            "id": document["id"],
+            "title": document["title"],
+            "sha256": document["sha256"],
+            "origin": document["origin"],
+            "origin_path": document["origin_path"],
+            "pages": document["pages"],
+            "passages": [
+                {"page": row["page"], "heading": row["heading"], "text": row["text"]}
+                for row in rows
+            ],
+        }
+
+    def collection_named(self, name: object) -> str:
+        """The id of the knowledge base with this name (the default one for ""), made if new."""
+        if not isinstance(name, str):
+            raise KnowledgeError("a knowledge base name is required")
+        wanted = " ".join(name.split())
+        if not wanted or wanted.casefold() in _DEFAULT_ALIASES:
+            return DEFAULT_COLLECTION
+        for collection in self.collections():
+            if str(collection.get("name") or "").casefold() == wanted.casefold():
+                return str(collection["id"])
+        return str(self.create_collection(wanted)["id"])
+
+    def add_extracted(
+        self, source: object, *, collection_id: object = None, origin: str = "phone"
+    ) -> dict[str, Any]:
+        """A document from a paired phone, already split into passages: added ready, with no
+        file to read. The same content (by the original file's SHA-256) is kept once."""
+        if not isinstance(source, dict):
+            raise KnowledgeError("the document from the phone is malformed")
+        title = " ".join(str(source.get("title") or "").split())[:300]
+        sha256 = str(source.get("sha256") or "").lower()
+        passages = source.get("passages")
+        if not title or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+            raise KnowledgeError("the document from the phone is malformed")
+        if not isinstance(passages, list) or not passages or len(passages) > 100_000:
+            raise KnowledgeError("the document from the phone has no passages")
+        rows: list[tuple[int | None, str, str]] = []
+        chars = 0
+        for item in passages:
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("text"), str)
+                or not item["text"].strip()
+            ):
+                raise KnowledgeError("the document from the phone is malformed")
+            page = item.get("page")
+            if page is not None and (
+                not isinstance(page, int) or isinstance(page, bool) or page < 0
+            ):
+                raise KnowledgeError("the document from the phone is malformed")
+            heading = " ".join(str(item.get("heading") or "").split())[:300]
+            chars += len(item["text"])
+            if chars > MAX_DOCUMENT_CHARS:
+                raise KnowledgeError("the document from the phone is too long")
+            rows.append((page, heading, item["text"]))
+        raw_pages = source.get("pages")
+        pages = (
+            raw_pages if isinstance(raw_pages, int) and not isinstance(raw_pages, bool) else None
+        )
+        raw_origin_path = source.get("origin_path")
+        origin_path = raw_origin_path if isinstance(raw_origin_path, str) else None
+        collection_id = collection_id or DEFAULT_COLLECTION
+        with self._lock, self._connect() as db:
+            if (
+                db.execute("SELECT 1 FROM collections WHERE id = ?", (collection_id,)).fetchone()
+                is None
+            ):
+                raise KnowledgeError("there is no such knowledge base")
+            existing = db.execute(
+                "SELECT * FROM documents WHERE sha256 = ? AND state != 'failed'", (sha256,)
+            ).fetchone()
+            if existing is not None:
+                return {**self._document(existing), "duplicate": True}
+            count = db.execute("SELECT COUNT(*) FROM documents WHERE state != 'failed'").fetchone()[
+                0
+            ]
+            if count >= MAX_DOCUMENTS:
+                raise KnowledgeError(
+                    f"the knowledge base is full ({MAX_DOCUMENTS} documents); remove some first"
+                )
+            document_id = "k" + uuid.uuid4().hex[:12]
+            stamp = _now()
+            db.execute(
+                """
+                    INSERT INTO documents (id, title, filename, suffix, media_type, size_bytes,
+                        sha256, origin, origin_path, state, progress, pages, passages, chars,
+                        created_at, updated_at, collection_id)
+                    VALUES (?, ?, ?, '', 'text/plain', ?, ?, ?, ?, 'ready', 1, ?, ?, ?, ?, ?, ?)
+                    """,
+                (
+                    document_id, title, title,
+                    sum(len(text.encode("utf-8")) for _, _, text in rows), sha256,
+                    origin, origin_path, pages, len(rows), chars, stamp, stamp, collection_id,
+                ),
+            )  # fmt: skip
+            for ordinal, (page, heading, text) in enumerate(rows):
+                cursor = db.execute(
+                    "INSERT INTO passages (document_id, ordinal, page, heading, text) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (document_id, ordinal, page, heading, text),
+                )
+                db.execute(
+                    "INSERT INTO passage_index (rowid, title, body) VALUES (?, ?, ?)",
+                    (
+                        cursor.lastrowid,
+                        " ".join(tokens(f"{title} {heading}")),
+                        " ".join(tokens(text)),
+                    ),
+                )
+        return self.document(document_id)
 
     def delete(self, document_id: object) -> None:
         with self._lock:

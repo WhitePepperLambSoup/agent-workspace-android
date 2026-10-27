@@ -112,6 +112,13 @@ class GatewayServer:
                 # Copying large files, or fetching a web page, would hold up the window.
                 "knowledge.add",
                 "knowledge.search",
+                "document.preview",
+                # Reading a month of usage, moving a batch back or scanning watched folders.
+                "usage.bill",
+                "session.rewind",
+                "files.batches.undo",
+                "knowledge.watch.add",
+                "knowledge.watch.scan",
             }
             and concurrent_commands
         ):

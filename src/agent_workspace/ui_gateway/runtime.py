@@ -6,8 +6,10 @@ import hashlib
 import hmac
 import inspect
 import json
+import logging
 import math
 import os
+import queue
 import re
 import shutil
 import sqlite3
@@ -15,7 +17,7 @@ import stat
 import subprocess
 import threading
 import time
-from collections.abc import Awaitable, Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Future
 from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, is_dataclass, replace
@@ -31,8 +33,9 @@ from agent_workspace.application.agent_control import AgentControlError, AgentCo
 from agent_workspace.application.cost_estimate import project, recent_calls
 from agent_workspace.application.github_delivery import GitHubDeliveryError, GitHubDeliveryService
 from agent_workspace.application.review_workflow import ReviewWorkflowError, ReviewWorkflowService
+from agent_workspace.application.rewind import rewind_files
 from agent_workspace.application.runtime_host import RuntimeHost, RuntimeSettings
-from agent_workspace.application.scheduler import ScheduledTaskConfigError, ScheduleStore
+from agent_workspace.application.usage_bill import current_month, month_bill
 from agent_workspace.config import (
     ProviderConfig,
     ProviderProtocol,
@@ -99,9 +102,14 @@ from agent_workspace.knowledge import (
     knowledge_store,
 )
 from agent_workspace.knowledge import error_code as knowledge_error_code
+from agent_workspace.knowledge.watch import FolderWatch, suggested_folders
 from agent_workspace.policy.redaction import Redactor
 from agent_workspace.providers import create_provider
-from agent_workspace.providers.health import ProviderHealthResult, provider_health_check
+from agent_workspace.providers.health import (
+    ProviderHealthResult,
+    provider_capabilities,
+    provider_health_check,
+)
 from agent_workspace.providers.reasoning import supported_reasoning_efforts
 from agent_workspace.settings import (
     ProviderProfile,
@@ -118,19 +126,34 @@ from agent_workspace.storage import (
     export_session,
     import_session_archive,
 )
+from agent_workspace.storage.file_versions import FileVersions
 from agent_workspace.storage.lock import ProcessWriteLockGroup
-from agent_workspace.tools.base import ConcurrentModificationError, ToolError
+from agent_workspace.tools.base import ConcurrentModificationError, ToolArgumentError, ToolError
 from agent_workspace.tools.custom import CustomToolError, load_custom_tool_definitions
+from agent_workspace.tools.delegation import SubagentLaunchError, SubagentOutcome, SubagentTask
+from agent_workspace.tools.file_batches import (
+    UNDOABLE_STATES,
+    FileBatch,
+    FileBatchError,
+    FileBatchStore,
+    undo_batch,
+)
 from agent_workspace.tools.filesystem import _open_identity_checked, atomic_write, sha256_bytes
 from agent_workspace.tools.mcp_host import McpHostError, load_mcp_servers
-from agent_workspace.tools.paths import WorkspacePaths
+from agent_workspace.tools.office_preview import PreviewError, preview_office
+from agent_workspace.tools.paths import WorkspacePathError, WorkspacePaths
+from agent_workspace.tools.phone_jobs import PhoneJobOutcome, PhoneJobRequest
 from agent_workspace.tools.terminal_sessions import TerminalSessionError
+from agent_workspace.ui_gateway.device_hub import DeviceHub, model_location
 from agent_workspace.ui_gateway.device_link import (
     DeviceLink,
     DeviceLinkError,
     DeviceTask,
     PairedDevice,
+    TaskOptions,
+    Upload,
 )
+from agent_workspace.ui_gateway.device_store import DeviceStoreError, PhoneJob
 from agent_workspace.ui_gateway.fork import ForkError, comparison, fork_conversation, fork_marker
 from agent_workspace.ui_gateway.protocol import (
     MAX_MESSAGE_BYTES,
@@ -138,6 +161,14 @@ from agent_workspace.ui_gateway.protocol import (
     CommandEnvelope,
     ProtocolError,
     encode_message,
+)
+from agent_workspace.ui_gateway.schedules import (
+    CATCH_UP_WINDOW,
+    OPEN_RUN_STATES,
+    Schedule,
+    ScheduleBook,
+    ScheduleRuleError,
+    ScheduleRun,
 )
 from agent_workspace.ui_gateway.transcription import decode_recording, transcribe
 
@@ -169,6 +200,10 @@ _MAX_TASKS_PER_SESSION = 500
 _MAX_TASK_POSITION = 1_000_000
 _MAX_PARALLEL_AGENT_RUNS = 4
 _MAX_AGENT_RUN_CONTINUATIONS = 8
+# How often a conversation waiting on its sub-agents looks at them, and how much of each
+# sub-agent's final answer goes back to it.
+_DELEGATION_POLL_SECONDS = 1.0
+_DELEGATION_ANSWER_CHARS = 6_000
 _MAX_PROVIDER_NAME_CHARS = 128
 _MAX_PROVIDER_BASE_URL_CHARS = 2_048
 _MAX_PROVIDER_MODEL_CHARS = 512
@@ -186,10 +221,16 @@ _DEVICE_COMMANDS = frozenset(
         "devices.pairing.start",
         "devices.token.create",
         "devices.revoke",
+        "devices.update",
+        "devices.reset",
+        "devices.send",
+        "devices.firewall.allow",
     }
 )
 # A phone reads recent messages only; long replies are cut for the phone's screen.
 _DEVICE_EVENT_LIMIT = 200
+# Finished scheduled runs and waiting approvals one inbox request returns.
+_DEVICE_INBOX_LIMIT = 50
 _DEVICE_CONTENT_CHARS = 20_000
 _DEVICE_RESULT_CHARS = 64 * 1024
 # A runtime started for a phone's task stops once its work is done and this long has passed.
@@ -199,6 +240,13 @@ _DEVICE_TURN_ENDS = {
     "turn.failed": "failed",
     "turn.cancelled": "cancelled",
 }
+# Phones' tasks waiting for their message to show, per conversation.
+_DEVICE_PENDING_ORIGINS = 20
+# What a phone's task is doing right now (GET /mobile/tasks/{id} "activity").
+_DEVICE_ACTIVITY_CHARS = 120
+_DEVICE_ACTIVITY_ARGUMENTS = ("command", "path", "url", "query", "task", "title", "source")
+# Latest answers kept per running turn, for the finished-turn summaries phones see.
+_TURN_ANSWERS_KEPT = 64
 _KNOWLEDGE_COMMANDS = frozenset(
     {
         "knowledge.status",
@@ -214,6 +262,47 @@ _KNOWLEDGE_COMMANDS = frozenset(
         "knowledge.search",
     }
 )
+_SCHEDULE_COMMANDS = frozenset(
+    {
+        "schedules.list",
+        "schedules.save",
+        "schedules.delete",
+        "schedules.run",
+        "schedules.runs",
+        "schedules.read",
+    }
+)
+_FILE_BATCH_COMMANDS = frozenset({"files.batches.list", "files.batches.undo"})
+_USAGE_COMMANDS = frozenset({"usage.bill", "usage.cap.set"})
+_WATCH_COMMANDS = frozenset(
+    {
+        "knowledge.watch.list",
+        "knowledge.watch.add",
+        "knowledge.watch.remove",
+        "knowledge.watch.scan",
+    }
+)
+# A month-to-date cost is read again after this long; the monthly cap checks it per task.
+_MONTH_COST_SECONDS = 60.0
+_MAX_MONTHLY_CAP_USD = 100_000.0
+# Changes of a file batch listed in its approval; the rest are counted.
+_APPROVAL_PLAN_ITEMS = 100
+# How often the gateway looks for due scheduled tasks, and how much of an answer a run keeps.
+_SCHEDULE_TICK_SECONDS = 15.0
+_SCHEDULE_RESULT_CHARS = 4000
+# Office files larger than this are not previewed in the window.
+_DOCUMENT_PREVIEW_BYTES = 64 * 1024 * 1024
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_LOGGER = logging.getLogger(__name__)
+
+
+def _is_directory(path: str) -> bool:
+    try:
+        return Path(path).expanduser().is_dir()
+    except OSError:
+        return False
+
+
 # Files picked or dropped at once on the Knowledge page.
 _KNOWLEDGE_MAX_FILES = 50
 _KNOWLEDGE_SEARCH_LIMIT = 8
@@ -272,6 +361,8 @@ _DISPLAY_FIELDS = frozenset(
         "reasoning",
         "result",
         "resources",
+        # A turn a phone handed over, or a conversation it handed over (device link 2).
+        "origin",
     }
 )
 _SAFE_HISTORY_TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
@@ -285,9 +376,17 @@ _SAFE_HISTORY_TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
     "make_directory": frozenset({"path"}),
     "move_path": frozenset({"source", "destination"}),
     "delete_path": frozenset({"path", "recursive"}),
+    # Office files: which file, and whether one was replaced (the window offers a comparison).
+    "create_docx": frozenset({"path", "expected_sha256"}),
+    "edit_docx": frozenset({"path", "expected_sha256"}),
+    "create_xlsx": frozenset({"path", "expected_sha256"}),
+    "update_xlsx": frozenset({"path", "sheet", "expected_sha256"}),
+    "create_pptx": frozenset({"path", "expected_sha256"}),
+    "organize_files": frozenset({"summary"}),
+    "phone_task": frozenset({"task", "operate_phone", "device"}),
 }
 _APPROVAL_DISPLAY_FIELDS = frozenset(
-    {"tool", "toolName", "name", "summary", "supportsSessionScope"}
+    {"tool", "toolName", "name", "summary", "supportsSessionScope", "plan", "planTotal"}
 )
 _COMPACT_CHANGE_EVENTS = frozenset(
     {"sandbox.changeset.created", "sandbox.change.applied", "sandbox.change.reviewed"}
@@ -308,6 +407,41 @@ def _approval_display_text(value: object) -> str | None:
     ):
         return None
     return text
+
+
+def _plan_text(value: object) -> str | None:
+    """A workspace path for an approval's list of changes (names may say 'token')."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or len(text) > 260 or any(ord(char) < 32 for char in text):
+        return None
+    return text if Redactor().redact(text) == text else None
+
+
+def _approval_plan(data: Mapping[str, object]) -> tuple[list[dict[str, str]], int] | None:
+    """Every change of a file batch, for the user to read before approving it."""
+    tool = data.get("tool") or data.get("toolName") or data.get("name")
+    arguments = data.get("arguments")
+    if tool != "organize_files" or not isinstance(arguments, Mapping):
+        return None
+    operations = arguments.get("operations")
+    if not isinstance(operations, list) or not operations:
+        return None
+    plan: list[dict[str, str]] = []
+    for operation in operations[:_APPROVAL_PLAN_ITEMS]:
+        if not isinstance(operation, Mapping):
+            continue
+        action = operation.get("action")
+        path = _plan_text(operation.get("path"))
+        if action not in {"move", "copy", "recycle", "make_folder"} or path is None:
+            continue
+        item = {"action": str(action), "path": path}
+        target = _plan_text(operation.get("to"))
+        if target is not None:
+            item["to"] = target
+        plan.append(item)
+    return (plan, len(operations)) if plan else None
 
 
 def _approval_summary(data: Mapping[str, object]) -> str | None:
@@ -334,6 +468,28 @@ def _approval_summary(data: Mapping[str, object]) -> str | None:
             command = "process (details hidden)"
         cwd = _approval_display_text(args.get("cwd"))
         return f"Command: {command}" + (f" in {cwd}" if cwd else "")
+    if tool == "organize_files":
+        operations = args.get("operations")
+        if isinstance(operations, list) and operations:
+            return f"Organize files: {len(operations)} changes"
+    if tool == "delegate_tasks":
+        tasks = args.get("tasks")
+        if isinstance(tasks, list) and tasks:
+            titles = [
+                title
+                for task in tasks
+                if isinstance(task, Mapping)
+                and (title := _approval_display_text(task.get("title")))
+            ]
+            text = f"Sub-agents ({len(tasks)}): " + ", ".join(titles)
+            return text if len(text) <= 160 else text[:157] + "..."
+    if tool == "phone_task":
+        task = args.get("task")
+        if isinstance(task, str) and task.strip():
+            # The whole request is shown on the phone; the window shows its start.
+            line = " ".join(task.split())
+            text = f"Ask the phone: {line[:120]}{'...' if len(line) > 120 else ''}"
+            return _approval_display_text(text) or "Ask the phone to do something"
     if tool == "move_path":
         source = _approval_display_text(args.get("source"))
         destination = _approval_display_text(args.get("destination"))
@@ -386,6 +542,7 @@ class Host(Protocol):
         reasoning_effort: str | None = None,
         model: str | None = None,
         limits: TaskLimits | None = None,
+        plan_only: bool = False,
     ) -> Future[None]: ...
 
     def optimize_prompt(
@@ -535,6 +692,107 @@ class _RunHostEntry:
     continuation_count: int = 0
     last_result_digest: str | None = None
     no_progress_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _Delegation:
+    """An agent run a conversation started with delegate_tasks."""
+
+    parent_session_id: str
+    title: str
+
+
+class _GatewaySubagents:
+    """The delegate_tasks launcher: each task runs as one of this gateway's agent runs."""
+
+    def __init__(self, gateway: GatewayRuntime) -> None:
+        self._gateway = gateway
+
+    async def run_tasks(
+        self, parent_session_id: str, tasks: Sequence[SubagentTask]
+    ) -> list[SubagentOutcome]:
+        return await self._gateway._run_delegated_tasks(parent_session_id, tasks)
+
+
+class _GatewayPhoneJobs:
+    """The phone_task launcher: requests go to a paired phone's inbox as phone jobs.
+
+    Called from runtime threads, so nothing here waits for the gateway lock except the
+    window's notice of a job's state, which is queued from a worker thread."""
+
+    _OFFERED_SECONDS = 5.0
+
+    def __init__(self, gateway: GatewayRuntime) -> None:
+        self._gateway = gateway
+        self._offered: tuple[float, bool] | None = None
+
+    def _devices(self) -> list[PairedDevice]:
+        link = self._gateway._device_link
+        if not link.settings()["enabled"]:
+            return []
+        return [device for device in link.registry.list() if device.accepts_jobs]
+
+    def offered(self) -> bool:
+        now = time.monotonic()
+        cached = self._offered
+        if cached is None or now - cached[0] > self._OFFERED_SECONDS:
+            with suppress(OSError, ValueError):
+                cached = self._offered = (now, bool(self._devices()))
+        return cached is not None and cached[1]
+
+    def submit(self, request: PhoneJobRequest) -> PhoneJobOutcome:
+        devices = self._devices()
+        if not devices:
+            raise ToolError("no paired phone takes requests from this computer right now")
+        if request.device is None:
+            if len(devices) > 1:
+                names = ", ".join(device.name for device in devices)
+                raise ToolArgumentError(f"several phones take requests; name one: {names}")
+            device = devices[0]
+        else:
+            wanted = request.device.casefold()
+            matches = [
+                item
+                for item in devices
+                if item.device_id == request.device or item.name.casefold() == wanted
+            ]
+            if len(matches) != 1:
+                names = ", ".join(item.name for item in devices)
+                raise ToolArgumentError(f"name one of the phones that take requests: {names}")
+            device = matches[0]
+        gateway = self._gateway
+        title = ""
+        with suppress(GatewayError, OSError, ValueError, sqlite3.Error):
+            title = gateway._session_title(gateway._workspace_session(request.session_id))
+        hub = gateway._device_hub
+        job = hub.store.add_job(
+            device.device_id, request.session_id, title, request.task, request.operate_phone
+        )
+        hub.log(device, "job_sent", request.task)
+        hub.job_updated(job, device.name)
+        return PhoneJobOutcome(job.job_id, device.name, job.state)
+
+    def _outcome(self, job: PhoneJob) -> PhoneJobOutcome:
+        device = self._gateway._device_link.registry.get(job.device_id)
+        return PhoneJobOutcome(
+            job.job_id, device.name if device else "", job.state, job.result, job.error
+        )
+
+    def poll(self, job_id: str) -> PhoneJobOutcome:
+        hub = self._gateway._device_hub
+        job = hub.store.job(job_id)
+        if job is None:
+            raise ToolError("the request to the phone is gone")
+        if job.state == "expired":
+            hub.job_updated(job, self._outcome(job).device)  # shown once it is noticed
+        return self._outcome(job)
+
+    def cancel(self, job_id: str) -> None:
+        hub = self._gateway._device_hub
+        with suppress(OSError, sqlite3.Error):
+            job = hub.store.cancel_job(job_id)
+            if job is not None and job.state == "cancelled":
+                hub.job_updated(job, self._outcome(job).device)
 
 
 @dataclass(slots=True)
@@ -852,6 +1110,46 @@ class GatewayRuntime:
         self._device_hosted_sessions: dict[str, float] = {}
         self._device_host_starting: set[str] = set()
         self._settle_device_tasks_after_restart()
+        # Scheduled tasks run in new conversations the way a phone's tasks do.
+        self._schedules = ScheduleBook(self._database.with_name("schedules"))
+        self._schedules_checked = float("-inf")
+        self._schedule_pass_thread: threading.Thread | None = None
+        # Earlier contents of files the agent replaced, for comparing a change afterwards.
+        self._file_versions = FileVersions(self._database.with_name("file-versions"))
+        # Batches of file changes the agent made, each undoable from the window.
+        self._file_batches = FileBatchStore(self._database.with_name("file-batches"))
+        # Both stores exist before the thread that prunes them starts.
+        threading.Thread(
+            target=self._prune_file_versions, name="gateway-file-versions", daemon=True
+        ).start()
+        # (month, when it was read, estimated cost) for the monthly cap.
+        self._month_cost: tuple[str, float, float] | None = None
+        self._folder_watch: FolderWatch | None = None
+        self._watch_thread: threading.Thread | None = None
+        # Agent runs a conversation started with delegate_tasks: their approvals and progress
+        # also show in that conversation.
+        self._delegations: dict[str, _Delegation] = {}
+        self._subagents = _GatewaySubagents(self)
+        # Device link 2: what phones send and collect, and requests this desktop's AI sends them.
+        self._device_hub = DeviceHub(self)
+        self._phone_jobs = _GatewayPhoneJobs(self)
+        # Tasks phones handed over, by conversation, until their message shows:
+        # (prompt, how the window marks the turn, task id, device id).
+        self._device_turn_origins: dict[str, list[tuple[str, dict[str, object], str, str]]] = {}
+        # Turns a phone's task started (correlation id -> device id), and each turn's latest
+        # answer, for the finished turns phones are told about.
+        self._device_turn_owners: dict[str, str] = {}
+        self._turn_answers: dict[str, str] = {}
+        self._finished_turns: queue.SimpleQueue[tuple[str, str, str, str, str | None]] = (
+            queue.SimpleQueue()
+        )
+        self._turn_recorder: threading.Thread | None = None
+        if self._workspace_catalog is not None:
+            with suppress(OSError):  # older versions kept schedules inside each folder
+                self._schedules.import_legacy(
+                    entry.path for entry in self._workspace_catalog.entries()
+                )
+        self._settle_schedule_runs_after_restart()
         with suppress(Exception):  # a busy port is reported in the status, never at startup
             self._device_link.start_if_enabled()
 
@@ -1119,8 +1417,16 @@ class GatewayRuntime:
             with self._lock:
                 if generation != self._session_switch_generation:
                     return
+                shutdown_timed_out = str(error) == "runtime_shutdown_failed"
+                if shutdown_timed_out and self._host is None:
+                    # The old host exited just after the deadline and
+                    # _collect_host_events detached it before this worker got
+                    # the lock. Its retry found this worker still holding the
+                    # switch slot, so nothing failed: keep the target pending
+                    # and let the finally block below start the retry.
+                    return
                 retryable = (
-                    str(error) == "runtime_shutdown_failed"
+                    shutdown_timed_out
                     and self._host is not None
                     and self._runtime_state == "stopping"
                 )
@@ -1365,15 +1671,27 @@ class GatewayRuntime:
         return reply
 
     def _session_approval_documents(self) -> list[dict[str, object]]:
-        return [
-            {**entry.payload, "requestId": request_id, "sessionId": entry.session_id}
-            for request_id, entry in self._approval_ledger.items()
-            if entry.state != "resolved"
-            and (
-                entry.session_id == self._selected_session_id
-                or (entry.session_id is None and entry.source_host is self._host)
-            )
-        ][-_MAX_BOOTSTRAP_APPROVALS:]
+        documents: list[dict[str, object]] = []
+        for request_id, entry in self._approval_ledger.items():
+            if entry.state == "resolved":
+                continue
+            delegation = self._delegations.get(entry.run_id) if entry.run_id is not None else None
+            if delegation is not None and delegation.parent_session_id == self._selected_session_id:
+                documents.append(
+                    {
+                        **entry.payload,
+                        "requestId": request_id,
+                        "sessionId": delegation.parent_session_id,
+                        "subagent": delegation.title,
+                    }
+                )
+            elif entry.session_id == self._selected_session_id or (
+                entry.session_id is None and entry.source_host is self._host
+            ):
+                documents.append(
+                    {**entry.payload, "requestId": request_id, "sessionId": entry.session_id}
+                )
+        return documents[-_MAX_BOOTSTRAP_APPROVALS:]
 
     def _execute(self, command: CommandEnvelope) -> GatewayReply:
         # ``workspace.open`` deliberately returns before a production
@@ -1421,24 +1739,8 @@ class GatewayRuntime:
             return self._session_history(command)
         if command.type == "events.replay":
             return self._events_replay(command)
-        if command.type in {
-            "workspace.schedule.list",
-            "workspace.schedule.create",
-            "workspace.schedule.update",
-            "workspace.schedule.delete",
-            "workspace.schedule.pause",
-            "workspace.schedule.resume",
-            "workspace.schedule.run_now",
-            "workspace.schedule.preview",
-            "workspace.schedules.list",
-            "workspace.schedules.create",
-            "workspace.schedules.update",
-            "workspace.schedules.delete",
-            "workspace.schedules.pause",
-            "workspace.schedules.resume",
-            "workspace.schedules.run_now",
-        }:
-            return self._schedule_command(command)
+        if command.type in _SCHEDULE_COMMANDS:
+            return self._schedules_command(command)
         if command.type in {"workspace.queue.list", "workspace.queue.get"}:
             return self._queue_command(command)
         if command.type in {
@@ -1472,6 +1774,8 @@ class GatewayRuntime:
             return self._fork_session(command)
         if command.type == "session.compare":
             return self._compare_session(command)
+        if command.type == "session.rewind":
+            return self._rewind_session(command)
         if command.type in {"limits.get", "limits.set"}:
             return self._task_limits_command(command)
         if command.type == "cost.estimate":
@@ -1480,6 +1784,14 @@ class GatewayRuntime:
             return self._device_command(command)
         if command.type in _KNOWLEDGE_COMMANDS:
             return self._knowledge_command(command)
+        if command.type in _FILE_BATCH_COMMANDS:
+            return self._file_batches_command(command)
+        if command.type in _USAGE_COMMANDS:
+            return self._usage_command(command)
+        if command.type in _WATCH_COMMANDS:
+            return self._watch_command(command)
+        if command.type == "document.preview":
+            return self._document_preview(command)
         if command.type == "session.usage":
             return self._session_usage(command)
         if command.type == "memory.list":
@@ -2049,11 +2361,25 @@ class GatewayRuntime:
             if self._selected_session_id is not None
             else {"timeline": [], "history": {"hasMore": False, "nextCursor": None, "cutoff": 0}}
         )
-        unresolved = [
-            {**entry.payload, "requestId": request_id, "sessionId": entry.session_id}
-            for request_id, entry in self._approval_ledger.items()
-            if entry.state != "resolved"
-        ]
+        unresolved: list[dict[str, object]] = []
+        for request_id, entry in self._approval_ledger.items():
+            if entry.state == "resolved":
+                continue
+            delegation = self._delegations.get(entry.run_id) if entry.run_id is not None else None
+            unresolved.append(
+                {
+                    **entry.payload,
+                    "requestId": request_id,
+                    "sessionId": entry.session_id,
+                }
+                if delegation is None
+                else {
+                    **entry.payload,
+                    "requestId": request_id,
+                    "sessionId": delegation.parent_session_id,
+                    "subagent": delegation.title,
+                }
+            )
         approvals = unresolved[-_MAX_BOOTSTRAP_APPROVALS:]
         provider = self._provider
         return {
@@ -3496,6 +3822,43 @@ class GatewayRuntime:
             session_id=None,
         )
 
+    def _rewind_session(self, command: CommandEnvelope) -> GatewayReply:
+        """Files the agent changed after a message, and putting them back as they were."""
+        self._require_payload(command, {"sessionId", "messageId"}, optional={"apply"})
+        if command.session_id is not None:
+            raise GatewayError("invalid_session")
+        session = self._workspace_session(command.payload.get("sessionId"))
+        message_id = command.payload.get("messageId")
+        apply = command.payload.get("apply", False)
+        if not isinstance(message_id, str) or not message_id or type(apply) is not bool:
+            raise GatewayError("invalid_payload")
+        with self._lock:
+            running = session.id == self._host_session_id and (
+                self._active_turn is not None or self._turn_requested
+            )
+        if apply and running:
+            raise GatewayError("runtime_busy")  # the agent may still be changing these files
+        try:
+            events = SQLiteEventStore.list_events_read_only(self._database, session.id)
+            report = rewind_files(
+                Path(session.workspace), self._file_versions, events, message_id, apply=apply
+            )
+        except KeyError:
+            raise GatewayError("unknown_message") from None
+        except ValueError:
+            raise GatewayError("workspace_unavailable") from None
+        except (OSError, sqlite3.DatabaseError):
+            raise GatewayError("storage_unavailable") from None
+        return self._reply(
+            "session.rewind.result",
+            {
+                "epoch": self.epoch,
+                "applied": apply,
+                "files": [item.document() for item in report],
+            },
+            session_id=None,
+        )
+
     def _estimate_cost(self, command: CommandEnvelope) -> GatewayReply:
         """A rough range for what the next task costs, for the composer while the user types."""
         self._require_payload(command, {"messageChars"}, optional={"sessionId"})
@@ -3559,17 +3922,41 @@ class GatewayRuntime:
                 self._require_payload(command, set())
                 document = link.status()
             elif command.type == "devices.configure":
-                self._require_payload(command, set(), optional={"enabled", "port", "secure"})
-                enabled = command.payload.get("enabled")
-                secure = command.payload.get("secure")
+                switches = ("enabled", "secure", "wake", "clipboard")
+                self._require_payload(command, set(), optional={"port", *switches})
+                values: dict[str, bool] = {}
+                for key in switches:
+                    value = command.payload.get(key)
+                    if value is not None and type(value) is not bool:
+                        raise GatewayError("invalid_command")
+                    if value is not None:
+                        values[key] = value
                 port = command.payload.get("port")
-                if (
-                    (enabled is not None and type(enabled) is not bool)
-                    or (secure is not None and type(secure) is not bool)
-                    or (port is not None and type(port) is not int)
-                ):
+                if port is not None and type(port) is not int:
                     raise GatewayError("invalid_command")
-                document = link.configure(enabled=enabled, port=port, secure=secure)
+                document = link.configure(port=port, **values)
+            elif command.type == "devices.update":
+                self._require_payload(command, {"deviceId"}, optional={"scopes", "notifyTurns"})
+                notify = command.payload.get("notifyTurns")
+                if notify is not None and type(notify) is not bool:
+                    raise GatewayError("invalid_command")
+                document = link.update_device(
+                    command.payload["deviceId"],
+                    scopes=command.payload.get("scopes"),
+                    notify_turns=notify,
+                )
+            elif command.type == "devices.reset":
+                self._require_payload(command, set())
+                document = link.reset()
+            elif command.type == "devices.firewall.allow":
+                # Returns at once; Windows' administrator confirmation is answered meanwhile.
+                self._require_payload(command, set())
+                document = link.allow_through_firewall()
+            elif command.type == "devices.send":
+                self._require_payload(
+                    command, {"deviceId", "kind"}, optional={"path", "text", "sessionId"}
+                )
+                document = {**link.status(), "transfer": self._device_send(command.payload)}
             elif command.type == "devices.pairing.start":
                 self._require_payload(command, {"scopes"})
                 document = link.start_pairing(command.payload["scopes"])
@@ -3588,11 +3975,48 @@ class GatewayRuntime:
                 document = link.revoke(command.payload["deviceId"])
         except DeviceLinkError as error:
             raise GatewayError(error.code) from None
-        except OSError:
+        except (OSError, sqlite3.Error):
             raise GatewayError("storage_unavailable") from None
         return self._reply(
             f"{command.type}.result", {"epoch": self.epoch, **document}, session_id=None
         )
+
+    def _device_send(self, payload: Mapping[str, object]) -> dict[str, object]:
+        """Something for a paired phone to collect from its inbox: a file of the open folder, a
+        text or link, or a conversation to continue on the phone."""
+        device_id, kind = payload.get("deviceId"), payload.get("kind")
+        if not isinstance(device_id, str) or self._device_link.registry.get(device_id) is None:
+            raise GatewayError("unknown_device")
+        hub = self._device_hub
+        if kind == "file":
+            raw = payload.get("path")
+            if not isinstance(raw, str) or not raw:
+                raise GatewayError("invalid_path")
+            with self._lock:
+                workspace = self._workspace
+            if workspace is None:
+                raise GatewayError("runtime_unconfigured")
+            try:
+                path = WorkspacePaths(workspace).resolve(raw)
+            except WorkspacePathError:
+                raise GatewayError("invalid_path") from None
+            source = payload.get("sessionId")
+            title = None
+            if isinstance(source, str):
+                with suppress(GatewayError):
+                    title = self._workspace_session(source).title
+            return hub.send_file(device_id, path, title)
+        if kind == "text":
+            text = payload.get("text")
+            if not isinstance(text, str):
+                raise GatewayError("invalid_text")
+            return hub.send_text(device_id, text)
+        if kind == "conversation":
+            session_id = payload.get("sessionId")
+            if not isinstance(session_id, str):
+                raise GatewayError("invalid_session")
+            return hub.send_conversation(device_id, session_id)
+        raise GatewayError("invalid_command")
 
     def _knowledge_command(self, command: CommandEnvelope) -> GatewayReply:
         """The knowledge base: documents, knowledge bases and each conversation's choice."""
@@ -3738,6 +4162,12 @@ class GatewayRuntime:
             if self._host_session_id is not None and (self._active_turn or self._turn_requested):
                 running.add(self._host_session_id)
             presentations = self._workspace_presentations()
+            # A conversation open in a runtime runs with that runtime's autonomy.
+            autonomies = {
+                session_id: context.autonomy for session_id, context in self._session_hosts.items()
+            }
+            if self._host_session_id is not None and self._host is not None:
+                autonomies[self._host_session_id] = self._autonomy
         if workspace is None or not self._database.is_file():
             return []
         try:
@@ -3759,6 +4189,7 @@ class GatewayRuntime:
                     "workspace": session.workspace,
                     "updated_at": session.updated_at,
                     "running": session.id in running,
+                    "autonomy": autonomies.get(session.id, session.autonomy).value,
                 }
             )
         return documents
@@ -3808,14 +4239,48 @@ class GatewayRuntime:
         context = self._session_hosts.get(session.id)
         return context.autonomy if context is not None else session.autonomy
 
+    @staticmethod
+    def _check_device_autonomy(
+        device: PairedDevice, autonomy: Autonomy, options: TaskOptions
+    ) -> list[str]:
+        """Whether a phone's task may run with the conversation's autonomy, and what the window
+        marks the turn with.
+
+        A task from another device is an outside instruction. Where this desktop approves
+        everything on its own (YOLO, full access) it runs only when the phone's user confirmed
+        that very setting and the phone was given ``broad_autonomy``; otherwise its approvals
+        are given here or on the phone.
+        """
+        labels: list[str] = []
+        if autonomy in {Autonomy.YOLO, Autonomy.FULL_ACCESS}:
+            if options.accept_autonomy is None:
+                raise DeviceLinkError("desktop_autonomy_too_broad", 409, autonomy=autonomy.value)
+            if "broad_autonomy" not in device.scopes:
+                raise DeviceLinkError("scope_denied", 403)
+            if options.accept_autonomy != autonomy.value:
+                raise DeviceLinkError("autonomy_changed", 409, autonomy=autonomy.value)
+            labels.append("broad_autonomy")
+        if options.private_accepted:
+            labels.append("private")
+        if options.from_agent:
+            labels.append("subtask")
+        return labels
+
     def device_submit(
-        self, device: PairedDevice, request_id: str, session_id: str, prompt: str
+        self,
+        device: PairedDevice,
+        request_id: str,
+        session_id: str,
+        prompt: str,
+        options: TaskOptions | None = None,
+        *,
+        handoff: bool = False,
+        files: Sequence[str] = (),
     ) -> dict[str, object]:
         """Run a phone's task in one of this desktop's conversations, once per request id.
 
-        A task from another device is an outside instruction: it never runs where this desktop
-        approves everything on its own (YOLO, full access), and its approvals are given here.
-        """
+        ``files`` are the open folder's paths of what the phone sent with it; the pictures
+        among them go to the model with the request when it is known to look at pictures."""
         prompt = prompt.strip()
         if not prompt or len(prompt) > _MAX_PROMPT_CHARS:
             raise DeviceLinkError("invalid_prompt")
@@ -3825,25 +4290,255 @@ class GatewayRuntime:
             if str(error) == "unknown_session":
                 raise DeviceLinkError("unknown_session", 404) from None
             raise DeviceLinkError(str(error), 503) from None
+        tasks = self._device_link.tasks
+        if tasks.find(device.device_id, request_id) is not None:
+            # Sent again: the first answer stands, even if the conversation changed since.
+            task, _created = tasks.create(device.device_id, request_id, session.id, prompt)
+            return self._device_task_document(task)
         with self._lock:
             if self._provider is None or self._closing:
                 raise DeviceLinkError("desktop_not_ready", 503)
             autonomy = self._device_session_autonomy(session)
-        if autonomy in {Autonomy.YOLO, Autonomy.FULL_ACCESS}:
-            raise DeviceLinkError("desktop_autonomy_too_broad", 409)
-        tasks = self._device_link.tasks
-        task, created = tasks.create(device.device_id, request_id, session.id, prompt)
+            provider = self._provider
+        labels = self._check_device_autonomy(device, autonomy, options or TaskOptions())
+        if handoff:
+            labels.append("handoff")
+        task, created = tasks.create(
+            device.device_id,
+            request_id,
+            session.id,
+            prompt,
+            autonomy=autonomy.value,
+            model_location=model_location(provider.base_url),
+            labels=labels,
+        )
         if created:
+            origin: dict[str, object] = {"device": device.name, "labels": labels}
+            pictures = self._device_pictures(provider, files)
+            # The message the turn writes: the request, then the attached pictures' paths.
+            message = task.prompt + (
+                "\n\n" + "\n".join(f"[File reference: {path}]" for path in pictures)
+                if pictures
+                else ""
+            )
+            pending = (message, origin, task.task_id, device.device_id)
+            with self._lock:
+                origins = self._device_turn_origins.setdefault(session.id, [])
+                origins.append(pending)
+                del origins[:-_DEVICE_PENDING_ORIGINS]
             try:
-                self._dispatch_device_task(task, session)
+                self._dispatch_prompt(f"device-{task.task_id}", session, task.prompt, pictures)
             except GatewayError as error:
                 # Nothing ran: the phone may send the same request again.
                 tasks.discard(task.task_id)
+                with self._lock, suppress(ValueError):
+                    self._device_turn_origins.get(session.id, []).remove(pending)
                 raise DeviceLinkError(str(error), 503) from None
             tasks.update(task.task_id, state="queued")
+            self._device_hub.log(device, "task_sent", prompt)
         refreshed = tasks.get(task.task_id)
         assert refreshed is not None
         return self._device_task_document(refreshed)
+
+    def device_inbox(self, device: PairedDevice) -> dict[str, object]:
+        """Finished runs of the schedules shared with phones, and the approvals waiting here."""
+        self._refresh_open_schedule_runs()
+        shared = {item.id for item in self._schedules.all() if item.notify_phone}
+        runs = [
+            {
+                "run_id": run.run_id,
+                "schedule_id": run.schedule_id,
+                "title": run.title,
+                "state": run.state,
+                "due_at": run.due_at,
+                "updated_at": run.updated_at,
+                **({"session_id": run.session_id} if run.session_id else {}),
+                **({"result": run.result} if run.result else {}),
+                **({"error": run.error} if run.error else {}),
+            }
+            for run in self._schedules.runs(limit=200)
+            if run.schedule_id in shared and run.state not in OPEN_RUN_STATES
+        ][:_DEVICE_INBOX_LIMIT]
+        approvals: list[dict[str, object]] = []
+        if "approvals" in device.scopes:
+            with self._lock:
+                for request_id, entry in self._approval_ledger.items():
+                    if entry.state != "pending" or entry.run_id is not None or not entry.session_id:
+                        continue
+                    tool = entry.payload.get("toolName") or entry.payload.get("tool")
+                    approvals.append(
+                        {
+                            "request_id": request_id,
+                            "session_id": entry.session_id,
+                            "tool": tool if isinstance(tool, str) else "",
+                            "summary": _approval_display_text(entry.payload.get("summary")) or "",
+                        }
+                    )
+        store = self._device_link.store
+        current = self._device_link.registry.get(device.device_id) or device
+        try:
+            turns = store.turns(device.device_id) if current.notify_turns else []
+            transfers = [item.inbox_item() for item in store.transfers(device.device_id)]
+            jobs = [job.document() for job in store.open_jobs(device.device_id)]
+        except (OSError, sqlite3.Error):
+            raise DeviceLinkError("storage_unavailable", 503) from None
+        return {
+            "runs": runs,
+            "approvals": approvals[-_DEVICE_INBOX_LIMIT:],
+            "turns": turns,
+            "transfers": transfers[:_DEVICE_INBOX_LIMIT],
+            "phone_jobs": jobs,
+        }
+
+    def _device_call[T](self, function: Callable[..., T], *arguments: object) -> T:
+        """A device link 2 request, with the hub's and the store's refusals as the endpoint's."""
+        try:
+            return function(*arguments)
+        except DeviceStoreError as error:
+            raise DeviceLinkError(error.code, error.status) from None
+        except GatewayError as error:
+            code = str(error)
+            raise DeviceLinkError(code, 404 if code == "unknown_session" else 503) from None
+        except (OSError, sqlite3.Error):
+            raise DeviceLinkError("storage_unavailable", 503) from None
+
+    def device_runtime(self) -> dict[str, object]:
+        return self._device_hub.runtime()
+
+    def device_stop(self, device: PairedDevice, session_id: str) -> dict[str, object]:
+        """Stop the turn running in a conversation, as the window's stop button does."""
+        try:
+            session = self._workspace_session(session_id)
+        except GatewayError as error:
+            code = str(error)
+            raise DeviceLinkError(code, 404 if code == "unknown_session" else 503) from None
+        with self._lock:
+            context = self._session_hosts.get(session.id)
+            if session.id == self._host_session_id and self._host is not None:
+                running = (
+                    self._active_turn is not None
+                    or self._turn_requested
+                    or bool(self._queued_turns)
+                )
+            elif context is not None and context.host is not None:
+                running = (
+                    context.active_turn is not None
+                    or context.turn_requested
+                    or bool(context.queued_turns)
+                )
+            else:
+                running = False
+            if not running:
+                raise DeviceLinkError("not_running", 409)
+            command = CommandEnvelope(
+                PROTOCOL_VERSION, f"device-stop-{uuid4()}", "turn.cancel", {}, session.id
+            )
+            try:
+                self._execute_unsent(command)
+            except GatewayError as error:
+                raise DeviceLinkError(str(error), 503) from None
+        self._device_hub.log(device, "turn_stopped", self._session_title(session))
+        return {"stopped": True}
+
+    def device_inbox_read(self, device: PairedDevice, run_ids: list[str]) -> None:
+        self._device_call(self._schedules.mark_read, run_ids)
+
+    def device_job_report(
+        self, device: PairedDevice, job_id: str, payload: dict[str, Any]
+    ) -> dict[str, object]:
+        return self._device_call(self._device_hub.job_report, device, job_id, payload)
+
+    def device_receive_file(
+        self, device: PairedDevice, transfer_id: str, upload: Upload
+    ) -> dict[str, object]:
+        return self._device_call(self._device_hub.receive_file, device, transfer_id, upload)
+
+    def device_files(self, device: PairedDevice, path: str) -> dict[str, object]:
+        return self._device_call(self._device_hub.files, path)
+
+    def device_file(self, device: PairedDevice, path: str) -> tuple[Path, str]:
+        return self._device_call(self._device_hub.file, device, path)
+
+    def device_transfer(self, device: PairedDevice, transfer_id: str) -> tuple[Path | None, Any]:
+        return self._device_call(self._device_hub.transfer, device, transfer_id)
+
+    def device_transfer_done(self, device: PairedDevice, transfer_id: str) -> None:
+        self._device_call(self._device_hub.transfer_done, device, transfer_id)
+
+    def device_message(self, device: PairedDevice, payload: dict[str, Any]) -> None:
+        self._device_call(self._device_hub.message, device, payload)
+
+    def device_conversation(
+        self, device: PairedDevice, payload: dict[str, Any]
+    ) -> dict[str, object]:
+        return self._device_call(self._device_hub.conversation, device, payload)
+
+    def device_knowledge(self, device: PairedDevice) -> dict[str, object]:
+        return self._device_call(self._device_hub.knowledge)
+
+    def device_knowledge_document(
+        self, device: PairedDevice, document_id: str
+    ) -> dict[str, object]:
+        return self._device_call(self._device_hub.knowledge_document, document_id)
+
+    def device_knowledge_add(
+        self, device: PairedDevice, payload: dict[str, Any]
+    ) -> tuple[int, dict[str, object]]:
+        return self._device_call(self._device_hub.knowledge_add, device, payload)
+
+    def device_info(self, device: PairedDevice) -> dict[str, object]:
+        return self._device_call(self._device_hub.info, device)
+
+    def device_settings(self, device: PairedDevice, payload: dict[str, Any]) -> dict[str, object]:
+        return self._device_call(self._device_hub.settings, device, payload)
+
+    def device_unpair(self, device: PairedDevice) -> None:
+        self._device_call(self._device_hub.unpair, device)
+
+    def _session_title(self, session: Session) -> str:
+        """A conversation's title as the window shows it (the user's own name for it first)."""
+        with self._lock:
+            alias = self._workspace_presentations().get(session.id, {}).get("alias")
+        return alias if isinstance(alias, str) and alias else session.title
+
+    def device_resolve_approval(
+        self, device: PairedDevice, request_id: str, approve: bool
+    ) -> dict[str, object]:
+        """Answer an approval this desktop is waiting for, once, as the window would."""
+        if "approvals" not in device.scopes:
+            raise DeviceLinkError("scope_denied", 403)
+        with self._lock:
+            entry = self._approval_ledger.get(request_id)
+            session_id = entry.session_id if entry is not None else None
+            unknown = entry is None or entry.run_id is not None or session_id is None
+            tool = (entry.payload.get("toolName") or entry.payload.get("tool")) if entry else None
+        if unknown:
+            raise DeviceLinkError("unknown_approval", 404)
+        command = CommandEnvelope(
+            PROTOCOL_VERSION,
+            f"device-approval-{request_id}",
+            "approval.resolve",
+            {"requestId": request_id, "scope": ApprovalScope.ONCE.value if approve else None},
+            session_id,
+        )
+        self._unsent_replies.active = True
+        try:
+            self.execute(command)
+        except GatewayError as error:
+            code = str(error)
+            if code in {"approval_already_resolved", "approval_resolution_pending"}:
+                raise DeviceLinkError(code, 409) from None
+            if code == "unknown_approval":
+                raise DeviceLinkError(code, 404) from None
+            raise DeviceLinkError(code, 503) from None
+        finally:
+            self._unsent_replies.active = False
+        self._device_hub.log(
+            device,
+            "approval_decided",
+            f"{'approved' if approve else 'rejected'}: {tool if isinstance(tool, str) else ''}",
+        )
+        return {"request_id": request_id, "approved": approve}
 
     def device_task(self, device: PairedDevice, task_id: str) -> dict[str, object] | None:
         task = self._device_link.tasks.get(task_id)
@@ -3851,12 +4546,36 @@ class GatewayRuntime:
             return None
         return self._device_task_document(task)
 
-    def _dispatch_device_task(self, task: DeviceTask, session: Session) -> None:
+    def _device_pictures(self, provider: ProviderConfig, files: Sequence[str]) -> list[str]:
+        """The pictures among files a phone sent (open-folder paths), to attach to its request
+        as the window attaches them. Only for a model known to look at pictures (what the window
+        shows as vision ready): another could refuse the request; it still sees every path."""
+        if not files or provider_capabilities(provider).vision is not True:
+            return []
+        pictures: list[str] = []
+        for path in files:
+            if len(pictures) == MAX_IMAGES_PER_MESSAGE:
+                break
+            try:
+                [reference] = self._attachment_references([path])
+                if self._attachment_images([reference]):
+                    pictures.append(reference)
+            except GatewayError:
+                continue  # not a picture this model takes, or too large: its path is enough
+        return pictures
+
+    def _dispatch_prompt(
+        self, request_id: str, session: Session, prompt: str, pictures: Sequence[str] = ()
+    ) -> None:
+        """Send a prompt to a conversation, starting a background runtime when it is closed."""
+        payload: dict[str, object] = {"prompt": prompt}
+        if pictures:
+            payload["attachmentPaths"] = list(pictures)
         command = CommandEnvelope(
             PROTOCOL_VERSION,
-            f"device-{task.task_id}",
+            request_id,
             "turn.start",
-            {"prompt": task.prompt},
+            payload,
             session.id,
         )
         with self._lock:
@@ -3903,6 +4622,9 @@ class GatewayRuntime:
                     autonomy=session.autonomy,
                     session_id=session.id,
                     writer_lock_group=self._writer_lock_group,
+                    # The same tools as in the window: the conversation may be opened there next.
+                    subagents=self._subagents,
+                    phone_jobs=self._phone_jobs,
                 )
             )
             host.start()
@@ -4022,7 +4744,9 @@ class GatewayRuntime:
                 if event.type == "turn.failed":
                     message = event.data.get("message")
                     error = Redactor().redact(message[:600]) if isinstance(message, str) else None
-                tasks.update(task.task_id, state=_DEVICE_TURN_ENDS[event.type], error=error)
+                state = _DEVICE_TURN_ENDS[event.type]
+                tasks.update(task.task_id, state=state, error=error)
+                self._device_hub.log(task.device_id, "task_finished", f"{state}: {task.prompt}")
                 break
         refreshed = tasks.get(task.task_id)
         return refreshed if refreshed is not None else task
@@ -4036,8 +4760,16 @@ class GatewayRuntime:
             "created_at": task.created_at,
             "updated_at": task.updated_at,
         }
+        if task.autonomy:
+            document["autonomy"] = task.autonomy
+        if task.model_location:
+            document["model_location"] = task.model_location
         if task.error:
             document["error"] = task.error
+        if task.state == "running" and task.correlation_id:
+            activity = self._device_task_activity(task.session_id, task.correlation_id)
+            if activity:
+                document["activity"] = activity
         if task.state == "succeeded" and task.correlation_id:
             with suppress(OSError, ValueError, sqlite3.DatabaseError):
                 answers = [
@@ -4053,6 +4785,68 @@ class GatewayRuntime:
                 if answers:
                     document["result"] = str(answers[-1])[:_DEVICE_RESULT_CHARS]
         return document
+
+    def _device_task_activity(self, session_id: str, correlation_id: str) -> str | None:
+        """The step a running task is on: the tool it is using and what on, or None."""
+        try:
+            events = SQLiteEventStore.list_session_events_of_types_read_only(
+                self._database,
+                session_id,
+                frozenset(
+                    {
+                        "tool.proposed",
+                        "tool.settled",
+                        "tool.failed",
+                        "tool.rejected",
+                        "tool.cancelled",
+                    }
+                ),
+            )
+        except (OSError, ValueError, sqlite3.DatabaseError):
+            return None
+        finished = {
+            event.data.get("tool_call_id")
+            for event in events
+            if event.correlation_id == correlation_id and event.type != "tool.proposed"
+        }
+        for event in reversed(events):
+            if event.correlation_id != correlation_id or event.type != "tool.proposed":
+                continue
+            if event.data.get("tool_call_id") in finished:
+                return None  # between steps
+            name = event.data.get("name")
+            if not isinstance(name, str):
+                return None
+            arguments = event.data.get("arguments")
+            detail = next(
+                (
+                    arguments[key]
+                    for key in _DEVICE_ACTIVITY_ARGUMENTS
+                    if isinstance(arguments, Mapping)
+                    and isinstance(arguments.get(key), str)
+                    and arguments[key].strip()
+                ),
+                "",
+            )
+            text = " ".join(Redactor().redact(f"{name} {detail}").split())
+            return text[:_DEVICE_ACTIVITY_CHARS]
+        return None
+
+    def _prune_file_versions(self) -> None:
+        with suppress(OSError):
+            self._file_versions.prune()
+        with suppress(OSError):
+            self._file_batches.prune()
+
+    def _settle_schedule_runs_after_restart(self) -> None:
+        """Runs in progress when the desktop closed: finished ones get their answer, the
+        others are reported interrupted (their conversation keeps what was done)."""
+        with suppress(OSError, sqlite3.DatabaseError):
+            book = self._schedules
+            for run in book.open_runs():
+                self._refresh_schedule_run(run)
+            for run in book.open_runs():
+                book.update_run(run.run_id, state="interrupted")
 
     def _settle_device_tasks_after_restart(self) -> None:
         """Tasks a phone handed over before the desktop restarted: those that had not finished
@@ -5905,8 +6699,16 @@ class GatewayRuntime:
             raise GatewayError("invalid_title")
         if parent_run_id is not None and not isinstance(parent_run_id, str):
             raise GatewayError("invalid_run")
+        raw_isolation = command.payload.get("isolation", "worktree")
+        if raw_isolation == "auto":
+            # Its own branch in a git repository; elsewhere the run works in the folder itself.
+            try:
+                git_head_sha(self._workspace)
+                raw_isolation = RunIsolation.WORKTREE.value
+            except GitOpsError:
+                raw_isolation = RunIsolation.SHARED.value
         try:
-            isolation = RunIsolation(cast(str, command.payload.get("isolation", "worktree")))
+            isolation = RunIsolation(cast(str, raw_isolation))
         except (TypeError, ValueError):
             raise GatewayError("invalid_isolation") from None
         try:
@@ -6005,6 +6807,7 @@ class GatewayRuntime:
         )
         if active_count >= _MAX_PARALLEL_AGENT_RUNS:
             raise GatewayError("run_concurrency_limit")
+        self._check_monthly_cap()
         try:
             run = service.update_run(
                 run_id,
@@ -6337,6 +7140,244 @@ class GatewayRuntime:
             session_id=run.session_id,
         )
 
+    def _file_batch_document(self, batch: FileBatch) -> dict[str, object]:
+        return {
+            "id": batch.id,
+            "summary": batch.summary,
+            "createdAt": batch.created_at,
+            "updatedAt": batch.updated_at or batch.created_at,
+            "state": batch.state,
+            # A batch still marked running belongs to a process that ended mid-way.
+            "undoable": batch.state in UNDOABLE_STATES or batch.state == "running",
+            "steps": [
+                {
+                    "action": step.action,
+                    "path": step.path,
+                    "to": step.to,
+                    "auto": step.auto,
+                    "undone": step.undone,
+                }
+                for step in batch.steps
+            ],
+            "problems": batch.problems,
+        }
+
+    def _file_batches_command(self, command: CommandEnvelope) -> GatewayReply:
+        """The agent's file batches in this workspace, and undoing one."""
+        if command.session_id is not None:
+            raise GatewayError("invalid_session")
+        try:
+            if command.type == "files.batches.list":
+                self._require_payload(command, set(), optional={"limit"})
+                limit = command.payload.get("limit", 50)
+                if type(limit) is not int or not 1 <= limit <= 200:
+                    raise GatewayError("invalid_limit")
+                with self._lock:
+                    workspace = self._workspace
+                batches = [] if workspace is None else self._file_batches.list(workspace, limit)
+                return self._reply(
+                    "files.batches.list.result",
+                    {
+                        "epoch": self.epoch,
+                        "batches": [self._file_batch_document(batch) for batch in batches],
+                    },
+                    session_id=None,
+                )
+            self._require_payload(command, {"batchId"})
+            batch_id = command.payload.get("batchId")
+            if not isinstance(batch_id, str):
+                raise GatewayError("invalid_batch")
+            report = undo_batch(self._file_batches, batch_id)
+        except FileBatchError:
+            raise GatewayError("unknown_batch") from None
+        except OSError:
+            raise GatewayError("storage_unavailable") from None
+        return self._reply(
+            "files.batches.undo.result",
+            {
+                "epoch": self.epoch,
+                "batch": self._file_batch_document(report.batch),
+                "undone": report.undone,
+                "skipped": report.skipped,
+            },
+            session_id=None,
+        )
+
+    def _usage_databases(self) -> list[Path]:
+        """The main database and every agent run's, whose model calls the bill counts."""
+        runs = self._database.parent / (self._database.stem + "-runs")
+        try:
+            extra = sorted(runs.glob("*.db")) if runs.is_dir() else []
+        except OSError:
+            extra = []
+        return [self._database, *extra]
+
+    def _monthly_cap_path(self) -> Path:
+        return self._database.with_name("monthly-cap.json")
+
+    def _monthly_cap(self) -> float | None:
+        try:
+            value = json.loads(self._monthly_cap_path().read_text("utf-8")).get("capUsd")
+        except (OSError, ValueError, AttributeError):
+            return None
+        if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+            return None
+        return float(value)
+
+    def _month_to_date(self, *, fresh: bool = False) -> float:
+        month = current_month()
+        cached = self._month_cost
+        if (
+            not fresh
+            and cached is not None
+            and cached[0] == month
+            and self._clock() - cached[1] < _MONTH_COST_SECONDS
+        ):
+            return cached[2]
+        cost = month_bill(self._usage_databases(), month).cost_usd
+        self._month_cost = (month, self._clock(), cost)
+        return cost
+
+    def _check_monthly_cap(self) -> None:
+        """Refuse new work once this month's estimated cost reaches the user's cap."""
+        cap = self._monthly_cap()
+        if cap is None:
+            return
+        try:
+            spent = self._month_to_date()
+        except OSError:
+            return  # unreadable usage never stops work
+        if spent >= cap:
+            raise GatewayError("monthly_cap_reached")
+
+    def _usage_command(self, command: CommandEnvelope) -> GatewayReply:
+        """A month's estimated model cost, and the monthly cap."""
+        if command.session_id is not None:
+            raise GatewayError("invalid_session")
+        if command.type == "usage.bill":
+            self._require_payload(command, set(), optional={"month"})
+            this_month = current_month()
+            month = command.payload.get("month") or this_month
+            if not isinstance(month, str) or not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month):
+                raise GatewayError("invalid_month")
+            try:
+                bill = month_bill(self._usage_databases(), month)
+                if month == this_month:
+                    self._month_cost = (month, self._clock(), bill.cost_usd)
+                spent = bill.cost_usd if month == this_month else self._month_to_date()
+            except OSError:
+                raise GatewayError("storage_unavailable") from None
+            return self._reply(
+                "usage.bill.result",
+                {
+                    "epoch": self.epoch,
+                    "month": bill.month,
+                    "costUsd": bill.cost_usd,
+                    "calls": bill.calls,
+                    "inputTokens": bill.input_tokens,
+                    "outputTokens": bill.output_tokens,
+                    "cachedTokens": bill.cached_tokens,
+                    "cacheRatio": round(bill.cache_ratio, 4),
+                    "models": [
+                        {
+                            "model": line.model,
+                            "calls": line.calls,
+                            "inputTokens": line.input_tokens,
+                            "outputTokens": line.output_tokens,
+                            "cachedTokens": line.cached_tokens,
+                            "costUsd": line.cost_usd,
+                            "priced": line.priced,
+                        }
+                        for line in bill.models
+                    ],
+                    "days": [{"day": day, "costUsd": cost} for day, cost in bill.days],
+                    "unpricedCalls": bill.unpriced_calls,
+                    "capUsd": self._monthly_cap(),
+                    "monthToDateUsd": spent,
+                },
+                session_id=None,
+            )
+        self._require_payload(command, {"capUsd"})
+        cap = command.payload.get("capUsd")
+        if cap is not None and (
+            isinstance(cap, bool)
+            or not isinstance(cap, int | float)
+            or not 0 < cap <= _MAX_MONTHLY_CAP_USD
+        ):
+            raise GatewayError("invalid_cap")
+        path = self._monthly_cap_path()
+        staging = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            staging.write_text(json.dumps({"capUsd": cap}), encoding="utf-8")
+            os.replace(staging, path)
+        except OSError:
+            raise GatewayError("storage_unavailable") from None
+        finally:
+            staging.unlink(missing_ok=True)
+        return self._reply(
+            "usage.cap.set.result",
+            {"epoch": self.epoch, "capUsd": self._monthly_cap()},
+            session_id=None,
+        )
+
+    def _watch(self) -> FolderWatch:
+        if self._folder_watch is None:
+            root = knowledge_root(self._database)
+            self._folder_watch = FolderWatch(root, knowledge_store(root))
+        return self._folder_watch
+
+    def _tick_folder_watch(self) -> None:
+        """Scan the watched folders when it is time (gateway lock held, so the scan runs apart)."""
+        if self._closing or (self._watch_thread is not None and self._watch_thread.is_alive()):
+            return
+        if not self._watch().due():
+            return
+        self._start_watch_scan()
+
+    def _start_watch_scan(self) -> None:
+        thread = threading.Thread(
+            target=self._scan_watched_folders, name="gateway-folder-watch", daemon=True
+        )
+        self._watch_thread = thread
+        thread.start()
+
+    def _scan_watched_folders(self) -> None:
+        try:
+            self._watch().scan()
+        except Exception:
+            _LOGGER.exception("watched folder scan failed")
+
+    def _watch_command(self, command: CommandEnvelope) -> GatewayReply:
+        """Folders whose new documents join a knowledge base by themselves."""
+        if command.session_id is not None:
+            raise GatewayError("invalid_session")
+        watch = self._watch()
+        payload: dict[str, object] = {"epoch": self.epoch}
+        try:
+            if command.type == "knowledge.watch.list":
+                self._require_payload(command, set())
+                payload["folders"] = [folder.document() for folder in watch.folders()]
+                payload["suggested"] = suggested_folders()
+            elif command.type == "knowledge.watch.add":
+                self._require_payload(command, {"path"}, optional={"collectionId"})
+                folder = watch.add(command.payload.get("path"), command.payload.get("collectionId"))
+                payload["folder"] = folder.document()
+                if self._watch_thread is None or not self._watch_thread.is_alive():
+                    self._start_watch_scan()  # its documents start arriving now
+            elif command.type == "knowledge.watch.remove":
+                self._require_payload(command, {"path"})
+                payload["removed"] = watch.remove(command.payload.get("path"))
+            else:
+                self._require_payload(command, set())
+                report = watch.scan()
+                payload.update(added=report.added, waiting=report.waiting, failed=report.failed)
+        except KnowledgeError as error:
+            raise GatewayError(knowledge_error_code(str(error))) from None
+        except OSError:
+            raise GatewayError("storage_unavailable") from None
+        return self._reply(f"{command.type}.result", payload, session_id=None)
+
     def _emit_run_update(self, run_id: str, session_id: str, state: str) -> None:
         self._pending_host_events.append(
             Event(
@@ -6345,6 +7386,200 @@ class GatewayRuntime:
                 data={"run_id": run_id, "state": state},
             )
         )
+        delegation = self._delegations.get(run_id)
+        if delegation is not None and delegation.parent_session_id != session_id:
+            self._pending_host_events.append(
+                Event(
+                    session_id=delegation.parent_session_id,
+                    type="agent.run.updated",
+                    data={
+                        "run_id": run_id,
+                        "state": state,
+                        "title": delegation.title,
+                        "delegated": True,
+                    },
+                )
+            )
+
+    @contextmanager
+    def _unsent(self) -> Iterator[None]:
+        """Commands the gateway gives itself; their replies take no wire sequence."""
+        previous = getattr(self._unsent_replies, "active", False)
+        self._unsent_replies.active = True
+        try:
+            yield
+        finally:
+            self._unsent_replies.active = previous
+
+    async def _run_delegated_tasks(
+        self, parent_session_id: str, tasks: Sequence[SubagentTask]
+    ) -> list[SubagentOutcome]:
+        """A conversation's delegate_tasks call: start each task as an agent run, wait for all.
+
+        Runs in the conversation host's event loop, so every step that takes the gateway lock
+        goes to a worker thread; the lock holder may itself be waiting on this loop.
+        """
+        run_ids = await asyncio.to_thread(self._create_delegated_runs, parent_session_id, tasks)
+        finished = False
+        try:
+            while not await asyncio.to_thread(self._advance_delegated_runs, run_ids):
+                await asyncio.sleep(_DELEGATION_POLL_SECONDS)
+            finished = True
+        finally:
+            if not finished:  # the conversation's turn was stopped: stop its sub-agents too
+                await asyncio.shield(asyncio.to_thread(self._cancel_delegated_runs, run_ids))
+        return await asyncio.to_thread(self._delegated_outcomes, run_ids)
+
+    def _create_delegated_runs(
+        self, parent_session_id: str, tasks: Sequence[SubagentTask]
+    ) -> list[str]:
+        with self._lock:
+            workspace = self._workspace
+            if workspace is None or self._provider is None or self._closing:
+                raise SubagentLaunchError("Sub-agents need an open folder and a model")
+        if any(task.isolation == "worktree" for task in tasks):
+            try:
+                git_head_sha(workspace)
+            except GitOpsError:
+                raise SubagentLaunchError(
+                    "'worktree' needs a git repository with at least one commit; "
+                    "use 'shared' in this folder"
+                ) from None
+        run_ids: list[str] = []
+        with self._lock:
+            service = self._control_service()
+            for task in tasks:
+                try:
+                    run = service.create_run(
+                        workspace=workspace,
+                        session_id=parent_session_id,
+                        goal=task.goal,
+                        title=task.title,
+                        isolation=RunIsolation(task.isolation),
+                    )
+                except (AgentControlError, OSError, sqlite3.DatabaseError) as error:
+                    for created in run_ids:
+                        with suppress(Exception):
+                            service.finish_run(
+                                created, AgentRunState.CANCELLED, reason="delegation_not_started"
+                            )
+                        self._delegations.pop(created, None)
+                    raise SubagentLaunchError(
+                        f"A sub-agent could not be created: {error}"
+                    ) from None
+                run_ids.append(run.id)
+                self._delegations[run.id] = _Delegation(parent_session_id, task.title)
+                self._emit_run_update(run.id, run.session_id, run.state.value)
+        return run_ids
+
+    def _delegated_run_finished(self, run: AgentRun, service: AgentControlService) -> bool:
+        if run.state in {AgentRunState.SUCCEEDED, AgentRunState.FAILED, AgentRunState.CANCELLED}:
+            return True
+        if run.state is not AgentRunState.NEEDS_ATTENTION:
+            return False
+        # Stopped for the user (paused, plan to verify, no progress): report it rather than wait.
+        entry = self._run_hosts.get(run.id)
+        if entry is not None and not entry.terminal and entry.host.is_alive():
+            return False
+        return not self._run_has_pending_approval(run.id, service)
+
+    def _advance_delegated_runs(self, run_ids: Sequence[str]) -> bool:
+        """Start delegated runs as slots free up; True once every one of them has finished."""
+        with self._lock:
+            service = self._control_service()
+            finished = True
+            for run_id in run_ids:
+                run = service.get_run(run_id)
+                if run is None or self._delegated_run_finished(run, service):
+                    continue
+                finished = False
+                if run.state is not AgentRunState.DRAFT or run_id in self._run_preparing:
+                    continue
+                try:
+                    with self._unsent():
+                        self._start_agent_run(
+                            CommandEnvelope(
+                                v=PROTOCOL_VERSION,
+                                request_id=f"delegate-{run_id}",
+                                type="workspace.runs.start",
+                                payload={"runId": run_id},
+                                session_id=run.session_id,
+                            )
+                        )
+                except GatewayError as error:
+                    if str(error) in {"run_concurrency_limit", "run_already_active"}:
+                        continue  # starts once another run finishes
+                    with suppress(Exception):
+                        failed = service.finish_run(run_id, AgentRunState.FAILED, reason=str(error))
+                        self._emit_run_update(run_id, failed.session_id, failed.state.value)
+            return finished
+
+    def _cancel_delegated_runs(self, run_ids: Sequence[str]) -> None:
+        with self._lock:
+            service = self._control_service()
+            for run_id in run_ids:
+                run = service.get_run(run_id)
+                if run is not None and run.state not in {
+                    AgentRunState.SUCCEEDED,
+                    AgentRunState.FAILED,
+                    AgentRunState.CANCELLED,
+                }:
+                    with suppress(GatewayError, AgentControlError), self._unsent():
+                        self._cancel_agent_run(
+                            CommandEnvelope(
+                                v=PROTOCOL_VERSION,
+                                request_id=f"delegate-cancel-{run_id}",
+                                type="workspace.runs.cancel",
+                                payload={"runId": run_id},
+                                session_id=run.session_id,
+                            )
+                        )
+                self._delegations.pop(run_id, None)
+
+    def _delegated_outcomes(self, run_ids: Sequence[str]) -> list[SubagentOutcome]:
+        with self._lock:
+            service = self._control_service()
+            runs = [service.get_run(run_id) for run_id in run_ids]
+            for run_id in run_ids:
+                self._delegations.pop(run_id, None)
+        outcomes: list[SubagentOutcome] = []
+        for run_id, run in zip(run_ids, runs, strict=True):
+            if run is None:
+                outcomes.append(SubagentOutcome(run_id, "", "failed", "", reason="run_missing"))
+                continue
+            answer = ""
+            with suppress(Exception):  # an unreadable run database leaves the answer empty
+                previews = SQLiteEventStore.list_message_previews_read_only(
+                    self._agent_run_database(run_id, self._database),
+                    run.session_id,
+                    limit=8,
+                    max_content_chars=_DELEGATION_ANSWER_CHARS,
+                )
+                last = next(
+                    (
+                        item
+                        for item in reversed(previews)
+                        if item.role is Role.ASSISTANT and item.content
+                    ),
+                    None,
+                )
+                if last is not None:
+                    answer = last.content + (
+                        "\n[shortened; the full answer is on the Agent runs page]"
+                        if last.truncated
+                        else ""
+                    )
+            outcomes.append(
+                SubagentOutcome(
+                    run_id=run_id,
+                    title=run.title,
+                    state=run.state.value,
+                    answer=answer,
+                    branch=run.branch if run.isolation is RunIsolation.WORKTREE else None,
+                    reason=run.blocking_reason,
+                )
+            )
+        return outcomes
 
     def _ensure_phase_graph(self, entry: _RunHostEntry, steps: list[PlanStep]) -> TaskGraph:
         ids = tuple(step.id for step in steps)
@@ -7308,145 +8543,277 @@ class GatewayRuntime:
             session_id=command.session_id,
         )
 
-    def _schedule_command(self, command: CommandEnvelope) -> GatewayReply:
-        """Handle mutable schedules without rewriting legacy TOML files."""
-
-        if self._workspace is None:
+    def _document_preview(self, command: CommandEnvelope) -> GatewayReply:
+        """What a Word, Excel or PowerPoint file of the open folder shows; with the digest of the
+        content a tool call replaced, also that earlier version (from the version store)."""
+        self._require_payload(command, {"path"}, optional={"previousSha256", "resultSha256"})
+        raw_path = command.payload["path"]
+        previous = command.payload.get("previousSha256")
+        produced = command.payload.get("resultSha256")
+        if not isinstance(raw_path, str) or not raw_path or len(raw_path) > 4096:
+            raise GatewayError("invalid_path")
+        for digest in (previous, produced):
+            if digest is not None and (not isinstance(digest, str) or not _SHA256.match(digest)):
+                raise GatewayError("unknown_change")
+        with self._lock:
+            workspace = self._workspace
+        if workspace is None:
             raise GatewayError("runtime_unconfigured")
+        paths = WorkspacePaths(workspace)
+        try:
+            target = paths.resolve(raw_path)
+            relative = paths.relative(target)
+        except (OSError, ToolError, ValueError):
+            raise GatewayError("invalid_path") from None
+        suffix = target.suffix.casefold()
+        if suffix not in {".docx", ".xlsx", ".pptx"}:
+            raise GatewayError("unsupported_type")
+        try:
+            if not target.is_file():
+                raise GatewayError("file_not_found")
+            if target.stat().st_size > _DOCUMENT_PREVIEW_BYTES:
+                raise GatewayError("too_large")
+            data = target.read_bytes()
+        except OSError:
+            raise GatewayError("file_not_found") from None
+        try:
+            preview = preview_office(data, suffix)
+        except PreviewError as error:
+            raise GatewayError(str(error)) from None
+        payload: dict[str, object] = {"epoch": self.epoch, "path": relative, "preview": preview}
+        if isinstance(previous, str):
+            earlier = self._file_versions.read(previous)
+            before = None
+            if earlier is not None:
+                with suppress(PreviewError):
+                    before = preview_office(earlier, suffix)
+            payload["before"] = before
+            payload["beforeAvailable"] = before is not None
+            if isinstance(produced, str):
+                payload["changedLater"] = sha256_bytes(data) != produced
+        return self._reply("document.preview.result", payload, session_id=command.session_id)
+
+    def _schedules_command(self, command: CommandEnvelope) -> GatewayReply:
+        """Scheduled tasks the desktop runs on its own, and the inbox of their results."""
         action = command.type.rsplit(".", 1)[-1]
-        store = ScheduleStore(self._workspace)
+        book = self._schedules
         try:
             if action == "list":
-                self._require_payload(command, set(), optional={"limit"})
-                limit = command.payload.get("limit", 100)
-                if type(limit) is not int or not 1 <= limit <= 500:
-                    raise GatewayError("invalid_limit")
-                schedules = store.list()[:limit]
-                payload = {
+                self._require_payload(command, set())
+                self._refresh_open_schedule_runs()
+                payload: dict[str, object] = {
                     "epoch": self.epoch,
-                    "schedules": [item.to_document() for item in schedules],
-                    "truncated": len(store.list()) > limit,
+                    "schedules": [self._schedule_document(item) for item in book.all()],
+                    "unread": book.unread_count(),
                 }
-            elif action == "create":
-                self._require_payload(
-                    command,
-                    {"id", "prompt"},
-                    optional={"cron", "at", "timezone"},
-                )
-                schedule_id = command.payload.get("id")
-                if not isinstance(schedule_id, str) or not schedule_id.strip():
-                    raise GatewayError("invalid_schedule")
-                schedule = store.create(
-                    schedule_id=schedule_id.strip(),
-                    prompt=cast(str, command.payload["prompt"]),
-                    cron=cast(str | None, command.payload.get("cron")),
-                    at=cast(str | None, command.payload.get("at")),
-                    timezone=cast(str, command.payload.get("timezone", "UTC")),
-                )
-                payload = {"epoch": self.epoch, "schedule": schedule.to_document()}
-            elif action == "update":
-                self._require_payload(
-                    command,
-                    {"scheduleId"},
-                    optional={"prompt", "cron", "at", "timezone", "enabled"},
-                )
-                schedule_id = command.payload.get("scheduleId")
-                if not isinstance(schedule_id, str) or not schedule_id:
-                    raise GatewayError("invalid_schedule")
-                changes = {
-                    key: command.payload[key]
-                    for key in ("prompt", "cron", "at", "timezone", "enabled")
-                    if key in command.payload
-                }
-                schedule = store.update(schedule_id, **changes)
-                payload = {"epoch": self.epoch, "schedule": schedule.to_document()}
-            elif action in {"pause", "resume"}:
-                self._require_payload(command, {"scheduleId"})
-                schedule_id = command.payload.get("scheduleId")
-                if not isinstance(schedule_id, str) or not schedule_id:
-                    raise GatewayError("invalid_schedule")
-                schedule = (
-                    store.pause(schedule_id) if action == "pause" else store.resume(schedule_id)
-                )
-                payload = {"epoch": self.epoch, "schedule": schedule.to_document()}
+            elif action == "save":
+                self._require_payload(command, {"schedule"})
+                schedule = book.save(command.payload["schedule"], workspace_exists=_is_directory)
+                payload = {"epoch": self.epoch, "schedule": self._schedule_document(schedule)}
             elif action == "delete":
                 self._require_payload(command, {"scheduleId"})
-                schedule_id = command.payload.get("scheduleId")
-                if not isinstance(schedule_id, str) or not schedule_id:
-                    raise GatewayError("invalid_schedule")
-                if not store.delete(schedule_id):
+                schedule_id = command.payload["scheduleId"]
+                if not isinstance(schedule_id, str) or not book.delete(schedule_id):
                     raise GatewayError("schedule_not_found")
-                payload = {"epoch": self.epoch, "scheduleId": schedule_id, "success": True}
-            elif action == "run_now":
-                self._require_payload(command, {"scheduleId"}, optional={"priority"})
-                schedule_id = command.payload.get("scheduleId")
-                if not isinstance(schedule_id, str) or not schedule_id:
-                    raise GatewayError("invalid_schedule")
-                trigger = store.run_now(schedule_id)
-                priority = command.payload.get("priority", 0)
-                if type(priority) is not int or not -100_000 <= priority <= 100_000:
-                    raise GatewayError("invalid_priority")
-                provider = self._provider
-                model = provider.model if provider is not None and provider.model else "scheduled"
-                with SQLiteEventStore(self._database) as event_store:
-                    queue = DurableRunQueue(event_store)
-                    queued = self._run_queue_enqueue_sync(
-                        queue,
-                        str(self._workspace),
-                        cast(str, trigger["prompt"]),
-                        model,
-                        priority=priority,
-                    )
-                payload = {
-                    "epoch": self.epoch,
-                    "scheduleId": schedule_id,
-                    "trigger": trigger,
-                    "task": self._queue_document(queued),
-                    "accepted": True,
-                }
-            elif action == "preview":
-                self._require_payload(command, {"scheduleId"}, optional={"count"})
-                schedule_id = command.payload.get("scheduleId")
-                if not isinstance(schedule_id, str) or not schedule_id:
-                    raise GatewayError("invalid_schedule")
-                preview_schedule = store.get(schedule_id)
-                if preview_schedule is None:
+                payload = {"epoch": self.epoch, "scheduleId": schedule_id}
+            elif action == "run":
+                self._require_payload(command, {"scheduleId"})
+                schedule_id = command.payload["scheduleId"]
+                found = book.get(schedule_id) if isinstance(schedule_id, str) else None
+                if found is None:
                     raise GatewayError("schedule_not_found")
-                count = command.payload.get("count", 5)
-                if type(count) is not int or not 1 <= count <= 100:
+                run = book.claim_run(found, datetime.now(UTC), manual=True)
+                if run is None:
+                    raise GatewayError("runtime_busy")
+                self._start_schedule_run_in_background(found, run)
+                payload = {"epoch": self.epoch, "run": run.document()}
+            elif action == "runs":
+                self._require_payload(command, set(), optional={"scheduleId", "limit"})
+                schedule_id = command.payload.get("scheduleId")
+                limit = command.payload.get("limit", 50)
+                if schedule_id is not None and not isinstance(schedule_id, str):
+                    raise GatewayError("schedule_not_found")
+                if type(limit) is not int or not 1 <= limit <= 200:
                     raise GatewayError("invalid_limit")
-                if preview_schedule.cron is None:
-                    runs = [preview_schedule.at] if preview_schedule.at is not None else []
-                else:
-                    from agent_workspace.core.timezone_schedules import (
-                        TimezoneSchedule,
-                        timezone_schedule_preview,
-                    )
-
-                    preview = timezone_schedule_preview(
-                        TimezoneSchedule(preview_schedule.cron, preview_schedule.timezone),
-                        count=count,
-                    )
-                    runs = [item.isoformat() for item in preview.next_runs_utc]
+                self._refresh_open_schedule_runs()
                 payload = {
                     "epoch": self.epoch,
-                    "schedule": preview_schedule.to_document(),
-                    "nextRuns": runs,
+                    "runs": [
+                        run.document() for run in book.runs(schedule_id=schedule_id, limit=limit)
+                    ],
+                    "unread": book.unread_count(),
                 }
+            elif action == "read":
+                self._require_payload(command, set(), optional={"runIds"})
+                run_ids = command.payload.get("runIds")
+                if run_ids is not None and (
+                    not isinstance(run_ids, list)
+                    or len(run_ids) > 500
+                    or not all(isinstance(item, str) for item in run_ids)
+                ):
+                    raise GatewayError("invalid_payload")
+                book.mark_read(cast(list[str] | None, run_ids))
+                payload = {"epoch": self.epoch, "unread": book.unread_count()}
             else:
                 raise GatewayError("unsupported_command")
-        except GatewayError:
-            raise
-        except (ScheduledTaskConfigError, OSError, ValueError, sqlite3.DatabaseError) as error:
-            code = str(error)
-            if "not found" in code:
-                code = "schedule_not_found"
-            elif "duplicated" in code:
-                code = "schedule_exists"
-            elif not code.startswith("invalid_"):
-                code = "invalid_schedule"
-            raise GatewayError(code) from None
+        except ScheduleRuleError as error:
+            raise GatewayError(str(error)) from None
+        except (OSError, sqlite3.DatabaseError):
+            raise GatewayError("storage_unavailable") from None
         return self._reply(f"{command.type}.result", payload, session_id=command.session_id)
+
+    def _schedule_document(self, schedule: Schedule) -> dict[str, object]:
+        document = schedule.document()
+        upcoming = self._schedules.next_run_of(schedule)
+        document["nextRun"] = upcoming.isoformat() if upcoming is not None else None
+        last = self._schedules.last_run_of(schedule.id)
+        document["lastRun"] = last.document() if last is not None else None
+        return document
+
+    def _tick_schedules(self) -> None:
+        """Start a pass over the schedules every so often (gateway lock held, so no work here)."""
+        now = self._clock()
+        if now - self._schedules_checked < _SCHEDULE_TICK_SECONDS or self._closing:
+            return
+        self._schedules_checked = now
+        self._tick_folder_watch()
+        if self._schedule_pass_thread is not None and self._schedule_pass_thread.is_alive():
+            return
+        thread = threading.Thread(target=self._schedule_pass, name="gateway-schedules", daemon=True)
+        self._schedule_pass_thread = thread
+        thread.start()
+
+    def _schedule_pass(self) -> None:
+        """Start the runs that are due, and follow the ones in progress to their answers."""
+        try:
+            book = self._schedules
+            self._refresh_open_schedule_runs()
+            now = datetime.now(UTC)
+            for schedule, due_at in book.due(now):
+                once = schedule.rule["kind"] == "once"
+                if now - due_at > CATCH_UP_WINDOW:
+                    # The computer was off or asleep for the whole window: say so, run nothing.
+                    book.claim_run(schedule, due_at, state="missed")
+                    book.mark_checked(schedule.id, now, enabled=False if once else None)
+                    continue
+                run = book.claim_run(schedule, due_at)
+                book.mark_checked(schedule.id, now, enabled=False if once else None)
+                if run is not None:
+                    self._start_schedule_run(schedule, run)
+        except Exception:
+            # One failed pass (a catalog that could not be read) must not stop later ones.
+            _LOGGER.exception("scheduled task pass failed")
+
+    def _start_schedule_run_in_background(self, schedule: Schedule, run: ScheduleRun) -> None:
+        threading.Thread(
+            target=self._start_schedule_run,
+            args=(schedule, run),
+            name=f"gateway-schedule-{run.run_id[:8]}",
+            daemon=True,
+        ).start()
+
+    def _start_schedule_run(self, schedule: Schedule, run: ScheduleRun) -> None:
+        """Open a new conversation in the schedule's folder and send its prompt there."""
+        book = self._schedules
+        if not _is_directory(schedule.workspace):
+            book.update_run(run.run_id, state="failed", error="folder_missing")
+            return
+        with self._lock:
+            ready = self._provider is not None and not self._closing
+        if not ready:
+            book.update_run(run.run_id, state="failed", error="desktop_not_ready")
+            return
+        started = datetime.fromisoformat(run.due_at).astimezone()
+        session = Session(
+            workspace=str(Path(schedule.workspace).resolve()),
+            mode=Mode.TASK,
+            autonomy=schedule.autonomy,
+            title=f"{schedule.title} · {started:%m-%d %H:%M}"[:200],
+        )
+        try:
+            with SQLiteEventStore(self._database) as store:
+                store.create_session(session)
+        except (OSError, sqlite3.DatabaseError, ValueError):
+            book.update_run(run.run_id, state="failed", error="storage_unavailable")
+            return
+        book.update_run(run.run_id, session_id=session.id)
+        with self._lock:
+            self._pending_host_events.append(
+                Event(
+                    session_id=session.id,
+                    type="session.created",
+                    data={
+                        "session_id": session.id,
+                        "title": session.title,
+                        "mode": session.mode.value,
+                        "autonomy": session.autonomy.value,
+                        "activated": False,
+                        # Listed in the window; the conversation open there stays open.
+                        "selected": False,
+                    },
+                )
+            )
+        try:
+            self._dispatch_prompt(f"schedule-{run.run_id}", session, schedule.prompt)
+        except GatewayError as error:
+            book.update_run(run.run_id, state="failed", error=str(error))
+            return
+        book.update_run(run.run_id, state="running")
+
+    def _refresh_open_schedule_runs(self) -> None:
+        for run in self._schedules.open_runs():
+            self._refresh_schedule_run(run)
+
+    def _refresh_schedule_run(self, run: ScheduleRun) -> None:
+        """Follow a run through its conversation's first turn."""
+        if run.state not in OPEN_RUN_STATES or run.session_id is None:
+            return
+        try:
+            events = SQLiteEventStore.list_session_events_of_types_read_only(
+                self._database,
+                run.session_id,
+                frozenset({"message.created", *_DEVICE_TURN_ENDS}),
+            )
+        except (OSError, ValueError, sqlite3.DatabaseError):
+            return
+        correlation = run.correlation_id
+        if correlation is None:
+            correlation = next(
+                (
+                    event.correlation_id
+                    for event in events
+                    if event.type == "message.created"
+                    and event.data.get("role") == "user"
+                    and event.correlation_id
+                ),
+                None,
+            )
+            if correlation is None:
+                return
+            self._schedules.update_run(run.run_id, correlation_id=correlation)
+        for event in events:
+            if event.correlation_id != correlation or event.type not in _DEVICE_TURN_ENDS:
+                continue
+            answers = [
+                str(item.data.get("content"))
+                for item in events
+                if item.correlation_id == correlation
+                and item.type == "message.created"
+                and item.data.get("role") == "assistant"
+                and isinstance(item.data.get("content"), str)
+                and str(item.data.get("content")).strip()
+            ]
+            error = None
+            if event.type == "turn.failed":
+                message = event.data.get("message")
+                error = Redactor().redact(message[:600]) if isinstance(message, str) else None
+            self._schedules.update_run(
+                run.run_id,
+                state=_DEVICE_TURN_ENDS[event.type],
+                result=answers[-1][:_SCHEDULE_RESULT_CHARS] if answers else None,
+                error=error,
+            )
+            return
 
     @staticmethod
     def _run_queue_enqueue_sync(
@@ -8159,7 +9526,13 @@ class GatewayRuntime:
         self._require_payload(
             command,
             {"prompt"},
-            optional={"attachmentPaths", "excludeImageDigests", "reasoningEffort", "model"},
+            optional={
+                "attachmentPaths",
+                "excludeImageDigests",
+                "reasoningEffort",
+                "model",
+                "planFirst",
+            },
         )
         self._require_selected_session(command.session_id, allow_unselected=True)
         if command.session_id != self._host_session_id:
@@ -8195,12 +9568,17 @@ class GatewayRuntime:
             if "model" in command.payload
             else None
         )
+        plan_first = command.payload.get("planFirst", False)
+        if type(plan_first) is not bool:
+            raise GatewayError("invalid_payload")
+        self._check_monthly_cap()
         prompt = prompt.strip()
         if references:
             prompt = f"{prompt}\n\n" + "\n".join(f"[File reference: {path}]" for path in references)
         busy = self._active_turn is not None or self._turn_requested or len(self._queued_turns) > 0
-        if model is not None and (busy or self._busy):
-            # A queued turn keeps only what the queue stores; another model is asked at once.
+        if (model is not None or plan_first) and (busy or self._busy):
+            # A queued turn keeps only what the queue stores; another model, or a plan, is
+            # asked at once.
             raise GatewayError("runtime_busy")
         if busy:
             if len(self._queued_turns) >= _MAX_TURN_QUEUE:
@@ -8244,7 +9622,12 @@ class GatewayRuntime:
         self._require_host()
         try:
             self._submit_host_turn(
-                prompt, exclude_image_digests, reasoning_effort, images=images, model=model
+                prompt,
+                exclude_image_digests,
+                reasoning_effort,
+                images=images,
+                model=model,
+                plan_only=plan_first,
             )
         except RuntimeError:
             raise GatewayError("runtime_unavailable") from None
@@ -8266,6 +9649,7 @@ class GatewayRuntime:
         *,
         images: tuple[ImagePart, ...] = (),
         model: str | None = None,
+        plan_only: bool = False,
     ) -> Future[None]:
         """Submit a turn while keeping legacy test hosts compatible.
 
@@ -8289,6 +9673,8 @@ class GatewayRuntime:
             kwargs["reasoning_effort"] = reasoning_effort
         if model is not None:
             kwargs["model"] = model
+        if plan_only:
+            kwargs["plan_only"] = True
         limits = self._task_limits()
         if limits is not None:
             kwargs["limits"] = limits
@@ -8972,6 +10358,19 @@ class GatewayRuntime:
                 },
             )
         )
+        delegation = self._delegations.get(entry.run_id) if entry.run_id is not None else None
+        if delegation is not None:
+            self._pending_host_events.append(
+                Event(
+                    session_id=delegation.parent_session_id,
+                    type="approval.resolved",
+                    data={
+                        "request_id": request_id,
+                        "allowed": scope is not None,
+                        "scope": scope.value if scope is not None else None,
+                    },
+                )
+            )
         if entry.run_id is not None:
             with suppress(Exception):
                 self._control_service().resolve_attention_by_source(
@@ -9000,6 +10399,8 @@ class GatewayRuntime:
                 autonomy=self._autonomy,
                 session_id=session_id,
                 writer_lock_group=self._writer_lock_group,
+                subagents=self._subagents,
+                phone_jobs=self._phone_jobs,
             )
         host: Host | None = None
         try:
@@ -9395,6 +10796,7 @@ class GatewayRuntime:
                     self._clear_turn_state_after_runtime_failure(session_id)
                 self._session_hosts.pop(session_id, None)
         self._retire_idle_device_hosts()
+        self._tick_schedules()
 
     def _queue_host_events(
         self,
@@ -9445,6 +10847,8 @@ class GatewayRuntime:
                     correlation_id=event.correlation_id,
                     created_at=event.created_at,
                 )
+            else:
+                display_event = self._note_device_turn(event)
             try:
                 payload = self._event_payload(display_event)
             except GatewayError:
@@ -9458,6 +10862,69 @@ class GatewayRuntime:
                     run_id=run_id,
                 )
             self._pending_host_events.append(display_event)
+
+    def _note_device_turn(self, event: Event) -> Event:
+        """Mark a phone's task where its message shows, and keep finished turns for the phones'
+        inboxes (gateway lock held)."""
+        correlation = event.correlation_id
+        if event.type == "message.created":
+            role, content = event.data.get("role"), event.data.get("content")
+            if role == "assistant" and correlation and isinstance(content, str) and content.strip():
+                self._turn_answers[correlation] = content[:300]
+                while len(self._turn_answers) > _TURN_ANSWERS_KEPT:
+                    self._turn_answers.pop(next(iter(self._turn_answers)))
+            elif role == "user" and isinstance(content, str) and "origin" not in event.data:
+                pending = self._device_turn_origins.get(event.session_id) or []
+                match = next((item for item in pending if item[0] == content), None)
+                if match is not None:
+                    pending.remove(match)
+                    _prompt, origin, task_id, device_id = match
+                    if correlation:
+                        self._device_turn_owners[correlation] = device_id
+                        with suppress(OSError, sqlite3.Error):
+                            self._device_link.tasks.update(
+                                task_id,
+                                state="running",
+                                message_event_id=event.id,
+                                correlation_id=correlation,
+                            )
+                    return replace(event, data={**event.data, "origin": origin})
+        elif event.type in _DEVICE_TURN_ENDS and correlation:
+            summary = self._turn_answers.pop(correlation, "")
+            owner = self._device_turn_owners.pop(correlation, None)
+            if event.type == "turn.failed":
+                message = event.data.get("message")
+                summary = Redactor().redact(message[:300]) if isinstance(message, str) else ""
+            self._record_finished_turn(
+                event.session_id, correlation, _DEVICE_TURN_ENDS[event.type], summary, owner
+            )
+        return event
+
+    def _record_finished_turn(
+        self, session_id: str, turn_id: str, state: str, summary: str, owner: str | None
+    ) -> None:
+        """Keep a finished turn for paired phones, in order, off the event path."""
+        with suppress(OSError, ValueError):
+            if not self._device_link.settings()["enabled"]:
+                return
+        self._finished_turns.put((session_id, turn_id, state, summary, owner))
+        if self._turn_recorder is None or not self._turn_recorder.is_alive():
+            self._turn_recorder = threading.Thread(
+                target=self._record_turns, name="device-link-turns", daemon=True
+            )
+            self._turn_recorder.start()
+
+    def _record_turns(self) -> None:
+        link = self._device_link
+        while True:
+            session_id, turn_id, state, summary, owner = self._finished_turns.get()
+            with suppress(Exception):
+                if not link.registry.list():
+                    continue
+                session = self._stored_session(session_id)
+                if session is not None:
+                    title = self._session_title(session)
+                    link.store.add_turn(turn_id, session_id, title, state, summary, owner)
 
     def _event_payload(self, event: Event) -> dict[str, object]:
         if event.type == "approval.requested":
@@ -9475,9 +10942,17 @@ class GatewayRuntime:
             scope = event.data.get("supports_session_scope", event.data.get("supportsSessionScope"))
             if isinstance(scope, bool):
                 payload["supportsSessionScope"] = scope
-            summary = _approval_summary(event.data)
+            summary = _approval_summary(event.data) or _approval_display_text(
+                event.data.get("summary")
+            )
             if summary:
                 payload["summary"] = summary
+            subagent = _approval_display_text(event.data.get("subagent"))
+            if subagent:
+                payload["subagent"] = subagent
+            plan = _approval_plan(event.data)
+            if plan is not None:
+                payload["plan"], payload["planTotal"] = cast(list[object], plan[0]), plan[1]
         elif event.type in _COMPACT_CHANGE_EVENTS or event.type.startswith("background.job."):
             fields = (
                 (("changeset_id", "changesetId"),)
@@ -9979,6 +11454,24 @@ class GatewayRuntime:
                     data={"run_id": run_id, "attention_kind": "approval"},
                 )
             )
+            delegation = self._delegations.get(run_id)
+            if delegation is not None:
+                # A sub-agent's question is answered where the user asked for the work.
+                self._pending_host_events.append(
+                    Event(
+                        session_id=delegation.parent_session_id,
+                        type="approval.requested",
+                        data={
+                            "request_id": request_id,
+                            "tool": approval_payload.get("tool")
+                            or approval_payload.get("toolName"),
+                            "summary": approval_payload.get("summary"),
+                            "supports_session_scope": approval_payload.get("supportsSessionScope")
+                            is True,
+                            "subagent": delegation.title,
+                        },
+                    )
+                )
             return
         if event_type == "approval.resolved":
             request_id = payload.get("requestId")
@@ -10263,11 +11756,20 @@ class GatewayRuntime:
         applied_input_ids = {
             event.causation_id for event in events if event.type == "turn.input.applied"
         }
+        origins = self._device_task_origins(session_id)
         for event in events:
             if event.type == "turn.input.applied" or (
                 event.type == "turn.input.received" and event.id in applied_input_ids
             ):
                 continue
+            origin = origins.get(event.correlation_id or "")
+            if (
+                origin is not None
+                and event.type == "message.created"
+                and event.data.get("role") == "user"
+                and "origin" not in event.data
+            ):
+                event = replace(event, data={**event.data, "origin": origin})
             request_id = inferred_requests.get(event.id)
             projected = self._timeline_event(
                 replace(event, data={**event.data, "model_request_id": request_id})
@@ -10337,6 +11839,24 @@ class GatewayRuntime:
                 "cutoff": durable_cutoff,
                 "oversizedTurn": oversized_turn,
             },
+        }
+
+    def _device_task_origins(self, session_id: str) -> dict[str, dict[str, object]]:
+        """How the window marks each turn a phone handed over in a conversation, by turn."""
+        if not (self._database.with_name("device-link") / "tasks.db").is_file():
+            return {}
+        try:
+            tasks = self._device_link.tasks.for_session(session_id)
+            names = {device.device_id: device.name for device in self._device_link.registry.list()}
+        except (OSError, sqlite3.Error):
+            return {}
+        return {
+            task.correlation_id: {
+                "device": names.get(task.device_id, ""),
+                "labels": list(task.labels),
+            }
+            for task in tasks
+            if task.correlation_id
         }
 
     def _acknowledge_history_page(self, session_id: str, page: Mapping[str, object]) -> None:

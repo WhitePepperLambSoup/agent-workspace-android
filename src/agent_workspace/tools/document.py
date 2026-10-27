@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import unicodedata
 import zipfile
 from pathlib import Path
@@ -314,6 +315,9 @@ def _read_document_sync(paths: WorkspacePaths, raw_path: str, maximum: int) -> s
     elif suffix in {".xlsx", ".xls"} and prefix.startswith(b"PK"):
         text, truncated = _xlsx_text(path, maximum)
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    elif suffix == ".pptx" and prefix.startswith(b"PK"):
+        text, truncated = _pptx_text(path, maximum)
+        media_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     elif suffix in {".txt", ".md", ".csv", ".json", ".log", ".toml", ".yaml", ".yml"}:
         try:
             raw = path.read_bytes()
@@ -326,15 +330,43 @@ def _read_document_sync(paths: WorkspacePaths, raw_path: str, maximum: int) -> s
         media_type = "text/plain"
     else:
         raise ToolError(f"unsupported document format: {suffix or path.name}")
+    try:
+        # The digest edit_docx and update_xlsx ask for, so a change applies to this version.
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise ToolError(f"cannot read document: {path}") from exc
     return json_result(
         {
             "path": paths.relative(path),
             "media_type": media_type,
+            "sha256": digest,
             "chars": len(text.encode("utf-8")),
             "truncated": truncated,
             "content": text,
         }
     )
+
+
+def _pptx_text(path: Path, maximum: int) -> tuple[str, bool]:
+    """A presentation's text, slide by slide: the title, then its points indented by level."""
+    from agent_workspace.tools.office_preview import PreviewError, preview_office
+
+    try:
+        preview = preview_office(path.read_bytes(), ".pptx")
+    except (OSError, PreviewError):
+        raise ToolError("document is not a readable PowerPoint presentation") from None
+    lines: list[str] = []
+    for slide in preview["slides"]:
+        lines.append(f"## Slide {slide['index']}: {slide['title']}".rstrip(": "))
+        lines.extend("  " * item["level"] + f"- {item['text']}" for item in slide["paragraphs"])
+        for table in slide["tables"]:
+            lines.extend(" | ".join(row) for row in table)
+        if slide["images"]:
+            lines.append(f"[{slide['images']} image(s)]")
+        if slide.get("notes"):
+            lines.append(f"Notes: {slide['notes']}")
+        lines.append("")
+    return _bounded_text("\n".join(lines).strip(), maximum)
 
 
 class ReadDocumentTool:
@@ -344,10 +376,12 @@ class ReadDocumentTool:
     _SPEC = ToolSpec(
         name="read_document",
         description=(
-            "Extract bounded UTF-8 text from a workspace document: PDF, DOCX, XLSX, or a "
-            "plain-text file. max_chars limits UTF-8 bytes. PDF fonts need readable Unicode "
-            "mappings; scanned or unmapped PDFs need page rendering and OCR. "
-            "Binary Word/Excel files and PDFs over 16 MiB are unsupported."
+            "Extract bounded UTF-8 text from a workspace document: PDF, DOCX, XLSX, PPTX, or a "
+            "plain-text file. max_chars limits UTF-8 bytes. The result's sha256 is what "
+            "edit_docx and update_xlsx need as expected_sha256. PDF fonts need readable "
+            "Unicode mappings; scanned or unmapped PDFs need page rendering and OCR. "
+            "Binary Word/Excel/PowerPoint files (.doc/.xls/.ppt) and PDFs over 16 MiB are "
+            "unsupported."
         ),
         input_schema={
             "type": "object",

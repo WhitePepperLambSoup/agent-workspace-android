@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING
 
 from agent_workspace.application.ports import ContextualTool, EventStore, Tool
 from agent_workspace.core.models import Mode, ToolSpec, capabilities_for_mode
+from agent_workspace.storage.file_versions import FileVersions
+from agent_workspace.tools.file_batches import FileBatchStore, OrganizeFilesTool
 
 from .background_jobs import (
     BackgroundJobLogsTool,
@@ -25,6 +27,7 @@ from .image import AttachImageTool
 from .lsp import LspDiagnosticsTool
 from .manage import DeletePathTool, MakeDirectoryTool, MovePathTool
 from .memory import MemorySearchTool, MemoryWriteTool
+from .office import CreateDocxTool, CreatePptxTool, CreateXlsxTool, EditDocxTool, UpdateXlsxTool
 from .patch import ApplyPatchTool
 from .paths import StrPath, WorkspacePaths
 from .pty import RunTerminalTool
@@ -59,6 +62,13 @@ if TYPE_CHECKING:
     from agent_workspace.application.background_jobs import BackgroundJobManager
 
 
+def _offered(tool: Tool) -> bool:
+    """A tool that depends on something outside (a phone that takes requests) says whether it
+    can be used right now; the model is not shown it otherwise."""
+    offered = getattr(tool, "offered", None)
+    return not callable(offered) or bool(offered())
+
+
 class ToolRegistry:
     def __init__(
         self,
@@ -81,6 +91,8 @@ class ToolRegistry:
         allow_host_process: bool = True,
         background_jobs: BackgroundJobManager | None = None,
         custom_tools: Iterable[Tool] = (),
+        file_versions: FileVersions | None = None,
+        file_batches: FileBatchStore | None = None,
     ) -> ToolRegistry:
         paths = workspace if isinstance(workspace, WorkspacePaths) else WorkspacePaths(workspace)
         if sandbox_backend is not None:
@@ -95,10 +107,16 @@ class ToolRegistry:
             ListFilesTool(paths),
             ReadFileTool(paths),
             ReadDocumentTool(paths),
+            CreateDocxTool(paths, file_versions),
+            EditDocxTool(paths, file_versions),
+            CreateXlsxTool(paths, file_versions),
+            UpdateXlsxTool(paths, file_versions),
+            CreatePptxTool(paths, file_versions),
+            *((OrganizeFilesTool(paths, file_batches),) if file_batches is not None else ()),
             QueryTableTool(paths),
             SearchFilesTool(paths),
-            WriteFileTool(paths),
-            ApplyPatchTool(paths),
+            WriteFileTool(paths, file_versions),
+            ApplyPatchTool(paths, file_versions),
             MakeDirectoryTool(paths),
             MovePathTool(paths),
             DeletePathTool(paths),
@@ -195,7 +213,7 @@ class ToolRegistry:
         matching = [
             tool.spec
             for tool in self._tools.values()
-            if capabilities is None or tool.spec.capability in capabilities
+            if (capabilities is None or tool.spec.capability in capabilities) and _offered(tool)
         ]
         # Deterministic lexicographic order keeps provider requests stable
         # across sessions (and friendly to provider-side caching).

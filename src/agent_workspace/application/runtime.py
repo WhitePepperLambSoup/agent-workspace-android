@@ -54,10 +54,13 @@ from agent_workspace.policy import (
 )
 from agent_workspace.providers import create_provider
 from agent_workspace.storage import ProcessWriteLock, SQLiteEventStore, create_verified_backup
+from agent_workspace.storage.file_versions import FileVersions
 from agent_workspace.storage.lock import ProcessWriteLockGroup, ProcessWriteLockLease
 from agent_workspace.tools import ToolRegistry
 from agent_workspace.tools.code_map import CodeMapTool
 from agent_workspace.tools.custom import CustomCommandTool, load_custom_tool_definitions
+from agent_workspace.tools.delegation import DelegateTasksTool, SubagentLauncher
+from agent_workspace.tools.file_batches import FileBatchStore
 from agent_workspace.tools.mcp_host import (
     McpHost,
     McpServerConfig,
@@ -65,6 +68,7 @@ from agent_workspace.tools.mcp_host import (
     load_mcp_servers,
 )
 from agent_workspace.tools.openapi import OpenApiGetTool, load_openapi_file
+from agent_workspace.tools.phone_jobs import PhoneJobLauncher, PhoneTaskTool
 from agent_workspace.tools.process_worker import run_in_process
 from agent_workspace.tools.sandbox import (
     LocalSandboxConfig,
@@ -422,6 +426,8 @@ def _build_runtime_core(
     prompt_assembler: Any,
     scheduled_tasks: Any,
     writer_lock_group: ProcessWriteLockGroup | None = None,
+    subagents: SubagentLauncher | None = None,
+    phone_jobs: PhoneJobLauncher | None = None,
 ) -> ApplicationRuntime:
     # Stack-managed resource allocation (R18 & R28)
     cleanup_stack: list[Callable[[], Any]] = []
@@ -479,8 +485,14 @@ def _build_runtime_core(
             custom_tools=(
                 CustomCommandTool(workspace_path, definition) for definition in approved_custom_defs
             ),
+            file_versions=FileVersions(database_path.with_name("file-versions")),
+            file_batches=FileBatchStore(database_path.with_name("file-batches")),
         )
         tools.register(CodeMapTool(workspace_path))
+        if subagents is not None:
+            tools.register(DelegateTasksTool(subagents))
+        if phone_jobs is not None:
+            tools.register(PhoneTaskTool(phone_jobs))
         knowledge = knowledge_store(knowledge_root(database_path))
         for tool in knowledge_tools(knowledge, workspace_path):
             tools.register(tool)
@@ -711,6 +723,8 @@ async def build_runtime_async(
     profile_turns: bool = False,
     sqlite_synchronous: str = "FULL",
     writer_lock_group: ProcessWriteLockGroup | None = None,
+    subagents: SubagentLauncher | None = None,
+    phone_jobs: PhoneJobLauncher | None = None,
 ) -> ApplicationRuntime:
     provider_config.validate()
     workspace_path = Path(workspace).resolve(strict=True)
@@ -784,4 +798,6 @@ async def build_runtime_async(
         prompt_assembler=prompt_assembler,
         scheduled_tasks=scheduled_tasks,
         writer_lock_group=writer_lock_group,
+        subagents=subagents,
+        phone_jobs=phone_jobs,
     )

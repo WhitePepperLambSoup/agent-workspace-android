@@ -45,6 +45,8 @@ from agent_workspace.policy.permissions import WorkspacePolicy
 from agent_workspace.providers import create_provider
 from agent_workspace.providers.prefix_cache import prefix_cache_endpoint
 from agent_workspace.storage.lock import ProcessWriteLockGroup, ProcessWriteLockLease
+from agent_workspace.tools.delegation import SubagentLauncher
+from agent_workspace.tools.phone_jobs import PhoneJobLauncher
 from agent_workspace.tools.terminal_sessions import TerminalSessionRegistry
 
 _SHUTDOWN_GRACE_SECONDS = 10.0
@@ -81,6 +83,21 @@ def _loopback_endpoint(base_url: str) -> bool:
         return False
 
 
+# What a plan-first turn may use: tools that only read, and the to-do list for the plan.
+_PLAN_EFFECTS = frozenset({"", "none", "read", "read_state", "session_state"})
+_PLAN_FIRST = (
+    "Plan first: for this request, look into it with the tools you have (they only read) and "
+    "reply with a short numbered plan: what you will change, in which files, and how you will "
+    "check the result. Do not write files or run commands yet; the user reads the plan and then "
+    "asks you to carry it out. End with any questions that would change the plan."
+)
+
+
+def _reads_only(spec: ToolSpec) -> bool:
+    effect = spec.side_effect.strip().lower().replace("-", "_")
+    return effect.rsplit(":", maxsplit=1)[-1].removeprefix("filesystem_") in _PLAN_EFFECTS
+
+
 def _knowledge_context(
     store: KnowledgeStore, prompt: str, session_id: str, local: bool
 ) -> tuple[str, tuple[ChatMessage, ...]]:
@@ -103,6 +120,7 @@ _ONCE_ONLY_APPROVAL_TOOLS = frozenset(
         "make_directory",
         "memory_write",
         "move_path",
+        "organize_files",
         "run_process",
         "web_fetch",
     }
@@ -162,6 +180,10 @@ class RuntimeSettings:
     allow_workspace_extensions: bool = False
     extension_approval_callback: ExtensionApprovalCallback | None = None
     writer_lock_group: ProcessWriteLockGroup | None = None
+    # Starts sub-agents for the delegate_tasks tool; None leaves the tool out.
+    subagents: SubagentLauncher | None = None
+    # Sends requests to paired phones for the phone_task tool; None leaves the tool out.
+    phone_jobs: PhoneJobLauncher | None = None
 
 
 @dataclass(slots=True)
@@ -249,6 +271,10 @@ class RuntimeHost(threading.Thread):
             build_options: dict[str, Any] = {}
             if self.settings.writer_lock_group is not None:
                 build_options["writer_lock_group"] = self.settings.writer_lock_group
+            if self.settings.subagents is not None:
+                build_options["subagents"] = self.settings.subagents
+            if self.settings.phone_jobs is not None:
+                build_options["phone_jobs"] = self.settings.phone_jobs
             self._runtime = loop.run_until_complete(
                 build_runtime_async(
                     self.settings.workspace,
@@ -351,8 +377,13 @@ class RuntimeHost(threading.Thread):
         reasoning_effort: str | None = None,
         model: str | None = None,
         limits: TaskLimits | None = None,
+        plan_only: bool = False,
     ) -> Future[None]:
-        """Run one turn; ``model`` overrides the Provider's model for this turn only."""
+        """Run one turn; ``model`` overrides the Provider's model for this turn only.
+
+        ``plan_only`` limits the turn to tools that only read, and asks for a plan the user
+        approves before anything changes.
+        """
         loop = self._loop
         if loop is None or loop.is_closed() or not self._accepting or self._closing:
             raise RuntimeError("runtime is not accepting commands")
@@ -364,6 +395,7 @@ class RuntimeHost(threading.Thread):
                 reasoning_effort,
                 model=model,
                 limits=limits,
+                plan_only=plan_only,
             ),
             loop,
         )
@@ -720,6 +752,7 @@ class RuntimeHost(threading.Thread):
         *,
         model: str | None = None,
         limits: TaskLimits | None = None,
+        plan_only: bool = False,
     ) -> None:
         if not self._accepting or self._closing:
             self._emit("runtime.command_rejected", {"reason": "runtime is stopping"})
@@ -801,6 +834,12 @@ class RuntimeHost(threading.Thread):
                     options["system_suffix"] = suffix
                 if passages:
                     options["supplemental_messages"] = passages
+            if plan_only:
+                options["allowed_tools"] = frozenset(
+                    spec.name for spec in runtime.service.tool_registry.specs() if _reads_only(spec)
+                )
+                earlier = options.get("system_suffix")
+                options["system_suffix"] = f"{earlier}\n\n{_PLAN_FIRST}" if earlier else _PLAN_FIRST
             task = asyncio.create_task(
                 runtime.service.run(
                     self._session,

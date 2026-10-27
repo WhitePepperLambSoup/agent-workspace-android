@@ -383,6 +383,8 @@ class WorkspacePolicy:
 
     @staticmethod
     def _declared_location_keys(tool: ToolSpec) -> frozenset[str]:
+        if tool.name == "organize_files":
+            return frozenset({"path"})  # a batch without paths is refused, never unbounded
         input_schema = tool.input_schema
         properties = input_schema.get("properties") if isinstance(input_schema, dict) else None
         if not isinstance(properties, dict):
@@ -391,6 +393,16 @@ class WorkspacePolicy:
 
     @staticmethod
     def _raw_paths(tool: ToolSpec, arguments: dict[str, Any]) -> tuple[str, ...]:
+        if tool.name == "organize_files":
+            # Every source and destination of the batch is checked, as for move_path.
+            operations = arguments.get("operations")
+            return tuple(
+                value
+                for operation in (operations if isinstance(operations, list) else ())
+                if isinstance(operation, dict)
+                for value in (operation.get("path"), operation.get("to"))
+                if isinstance(value, str) and value
+            )
         keys = (
             ("source", "destination")
             if tool.name == "move_path"

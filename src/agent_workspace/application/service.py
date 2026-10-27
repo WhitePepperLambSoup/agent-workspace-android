@@ -107,6 +107,10 @@ class ApplicationService:
         self.store.create_session(session)
         return session
 
+    @property
+    def tool_registry(self) -> ToolRegistryPort:
+        return self._tools
+
     async def run(
         self,
         session: Session,

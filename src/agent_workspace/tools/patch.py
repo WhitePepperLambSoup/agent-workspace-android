@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Any
 
 from agent_workspace.application.ports import ToolExecutionContext
+from agent_workspace.core.events import Event
 from agent_workspace.core.models import Capability, FileCheckpoint, ToolSpec
+from agent_workspace.storage.file_versions import FileVersions
 
 from .base import ToolArgumentError, ToolError, json_result, require_string
 from .filesystem import (
@@ -91,8 +93,12 @@ class ApplyPatchTool:
         durable_preimage_checkpoint=True,
     )
 
-    def __init__(self, workspace: WorkspacePaths | StrPath) -> None:
+    def __init__(
+        self, workspace: WorkspacePaths | StrPath, versions: FileVersions | None = None
+    ) -> None:
         self.paths = _workspace_paths(workspace)
+        # Where replaced content is kept, so files can be put back to before a message.
+        self.versions = versions
 
     @property
     def spec(self) -> ToolSpec:
@@ -121,7 +127,9 @@ class ApplyPatchTool:
                 created_at=datetime.now(UTC).isoformat(),
             )
         )
-        return await run_in_process(
+        if self.versions is not None:
+            await asyncio.to_thread(self.versions.keep, original_bytes)
+        result = await run_in_process(
             self._execute_prepared,
             path,
             relative,
@@ -129,6 +137,22 @@ class ApplyPatchTool:
             expected,
             diff,
         )
+        await context.record_event(
+            Event(
+                session_id=context.session_id,
+                type="file.version.recorded",
+                data={
+                    "attempt_id": context.attempt_id,
+                    "path": relative,
+                    "sha256": postimage_digest,
+                    "bytes": len(updated_bytes),
+                    "previous_sha256": expected,
+                },
+                causation_id=context.started_event_id,
+                correlation_id=context.correlation_id,
+            )
+        )
+        return result
 
     def _execute_sync(self, arguments: dict[str, Any]) -> str:
         path, relative, _, updated_bytes, expected, diff = self._prepare(arguments)
