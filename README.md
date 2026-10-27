@@ -2,6 +2,8 @@
 
 # Agent Workspace for Android
 
+> Desktop app: [agent-workspace-desktop](https://github.com/WhitePepperLambSoup/agent-workspace-desktop) (Windows). Paired with it, the phone and the computer hand tasks to each other, send files and continue each other's conversations; see [Working with your computer](#working-with-your-computer).
+
 An AI agent that runs on your Android phone. It plans and carries out multi-step tasks with real tools — files, PDFs, web search, an optional Linux toolchain and Android system actions — and, with the accessibility service turned on, operates other apps on the phone when you ask it to. It uses a cloud model you choose, Ollama on a computer in your local network, or a model that runs entirely on the phone. Everything is packaged in one APK; no Termux or root is needed.
 
 <p align="center">
@@ -12,14 +14,14 @@ An AI agent that runs on your Android phone. It plans and carries out multi-step
 
 ## Download
 
-Get `AgentWorkspace_2.4.0_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app: it checks at every start and about every 12 hours, and you can check yourself under Menu → About and updates, or "Updates" on the loading screen. Changes in each version are listed in the [CHANGELOG](CHANGELOG.md).
+Get `AgentWorkspace_2.5.0_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app: it checks at every start and about every 12 hours, and you can check yourself under Menu → About and updates, or "Updates" on the loading screen. Changes in each version are listed in the [CHANGELOG](CHANGELOG.md).
 
 - Android 8.0 (API 26) or newer, 64-bit ARM (`arm64-v8a`) or `x86_64`; phones running a 32-bit-only system cannot install it.
 - The interface is shown by the system's Android System WebView, which must be Chromium 80 or newer. If WebView is disabled, missing or too old, the app explains why and links to the app store to update it.
 - Works on Android 15+ devices with 16 KB memory pages, foldables, split screen and external keyboards, and keeps its own colours under system or vendor "force dark" modes.
 - About 73 MB to install. Local models and the offline speech model are optional downloads inside the app.
 
-What changed in 2.4.0: file history, search by meaning in the knowledge base, privacy routing, Japanese and Korean, elder mode's Help button, backup passphrases and more triggers are new; fixes from a full review of the app, including several in approvals and outside content.
+What changed in 2.5.0: the phone now works with Agent Workspace on a computer, with pairing, handing tasks both ways, approving the computer's actions on the phone, files and text both ways, continuing conversations, waking the computer, scheduled results and knowledge base sync.
 
 ## Features
 
@@ -112,6 +114,27 @@ Set up by a family member under Menu → Elder mode, for an older person in the 
 3. On the phone, open the menu (⋯) → **Provider & API settings**, choose Ollama, enter `http://192.168.1.5:11434`, check **Allow local network HTTP**, tap **Get model list**, pick a model and save.
 
 The option applies to private IP addresses only: host names such as `.local` and public addresses still need HTTPS. When the phone and the computer are on different networks, give Ollama an HTTPS address with Tailscale or a similar tool. Plain http is not encrypted, so other devices on the same network can see the conversation. Model requests to a local address go through the same network access approval as requests to any other provider.
+
+### Working with your computer
+
+Paired with Agent Workspace on a computer ([agent-workspace-desktop](https://github.com/WhitePepperLambSoup/agent-workspace-desktop), Windows), the phone and the computer hand tasks to each other, send files and continue each other's conversations.
+
+1. On the computer, turn on the connection under **Settings → Phone connection**; it shows a pairing QR code.
+2. On the phone, open the menu (⋯) → **Device connections** and tap **Photograph the QR code**, or **From a picture** to pick a screenshot of it; you can also type the computer's address and pairing code. Opening a pairing link from another app fills in the same page.
+3. Check the computer's name and address and tap **Pair**.
+
+The phone and the computer need to be on the same network, or both on Tailscale. Once paired, tap the computer's name under **Device connections** to open its page:
+
+- **Hand tasks to the computer.** Send a task to a conversation on the computer, or to a new one there; it runs with the computer's model and tools, and a notification arrives when it is done. Before a task goes to a conversation that approves everything or has full access, or when it holds an ID or bank card number, the phone explains the risk and you decide; ID numbers can be masked first.
+- **Approve and stop.** When the computer allows it, what needs approval on the computer comes to the phone for you to approve or decline; you can also see what the computer is doing and stop it from the phone. A notification arrives when a task on the computer ends.
+- **Requests from the computer.** The computer's AI can ask the phone to do something, such as opening an app to check a setting. Requests can be asked about every time, accepted automatically or refused; accepting one, you choose whether each step asks you or the task is allowed. It runs in a conversation named after the computer, and the result goes back.
+- **Let the computer do a part.** The phone's AI can hand part of a task to the computer, such as running tests there, and use the result in its answer; it asks you every time.
+- **Files both ways.** Choose **Send to computer** in any app's share menu, or pick files or photos or take a photo on the computer page; add an instruction and the computer starts on it when the files arrive. You can also browse and download files in the folder open on the computer. Files from the computer are saved in the workspace folder 来自电脑. Files up to 100 MB.
+- **Continue a conversation.** **Continue on the computer** in a conversation's settings hands it over with its pictures; a conversation the computer continues on the phone becomes a new conversation here.
+- **Text and links.** Both ways; a notification copies the text in one tap and opens a link in one more.
+- **Wake the computer.** When the computer allows it, the phone sends a wake-on-LAN packet and notifies you once the computer is back.
+- **Scheduled results and knowledge base sync.** Results of the computer's scheduled tasks come to the phone, listed in the computer page's inbox. Pair a knowledge base on each side and each gets what the other has; documents with the same content are added once.
+- **Device and activity.** The Device part of the computer page lists permissions, addresses and the activity on both sides; removing a computer on the phone also removes this phone from the computer. When the computer's IP address changes, the phone finds it again on the local network by the computer's id.
 
 ### Files, knowledge bases and memory
 
@@ -221,6 +244,7 @@ agent-workspace-android/
 - The app check reads only what Android reports about apps (source, permissions and special access) and scans no files; the pop-up record keeps only the app and the time, for 7 days, on the phone, and is cleared when turned off.
 - Backups never contain API keys; a backup with a passphrase is encrypted with AES-256 and cannot be opened without it.
 - File history stays on the phone, for 30 days and 300 MB at most; the workspace's internal folders and key files are not kept.
+- Pairing with a computer works only on the same local network or over Tailscale; the token the computer gives the phone is stored encrypted with Android Keystore, like API keys. Over HTTPS the phone accepts only the certificate named in the QR code and does not connect if it differs. The computer cannot see the phone's files or conversations, only what you send it and the results of requests you accept; what the computer's AI asks the phone to do is asked about, accepted or refused as you set it.
 - Deleting a conversation erases its messages, tasks and images from the phone and cannot be undone; files it created in the workspace stay.
 - Offline speech recognition processes audio on the phone only; recordings are neither uploaded nor kept. Circle to ask sends only the screenshot you circled to the model, and takes no screenshot while a password field is on screen.
 
@@ -244,6 +268,8 @@ agent-workspace-android/
 - The English interface text was written by the developer; corrections are welcome. The Japanese and Korean text is new, and corrections from native speakers are especially welcome.
 - When privacy routing has the on-device model answer a message in an ordinary conversation, the first answer reads a long system prompt once: about 20 minutes on a Snapdragon 888, about 20 seconds after that.
 - Gemma 4 E2B needs about 3.5 GB of free memory; on a phone with less, it only runs in the extended memory mode with a manually set context, and slowly.
+- Some phones (ZTE, for one) pause the app about a minute after the screen locks. Meanwhile the phone cannot read the computer, and its approval requests and finished-task notifications arrive once the screen is on. Allowing the app to run in the background in the system settings lets them arrive while locked; the computer page says so and links to the setting.
+- Finding computers on the local network relies on multicast, which some networks (campus or public Wi‑Fi, for example) drop: Computers nearby then stays empty and the phone cannot find a computer whose address changed, so pair with the QR code. Wake packets are broadcasts and wake a computer only on the same local network.
 
 ## License
 

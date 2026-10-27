@@ -1,5 +1,47 @@
 # Changelog
 
+## 2.5.0 — 2026-10-27
+
+2.5.0 新增和电脑版 Agent Workspace 互联。Agent Workspace 2.5.0 connects the phone with Agent Workspace on a Windows computer.
+
+电脑版 / Desktop app: https://github.com/WhitePepperLambSoup/agent-workspace-desktop
+
+### 中文
+
+- 新增：和电脑版 Agent Workspace（[agent-workspace-desktop](https://github.com/WhitePepperLambSoup/agent-workspace-desktop)）配对。在电脑版的「设置 → 手机连接」里打开连接，再在手机菜单（⋯）→「设备连接」里拍下或从图片识别电脑上的二维码；也可以打开配对链接，或手动填写地址和配对码。手机和电脑需要在同一个网络里，或者都装了 Tailscale。连接走 HTTPS 时，手机只认二维码里的那张证书。电脑换了 IP 地址后，手机会在局域网里按电脑的编号重新找到它；同一网络里正在等待配对的电脑列在「附近的电脑」里。
+- 新增：把任务交给电脑上的某个对话，或在电脑上新开一个对话；电脑做完后手机收到通知。往「自动批准一切」或「完全访问」的对话交任务，或者要交的内容里有身份证号、银行卡号时，先说明风险，由你决定是否继续；含证件号的内容可以先打码再交。
+- 新增：电脑给了权限时，可以在手机上批准电脑上的操作，查看电脑正在做什么，并从手机上停止；电脑上的任务结束时，手机收到通知。
+- 新增：电脑上的 AI 可以请手机做事，例如打开某个应用查一项设置。每个请求由你决定，可设为每次询问、自动接受或不接受；接受后在「{电脑名} 交来的任务」对话里执行，结果交回电脑。
+- 新增：手机上的 AI 可以把一部分工作交给电脑（`ask_computer`），每次都先问你。
+- 新增：文件互传。在任何应用的分享菜单里选「发到电脑」，或在电脑页选文件、选照片、拍照；可以附一句要求，电脑收到后直接开始做。也可以浏览并下载电脑上打开的文件夹里的文件。电脑发来的文件存进工作区的「来自电脑」文件夹。单个文件最大 100 MB。
+- 新增：对话接力。对话设置里的「在电脑上继续」把对话连同图片交给电脑；电脑上「在手机上继续」的对话，在手机上成为一个新对话。
+- 新增：手机和电脑互发文字和链接。收到的通知上可以直接复制，链接还可以直接打开。
+- 新增：唤醒电脑。电脑允许后，手机可以发出网络唤醒包，电脑上线后手机发通知。
+- 新增：电脑上定时任务的结果发到手机，在电脑页的收件箱里查看。
+- 新增：知识库同步。选好手机和电脑上对应的知识库，两边互相补齐；内容相同的文档不重复添加。
+- 新增：电脑页的「设备」部分列出权限、地址和两边的活动记录。在手机上移除电脑时，电脑上也会解除这台手机。
+- 修复：通知多的时候，先清掉最旧的普通消息，不会再因为超过安卓的数量上限而发不出新通知；等你确认的通知不清。
+- 注意：部分手机（例如中兴）锁屏约一分钟后会暂停应用。这期间手机读不到电脑，电脑的审批请求和完成通知要等亮屏后才到。在系统设置里允许本应用后台运行后，锁屏时也能收到；电脑页会说明并给出设置入口。
+- 覆盖安装即可，数据会保留。
+
+### English
+
+- New: pairing with Agent Workspace on a computer ([agent-workspace-desktop](https://github.com/WhitePepperLambSoup/agent-workspace-desktop)). Turn on the connection under Settings → Phone connection on the computer, then photograph the QR code it shows, or pick a picture of it, under the phone's menu (⋯) → Device connections; a pairing link or the address and pairing code typed by hand work too. The phone and the computer need to be on the same network, or both on Tailscale. Over HTTPS the phone accepts only the certificate named in the QR code. When the computer's IP address changes, the phone finds it again on the local network by the computer's id; computers waiting to be paired on the same network are listed under Computers nearby.
+- New: hand a task to a conversation on the computer, or to a new one there; a notification arrives when the computer is done. Before a task goes to a conversation that approves everything or has full access, or when what you hand over holds an ID or bank card number, the phone explains the risk and you decide; ID numbers can be masked first.
+- New: when the computer allows it, approve what runs on the computer, see what it is doing and stop it from the phone; a notification arrives when a task on the computer ends.
+- New: the computer's AI can ask the phone to do something, such as opening an app to check a setting. You decide on each request: ask every time, accept automatically, or refuse. An accepted request runs in a conversation named after the computer, and the result goes back to it.
+- New: the phone's AI can hand part of a task to the computer (`ask_computer`), asking you every time.
+- New: files both ways. Choose Send to computer in any app's share menu, or pick files or photos or take a photo on the computer page; add an instruction and the computer starts on it when the files arrive. You can also browse and download files in the folder open on the computer. Files from the computer are saved in the workspace folder 来自电脑. Files up to 100 MB.
+- New: continue a conversation on the other device. Continue on the computer in a conversation's settings hands it over with its pictures; a conversation the computer continues on the phone becomes a new conversation here.
+- New: text and links both ways. A notification copies the text in one tap and opens a link in one more.
+- New: wake the computer. When the computer allows it, the phone sends a wake-on-LAN packet and notifies you once the computer is back.
+- New: results of the computer's scheduled tasks come to the phone, listed in the computer page's inbox.
+- New: knowledge base sync. Pair a knowledge base on the phone with one on the computer and each side gets what the other has; documents with the same content are added once.
+- New: the Device part of the computer page lists permissions, addresses and the activity on both sides. Removing a computer on the phone also removes this phone from the computer.
+- Fixed: when notifications pile up, the oldest ordinary ones are cleared first, so new ones are no longer lost to Android's limit per app; ones waiting for your answer are kept.
+- Note: some phones (ZTE, for one) pause the app about a minute after the screen locks. Meanwhile the phone cannot read the computer, and its approval requests and finished-task notifications arrive once the screen is on. Allowing the app to run in the background in the system settings lets them arrive while locked; the computer page says so and links to the setting.
+- Install over the existing app; your data is kept.
+
 ## 2.4.0 — 2026-10-25
 
 2.4.0 新增文件历史、按意思检索知识库、隐私路由和日文、韩文界面，并修复了一次全面检查中发现的问题。Agent Workspace 2.4.0 adds file history, search by meaning in the knowledge base, privacy routing and Japanese and Korean, and fixes what a full review of the app found.
