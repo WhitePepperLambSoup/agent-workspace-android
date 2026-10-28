@@ -204,7 +204,7 @@
 
   function formatBytes(size) {
     const count = Number(size) || 0;
-    return count >= 1024 * 1024 ? `${(count / (1024 * 1024)).toFixed(1)} MB` : count >= 1024 ? `${(count / 1024).toFixed(1)} KB` : `${count} B`;
+    return count >= 1024 ** 3 ? `${(count / 1024 ** 3).toFixed(2)} GB` : count >= 1024 * 1024 ? `${(count / (1024 * 1024)).toFixed(1)} MB` : count >= 1024 ? `${(count / 1024).toFixed(1)} KB` : `${count} B`;
   }
 
   function fileDirty() { return !!fileEditor?.loaded && fileEditor.content !== fileEditor.originalContent; }

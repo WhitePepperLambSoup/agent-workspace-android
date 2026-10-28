@@ -97,6 +97,8 @@ class NativeJsBridge(
     // The provider model list being read in the background (refreshProviderModels).
     private val modelListLock = Any()
     private var modelListState = JSONObject().put("ok", true).put("state", "idle")
+    private val quickProviderLock = Any()
+    private var quickProviderState = JSONObject().put("ok", true).put("state", "idle")
 
     /** Whether the agent may read and add calendar events (Settings → Device & tools). */
     @JavascriptInterface
@@ -632,6 +634,53 @@ class NativeJsBridge(
 
     @JavascriptInterface
     fun getProviderModelsStatus(): String = synchronized(modelListLock) { modelListState.toString() }
+
+    /**
+     * First use (the page's "choose an AI" sheet): one of the built-in providers and its API key.
+     * The key is tried by reading the provider's model list before anything is saved, in the
+     * background; the page asks [getQuickProviderStatus] until it is done. Saving restarts the
+     * engine like the settings dialog.
+     */
+    @JavascriptInterface
+    fun saveQuickProvider(requestJson: String): String {
+        val request = runCatching { JSONObject(requestJson) }.getOrNull()
+            ?: return JSONObject().put("ok", false).put("error", "无效请求").toString()
+        val baseUrl = request.optString("base_url").trimEnd('/')
+        val preset = MobileProviderSettings.providerPresets.firstOrNull {
+            it.protocol == request.optString("protocol") && it.baseUrl?.trimEnd('/') == baseUrl &&
+                baseUrl != MobileProviderSettings.EMBEDDED_QWEN_BASE_URL
+        } ?: return JSONObject().put("ok", false).put("error", "未知服务商").toString()
+        val key = request.optString("api_key").trim()
+        if (key.isEmpty() || key.length > 512 || key.any { it.isWhitespace() }) {
+            return JSONObject().put("ok", false).put("error", com.agentworkspace.mobile.UiText.of(context, "请粘贴完整的 API 密钥", "Paste the whole API key")).toString()
+        }
+        synchronized(quickProviderLock) {
+            if (quickProviderState.optString("state") == "checking") return quickProviderState.toString()
+            quickProviderState = JSONObject().put("ok", true).put("state", "checking")
+        }
+        Thread({
+            val result = try {
+                val listed = ProviderModelCatalog.fetch(context, preset.protocol, baseUrl, key, false).map { it.id }
+                // The provider's own list says which of the usual models this key can use; the page
+                // suggests a quick, inexpensive one to start with.
+                val model = request.optString("model").takeIf { it in listed }
+                    ?: preset.models.firstOrNull { it in listed } ?: preset.models.firstOrNull() ?: listed.first()
+                val saved = JSONObject(changeProvider(false) {
+                    MobileProviderSettings.save(context, preset.protocol, baseUrl, model, key, false, "auto")
+                })
+                if (saved.optBoolean("ok")) JSONObject().put("ok", true).put("state", "saved").put("model", model)
+                else saved.put("state", "error")
+            } catch (failure: Exception) {
+                JSONObject().put("ok", false).put("state", "error")
+                    .put("error", failure.message ?: com.agentworkspace.mobile.UiText.of(context, "无法连接服务商", "Could not reach the provider"))
+            }
+            synchronized(quickProviderLock) { quickProviderState = result }
+        }, "quick-provider").start()
+        return JSONObject().put("ok", true).put("state", "checking").toString()
+    }
+
+    @JavascriptInterface
+    fun getQuickProviderStatus(): String = synchronized(quickProviderLock) { quickProviderState.toString() }
 
     private fun localModelControl(method: String, settings: String = "{}"): String = try {
         require(settings.length <= 4096)

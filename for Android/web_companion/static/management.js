@@ -43,6 +43,24 @@
   function sourceTitle(model) {
     return (model.download_sources || []).find((source) => source.id === model.source)?.title || "";
   }
+  // A download the engine is working on, also while it waits for the network to come back.
+  const activeDownloadStates = ["queued", "downloading", "waiting_network", "verifying"];
+  // "Downloading · 68.1 MiB of 507.8 MiB · 190 KB/s · about 38 min": what came in and how long is left.
+  function downloadState(model) {
+    const names = { not_installed: t("未下载"), installed: t("已校验安装"), queued: t("等待下载"), downloading: t("下载中"),
+      waiting_network: t("网络断了，恢复后自动继续"), verifying: t("校验中"), paused: t("已暂停"), failed: t("下载失败") };
+    const name = names[model.state] || model.state;
+    if (!["downloading", "waiting_network", "paused"].includes(model.state) || !model.downloaded_bytes) return name;
+    const parts = [name, t("{0} / {1}", bytes(model.downloaded_bytes), bytes(model.size_bytes))];
+    const speed = Number(model.bytes_per_second) || 0;
+    if (model.state === "downloading" && speed > 0) {
+      parts.push(speed >= 1024 ** 2 ? `${(speed / 1024 ** 2).toFixed(1)} MB/s` : `${Math.max(1, Math.round(speed / 1024))} KB/s`);
+      const minutes = Math.ceil((model.size_bytes - model.downloaded_bytes) / speed / 60);
+      parts.push(minutes <= 1 ? t("不到 1 分钟") : t("约 {0} 分钟", minutes));
+    }
+    if (model.state === "downloading" && sourceTitle(model)) parts.push(t("来源 {0}", sourceTitle(model)));
+    return parts.join(" · ");
+  }
   try {
     const saved = window.localStorage.getItem(downloadSourceKey);
     if (["auto", "modelscope", "huggingface"].includes(saved)) $("modelDownloadSource").value = saved;
@@ -2249,7 +2267,7 @@
     setUnavailable($("btnRestoreCloudModel"), deviceBusyReason || (typeof native?.restorePreviousProvider !== "function" ? t("请在 Android 应用中恢复模型配置") : value.route !== "embedded_qwen" ? t("当前未启用本机模型") : ""));
     status("localModelControlStatus", deviceBusyReason || (!engine.available ? engine.last_error || t("本机引擎尚未就绪") : ""));
     const entries = [...(value.models || []), ...(value.vision_components || []), ...(value.speech_models || [])];
-    const list = $("localModelList"); const speechList = $("speechModelList"); const activeDownload = entries.find(model => ["queued", "downloading", "verifying"].includes(model.state)); const downloading = !!activeDownload;
+    const list = $("localModelList"); const speechList = $("speechModelList"); const activeDownload = entries.find(model => activeDownloadStates.includes(model.state)); const downloading = !!activeDownload;
     const ids = new Set();
     for (const model of entries) {
       const projection = model.kind === "vision_projection";
@@ -2260,15 +2278,19 @@
       let card = [...home.children].find(item => item.dataset.modelId === model.model_id);
       if (!card) { card = row(model.title); card.classList.add("local-model-card"); card.dataset.modelId = model.model_id; const progress = document.createElement("progress"); progress.max = 1; progress.setAttribute("aria-label", t("{0}下载进度", model.title)); card.append(progress); const links = document.createElement("div"); links.className = "model-sources"; for (const [label, address] of [[t("模型主页"), model.source_page], [t("直接下载"), model.download_url]]) { try { const url = new URL(address); if (url.protocol !== "https:") continue; const link = document.createElement("a"); link.href = url.href; link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = label; links.append(link); } catch {} } card.append(links); const actions = document.createElement("div"); actions.className = "model-actions"; card.append(actions); home.append(card); }
       const vision = !projection && model.supports_vision ? t("\n图片理解：{0}", !engine.supports_vision ? t("需支持视觉的本机引擎") : model.vision_component_installed ? t("视觉组件已就绪") : t("请下载配套视觉组件")) : "";
-      card.querySelector("small").textContent = `${model.publisher || ""} · ${model.local_artifact ? t("工具训练版 · 实验") : model.official_weights ? t("官方量化") : t("社区量化")} · ${model.license || ""}\n${bytes(model.size_bytes)}${projection ? t(" · 配套图片理解组件") : speech ? t(" · 中文、英文、日语、韩语、粤语") : t(" · 预计需 {0} 可用内存", bytes(model.minimum_available_ram_bytes))}${vision}\n${model.local_artifact && !model.installed ? t("请选择此版本对应的 GGUF 文件导入") : ({ not_installed: t("未下载"), installed: t("已校验安装"), queued: t("等待下载"), downloading: t("下载中"), verifying: t("校验中"), paused: t("已暂停"), failed: t("下载失败") })[model.state] || model.state}${model.state === "downloading" && sourceTitle(model) ? t(" · 来源 {0}", sourceTitle(model)) : ""}${model.error ? t("：{0}", model.error) : ""}`;
-      const progress = card.querySelector("progress"); progress.hidden = !["queued", "downloading", "paused", "verifying"].includes(model.state); progress.value = model.progress || 0;
+      card.querySelector("small").textContent = `${model.publisher || ""} · ${model.local_artifact ? t("工具训练版 · 实验") : model.official_weights ? t("官方量化") : t("社区量化")} · ${model.license || ""}\n${bytes(model.size_bytes)}${projection ? t(" · 配套图片理解组件") : speech ? t(" · 中文、英文、日语、韩语、粤语") : t(" · 预计需 {0} 可用内存", bytes(model.minimum_available_ram_bytes))}${vision}\n${model.local_artifact && !model.installed ? t("请选择此版本对应的 GGUF 文件导入") : downloadState(model)}${model.error ? t("：{0}", localizeError(model.error)) : ""}`;
+      const progress = card.querySelector("progress"); progress.hidden = ![...activeDownloadStates, "paused"].includes(model.state); progress.value = model.progress || 0;
       const signature = `${model.state}:${!!model.has_local_files}:${busy}:${!!engine.available}:${activeDownload?.model_id}:${value.model}:${value.route}`;
       if (card.dataset.signature !== signature) { card.dataset.signature = signature; const actions = card.querySelector(".model-actions"); actions.replaceChildren();
-        if (["queued", "downloading"].includes(model.state)) namedAction(actions, "pause", t("暂停下载"), async () => { await post("/mobile/local-models/cancel", { model_id: model.model_id }); await localModels(isCurrent); });
+        if (["queued", "downloading", "waiting_network"].includes(model.state)) namedAction(actions, "pause", t("暂停下载"), async () => { await post("/mobile/local-models/cancel", { model_id: model.model_id }); await localModels(isCurrent); });
         else if (!model.installed && model.local_artifact) { const button = namedAction(actions, "folder-open", t("导入训练模型"), () => { nativeResult("importLocalModel", model.model_id); status("localModelsStatus", t("请选择训练模型文件，导入后将自动校验")); }); button.disabled = busy || typeof native?.importLocalModel !== "function"; }
         else if (!model.installed && model.state !== "verifying") { const button = namedAction(actions, "download", model.downloaded_bytes ? t("继续下载") : projection ? t("下载视觉组件") : speech ? t("下载语音模型") : t("下载模型"), async () => { await post("/mobile/local-models/download", { model_id: model.model_id, ...downloadSource(model) }); await localModels(isCurrent); }); setUnavailable(button, downloading ? t("{0} 正在{1}，完成或暂停后可下载", activeDownload.title || activeDownload.model_id, activeDownload.state === "verifying" ? t("校验") : t("下载")) : ""); }
-        if (model.installed && !projection && !speech) { const button = namedAction(actions, "play", value.model === model.model_id && value.route === "embedded_qwen" ? t("当前模型") : t("使用此模型"), () => { nativeResult("selectLocalModel", model.model_id); status("localModelsStatus", t("模型配置已保存，正在切换引擎")); }); button.disabled = busy || !engine.available || typeof native?.selectLocalModel !== "function"; }
-        if (model.has_local_files || model.installed || model.downloaded_bytes) { const button = namedAction(actions, "trash-2", projection ? t("移除视觉组件") : speech ? t("移除语音模型") : t("移除模型"), async () => { if (!window.confirm(t("移除 {0} 的已下载文件？", model.title))) return; await post("/mobile/local-models/remove", { model_id: model.model_id }); await localModels(isCurrent); }); button.disabled = busy || ["queued", "downloading", "verifying"].includes(model.state); }
+        if (model.installed && !projection && !speech) { const button = namedAction(actions, "play", value.model === model.model_id && value.route === "embedded_qwen" ? t("当前模型") : t("使用此模型"), () => {
+          nativeResult("selectLocalModel", model.model_id); status("localModelsStatus", t("模型配置已保存，正在切换引擎"));
+          // After the restart the model reads its instructions once, ahead of the first message (app/27-setup.js).
+          try { window.localStorage.setItem("agent-mobile-setup-pending-v1", JSON.stringify({ prepare: model.model_id })); } catch { /* it reads them with the first message instead */ }
+        }); button.disabled = busy || !engine.available || typeof native?.selectLocalModel !== "function"; }
+        if (model.has_local_files || model.installed || model.downloaded_bytes) { const button = namedAction(actions, "trash-2", projection ? t("移除视觉组件") : speech ? t("移除语音模型") : t("移除模型"), async () => { if (!window.confirm(t("移除 {0} 的已下载文件？", model.title))) return; await post("/mobile/local-models/remove", { model_id: model.model_id }); await localModels(isCurrent); }); button.disabled = busy || activeDownloadStates.includes(model.state); }
       }
       let actionStatus = card.querySelector(".model-action-status");
       if (!actionStatus) { actionStatus = document.createElement("p"); actionStatus.className = "model-action-status"; actionStatus.setAttribute("role", "status"); card.append(actionStatus); }

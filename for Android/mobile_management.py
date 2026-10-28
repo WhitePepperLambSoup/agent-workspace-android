@@ -166,6 +166,8 @@ class MobileManagement:
     def start(self):
         with suppress(Exception):
             self.knowledge()  # resumes documents whose indexing an engine stop interrupted
+        with suppress(Exception):
+            self.models.resume_interrupted()  # and a model download it cut off
         # The official skills shipped in this app version (first start, or newer than installed).
         threading.Thread(target=self._install_bundled_skills, name="bundled-skills", daemon=True).start()
         self._job = asyncio.create_task(self._run(), name="mobile-management")
@@ -598,6 +600,23 @@ class MobileManagement:
                 "scenarios": self.evaluations.scenarios(),
                 "runs": self.evaluations.list(),
                 "summary": self.evaluations.summary(),
+            }
+        if path == "/mobile/approvals/trusted-providers":
+            # Providers sent to without asking (Execution mode page), each can be asked about again.
+            return 200, {"trusted": sorted(self.controller.approvals.trusted_providers())}
+        if path == "/mobile/local-models/engine":
+            # What the on-device model is doing now, polled by a conversation while it waits: how
+            # much of the prompt it has read (the first answer reads all of it, for minutes).
+            import mobile_local_prepare
+
+            native = await asyncio.to_thread(native_engine_status)
+            last = native.get("last_generation") or {}
+            return 200, {
+                "preparing": mobile_local_prepare.preparing(),
+                "generating": bool(native.get("generating")),
+                "phase": native.get("generation_phase"),
+                "prompt_progress": native.get("prompt_progress"),
+                "prompt_tokens_per_second": last.get("prompt_tokens_per_second"),
             }
         if path == "/mobile/local-models":
             value = await asyncio.to_thread(
@@ -1354,6 +1373,35 @@ class MobileManagement:
             return 202, await self.evaluations.start(
                 payload, self.controller, self.system, controller.runtime, metadata
             )
+        if path == "/mobile/app-settings/snapshot":
+            # The page's current settings, for the agent's app_settings tool to read.
+            from android_adapter.app_settings_tool import set_snapshot
+
+            return 200, {"values": set_snapshot(payload.get("values"))}
+        if path == "/mobile/approvals/trust-provider":
+            # The provider the user just set up on the first-use sheet (only the one in use).
+            from mobile_approval import provider_origin
+
+            origin = provider_origin(payload.get("endpoint"))
+            if not origin or origin != provider_origin(getattr(self.controller, "base_url", "")):
+                raise ValueError("only the model provider in use can be trusted")
+            return 200, {"trusted": self.controller.approvals.trust_provider(origin)}
+        if path == "/mobile/approvals/distrust-provider":
+            origin = payload.get("origin")
+            if not isinstance(origin, str):
+                raise ValueError("origin is required")
+            self.controller.approvals.distrust_provider(origin)
+            return 200, {"trusted": sorted(self.controller.approvals.trusted_providers())}
+        if path == "/mobile/local-models/prepare":
+            # Read the on-device model's instructions once now, not with the first message.
+            import mobile_local_prepare
+            from mobile_local_models import EMBEDDED_BASE_URL
+
+            if (getattr(self.controller, "base_url", "") or "").rstrip("/") != EMBEDDED_BASE_URL:
+                raise ValueError("the on-device model is not in use")
+            if getattr(self, "api", None) is None:
+                raise ValueError("preparing the on-device model is unavailable")
+            return 202, mobile_local_prepare.start(self.api, self.controller)
         if path == "/mobile/local-models/probe":
             return 200, await probe_local_model(self.controller, model_manager=self.models)
         if path == "/mobile/local-models/download":

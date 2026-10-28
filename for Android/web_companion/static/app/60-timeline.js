@@ -253,7 +253,7 @@
     web_search: t("联网搜索"), web_fetch: t("读取网页"), read_document: t("读取文档"), render_pdf: t("查看 PDF 页面"),
     create_pdf: t("生成 PDF"), create_docx: t("生成 Word 文档"), create_xlsx: t("生成表格"),
     use_skill: t("使用技能"), save_skill: t("保存技能"),
-    run_subagents: t("分给子任务"), ask_computer: t("交给电脑做"),
+    run_subagents: t("分给子任务"), ask_computer: t("交给电脑做"), app_settings: t("本应用设置"),
     active_notifications: t("查看通知"), notification_reply: t("回复通知"), notification_open: t("打开通知"),
     app_audit: t("应用体检"), manage_app: t("处理应用"),
     compose_sms: t("写好短信"), system_settings: t("调整手机设置"), system_status: t("查看手机状态"),
@@ -377,6 +377,8 @@
     }
     setToolState(card, outcome);
     endToolOutput(card);
+    // The agent proposed a settings change or a page to open: the user applies it from here.
+    if (outcome === "done" && toolName === "app_settings") showAppSettingsStep(card, toolArguments.get(data.tool_call_id));
     const detail = outcome === "done" ? data.result : (data.error ?? data.reason ?? data.result);
     if (detail === undefined || detail === null || detail === "") return;
     const view = toolDetailView(detail);
@@ -464,12 +466,61 @@
     return empty;
   }
 
-  function showTaskError(error) {
+  function showTaskError(error, reason = "") {
     const message = document.createElement("div");
     message.className = "task-error";
     message.setAttribute("role", "alert");
     message.textContent = error;
+    // The engine's reason is often the provider's own English; say what it means and what fixes it.
+    const help = failureHelp(reason || error);
+    if (help) {
+      const detail = document.createElement("p");
+      detail.className = "task-error-help";
+      detail.textContent = help.text;
+      message.append(detail);
+      if (help.action) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "button-secondary";
+        button.textContent = help.label;
+        button.addEventListener("click", () => {
+          if (help.action === "setup") { if (!openSetup()) openModelSettings(); }
+          else if (help.action === "model") openModelSheet();
+          else if (help.action === "local") { openMenu(); setSettingsPage("localModels"); }
+        });
+        message.append(button);
+      }
+    }
     elements.timelineList.appendChild(message);
+  }
+
+  /** What a failed reply means for the user and the one step that fixes it (null when unknown). */
+  function failureHelp(reason) {
+    const text = String(reason || "");
+    const status = Number((text.match(/\(status=(\d{3})\)/) || [])[1]) || 0;
+    if (status === 401 || status === 403) {
+      return { text: t("服务商没有接受 API 密钥：可能没填、填错了或已经失效。"), action: "setup", label: t("设置模型") };
+    }
+    // The escaped words are a Chinese provider's "insufficient balance".
+    if (status === 402 || /insufficient[_ ]balance|\u4f59\u989d\u4e0d\u8db3|billing|quota/i.test(text)) {
+      return { text: t("服务商账户的余额或额度用完了，充值后再试。"), action: null };
+    }
+    if (status === 404 && /model/i.test(text)) {
+      return { text: t("服务商那里没有这个模型名称，换一个模型再试。"), action: "model", label: t("换模型") };
+    }
+    if (status === 429) return { text: t("请求太频繁，或这段时间的额度用完了，稍等一会儿再试。"), action: null };
+    if (/provider request (failed|timed out)/.test(text)) {
+      if (navigator.onLine === false) return { text: t("手机现在没有网络。"), action: null };
+      return { text: t("连不上 {0}。请检查网络；国内网络访问不了的服务商，可以换成 DeepSeek 这类国内服务商。", hostOf(settings.base_url) || t("服务商")),
+        action: "setup", label: t("换服务商") };
+    }
+    if (isLocalModel() && /not installed|download and verify/i.test(text)) {
+      return { text: t("本机模型还没下载好。"), action: "local", label: t("打开本地模型") };
+    }
+    if (isLocalModel() && /memory|\u5185\u5b58/i.test(text)) {
+      return { text: t("手机可用内存不够运行这个本机模型。关掉一些应用，或换一个小一点的模型。"), action: "local", label: t("打开本地模型") };
+    }
+    return null;
   }
 
   // Edit-and-resend and regenerate keep the replaced turns in the store (context.rewound marks

@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
+import os
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, dataclass, is_dataclass
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from agent_workspace.application.ports import EventStore
@@ -37,8 +41,12 @@ class _PendingApproval:
 ApprovalRequestListener = Callable[[dict[str, Any]], Awaitable[None] | None]
 
 # Scopes the user can pick on the approval shelf. "task" approves this request and every later
-# request of the same task, until it ends, except the tools below.
+# request of the same task, until it ends, except the tools below. "always" is for sending to the
+# model provider: that service is trusted from then on (trust_provider).
 APPROVAL_SCOPES = frozenset({"once", "session", "task"})
+_ALWAYS = "always"
+# What the approval shelf may send (mobile_gateway).
+RESOLVE_SCOPES = APPROVAL_SCOPES | {_ALWAYS}
 # A task-wide approval never covers deleting files, changing long-term memory (app notes too),
 # operating other apps, removing an app or taking back its powers (manage_app), or sending a
 # message as the user: those still ask each time. The exception is a task the user started from
@@ -76,6 +84,24 @@ def _elder_refusal(tool: Any, arguments: Any) -> str | None:
     return elder_refusal(str(tool or ""), arguments)
 
 
+def provider_origin(endpoint: Any) -> str:
+    """scheme://host[:port] of a provider endpoint, lower case ("" for anything else)."""
+    try:
+        parts = urlsplit(str(endpoint or "").strip())
+        host = (parts.hostname or "").lower()
+        port = parts.port
+    except ValueError:
+        return ""
+    if parts.scheme not in {"http", "https"} or not host:
+        return ""
+    return f"{parts.scheme}://{host}" + (f":{port}" if port else "")
+
+
+def _trusted_file() -> Path | None:
+    data = os.getenv("AGENT_WORKSPACE_DATA_DIR")
+    return Path(data) / "trusted-providers.json" if data else None
+
+
 class MobileApprovalBroker:
     def __init__(
         self,
@@ -92,6 +118,50 @@ class MobileApprovalBroker:
         # A task that read instructions in outside content (mobile_injection): nothing is covered.
         self._distrusted: tuple[str, str] | None = None
         self._pending: dict[str, _PendingApproval] = {}
+        self._trusted_providers: set[str] | None = None
+
+    # ---- Model providers the user trusts -----------------------------------------------------------
+    # Sending a conversation to the model provider asked in every conversation, before every first
+    # answer; a new user cannot judge it. A provider set up on the first-use sheet, or approved with
+    # "always", is sent to without asking. Only that origin: another address still asks.
+
+    def trusted_providers(self) -> set[str]:
+        if self._trusted_providers is None:
+            path = _trusted_file()
+            try:
+                value = json.loads(path.read_text(encoding="utf-8")) if path and path.is_file() else []
+            except (OSError, ValueError):
+                value = []
+            self._trusted_providers = {item for item in value if isinstance(item, str) and provider_origin(item) == item}
+        return self._trusted_providers
+
+    def trust_provider(self, endpoint: str) -> str:
+        origin = provider_origin(endpoint)
+        if not origin:
+            raise ValueError("endpoint must be an http(s) address")
+        trusted = self.trusted_providers()
+        if origin not in trusted:
+            trusted.add(origin)
+            self._save_trusted(trusted)
+        return origin
+
+    def distrust_provider(self, origin: str) -> bool:
+        """Asks again before sending to this provider (Execution mode page)."""
+        trusted = self.trusted_providers()
+        if origin not in trusted:
+            return False
+        trusted.discard(origin)
+        self._save_trusted(trusted)
+        return True
+
+    @staticmethod
+    def _save_trusted(trusted: set[str]) -> None:
+        path = _trusted_file()
+        if path is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(sorted(trusted)), encoding="utf-8")
+            os.replace(temporary, path)
 
     def set_active_task(self, task_id: str, session_id: str) -> None:
         if not task_id or not session_id:
@@ -163,6 +233,12 @@ class MobileApprovalBroker:
         pending = self._pending.get(request_id)
         if pending is None:
             return False
+        if scope == _ALWAYS:
+            if pending.kind != "egress":
+                raise ValueError("only sending to the model provider can be allowed always")
+            if allowed:
+                self.trust_provider(str(pending.details.get("endpoint") or ""))
+            scope = "session"
         if scope not in APPROVAL_SCOPES:
             raise ValueError("scope must be once, session or task")
         tool = pending.details.get("tool")
@@ -253,6 +329,23 @@ class MobileApprovalBroker:
                 )
             )
             return ApprovalDecision(request_id, allowed, scope, self._active_task_id, kind, refusal or "")
+        if kind == "egress" and provider_origin(details.get("endpoint")) in self.trusted_providers():
+            # A model provider the user chose to trust (first-use setup, or "always"); recorded.
+            self.event_store.append(
+                Event(
+                    session_id=self._active_session_id,
+                    type="mobile.approval.auto",
+                    data={
+                        "request_id": request_id,
+                        "task_id": self._active_task_id,
+                        "kind": kind,
+                        "subject": details.get("endpoint"),
+                        "scope": "session",
+                        "trusted_provider": True,
+                    },
+                )
+            )
+            return ApprovalDecision(request_id, True, "session", self._active_task_id, kind)
         if untrusted:
             details = {**details, "untrusted_content": untrusted}
         elif self._trusted_task_id == self._active_task_id and covered:

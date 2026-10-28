@@ -28,7 +28,7 @@ from typing import Any, BinaryIO
 from urllib.parse import parse_qs, quote, urlparse
 from weakref import WeakValueDictionary
 
-from mobile_approval import APPROVAL_SCOPES
+from mobile_approval import RESOLVE_SCOPES
 from mobile_artifacts import change_workspace_coordinated, write_workspace_file_coordinated
 from mobile_images import attachment_media_type, attachment_receipt
 from mobile_protocol import (
@@ -923,6 +923,9 @@ class _Handler(BaseHTTPRequestHandler):
                 "/mobile/notification-rules",
                 # Skills become instructions to the agent.
                 "/mobile/skills/",
+                # A provider trusted is sent to without asking.
+                "/mobile/approvals/trust-provider",
+                "/mobile/approvals/distrust-provider",
             )
         ) and path != "/mobile/triggers/fire" and not self._authorized("approval"):
         # (Firing only starts triggers the user set up with approval; the app reports phone events
@@ -1267,10 +1270,11 @@ class _Handler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[:2] == ["mobile", "approvals"] and parts[3] == "resolve":
             allowed = payload.get("allowed")
             scope = payload.get("scope", "once")
-            if not isinstance(allowed, bool) or scope not in APPROVAL_SCOPES:
+            # "always" trusts the model provider (sending to it only); the broker checks the kind.
+            if not isinstance(allowed, bool) or scope not in RESOLVE_SCOPES:
                 self._reply(
                     400,
-                    {"error": "allowed must be boolean and scope must be once, session or task"},
+                    {"error": "allowed must be boolean and scope must be once, session, task or always"},
                 )
                 return
             try:
@@ -1537,6 +1541,8 @@ class MobileGateway:
             from mobile_management import MobileManagement
 
             self.management = MobileManagement(runtime, controller)
+            # Conversations it makes and removes for itself (preparing the on-device model).
+            self.management.api = self
         self._server = ThreadingHTTPServer((host, port), _Handler)
         self._server.api = self  # type: ignore[attr-defined]
         self._thread: threading.Thread | None = None

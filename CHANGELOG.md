@@ -1,5 +1,39 @@
 # Changelog
 
+## 2.5.1 — 2026-10-28
+
+2.5.1 改进第一次使用、本机模型和出错提示，AI 也能帮你找设置、改设置。Agent Workspace 2.5.1 improves the first start, on-device models and error messages, and the AI can now find and change the app's settings for you.
+
+电脑版 / Desktop app: https://github.com/WhitePepperLambSoup/agent-workspace-desktop
+
+### 中文
+
+- 新增：第一次打开时先选模型。可以用云端服务：填好 API 密钥后先试一次，填错了直接提示。也可以下载在手机上运行的本机模型，下载完自动切换。还没选模型就发消息时，会打开这一页，输入的内容保留。
+- 改进：本机模型切换后，先在后台读一遍系统说明，状态栏显示进度；之后所有对话共用读好的这一份。以前第一次用、换了一天或改了记忆，都要重读一遍（测试机上约 6 分钟）；现在只在切换后准备一次，之后新对话约 1 秒开始回答。准备期间发的消息会排队，准备好后马上回答。
+- 改进：模型下载失败会自动重试；断网时等网络恢复后自动继续；引擎重启后接着下载（你手动暂停的除外）。下载时显示已下载大小、速度、剩余时间和下载来源。
+- 改进：回复失败时说明原因和处理办法：API 密钥无效、余额用完、模型名称不对、请求太频繁、没有网络、连不上服务商，或本机模型还没下载好；能直接处理的附带按钮。
+- 新增：AI 可以帮你找设置、改设置。问「悬浮球在哪里打开」，回复下方会有打开对应设置页的按钮；让它「改成深色模式」，会出现一张写明从什么改成什么的卡片，点「应用更改」才生效。API 密钥、应用锁和系统权限只能打开页面，由你自己改。
+- 新增：网络访问审批可以选「以后都允许发给这个服务商」（默认选中），这个服务商以后不再询问。已信任的服务商列在「执行权限」页，可以随时取消。
+- 改进：本地模型页把调参项收进「高级设置」。
+- 改进：8080 端口被别的应用占用、引擎启动不了时，会说明原因。
+- 修复：「最近一天 Agent 引擎被系统结束了 N 次」的提示把应用自己的重启也算了进去。
+- 修复：配对电脑后，「设备连接」列表一直显示「还没连过」。
+- 覆盖安装即可，数据会保留。
+
+### English
+
+- New: the first start asks you to pick a model. Use a cloud provider: the API key is tried once before it is saved, and a wrong key is reported right away. Or download a model that runs on the phone; the app switches to it when the download is done. Sending a message before a model is set opens this page and keeps what you typed.
+- Improved: after switching to an on-device model, it reads the system prompt once in the background, with progress in the status bar, and every conversation then shares what it read. Before, the first use, a new day or a memory change meant reading it again (about 6 minutes on the test phone); now it is prepared once after switching, and a new conversation starts answering in about 1 second. Messages sent while it prepares wait in line and are answered as soon as it is ready.
+- Improved: model downloads retry on failure, wait for the network when it drops and continue on their own, and resume after an engine restart (unless you paused them). A download shows the size so far, speed, time left and the source.
+- Improved: a failed reply says why and what to do: an invalid API key, no balance left, an unknown model name, too many requests, no network, a provider that cannot be reached, or an on-device model not downloaded yet; where it can be fixed in place, a button takes you there.
+- New: the AI can find and change settings for you. Ask where to turn on the floating bubble and a button below the reply opens that settings page; ask for dark mode and a card shows the change from one value to the other, applied only when you tap Apply. API keys, the app lock and system permissions can only be opened, for you to change.
+- New: a network access approval offers Always allow this provider (preselected), and that provider is not asked about again. Trusted providers are listed on the Execution permission page, where each can be removed.
+- Improved: the Local models page keeps the tuning options under Advanced settings.
+- Improved: when another app holds port 8080 and the engine cannot start, the app says so.
+- Fixed: the "engine was stopped by the system N times in the last day" notice counted the app's own restarts.
+- Fixed: after pairing a computer, Device connections kept showing it as never connected.
+- Install over the existing app; your data is kept.
+
 ## 2.5.0 — 2026-10-27
 
 2.5.0 新增和电脑版 Agent Workspace 互联。Agent Workspace 2.5.0 connects the phone with Agent Workspace on a Windows computer.

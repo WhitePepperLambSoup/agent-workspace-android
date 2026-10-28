@@ -4,6 +4,7 @@
     if (elderOn() && !$("elderScreen").hidden) { void stopReading(); return true; }
     if (closeAttachMenu()) return true;
     if (!$("sessionSheet").hidden) { closeSessionSheet(); return true; }
+    if (closeSetup()) return true;
     if (closeModelSheet()) return true;
     if (closeDrawer()) return true;
     if (!layerOpen(elements.settingsOverlay)) return false;

@@ -218,7 +218,8 @@ enum class Evaluation { complete, stopped, failed };
  * re-tokenizes the last few prompt tokens differently ("\n\n" merges with a following "\n").
  * When `prefix_end` lies in the evaluated range, a checkpoint is also kept there and, given a
  * `prefix_path` that does not exist yet, the state is saved to it (`prefix_saved` reports it).
- * `stopped()` is polled before each batch and `evaluated(first_batch)` called after it.
+ * `stopped()` is polled before each batch and `evaluated(first_batch, done, total)` called after
+ * it, with the prompt tokens in memory so far (restored ones included) and the prompt's length.
  */
 template <typename Stopped, typename Evaluated>
 Evaluation evaluate_prompt(Cache * cache, llama_context * context, std::vector<llama_token> & tokens,
@@ -240,7 +241,7 @@ Evaluation evaluate_prompt(Cache * cache, llama_context * context, std::vector<l
         if (mark < marks.size() && marks[mark] < stop) stop = marks[mark];
         auto batch = llama_batch_get_one(tokens.data() + offset, static_cast<int32_t>(stop - offset));
         if (llama_decode(context, batch) != 0) return Evaluation::failed;
-        evaluated(offset == start);
+        evaluated(offset == start, stop, end);
         if (cache) cache->tokens.insert(cache->tokens.end(), tokens.begin() + offset, tokens.begin() + stop);
         offset = stop;
         if (mark < marks.size() && marks[mark] == stop) {

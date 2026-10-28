@@ -40,7 +40,7 @@
     <section id="approvalShelf" class="hidden" hidden aria-labelledby="approvalTitle">
       <div class="approval-header"><span data-icon="shield"></span><strong id="approvalTitle">待审批操作</strong></div>
       <pre id="approvalDetail"></pre>
-      <label class="approval-scope" for="approvalScopeSelector"><span>授权范围</span><select id="approvalScopeSelector"><option value="once">仅此次</option><option value="session">本会话</option><option value="task">本任务内都允许</option></select></label>
+      <label class="approval-scope" for="approvalScopeSelector"><span>授权范围</span><select id="approvalScopeSelector"><option value="once">仅此次</option><option value="session">本会话</option><option value="task">本任务内都允许</option><option value="always" hidden disabled>以后都允许发给这个服务商</option></select></label>
       <div class="approval-actions"><button id="btnRejectAction" class="button-secondary" type="button">拒绝</button><button id="btnApproveAction" class="button-primary" type="button">批准执行</button></div>
     </section>
     <!-- Filled by app.js from the user's quick tasks (Appearance → Edit quick tasks). -->
@@ -99,6 +99,39 @@
     </aside>
   </div>
   <!-- Quick model sheet: opened from the composer's model chip. The full model page stays in the menu. -->
+  <!-- First use: which model answers. A new install has none (app/27-setup.js). -->
+  <div id="setupSheet" hidden>
+    <button id="setupSheetBackdrop" type="button" aria-label="关闭" tabindex="-1"></button>
+    <section id="setupSheetPanel" role="dialog" aria-modal="true" aria-labelledby="setupSheetTitle">
+      <div class="sheet-grip" aria-hidden="true"></div>
+      <div class="model-sheet-header">
+        <span class="model-sheet-icon" data-icon="sparkles"></span>
+        <div class="model-sheet-heading"><h2 id="setupSheetTitle">选择 AI 模型</h2><p id="setupSheetLead" class="setting-hint">先选一个模型，AI 才能回答。以后可以点输入框下面的模型按钮更换。</p></div>
+        <button id="btnSetupClose" class="icon-button" type="button" title="稍后再说" aria-label="稍后再说"><span data-icon="x"></span></button>
+      </div>
+      <div class="setup-choices" role="radiogroup" aria-label="模型在哪里运行">
+        <button id="btnSetupCloud" class="setup-choice" type="button" role="radio" aria-checked="false"><span data-icon="globe"></span><span><strong>云端模型</strong><small>回答快，能力强。需要服务商的 API 密钥，按用量付费。</small></span></button>
+        <button id="btnSetupLocal" class="setup-choice" type="button" role="radio" aria-checked="false"><span data-icon="cpu"></span><span><strong>在手机上运行</strong><small>免费，不联网也能用。回答慢一些，能力也弱一些。</small></span></button>
+      </div>
+      <div id="setupCloud" class="setup-step" hidden>
+        <label for="setupProvider">服务商</label>
+        <select id="setupProvider"></select>
+        <p id="setupProviderNote" class="setting-hint"></p>
+        <a id="setupKeyLink" class="text-action" href="#" target="_blank" rel="noopener noreferrer"><span data-icon="link"></span>去服务商网站获取 API 密钥</a>
+        <label for="setupApiKey">API 密钥</label>
+        <div class="setup-key"><input id="setupApiKey" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴密钥"><button id="btnSetupPaste" class="button-secondary" type="button">粘贴</button></div>
+        <button id="btnSetupSave" class="button-primary" type="button">验证并开始使用</button>
+        <button id="btnSetupMore" class="text-action" type="button">其他服务商或自定义地址<span data-icon="chevron-right"></span></button>
+      </div>
+      <div id="setupLocal" class="setup-step" hidden>
+        <p id="setupLocalModel"></p>
+        <progress id="setupLocalProgress" max="1" hidden></progress>
+        <button id="btnSetupLocalGo" class="button-primary" type="button">下载并使用</button>
+        <button id="btnSetupLocalMore" class="text-action" type="button">选择其他本机模型<span data-icon="chevron-right"></span></button>
+      </div>
+      <p id="setupStatus" class="setting-hint" role="status"></p>
+    </section>
+  </div>
   <div id="modelSheet" hidden>
     <button id="modelSheetBackdrop" type="button" aria-label="关闭" tabindex="-1"></button>
     <section id="modelSheetPanel" role="dialog" aria-modal="true" aria-labelledby="modelSheetTitle" data-top="false">
@@ -292,6 +325,11 @@
           <select id="privacyNumbersRoute"><option value="ask">每次问我</option><option value="local">用本机模型回答</option><option value="mask">遮盖后发送</option></select>
           <label for="privacyOfflineRoute">没有网络时发消息</label>
           <select id="privacyOfflineRoute"><option value="ask">每次问我</option><option value="wait">联网后自动发送</option><option value="local">用本机模型回答</option></select>
+        </div>
+        <div id="trustedProviders" class="management-section" hidden>
+          <strong>不再询问就发送的服务商</strong>
+          <p class="setting-hint">发给这些服务商时不再每个对话询问。取消后，下次发送会先问你。</p>
+          <div id="trustedProviderList" class="management-list"></div>
         </div>
       </div>
       <div id="settingsAppearance" class="settings-page" hidden>
@@ -959,34 +997,37 @@
         <p id="evaluationsStatus" class="page-status" role="status"></p><dl id="evaluationSummary" class="usage-summary"></dl><div id="evaluationCases" class="management-list"></div><div id="evaluationRuns" class="management-list"></div>
       </div>
       <div id="settingsLocalModels" class="settings-page" hidden>
-        <p id="localModelsStatus" class="page-status" role="status"></p><dl id="localModelSummary" class="usage-summary"></dl>
-        <label for="localDeviceModelSelector">本机性能设置模型</label><select id="localDeviceModelSelector" aria-label="本机性能设置模型" disabled></select>
-        <label for="localContextSelector">本机上下文大小</label><select id="localContextSelector" aria-label="本机上下文大小"><option value="0">自动（按本机与模型决定）</option><option value="4096">4,096 Token</option><option value="8192">8,192 Token</option><option value="16384">16,384 Token</option><option value="32768">32,768 Token</option><option value="65536">65,536 Token</option><option value="131072">131,072 Token</option><option value="262144">262,144 Token</option><option value="custom">自定义 Token 数</option></select>
-        <div id="localContextCustomRow" hidden><label for="localContextCustomInput">自定义上下文 Token 数</label><input id="localContextCustomInput" type="number" min="512" max="262144" step="1" inputmode="numeric" value="8192" aria-label="自定义上下文 Token 数"></div>
-        <label for="localMemorySelector">本机内存模式</label><select id="localMemorySelector" aria-label="本机内存模式"><option value="balanced">平衡</option><option value="extended">扩展（使用系统可用交换内存）</option></select>
-        <label for="localThreadsInput">CPU 线程数（0 为自动）</label><input id="localThreadsInput" type="number" min="0" max="64" step="1" inputmode="numeric" value="0">
-        <label for="localTimeoutInput">单次生成超时秒数（0 为自动）</label><input id="localTimeoutInput" type="number" min="0" max="7200" step="1" inputmode="numeric" value="0">
-        <label for="localAcceleratorSelector">推理设备</label><select id="localAcceleratorSelector" aria-label="推理设备" aria-describedby="localAcceleratorStatus" disabled><option value="auto">自动（支持时用 GPU，测试中）</option><option value="cpu">仅 CPU</option></select>
-        <p id="localAcceleratorStatus" class="setting-hint" role="status"></p>
-        <button id="btnRetryLocalGpu" class="button-secondary" type="button" hidden>重新尝试 GPU</button>
-        <p class="setting-hint">自动值按可用于模型的内存（含系统可立即回收的部分）、模型上限和已测速度推荐。手动上下文保留所选容量，内存估算作为建议；实际分配失败会明确提示。扩展模式可使用系统剩余交换内存。</p>
-        <p id="localContextHint" class="setting-hint">上下文按本机可用内存与模型上限决定。更改后会重启引擎。</p>
-        <dl id="localDeviceRecommendation" class="usage-summary"></dl><button id="btnUseLocalRecommendation" class="button-secondary" type="button" aria-describedby="localDeviceStatus" disabled>填入推荐值</button>
-        <details class="management-section"><summary>设备性能测试</summary>
-          <p class="setting-hint">使用所选容量分配上下文，以一段固定任务文本测试输入处理与最多 64 个输出 Token，最长 90 秒。结果只供参考，不会修改设置；分配容量与实际测试输入长度会分别显示。</p>
-          <div class="page-toolbar"><button id="btnStartLocalBenchmark" class="button-secondary" type="button" aria-describedby="localDeviceStatus" disabled>开始设备测试</button><button id="btnCancelLocalBenchmark" class="button-secondary" type="button" disabled>取消测试</button></div>
-          <dl id="localDeviceBenchmark" class="usage-summary"></dl>
-        </details>
-        <p id="localDeviceStatus" class="page-status" role="status"></p>
+        <p id="localModelsStatus" class="page-status" role="status"></p>
         <p class="setting-hint">推荐先下载 Qwen3.5 0.8B Q4。本机推理支持文字与工具调用；Qwen3.5 图片理解需配套视觉组件。模型按需下载，校验完成后才能使用。</p>
-        <label for="modelDownloadSource">模型下载来源</label>
-        <select id="modelDownloadSource">
-          <option value="auto">自动（推荐）</option>
-          <option value="modelscope">ModelScope 魔搭（国内 CDN）</option>
-          <option value="huggingface">Hugging Face</option>
-        </select>
-        <p class="setting-hint">自动：先连 ModelScope 魔搭，连不上再换 Hugging Face。各来源是同一份文件，下载完都按固定的 SHA-256 校验；暂停后换来源会接着下载。</p>
         <div class="page-toolbar"><button id="btnProbeLocalModel" class="button-secondary" type="button"><span data-icon="activity"></span>检查本地引擎</button><button id="btnUnloadLocalModel" class="button-secondary" type="button">释放模型内存</button><button id="btnRestoreCloudModel" class="button-secondary" type="button">恢复原模型配置</button></div><p id="localModelControlStatus" class="page-status" role="status"></p><div id="localModelList" class="management-list"></div>
+        <details id="localAdvanced" class="management-section"><summary>高级设置</summary>
+          <dl id="localModelSummary" class="usage-summary"></dl>
+          <label for="localDeviceModelSelector">本机性能设置模型</label><select id="localDeviceModelSelector" aria-label="本机性能设置模型" disabled></select>
+          <label for="localContextSelector">本机上下文大小</label><select id="localContextSelector" aria-label="本机上下文大小"><option value="0">自动（按本机与模型决定）</option><option value="4096">4,096 Token</option><option value="8192">8,192 Token</option><option value="16384">16,384 Token</option><option value="32768">32,768 Token</option><option value="65536">65,536 Token</option><option value="131072">131,072 Token</option><option value="262144">262,144 Token</option><option value="custom">自定义 Token 数</option></select>
+          <div id="localContextCustomRow" hidden><label for="localContextCustomInput">自定义上下文 Token 数</label><input id="localContextCustomInput" type="number" min="512" max="262144" step="1" inputmode="numeric" value="8192" aria-label="自定义上下文 Token 数"></div>
+          <label for="localMemorySelector">本机内存模式</label><select id="localMemorySelector" aria-label="本机内存模式"><option value="balanced">平衡</option><option value="extended">扩展（使用系统可用交换内存）</option></select>
+          <label for="localThreadsInput">CPU 线程数（0 为自动）</label><input id="localThreadsInput" type="number" min="0" max="64" step="1" inputmode="numeric" value="0">
+          <label for="localTimeoutInput">单次生成超时秒数（0 为自动）</label><input id="localTimeoutInput" type="number" min="0" max="7200" step="1" inputmode="numeric" value="0">
+          <label for="localAcceleratorSelector">推理设备</label><select id="localAcceleratorSelector" aria-label="推理设备" aria-describedby="localAcceleratorStatus" disabled><option value="auto">自动（支持时用 GPU，测试中）</option><option value="cpu">仅 CPU</option></select>
+          <p id="localAcceleratorStatus" class="setting-hint" role="status"></p>
+          <button id="btnRetryLocalGpu" class="button-secondary" type="button" hidden>重新尝试 GPU</button>
+          <p class="setting-hint">自动值按可用于模型的内存（含系统可立即回收的部分）、模型上限和已测速度推荐。手动上下文保留所选容量，内存估算作为建议；实际分配失败会明确提示。扩展模式可使用系统剩余交换内存。</p>
+          <p id="localContextHint" class="setting-hint">上下文按本机可用内存与模型上限决定。更改后会重启引擎。</p>
+          <dl id="localDeviceRecommendation" class="usage-summary"></dl><button id="btnUseLocalRecommendation" class="button-secondary" type="button" aria-describedby="localDeviceStatus" disabled>填入推荐值</button>
+          <details class="management-section"><summary>设备性能测试</summary>
+            <p class="setting-hint">使用所选容量分配上下文，以一段固定任务文本测试输入处理与最多 64 个输出 Token，最长 90 秒。结果只供参考，不会修改设置；分配容量与实际测试输入长度会分别显示。</p>
+            <div class="page-toolbar"><button id="btnStartLocalBenchmark" class="button-secondary" type="button" aria-describedby="localDeviceStatus" disabled>开始设备测试</button><button id="btnCancelLocalBenchmark" class="button-secondary" type="button" disabled>取消测试</button></div>
+            <dl id="localDeviceBenchmark" class="usage-summary"></dl>
+          </details>
+          <p id="localDeviceStatus" class="page-status" role="status"></p>
+          <label for="modelDownloadSource">模型下载来源</label>
+          <select id="modelDownloadSource">
+            <option value="auto">自动（推荐）</option>
+            <option value="modelscope">ModelScope 魔搭（国内 CDN）</option>
+            <option value="huggingface">Hugging Face</option>
+          </select>
+          <p class="setting-hint">自动：先连 ModelScope 魔搭，连不上再换 Hugging Face。各来源是同一份文件，下载完都按固定的 SHA-256 校验；暂停后换来源会接着下载。</p>
+        </details>
         <div id="speechSection" class="management-section">
           <strong>离线语音识别</strong>
           <p class="setting-hint">下载语音模型后，输入框的麦克风按钮直接在手机上识别，不需要联网，录音不会上传也不会保存。AI 也能把工作区里的录音、视频转成文字。模型为 SenseVoice Small（FunAudioLLM，FunASR 模型协议），支持中文、英文、日语、韩语和粤语。</p>

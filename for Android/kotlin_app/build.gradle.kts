@@ -20,11 +20,13 @@ android {
     ndkVersion = "27.3.13750724"
 
     defaultConfig {
-        applicationId = "com.agentworkspace.mobile"
+        // AGENT_TEST_APP_SUFFIX lets a local test build install beside the real app as a fresh
+        // install (first-run checks on a phone without touching its data); releases never set it.
+        applicationId = "com.agentworkspace.mobile" + (providers.environmentVariable("AGENT_TEST_APP_SUFFIX").orNull ?: "")
         minSdk = 26
         targetSdk = 36
-        versionCode = 20500
-        versionName = "2.5.0"
+        versionCode = 20501
+        versionName = "2.5.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Local test builds can inspect the console page over adb (chrome://inspect) while keeping

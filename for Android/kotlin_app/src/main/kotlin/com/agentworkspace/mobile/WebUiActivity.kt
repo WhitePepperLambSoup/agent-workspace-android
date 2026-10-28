@@ -1968,6 +1968,11 @@ class WebUiActivity : ComponentActivity() {
                                 continue
                             }
                             val step = EngineStartupLog.lastStep(this@WebUiActivity)?.let { "\n$it" }.orEmpty()
+                            // The engine listens on 127.0.0.1:8080; another app's server there (a web
+                            // server in Termux, a proxy) keeps it from starting. Say so, not errno 98.
+                            if ("Address already in use" in step) throw IllegalStateException(UiText.of(this@WebUiActivity,
+                                "手机上另一个应用占用了端口 8080（例如 Termux 里运行的网页服务或代理），引擎无法启动。关掉那个应用或服务后点「重试连接」。",
+                                "Another app on this phone is using port 8080 (a web server in Termux or a proxy, for example), so the engine cannot start. Close it, then tap Retry."))
                             throw IllegalStateException(UiText.of(this@WebUiActivity, "本地 Python 服务启动失败，可点右上角“导出日志”$step", "The local Python service failed to start; use Export logs$step"))
                         }
                         token = readServeToken()

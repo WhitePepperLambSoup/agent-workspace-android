@@ -33,7 +33,7 @@ from mobile_screen import bind as bind_screen
 from mobile_screen import reset as reset_screen
 from mobile_subagents import SubagentHost, bind_host, reset_host
 from mobile_task_limits import TaskLimits, limits_for_task
-from mobile_prompt_cache import FrozenPrompts, prefix_cache_endpoint
+from mobile_prompt_cache import SHARED_ON_DEVICE, FrozenPrompts, prefix_cache_endpoint
 from mobile_prompt_cache import assemble as assemble_prompt
 from mobile_protocol import REASONING_EFFORTS, MobileEvent, MobileTask, MobileTaskRequest, TaskState
 from mobile_shortcuts import begin_recording, end_recording, finish_recording
@@ -1210,13 +1210,17 @@ class MobileRuntimeController:
                 # as notes with the next message, and compaction moves in rare large steps.
                 context_notes: tuple[str, ...] = ()
                 registry = self._tool_registry()
-                if on_device is None and prefix_cache_endpoint(self.base_url, model):
+                # The on-device model keeps what it read of a system prompt on disk, for that exact
+                # prompt only, and reading one again takes minutes on a phone: every conversation
+                # starts from the same snapshot (mobile_prompt_cache.SHARED_ON_DEVICE).
+                if local or (on_device is None and prefix_cache_endpoint(self.base_url, model)):
                     options["prefix_stable"] = True
                     system_suffix, context_notes = self._frozen_prompts().prepare(
                         session.id,
                         _ANDROID_SYSTEM_SUFFIX,
                         _prompt_sections(session.id, registry),
                         new_turn=not has_persisted_input,
+                        shared=SHARED_ON_DEVICE if local else None,
                     )
                 else:
                     system_suffix = _android_system_suffix(session.id, registry)

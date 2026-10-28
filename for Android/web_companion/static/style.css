@@ -664,8 +664,45 @@ strong { font-weight: 600; }
 .drawer-workspaces { touch-action: auto; }
 
 /* ---------- Quick model sheet (composer model chip) ---------- */
-#modelSheet { position: fixed; inset: 0; z-index: 35; }
-#modelSheetBackdrop { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; background: var(--scrim); cursor: default; }
+#modelSheet, #setupSheet { position: fixed; inset: 0; z-index: 35; }
+#modelSheetBackdrop, #setupSheetBackdrop { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; background: var(--scrim); cursor: default; }
+/* First use: choosing the model (app/27-setup.js). */
+#setupSheetPanel {
+  position: absolute; left: 0; right: 0; bottom: 0; display: grid; gap: 12px; max-width: 520px; max-height: 92vh; margin: 0 auto;
+  padding: 8px 18px calc(22px + env(safe-area-inset-bottom)); overflow-y: auto;
+  border-radius: 26px 26px 0 0; background: var(--surface); box-shadow: var(--shadow-3);
+}
+#setupSheetPanel .model-sheet-heading .setting-hint { margin: 2px 0 0; }
+.setup-choices { display: grid; gap: 10px; }
+.setup-choice {
+  display: flex; align-items: flex-start; gap: 12px; padding: 12px 14px; border: 1px solid var(--border-strong);
+  border-radius: 16px; background: var(--field); color: var(--text); text-align: left; font: inherit;
+}
+.setup-choice > [data-icon] { flex: 0 0 22px; color: var(--accent); margin-top: 2px; }
+.setup-choice strong { display: block; font-size: 15px; font-weight: 650; }
+.setup-choice small { display: block; margin-top: 2px; color: var(--text-2); font-size: 13px; line-height: 1.45; }
+.setup-choice[aria-checked="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.setup-step { display: grid; gap: 8px; }
+.setup-step label { font-size: 13px; font-weight: 600; color: var(--text-2); }
+.setup-step select, .setup-key input {
+  min-height: 42px; padding: 8px 12px; border: 1px solid var(--border-strong); border-radius: 12px;
+  background: var(--field); color: var(--text); font-size: 15px;
+}
+.setup-key { display: flex; gap: 8px; }
+.setup-key input { flex: 1 1 auto; min-width: 0; }
+.setup-step .text-action { justify-self: start; }
+#setupLocalProgress { width: 100%; }
+#setupStatus.error { color: var(--danger); }
+/* A settings change the agent proposed, applied with a tap (app/28-app-settings.js). */
+.setting-proposal { display: grid; gap: 8px; margin: 4px 0 10px; padding: 12px 14px; border: 1px solid var(--accent); border-radius: 16px; background: var(--accent-soft); }
+.setting-proposal p { margin: 0; font-size: 14px; line-height: 1.5; }
+.setting-proposal .setting-risk { color: var(--danger); }
+.setting-proposal-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+/* A failed reply's explanation and the step that fixes it (60-timeline.js failureHelp). */
+.task-error-help { margin: 6px 0 0; color: var(--text); font-size: 14px; line-height: 1.5; }
+.task-error > .button-secondary { margin-top: 8px; }
+/* The composer's model chip when no model can answer yet: it opens the setup sheet. */
+#modelBar[data-setup="true"] { border-color: var(--accent); color: var(--accent); }
 /* It reaches 40px below the screen so the spring's overshoot never shows a gap under it. */
 #modelSheetPanel {
   position: absolute; left: 0; right: 0; bottom: -40px; display: grid; gap: 14px; max-width: 520px; margin: 0 auto;

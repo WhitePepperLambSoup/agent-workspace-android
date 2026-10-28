@@ -733,7 +733,8 @@
   window.addEventListener("focus", refreshWorkspaceAccess);
   window.addEventListener("agent-workspace-storage-changed", refreshWorkspaceAccess);
   elements.btnSettings.addEventListener("click", openMenu);
-  elements.modelBar.addEventListener("click", openModelSheet);
+  // With no model that can answer yet, the chip says so and opens the first-use sheet.
+  elements.modelBar.addEventListener("click", () => { if (!setupNeeded() || !openSetup()) openModelSheet(); });
   elements.settingsBackdrop.addEventListener("click", closeMenu);
   elements.settingsCloseButton.addEventListener("click", closeMenu);
   elements.btnSessions.addEventListener("click", openDrawer);
@@ -768,7 +769,7 @@
     saveQuickTasks(defaultQuickTasks(), true);
   });
   elements.btnModelPage.addEventListener("click", () => setSettingsPage("model"));
-  elements.btnPermissionPage.addEventListener("click", () => setSettingsPage("permission"));
+  elements.btnPermissionPage.addEventListener("click", () => { setSettingsPage("permission"); void loadTrustedProviders(); });
   elements.btnAppearancePage.addEventListener("click", () => setSettingsPage("appearance"));
   elements.btnSearchPage.addEventListener("click", () => setSettingsPage("search"));
   elements.btnTasksPage.addEventListener("click", () => setSettingsPage("tasks"));

@@ -21,6 +21,10 @@ from urllib.parse import urlsplit
 SECTIONS = ("date", "environment", "memory", "knowledge", "skills", "elder")
 _VERSION = 1
 _SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+# The on-device model's prompt, shared by every conversation (FrozenPrompts.prepare(shared=...)).
+SHARED_ON_DEVICE = "_shared-on-device"
+# Notes for a new conversation beyond this many characters: the snapshot is too old, start over.
+_SHARED_NOTES_LIMIT = 4000
 
 
 # Services that bill a repeated prompt prefix at a lower price. Most do it on their own (DeepSeek,
@@ -152,29 +156,46 @@ class FrozenPrompts:
         os.replace(temporary, path)
 
     def prepare(
-        self, session_id: str, base: str, sections: dict[str, str], *, new_turn: bool
+        self, session_id: str, base: str, sections: dict[str, str], *, new_turn: bool,
+        shared: str | None = None,
     ) -> tuple[str, tuple[str, ...]]:
         """The conversation's frozen suffix and notes for what changed since it was frozen.
 
         Notes are produced only for a new user turn (a resumed task has no new message to
         carry them) and each change is announced once. Never raises: without a usable
         snapshot the current prompt is used and frozen.
+
+        With ``shared`` (the on-device model), a new conversation starts from that snapshot
+        instead of the current sections: the phone keeps the model's state after reading a
+        system prompt only for a byte-identical one, and reading it again takes minutes. A
+        new day or a new memory then costs a short note rather than the whole prompt.
         """
         current = {key: sections.get(key, "") for key in SECTIONS}
         try:
             path = self._path(session_id)
             state = self._read(path)
+            if state is None and shared is not None:
+                state = self._seed(shared, base)
+                if state is not None:
+                    changed = sum(
+                        len(_note(key, current[key])) for key in SECTIONS
+                        if _digest(current[key]) != state["applied"][key]
+                    )
+                    if changed > _SHARED_NOTES_LIMIT:
+                        state = None  # too much changed since: read a fresh prompt once
+                    else:
+                        self._write(path, state)
             if state is None or state["base"] != base:
                 # New conversation, or new app guidance after an update: start over once.
-                self._write(
-                    path,
-                    {
-                        "version": _VERSION,
-                        "base": base,
-                        "frozen": current,
-                        "applied": {key: _digest(value) for key, value in current.items()},
-                    },
-                )
+                fresh = {
+                    "version": _VERSION,
+                    "base": base,
+                    "frozen": current,
+                    "applied": {key: _digest(value) for key, value in current.items()},
+                }
+                self._write(path, fresh)
+                if shared is not None:
+                    self._write(self._path(shared), fresh)
                 return assemble(base, current), ()
             frozen = {key: str(state["frozen"].get(key, "")) for key in SECTIONS}
             notes = []
@@ -190,15 +211,31 @@ class FrozenPrompts:
         except (OSError, ValueError):
             return assemble(base, current), ()
 
+    def _seed(self, shared: str, base: str) -> dict | None:
+        """A new conversation's state from the shared snapshot (None without a usable one).
+
+        What the snapshot froze counts as applied, so every section that changed since then
+        becomes a note with the conversation's first message."""
+        snapshot = self._read(self._path(shared))
+        if snapshot is None or snapshot["base"] != base:
+            return None
+        frozen = {key: str(snapshot["frozen"].get(key, "")) for key in SECTIONS}
+        return {
+            "version": _VERSION,
+            "base": base,
+            "frozen": frozen,
+            "applied": {key: _digest(value) for key, value in frozen.items()},
+        }
+
     def prune(self, keep: set[str]) -> int:
-        """Delete snapshots of conversations that no longer exist."""
+        """Delete snapshots of conversations that no longer exist (the shared ones stay)."""
         removed = 0
         try:
             entries = list(self.root.glob("*.json"))
         except OSError:
             return 0
         for path in entries:
-            if path.stem not in keep:
+            if path.stem not in keep and not path.stem.startswith("_shared"):
                 try:
                     path.unlink()
                     removed += 1

@@ -57,14 +57,31 @@ object ProcessExits {
         val result = JSONArray()
         val log = file(context)
         if (!log.isFile) return result
+        val own = ownRestarts(context)
         runCatching {
             log.readLines().mapNotNull { runCatching { JSONObject(it.substringAfter(' ')) }.getOrNull() }
                 .filter { now - it.optLong("timestamp") in 0..RECENT_MS }
                 .filter { it.optString("process").endsWith(":engine") && it.optString("reason") in SYSTEM_KILLS }
+                .filter { exit -> !replacedByThisApp(exit.optLong("timestamp"), own) }
                 .forEach { result.put(it) }
         }
         return result
     }
+
+    /**
+     * When this app ended the engine itself (it would not start, did not answer, did not stop in
+     * time, or its code changed), written to engine-restarts.log just before: Android reports such an
+     * exit as "signaled" too. Seen on a new install: two of those made the page say the system had
+     * ended the engine twice.
+     */
+    private fun ownRestarts(context: Context): List<Long> = runCatching {
+        File(context.filesDir, "agent-data/logs/engine-restarts.log").readLines().mapNotNull { line ->
+            runCatching { Instant.parse(line.substringBefore(' ')).toEpochMilli() }.getOrNull()
+        }
+    }.getOrDefault(emptyList())
+
+    internal fun replacedByThisApp(exitAt: Long, ownRestarts: List<Long>): Boolean =
+        ownRestarts.any { exitAt - it in -2_000L..15_000L }
 
     internal fun line(exit: JSONObject): String = "${Instant.ofEpochMilli(exit.optLong("timestamp"))} $exit"
 

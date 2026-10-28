@@ -54,6 +54,9 @@ std::string model_root;
 std::string loaded_id;
 std::string active_request;
 std::string generation_phase;
+// Prompt tokens read so far of this request's prompt, for "reading 3,200 of 10,775" on the page.
+size_t prompt_done = 0;
+size_t prompt_total = 0;
 std::string last_error;
 json last_generation = nullptr;
 bool initialized = false;
@@ -212,12 +215,14 @@ struct RunState {
         generating = true;
         generation_phase = "loading_model";
         context_size = n_context;
+        prompt_done = prompt_total = 0;
         last_error.clear();
     }
     ~RunState() {
         std::lock_guard<std::mutex> lock(state_mutex);
         generating = false;
         generation_phase.clear();
+        prompt_done = prompt_total = 0;
         active_request.clear();
         context_size = 0;
     }
@@ -226,6 +231,12 @@ struct RunState {
 void set_generation_phase(const char * phase) {
     std::lock_guard<std::mutex> lock(state_mutex);
     generation_phase = phase;
+}
+
+void set_prompt_progress(size_t done, size_t total) {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    prompt_done = done;
+    prompt_total = total;
 }
 
 void publish_prompt_cache() {
@@ -769,7 +780,10 @@ json generate(const std::string & raw, const std::vector<std::string> & rgb_imag
             const auto evaluation = agent_prompt_cache::evaluate_prompt(reuse ? &kept.prompt : nullptr,
                 context, tokens, cached_tokens, partial, [&] { follow_thread_limit(); return budget.stopped(); },
                 // This phase proves at least one real CPU prompt batch completed.
-                [](bool first) { if (first) set_generation_phase("prompt_evaluation"); },
+                [](bool first, size_t done, size_t total) {
+                    if (first) set_generation_phase("prompt_evaluation");
+                    set_prompt_progress(done, total);
+                },
                 prefix_end, prefix_path, &prefix_saved);
             if (prefix_saved) evict_prefix_files(id);
             if (evaluation == agent_prompt_cache::Evaluation::stopped) return interrupt();
@@ -888,6 +902,7 @@ Java_com_agentworkspace_mobile_localmodels_LocalModelBridge_nativeStatus(JNIEnv 
         {"generating", generating}, {"context_size", context_size},
         {"supports_vision", true}, {"max_images", MAX_IMAGES}, {"image_max_tokens", 256},
         {"generation_phase", generation_phase.empty() ? json(nullptr) : json(generation_phase)},
+        {"prompt_progress", prompt_total == 0 ? json(nullptr) : json{{"done", prompt_done}, {"total", prompt_total}}},
         {"last_generation", last_generation}, {"prompt_cache", prompt_cache_status},
         {"gpu_build", GPU_BUILD}, {"loaded_gpu_layers", loaded_gpu_layers},
         {"last_error", last_error.empty() ? json(nullptr) : json(last_error)}});

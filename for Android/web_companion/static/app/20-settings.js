@@ -203,6 +203,10 @@
     elements.modelBar.title = t("{0} · 思考强度 {1}", model, effort);
     // The chip keeps a colored rim while the model thinks at its highest level.
     elements.modelBar.dataset.top = String(isTopEffort(settings.model, settings.reasoning_effort));
+    // No model can answer yet (a new install): the chip asks for one (app/27-setup.js).
+    const needsSetup = !!setupNeeded();
+    elements.modelBar.dataset.setup = String(needsSetup);
+    if (needsSetup) elements.modelSummary.textContent = t("选择模型");
     elements.executionSummary.textContent = autonomyLabels[settings.autonomy] || autonomyLabels.workspace;
     // The composer shows the mode as a color-coded shield; the name stays available to touch and screen readers.
     elements.btnModeChip.dataset.mode = settings.autonomy in autonomyLabels ? settings.autonomy : "workspace";
@@ -308,7 +312,8 @@
     elements.settingsNotifications.hidden = page !== "notifications";
     elements.settingsUsage.hidden = page !== "usage";
     elements.settingsPricing.hidden = page !== "pricing";
-    elements.settingsActions.hidden = !["model", "permission", "localModels"].includes(page);
+    // The local models page tunes the engine under its collapsed 高级设置 only.
+    elements.settingsActions.hidden = !["model", "permission", "localModels"].includes(page) || (page === "localModels" && !$("localAdvanced")?.open);
     elements.btnApplySettings.textContent = page === "permission" ? t("应用执行模式") : page === "localModels" ? t("应用本机设置") : t("应用设置");
     elements.settingsError.hidden = true;
     if (page === "model") {

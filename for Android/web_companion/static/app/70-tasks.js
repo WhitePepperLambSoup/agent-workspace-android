@@ -7,6 +7,7 @@
     window.setTimeout(() => { region.textContent = String(text).slice(0, 600); }, 50);
   }
 
+  let approvalFailure = null;
   // mobile_approval._ALWAYS_ASK_TOOLS: the engine approves these once even when "session" is picked.
   const askEachTools = new Set(["delete_path", "memory_write", "app_note", "android_action", "notification_reply", "manage_app"]);
 
@@ -20,10 +21,16 @@
     elements.btnApproveAction.disabled = !approval || isResolvingApproval;
     elements.btnRejectAction.disabled = !approval || isResolvingApproval;
     if (approval) {
-      elements.approvalTitle.textContent = approval.kind === "egress" ? t("网络访问审批") : t("工具审批");
+      // A failed tap keeps saying why (the shelf is redrawn on every poll), until it goes through.
+      elements.approvalTitle.textContent = approvalFailure?.id === approval.request_id ? approvalFailure.text
+        : approval.kind === "egress" ? t("网络访问审批") : t("工具审批");
       elements.approvalDetail.textContent = approvalText(approval);
       elements.approvalDetail.dataset.kind = approval.kind || "";
-      if (changed) elements.approvalScopeSelector.value = "once";
+      // Sending to the model provider the user set up: by default it stops asking for that service
+      // (every conversation asked before). Tools keep "once" as the default.
+      const always = elements.approvalScopeSelector.querySelector('option[value="always"]');
+      always.hidden = always.disabled = approval.kind !== "egress";
+      if (changed) elements.approvalScopeSelector.value = approval.kind === "egress" ? "always" : "once";
       // A reply sent as the user is approved one at a time (the engine ignores a wider scope too).
       const onceOnly = approval.details?.tool === "notification_reply";
       if (onceOnly) elements.approvalScopeSelector.value = "once";
@@ -92,11 +99,13 @@
         body: JSON.stringify({ allowed, scope }),
       });
       activeTask?.resolvedApprovals.add(approval.request_id);
+      approvalFailure = null;
       showApproval(null);
       haptic(32);
     } catch (error) {
       if (disposed) return;
-      elements.approvalTitle.textContent = t("审批失败: {0}", error.message);
+      approvalFailure = { id: approval.request_id, text: t("审批失败: {0}", error.message) };
+      elements.approvalTitle.textContent = approvalFailure.text;
     } finally {
       isResolvingApproval = false;
       if (!disposed) {
@@ -127,6 +136,7 @@
       task.dirty = false;
     } else if (["task.failed", "mobile.task.failed"].includes(event.event_type)) {
       task.error = localizeError(payload.error || payload.reason) || t("任务失败");
+      task.errorReason = String(payload.error || payload.reason || "");
       task.done = true;
       task.state = "failed";
     } else if (event.event_type === "approval.requested") {
@@ -239,10 +249,12 @@
         }
         // Long tasks show how full the context is; older history is compacted near 100%.
         const context = task.contextPercent >= 30 ? t(" · 上下文 {0}%", task.contextPercent) : "";
+        const local = ["running", "queued"].includes(state) && (task.onDevice || isLocalModel()) ? await localProgress(task) : "";
         updateTaskStatus(task.stopping ? t("正在停止任务...") : (state === "waiting_approval" ? t("等待审批")
-          : (state === "queued" ? (task.waitingNetwork ? t("没有网络：联网后自动开始") : t("任务排队中")) : t("任务执行中") + context)));
+          : (state === "queued" ? (task.waitingNetwork ? t("没有网络：联网后自动开始") : local || t("任务排队中")) : local || t("任务执行中") + context)));
         if (["failed", "cancelled", "interrupted"].includes(state)) {
           task.error = state === "failed" ? (localizeError(snapshot.task.reason) || t("任务失败")) : null;
+          task.errorReason = state === "failed" ? String(snapshot.task.reason || "") : "";
           task.interrupted = state === "interrupted" && snapshot.task.resume_available;
           task.done = true;
         } else if (state === "succeeded" && ++completedPolls >= 3) {
@@ -279,7 +291,7 @@
   function finishTask(task) {
     if (activeTask !== task || !task.done || disposed) return;
     if (task.error) {
-      showTaskError(t("任务失败: {0}", task.error));
+      showTaskError(t("任务失败: {0}", task.error), task.errorReason);
       announce(t("任务失败: {0}", task.error));
       retryTask = task.prompt ? task : null;
       // Lost the network on the way: tried again once the phone is back online (65-privacy.js).
@@ -546,8 +558,36 @@
     } catch (error) { notice(t("分叉失败：{0}", error.message)); }
   }
 
+  // The on-device model reads its whole prompt before the first word: minutes on a phone the first
+  // time (later ones reuse what it read). The status says how far it got instead of a bare "running".
+  async function localProgress(task) {
+    if (Date.now() - (task.localCheckedAt || 0) < 3000) return task.localStatus || "";
+    task.localCheckedAt = Date.now();
+    let engine;
+    try { engine = await apiJson("/mobile/local-models/engine"); } catch { return task.localStatus || ""; }
+    const progress = engine.prompt_progress;
+    let text = "";
+    if (["loading_model", "allocating_context"].includes(engine.phase)) text = t("正在加载本机模型…");
+    else if (engine.phase === "prompt_evaluation" && progress?.total && progress.done < progress.total) {
+      const left = progress.total - progress.done;
+      const speed = Number(engine.prompt_tokens_per_second) || 0;
+      const minutes = speed > 0 ? Math.ceil(left / speed / 60) : 0;
+      const percent = Math.floor(progress.done / progress.total * 100);
+      // The first-time reading started right after switching (mobile_local_prepare): this message waits for it.
+      text = (engine.preparing ? t("本机模型正在做第一次准备 {0}%，完成后回答这条消息", percent) : t("本机模型正在读取说明 {0}%", percent))
+        + (minutes > 1 ? t(" · 约 {0} 分钟", minutes) : "")
+        + (!engine.preparing && left > 2000 ? t(" · 第一次较慢，之后会快很多") : "");
+    } else if (engine.preparing) text = t("本机模型正在做第一次准备，完成后回答这条消息");
+    task.localStatus = text;
+    return text;
+  }
+
   async function sendPrompt(customText = null, attachmentOverride = []) {
     flushQuickEffort();
+    // No model can answer yet: choose one first; what was typed stays in the composer.
+    if (!activeTask && setupNeeded() && openSetup("send")) return;
+    // What the settings are now, for the agent's app_settings tool.
+    void syncAppSettings();
     // Personal numbers typed for a cloud model, or no network: answered on the phone, masked, sent
     // once online, or cancelled (65-privacy.js).
     let route = {};

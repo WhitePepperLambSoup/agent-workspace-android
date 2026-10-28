@@ -59,8 +59,17 @@ def _atomic_json(path: Path, value: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
+# While no source can be reached, a download waits and tries again: the phone went offline, or the
+# app was paused with the screen off (some makers' systems do that within a minute). Seconds
+# between tries, then the last one repeated, for up to _NETWORK_PATIENCE.
+_RETRY_DELAYS = (5, 10, 20, 40, 60, 120)
+_NETWORK_PATIENCE = 2 * 3600
+_INTERRUPTED = "model download interrupted; check connection and storage"
+
+
 class ModelManager:
-    def __init__(self, root: Path, catalog=None, *, client_factory=None, disk_free=None):
+    def __init__(self, root: Path, catalog=None, *, client_factory=None, disk_free=None,
+                 retry_delays=_RETRY_DELAYS, network_patience=_NETWORK_PATIENCE, sleep=None):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.catalog = {
@@ -110,6 +119,9 @@ class ModelManager:
             )
         )
         self._disk_free = disk_free or (lambda: shutil.disk_usage(self.root).free)
+        self._retry_delays = tuple(retry_delays)
+        self._network_patience = network_patience
+        self._sleep = sleep or asyncio.sleep
         self._lock = threading.RLock()
         self._jobs = {}
         self._verified = {}
@@ -128,9 +140,11 @@ class ModelManager:
             if isinstance(record, dict) and record.get("state") in {
                 "queued",
                 "downloading",
+                "waiting_network",
                 "verifying",
             }:
-                record.update(state="paused", error="Download interrupted; resume when ready")
+                # The engine stopped under it; resume_interrupted() goes on with it.
+                record.update(state="paused", error=None, interrupted=True)
 
     def _model(self, model_id):
         if not isinstance(model_id, str) or model_id not in self.catalog:
@@ -295,7 +309,7 @@ class ModelManager:
         if any(not job.done() for job in self._jobs.values()):
             raise ValueError("a model download is already active")
         self._ordered_sources(model, source, prefer)
-        self._update(model_id, state="queued", error=None)
+        self._update(model_id, state="queued", error=None, interrupted=False, choice=source, prefer=prefer)
         task = asyncio.create_task(
             self.download(model_id, source, prefer), name="model-download-" + model_id
         )
@@ -310,9 +324,28 @@ class ModelManager:
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        if self._states.get(model_id, {}).get("state") in {"queued", "downloading", "verifying"}:
-            self._update(model_id, state="paused", error=None)
+        if self._states.get(model_id, {}).get("state") in {"queued", "downloading", "waiting_network", "verifying", "paused"}:
+            # Paused by the user: it waits for them, also across engine restarts.
+            self._update(model_id, state="paused", error=None, interrupted=False)
         return self.snapshot()
+
+    def resume_interrupted(self):
+        """A download that an engine stop cut off (the app was closed or paused by the system, or
+        the engine restarted for a model switch) goes on by itself; one the user paused waits."""
+        if any(not job.done() for job in self._jobs.values()):
+            return None
+        for model_id, record in list(self._states.items()):
+            if (
+                model_id in self.catalog
+                and isinstance(record, dict)
+                and record.get("state") == "paused"
+                and record.get("interrupted") is True
+            ):
+                try:
+                    return self.start_download(model_id, record.get("choice") or "auto", record.get("prefer"))
+                except ValueError:
+                    self._update(model_id, interrupted=False)
+        return None
 
     async def _fetch(self, model_id, model, source, partial):
         """Fetch the rest of the file from one source, resuming whatever is already on disk."""
@@ -373,6 +406,19 @@ class ModelManager:
                 output.flush()
                 os.fsync(output.fileno())
 
+    async def _fetch_resuming(self, model_id, model, source, partial):
+        """One source until the file is complete: a connection that drops after some bytes came in
+        resumes at once from the same source; one that brings nothing raises."""
+        while True:
+            before = partial.stat().st_size if partial.is_file() else 0
+            try:
+                await self._fetch(model_id, model, source, partial)
+                return
+            except httpx.HTTPError:
+                if (partial.stat().st_size if partial.is_file() else 0) <= before:
+                    raise
+                self._update(model_id, state="downloading")
+
     async def download(self, model_id, source="auto", prefer=None):
         model = self._model(model_id)
         if model.get("local_artifact") is True:
@@ -403,27 +449,36 @@ class ModelManager:
                 raise ValueError("not enough storage space for this model")
             _atomic_json(metadata_file, identity)
             self._update(model_id, state="downloading", downloaded_bytes=offset, error=None)
-            failures = []
-            for candidate in sources:
-                try:
-                    await self._fetch(model_id, model, candidate, partial)
-                    break
-                except (_SourceFailed, httpx.HTTPError) as failure:
-                    if getattr(failure, "discard_partial", False):
-                        partial.unlink(missing_ok=True)
-                    reason = (
-                        str(failure)
-                        if isinstance(failure, _SourceFailed)
-                        else "model download interrupted; check connection and storage"
+            waited, attempt = 0.0, 0
+            while True:
+                failures = []
+                for candidate in sources:
+                    try:
+                        await self._fetch_resuming(model_id, model, candidate, partial)
+                        break
+                    except (_SourceFailed, httpx.HTTPError) as failure:
+                        if getattr(failure, "discard_partial", False):
+                            partial.unlink(missing_ok=True)
+                        network = isinstance(failure, httpx.HTTPError)
+                        failures.append((candidate["title"], _INTERRUPTED if network else str(failure), network))
+                else:
+                    if all(network for *_, network in failures) and waited < self._network_patience:
+                        delay = self._retry_delays[min(attempt, len(self._retry_delays) - 1)]
+                        self._update(
+                            model_id, state="waiting_network", error=None,
+                            downloaded_bytes=partial.stat().st_size if partial.is_file() else 0,
+                        )
+                        await self._sleep(delay)
+                        waited, attempt = waited + delay, attempt + 1
+                        continue
+                    reasons = list(dict.fromkeys(reason for _, reason, _ in failures))
+                    if len(reasons) == 1:
+                        raise ValueError(reasons[0])
+                    raise ValueError(
+                        "every download source failed: "
+                        + "; ".join(f"{title}: {reason}" for title, reason, _ in failures)
                     )
-                    failures.append((candidate["title"], reason))
-            else:
-                if len(failures) == 1:
-                    raise ValueError(failures[0][1])
-                raise ValueError(
-                    "every download source failed: "
-                    + "; ".join(f"{title}: {reason}" for title, reason in failures)
-                )
+                break
             self._update(model_id, state="verifying", downloaded_bytes=partial.stat().st_size)
             await asyncio.to_thread(self._validate_file, partial, model)
             final = directory / weights
@@ -449,19 +504,17 @@ class ModelManager:
             )
             return {"model_id": model_id, "state": "installed"}
         except asyncio.CancelledError:
+            # The engine stopping (cancel_download marks a pause the user asked for).
             self._update(
                 model_id,
                 state="paused",
                 downloaded_bytes=partial.stat().st_size if partial.is_file() else 0,
                 error=None,
+                interrupted=True,
             )
             raise
         except (ValueError, OSError, httpx.HTTPError) as exc:
-            message = (
-                str(exc)
-                if isinstance(exc, ValueError)
-                else "model download interrupted; check connection and storage"
-            )
+            message = str(exc) if isinstance(exc, ValueError) else _INTERRUPTED
             if "integrity" in message or "range" in message:
                 partial.unlink(missing_ok=True)
                 metadata_file.unlink(missing_ok=True)
