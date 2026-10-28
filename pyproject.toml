@@ -74,3 +74,6 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 python_version = "3.12"
 strict = true
 packages = ["agent_workspace"]
+# The figure helpers run inside the scientific environment (NumPy, pandas, Matplotlib), not in
+# the app; tests/science_checks.py exercises them there.
+exclude = ['agent_workspace[\\/]science[\\/]aw_sciplot[\\/]']

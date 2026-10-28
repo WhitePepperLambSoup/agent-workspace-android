@@ -172,6 +172,8 @@ def _known_executables() -> dict[str, dict[str, Any]]:
         "tectonic": shutil.which("tectonic"),
         "pdfinfo": shutil.which("pdfinfo"),
         "pdftoppm": shutil.which("pdftoppm"),
+        # The desktop's scientific Python environment, when the user installed it.
+        "science_python": os.environ.get("AGENT_WORKSPACE_SCIENCE_PYTHON") or None,
     }
     if os.name == "nt":
         with_shells = {

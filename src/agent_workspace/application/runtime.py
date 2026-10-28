@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Callable, Coroutine, Hashable
+from collections.abc import Callable, Coroutine, Hashable, Sequence
 from concurrent.futures import Future
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -11,7 +11,7 @@ from typing import Any, cast
 
 from agent_workspace.application.background_jobs import BackgroundJobManager
 from agent_workspace.application.event_bus import EventBus
-from agent_workspace.application.ports import EventListener, ManagedModelProvider
+from agent_workspace.application.ports import EventListener, ManagedModelProvider, Tool
 from agent_workspace.application.scheduler import (
     ScheduledTaskHost,
     build_scheduled_host,
@@ -428,6 +428,7 @@ def _build_runtime_core(
     writer_lock_group: ProcessWriteLockGroup | None = None,
     subagents: SubagentLauncher | None = None,
     phone_jobs: PhoneJobLauncher | None = None,
+    extra_tools: Sequence[Tool] = (),
 ) -> ApplicationRuntime:
     # Stack-managed resource allocation (R18 & R28)
     cleanup_stack: list[Callable[[], Any]] = []
@@ -496,6 +497,9 @@ def _build_runtime_core(
         knowledge = knowledge_store(knowledge_root(database_path))
         for tool in knowledge_tools(knowledge, workspace_path):
             tools.register(tool)
+        # Tools the embedding app adds (the desktop's use_skill).
+        for extra in extra_tools:
+            tools.register(extra)
         openapi_path = workspace_path / ".agent" / "openapi.json"
         if openapi_path.is_file():
             for operation in load_openapi_file(openapi_path):
@@ -725,6 +729,7 @@ async def build_runtime_async(
     writer_lock_group: ProcessWriteLockGroup | None = None,
     subagents: SubagentLauncher | None = None,
     phone_jobs: PhoneJobLauncher | None = None,
+    extra_tools: Sequence[Tool] = (),
 ) -> ApplicationRuntime:
     provider_config.validate()
     workspace_path = Path(workspace).resolve(strict=True)
@@ -800,4 +805,5 @@ async def build_runtime_async(
         writer_lock_group=writer_lock_group,
         subagents=subagents,
         phone_jobs=phone_jobs,
+        extra_tools=extra_tools,
     )

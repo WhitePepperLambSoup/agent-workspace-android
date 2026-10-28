@@ -5,13 +5,15 @@ import contextlib
 import sqlite3
 import threading
 from collections import deque
+from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass, replace
 from itertools import count
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
+from agent_workspace.application.ports import Tool
 from agent_workspace.application.runner import RunResult
 from agent_workspace.application.runtime import (
     ApplicationRuntime,
@@ -111,6 +113,31 @@ def _knowledge_context(
         return "", ()
 
 
+def _system_note(note: Callable[[], str]) -> str:
+    try:
+        return note()
+    except (OSError, ValueError):  # unreadable skills must not stop the turn
+        return ""
+
+
+_TURN_FILES_EVENT = "turn.files.changed"
+
+
+class TurnObserver(Protocol):
+    """Sees one turn's events; ``finish`` gives what the turn changed in the folder, if anything."""
+
+    def observe(self, event: Event) -> None: ...
+
+    def finish(self) -> dict[str, Any] | None: ...
+
+
+def _watch_turn(start: Callable[[Path], TurnObserver], workspace: Path) -> TurnObserver | None:
+    try:
+        return start(workspace)
+    except Exception:  # the list of changed files must not stop the turn
+        return None
+
+
 _ONCE_ONLY_APPROVAL_TOOLS = frozenset(
     {
         "delete_path",
@@ -184,6 +211,15 @@ class RuntimeSettings:
     subagents: SubagentLauncher | None = None
     # Sends requests to paired phones for the phone_task tool; None leaves the tool out.
     phone_jobs: PhoneJobLauncher | None = None
+    # More tools for the runtime (the desktop's use_skill), and a section added to the system
+    # prompt of each turn (the skills it lists), read again for every turn.
+    extra_tools: tuple[Tool, ...] = ()
+    system_note: Callable[[], str] | None = None
+    # Called with the folder before each turn (the desktop lists it then); what the observer
+    # finds is recorded after the turn as ``turn.files.changed``.
+    turn_files: Callable[[Path], TurnObserver] | None = None
+    # Tools that work on the open folder (the desktop's research tools), made for it at start.
+    workspace_tools: Callable[[Path], tuple[Tool, ...]] | None = None
 
 
 @dataclass(slots=True)
@@ -224,6 +260,7 @@ class RuntimeHost(threading.Thread):
         self._terminal_registry: TerminalSessionRegistry | None = None
         self._session: Session | None = None
         self._active_turn: asyncio.Task[RunResult] | None = None
+        self._turn_watch: TurnObserver | None = None
         self._turn_admission_pending = False
         self._turn_failure_forwarded = False
         self._pending_mode: Mode | None = None
@@ -237,7 +274,8 @@ class RuntimeHost(threading.Thread):
         self._accepting = False
         self._closing = False
         self._stopped_emitted = False
-        self._create_backup_on_shutdown = True
+        # The desktop backs its database up once a day (ui_gateway.backups), not while closing.
+        self._create_backup_on_shutdown = False
         self._background_work = threading.Event()
         self._background_work_lock = threading.Lock()
         self._background_work_ids: set[tuple[str, str]] = set()
@@ -275,6 +313,12 @@ class RuntimeHost(threading.Thread):
                 build_options["subagents"] = self.settings.subagents
             if self.settings.phone_jobs is not None:
                 build_options["phone_jobs"] = self.settings.phone_jobs
+            extra_tools = self.settings.extra_tools
+            folder_tools = self.settings.workspace_tools
+            if folder_tools is not None:
+                extra_tools = (*extra_tools, *folder_tools(self.settings.workspace))
+            if extra_tools:
+                build_options["extra_tools"] = extra_tools
             self._runtime = loop.run_until_complete(
                 build_runtime_async(
                     self.settings.workspace,
@@ -521,7 +565,7 @@ class RuntimeHost(threading.Thread):
             return None
         return asyncio.run_coroutine_threadsafe(self._resolve_approval(request_id, scope), loop)
 
-    def request_shutdown(self, *, create_backup: bool = True) -> Future[None] | None:
+    def request_shutdown(self, *, create_backup: bool = False) -> Future[None] | None:
         self._create_backup_on_shutdown = create_backup
         self._shutdown_requested.set()
         loop = self._loop
@@ -793,6 +837,7 @@ class RuntimeHost(threading.Thread):
             return
         self._turn_failure_forwarded = False
         task: asyncio.Task[RunResult] | None = None
+        watch: TurnObserver | None = None
         try:
             if self._session is None:
                 self._session = runtime.service.create_session(
@@ -834,12 +879,22 @@ class RuntimeHost(threading.Thread):
                     options["system_suffix"] = suffix
                 if passages:
                     options["supplemental_messages"] = passages
+            if self.settings.system_note is not None:
+                note = await asyncio.to_thread(_system_note, self.settings.system_note)
+                if note:
+                    earlier = options.get("system_suffix")
+                    options["system_suffix"] = f"{earlier}\n\n{note}" if earlier else note
             if plan_only:
                 options["allowed_tools"] = frozenset(
                     spec.name for spec in runtime.service.tool_registry.specs() if _reads_only(spec)
                 )
                 earlier = options.get("system_suffix")
                 options["system_suffix"] = f"{earlier}\n\n{_PLAN_FIRST}" if earlier else _PLAN_FIRST
+            if self.settings.turn_files is not None:
+                watch = await asyncio.to_thread(
+                    _watch_turn, self.settings.turn_files, self.settings.workspace
+                )
+                self._turn_watch = watch
             task = asyncio.create_task(
                 runtime.service.run(
                     self._session,
@@ -864,6 +919,33 @@ class RuntimeHost(threading.Thread):
             if task is not None and self._active_turn is task:
                 self._active_turn = None
             self._turn_failure_forwarded = False
+            if watch is not None:
+                self._turn_watch = None
+                if not self._closing:
+                    await self._record_turn_files(watch)
+
+    async def _record_turn_files(self, watch: TurnObserver) -> None:
+        """Record what the turn changed in the folder, after its last event."""
+        try:
+            data = await asyncio.to_thread(watch.finish)
+        except Exception:
+            return
+        runtime, session = self._runtime, self._session
+        if data is None or runtime is None or session is None:
+            return
+        turn_id = data.get("turn_id")
+        try:
+            stored = runtime.store.append(
+                Event(
+                    session_id=session.id,
+                    type=_TURN_FILES_EVENT,
+                    data=data,
+                    correlation_id=turn_id if isinstance(turn_id, str) else None,
+                )
+            )
+        except (OSError, ValueError, sqlite3.Error):
+            return
+        self._forward_event(stored)
 
     async def _queue_mode_change(self, mode: Mode) -> None:
         self._pending_mode = mode
@@ -1139,6 +1221,10 @@ class RuntimeHost(threading.Thread):
             )
         if event.type == "turn.failed":
             self._turn_failure_forwarded = True
+        watch = self._turn_watch
+        if watch is not None:
+            with contextlib.suppress(Exception):
+                watch.observe(event)
         self._queue_display_event(event)
 
     def _forward_terminal_event(self, payload: dict[str, object]) -> None:

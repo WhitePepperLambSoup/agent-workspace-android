@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
+import os
 import sqlite3
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
@@ -11,6 +13,7 @@ from pathlib import Path
 from threading import Lock, RLock
 from types import TracebackType
 from typing import Any, Self, cast
+from uuid import uuid4
 
 from agent_workspace.core.background_jobs import BackgroundJobStatus
 from agent_workspace.core.events import (
@@ -88,6 +91,9 @@ _MAX_OPEN_VALIDATION_CACHE_ENTRIES = 64
 # file id); consulted only after trust_databases_validated_here().
 _VALIDATED_HERE: dict[Path, tuple[int, int]] = {}
 _TRUST_VALIDATED_HERE = False
+# Also trust a file a trusted process closed cleanly, by the note it left beside it.
+_TRUST_ACROSS_RESTARTS = False
+_CLEAN_CLOSE_NOTE_VERSION = 1
 _MAX_IMPORT_ARTIFACT_BATCH_BYTES = 128 * 1024 * 1024
 _CONTEXT_EVENT_TYPES = (
     "message.created",
@@ -1028,7 +1034,7 @@ def _schema_definitions_by_version() -> dict[int, frozenset[str]]:
 SCHEMA_DEFINITIONS_BY_VERSION = _schema_definitions_by_version()
 
 
-def trust_databases_validated_here() -> None:
+def trust_databases_validated_here(*, across_restarts: bool = False) -> None:
     """Validate each database file once per process instead of on every open.
 
     Every runtime opens its own store, and a live WAL (present while any store
@@ -1039,9 +1045,63 @@ def trust_databases_validated_here() -> None:
     lock finds only changes made through the same checked write paths, its own
     or those of a command that took the lock. A replaced file (a restore) has a
     new identity and is validated again; quick_check still runs on every open.
+
+    With ``across_restarts`` the last store of such a process to close a database cleanly (no
+    WAL left) notes the file's id, size and modification time beside it, and the next process
+    that trusts databases this way skips the full validation of a file that still matches.
+    Any other writer, a crash (a WAL is left), a restore or a schema upgrade changes what is
+    compared, and the file is validated again.
     """
-    global _TRUST_VALIDATED_HERE
+    global _TRUST_VALIDATED_HERE, _TRUST_ACROSS_RESTARTS
     _TRUST_VALIDATED_HERE = True
+    _TRUST_ACROSS_RESTARTS = _TRUST_ACROSS_RESTARTS or across_restarts
+
+
+def _clean_close_note(database: Path) -> Path:
+    return database.with_name(f"{database.name}.validated")
+
+
+def _clean_close_facts(
+    open_identity: tuple[int, int], file_identity: tuple[int, int]
+) -> dict[str, object]:
+    return {
+        "version": _CLEAN_CLOSE_NOTE_VERSION,
+        "schema": CURRENT_SCHEMA_VERSION,
+        "file": list(file_identity),
+        "mtime_ns": open_identity[0],
+        "size": open_identity[1],
+    }
+
+
+def _note_clean_close(database: Path) -> None:
+    """Note a cleanly closed database this process validated (trust_databases_validated_here)."""
+    open_identity = SQLiteEventStore._database_open_identity(database)
+    file_identity = _file_identity(database)
+    if open_identity is None or file_identity is None:
+        return
+    with _OPEN_VALIDATION_CACHE_LOCK:
+        if _VALIDATED_HERE.get(database) != file_identity:
+            return
+    note = _clean_close_note(database)
+    staging = note.with_name(f".{note.name}.{uuid4().hex}.tmp")
+    try:
+        staging.write_text(
+            json.dumps(_clean_close_facts(open_identity, file_identity)), encoding="utf-8"
+        )
+        os.replace(staging, note)
+    except OSError:
+        with contextlib.suppress(OSError):
+            staging.unlink(missing_ok=True)
+
+
+def _closed_cleanly_as_noted(
+    database: Path, open_identity: tuple[int, int], file_identity: tuple[int, int]
+) -> bool:
+    try:
+        noted = json.loads(_clean_close_note(database).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return bool(noted == _clean_close_facts(open_identity, file_identity))
 
 
 def _file_identity(database: Path) -> tuple[int, int] | None:
@@ -1080,6 +1140,8 @@ class SQLiteEventStore:
             self._backup_before_migration(database_path)
         self._lock = RLock()
         self._session_locks: dict[str, asyncio.Lock] = {}
+        # Set once the file is validated, when a clean close is noted across restarts.
+        self._trusted_path: Path | None = None
         self._connection: sqlite3.Connection | None = sqlite3.connect(
             str(database_path),
             timeout=_BUSY_TIMEOUT_MS / 1_000,
@@ -1096,6 +1158,8 @@ class SQLiteEventStore:
             if not SQLiteEventStore._open_validation_cached(database_path, pre_open_identity):
                 validate_database(database_path)
                 SQLiteEventStore._cache_open_validation(database_path, pre_open_identity)
+            if _TRUST_ACROSS_RESTARTS:
+                self._trusted_path = database_path
         except BaseException:
             self.close()
             raise
@@ -3245,7 +3309,19 @@ class SQLiteEventStore:
             if not _TRUST_VALIDATED_HERE:
                 return False
             known = _VALIDATED_HERE.get(database)
-        return known is not None and known == _file_identity(database)
+        file_identity = _file_identity(database)
+        if known is not None and known == file_identity:
+            return True
+        if (
+            _TRUST_ACROSS_RESTARTS
+            and identity is not None
+            and file_identity is not None
+            and _closed_cleanly_as_noted(database, identity, file_identity)
+        ):
+            with _OPEN_VALIDATION_CACHE_LOCK:
+                _VALIDATED_HERE[database] = file_identity
+            return True
+        return False
 
     @staticmethod
     def _cache_open_validation(
@@ -4513,6 +4589,9 @@ class SQLiteEventStore:
                 return
             self._connection.close()
             self._connection = None
+            trusted = self._trusted_path
+        if trusted is not None:
+            _note_clean_close(trusted)
 
     @staticmethod
     def _project_event(

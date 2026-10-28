@@ -67,6 +67,11 @@ def _positive_env(name: str, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+def _optional_positive_env(name: str) -> int | None:
+    value = _positive_env(name, 0)
+    return value or None
+
+
 def _safe_session_component(session_id: str) -> str:
     if _SAFE_SESSION_ID.fullmatch(session_id):
         return session_id
@@ -116,6 +121,27 @@ def _redact_trace_value(value: object, redactor: TraceRedactor, *, key: str = ""
     return value
 
 
+def _fingerprint(value: object) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=repr)
+    return hashlib.sha256(encoded.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _trace_line(document: Mapping[str, Any]) -> str | None:
+    try:
+        return (
+            json.dumps(
+                document,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                default=lambda value: repr(value),
+            )
+            + "\n"
+        )
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 class RawConversationTrace:
     def __init__(
         self,
@@ -125,19 +151,35 @@ class RawConversationTrace:
         max_file_bytes: int = _DEFAULT_MAX_FILE_BYTES,
         max_files: int = _DEFAULT_MAX_FILES,
         redactor: TraceRedactor | None = None,
+        request_deltas: bool = False,
+        max_total_bytes: int | None = None,
+        max_age_days: int | None = None,
     ) -> None:
+        """``request_deltas`` writes each ``provider.request`` as the messages added since the
+        previous request of the session (``messages_from`` says where they start, the tool
+        schemas only when they changed); a request after a rotation or a restart is complete.
+        ``max_total_bytes`` and ``max_age_days`` bound the whole directory, oldest files first.
+        """
         self.directory = Path(directory).expanduser().resolve()
         self.enabled = enabled
         self.max_file_bytes = max(1, int(max_file_bytes))
         self.max_files = max(1, int(max_files))
         self.redactor = redactor or TraceRedactor()
+        self.request_deltas = request_deltas
+        self.max_total_bytes = max_total_bytes
+        self.max_age_days = max_age_days
         self._lock = threading.Lock()
+        # session id -> (fingerprint of each message, of the tool schemas) of its last request.
+        self._last_requests: dict[str, tuple[list[str], str]] = {}
+        if enabled and (max_total_bytes is not None or max_age_days is not None):
+            self._prune_directory()
 
     @classmethod
     def for_database(cls, database: str | Path) -> RawConversationTrace:
         raw = os.environ.get("AGENT_WORKSPACE_RAW_TRACE", "1").strip().lower()
         enabled = raw not in {"0", "false", "off", "no"}
         directory = os.environ.get("AGENT_WORKSPACE_RAW_TRACE_DIR")
+        deltas = os.environ.get("AGENT_WORKSPACE_RAW_TRACE_REQUEST_DELTAS", "").strip().lower()
         return cls(
             directory or (Path(database).expanduser().resolve().parent / "raw-traces"),
             enabled=enabled,
@@ -145,6 +187,9 @@ class RawConversationTrace:
                 "AGENT_WORKSPACE_RAW_TRACE_MAX_BYTES", _DEFAULT_MAX_FILE_BYTES
             ),
             max_files=_positive_env("AGENT_WORKSPACE_RAW_TRACE_MAX_FILES", _DEFAULT_MAX_FILES),
+            request_deltas=deltas in {"1", "true", "on", "yes"},
+            max_total_bytes=_optional_positive_env("AGENT_WORKSPACE_RAW_TRACE_MAX_TOTAL_BYTES"),
+            max_age_days=_optional_positive_env("AGENT_WORKSPACE_RAW_TRACE_MAX_AGE_DAYS"),
         )
 
     def record(
@@ -157,38 +202,109 @@ class RawConversationTrace:
     ) -> None:
         if not self.enabled:
             return
-        document = {
-            "timestamp": datetime.now(UTC).isoformat(),
-            "session_id": session_id,
-            "correlation_id": correlation_id,
-            "phase": phase,
-            "payload": _redact_trace_value(dict(payload or {}), self.redactor),
-        }
-        try:
-            line = (
-                json.dumps(
-                    document,
-                    ensure_ascii=False,
-                    allow_nan=False,
-                    separators=(",", ":"),
-                    default=lambda value: repr(value),
-                )
-                + "\n"
-            )
-            encoded_size = len(line.encode("utf-8"))
-        except (TypeError, ValueError, OverflowError):
-            return
         path = self.directory / f"session-{_safe_session_component(session_id)}.jsonl"
+        if self.request_deltas and phase == "provider.request":
+            self._record_request_delta(path, session_id, correlation_id, dict(payload or {}))
+            return
+        line = _trace_line(
+            {
+                "timestamp": datetime.now(UTC).isoformat(),
+                "session_id": session_id,
+                "correlation_id": correlation_id,
+                "phase": phase,
+                "payload": _redact_trace_value(dict(payload or {}), self.redactor),
+            }
+        )
+        if line is None:
+            return
+        encoded_size = len(line.encode("utf-8"))
         try:
             with self._lock:
                 self.directory.mkdir(parents=True, exist_ok=True)
                 if path.is_file() and path.stat().st_size + encoded_size > self.max_file_bytes:
                     self._rotate_locked(path)
+                    self._last_requests.pop(session_id, None)
                 with path.open("a", encoding="utf-8", newline="\n") as stream:
                     stream.write(line)
         except OSError:
             # Diagnostics must never abort the user's turn.
             return
+
+    def _record_request_delta(
+        self, path: Path, session_id: str, correlation_id: str, payload: dict[str, Any]
+    ) -> None:
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            messages = []
+        fingerprints = [_fingerprint(message) for message in messages]
+        tools_fingerprint = _fingerprint(payload.get("tools"))
+        try:
+            with self._lock:
+                self.directory.mkdir(parents=True, exist_ok=True)
+                # Rotate before writing, so the request that starts a file is complete.
+                if path.is_file() and path.stat().st_size >= self.max_file_bytes:
+                    self._rotate_locked(path)
+                    self._last_requests.pop(session_id, None)
+                previous = self._last_requests.get(session_id)
+                start = 0
+                if previous is not None:
+                    prior = previous[0]
+                    while (
+                        start < min(len(prior), len(fingerprints))
+                        and prior[start] == fingerprints[start]
+                    ):
+                        start += 1
+                compact = dict(payload)
+                compact["messages"] = messages[start:]
+                compact["messages_from"] = start
+                compact["message_count"] = len(messages)
+                compact["tools_sha256"] = tools_fingerprint
+                if previous is not None and previous[1] == tools_fingerprint:
+                    compact.pop("tools", None)
+                line = _trace_line(
+                    {
+                        "timestamp": datetime.now(UTC).isoformat(),
+                        "session_id": session_id,
+                        "correlation_id": correlation_id,
+                        "phase": "provider.request",
+                        "payload": _redact_trace_value(compact, self.redactor),
+                    }
+                )
+                if line is None:
+                    return
+                with path.open("a", encoding="utf-8", newline="\n") as stream:
+                    stream.write(line)
+                self._last_requests[session_id] = (fingerprints, tools_fingerprint)
+        except OSError:
+            return
+
+    def _prune_directory(self) -> None:
+        """Drop the oldest trace files beyond the age and total-size limits."""
+        try:
+            files = [
+                (path.stat().st_mtime, path.stat().st_size, path)
+                for path in self.directory.glob("session-*.jsonl*")
+                if path.is_file()
+            ]
+        except OSError:
+            return
+        files.sort(key=lambda item: item[0], reverse=True)
+        cutoff = (
+            datetime.now(UTC).timestamp() - self.max_age_days * 86_400
+            if self.max_age_days is not None
+            else None
+        )
+        kept = 0
+        for modified, size, path in files:
+            too_old = cutoff is not None and modified < cutoff
+            too_much = self.max_total_bytes is not None and kept + size > self.max_total_bytes
+            if too_old or too_much:
+                try:
+                    path.unlink()
+                except OSError:
+                    kept += size
+                continue
+            kept += size
 
     def query(
         self,

@@ -9,6 +9,7 @@ import shutil
 import sqlite3
 import stat
 import tempfile
+import time
 import zipfile
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
@@ -38,6 +39,9 @@ from agent_workspace.storage.sqlite import (
 _BACKUP_FORMAT_VERSION = 1
 _DEFAULT_BACKUP_MAX_AGE_DAYS = 30
 _DEFAULT_BACKUP_MAX_TOTAL_BYTES = 10 * 1024 * 1024 * 1024
+# A backup copies and checks the database in a few seconds; a temporary file this old belongs
+# to one that was stopped (the backup lock is held while pruning, so none is in progress).
+_STALE_BACKUP_TEMPORARY_SECONDS = 600
 _EXPORT_FORMAT_VERSION = 3
 _MAX_SESSION_ARCHIVE_BYTES = 128 * 1024 * 1024
 _MAX_SESSION_ARCHIVE_ENTRIES = 2005
@@ -141,7 +145,14 @@ def create_verified_backup(
     max_age_days: int = _DEFAULT_BACKUP_MAX_AGE_DAYS,
     max_total_bytes: int = _DEFAULT_BACKUP_MAX_TOTAL_BYTES,
     incremental: bool = False,
+    quick_prune: bool = False,
 ) -> Path:
+    """Copy and verify the database, then drop this lineage's backups beyond the retention.
+
+    With ``quick_prune`` the older backups are judged by their manifests (date, file name
+    and size) instead of being verified again, which takes about as long as making a backup
+    each, and temporary files left by a backup that was stopped are removed.
+    """
     source_path = Path(database).expanduser().resolve()
     if not source_path.is_file():
         raise FileNotFoundError(f"database does not exist: {source_path}")
@@ -154,7 +165,7 @@ def create_verified_backup(
     directory = Path(backup_directory).expanduser().resolve()
     directory.mkdir(parents=True, exist_ok=True)
     source_identity = _file_identity(source_path)
-    lineage = hashlib.sha256(os.path.normcase(str(source_path)).encode("utf-8")).hexdigest()[:16]
+    lineage = _backup_lineage(source_path)
     lock = ProcessWriteLock(
         directory / ".backup.lock",
         busy_message="another backup operation is running",
@@ -169,7 +180,28 @@ def create_verified_backup(
             max_age_days=max_age_days,
             max_total_bytes=max_total_bytes,
             incremental=incremental,
+            quick_prune=quick_prune,
         )
+
+
+def latest_backup_time(database: str | Path, backup_directory: str | Path) -> datetime | None:
+    """When the newest backup of this database in the directory was made, from the manifests."""
+    lineage = _backup_lineage(Path(database).expanduser().resolve())
+    directory = Path(backup_directory).expanduser().resolve()
+    latest: datetime | None = None
+    for manifest in directory.glob(f"agent-{lineage}-*.db.manifest.json"):
+        try:
+            created_at = json.loads(manifest.read_text(encoding="utf-8")).get("created_at")
+            when = datetime.fromisoformat(created_at) if isinstance(created_at, str) else None
+        except (OSError, UnicodeError, ValueError, AttributeError):
+            continue
+        if when is not None and when.tzinfo is not None and (latest is None or when > latest):
+            latest = when
+    return latest
+
+
+def _backup_lineage(source_path: Path) -> str:
+    return hashlib.sha256(os.path.normcase(str(source_path)).encode("utf-8")).hexdigest()[:16]
 
 
 def _create_verified_backup_locked(
@@ -182,6 +214,7 @@ def _create_verified_backup_locked(
     max_age_days: int,
     max_total_bytes: int,
     incremental: bool,
+    quick_prune: bool = False,
 ) -> Path:
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=".agent-backup-",
@@ -219,6 +252,7 @@ def _create_verified_backup_locked(
             max_age_days=max_age_days,
             max_total_bytes=max_total_bytes,
             protected=backup_path,
+            quick=quick_prune,
         )
         return backup_path
     except BaseException:
@@ -2015,9 +2049,10 @@ def _prune_backups(
     max_age_days: int,
     max_total_bytes: int,
     protected: Path,
+    quick: bool = False,
 ) -> None:
     database_pattern = f"agent-{lineage}-*.db"
-    changed = False
+    changed = _remove_stale_backup_temporaries(directory) if quick else False
     for backup in directory.glob(database_pattern):
         if not _manifest_path(backup).exists():
             backup.unlink(missing_ok=True)
@@ -2041,7 +2076,10 @@ def _prune_backups(
             changed = True
             continue
         try:
-            _verify_backup(backup)
+            if quick:
+                _check_backup_manifest_facts(backup, manifest)
+            else:
+                _verify_backup(backup)
             raw_manifest = json.loads(manifest.read_text(encoding="utf-8"))
             created_at = datetime.fromisoformat(cast(str, raw_manifest["created_at"]))
             pair_size = backup.stat().st_size + manifest.stat().st_size
@@ -2080,6 +2118,37 @@ def _prune_backups(
         changed = True
     if changed:
         fsync_directory(directory)
+
+
+def _remove_stale_backup_temporaries(directory: Path) -> bool:
+    cutoff = time.time() - _STALE_BACKUP_TEMPORARY_SECONDS
+    removed = False
+    for temporary in directory.glob(".agent-backup-*.db.tmp"):
+        try:
+            if temporary.stat().st_mtime > cutoff:
+                continue
+            temporary.unlink()
+            _remove_sqlite_sidecars(temporary)
+        except OSError:
+            continue
+        removed = True
+    return removed
+
+
+def _check_backup_manifest_facts(backup: Path, manifest: Path) -> None:
+    """The cheap part of ``_verify_backup``: the manifest names this file and its size."""
+    try:
+        document = json.loads(manifest.read_text(encoding="utf-8"))
+        size = backup.stat().st_size
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise BackupValidationError("backup manifest is missing or invalid") from None
+    if (
+        not isinstance(document, dict)
+        or document.get("database_file") != backup.name
+        or not _is_timezone_aware_timestamp(document.get("created_at"))
+        or document.get("size") != size
+    ):
+        raise BackupValidationError("backup manifest does not match the database file")
 
 
 def _redact_sensitive(value: object) -> object:
