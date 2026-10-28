@@ -131,28 +131,53 @@ def configure_environment(files_dir: str, provider_json: str) -> tuple[Path, Pat
     return workspace, database
 
 
+def _write_stacks(handle, header: str) -> None:
+    """Every other thread's stack, read by this Python thread with the GIL held.
+
+    faulthandler.dump_traceback_later read them from a C thread without the GIL while they ran:
+    on a phone whose first start after the 2.5.1 update took longer than its 45 s timer, that
+    crashed the engine (SIGSEGV in _Py_DumpTracebackThreads) at every start.
+    """
+    import traceback
+
+    names = {thread.ident: thread.name for thread in threading.enumerate()}
+    me = threading.get_ident()
+    lines = [header]
+    for ident, frame in sys._current_frames().items():
+        if ident == me:
+            continue
+        lines.append(f"Thread {ident:#x} ({names.get(ident, '?')}), most recent call last:\n")
+        lines.extend(traceback.format_stack(frame))
+    with contextlib.suppress(OSError, ValueError):  # ValueError: the handle was closed meanwhile
+        handle.write("".join(lines))
+        handle.flush()
+
+
 def _arm_stall_dump(files_dir: str):
     """If the final loop cleanup hangs, record every thread's stack before Android replaces the process."""
-    import faulthandler
-
     try:
         log = Path(files_dir) / "agent-data" / "logs" / "engine-stalls.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         handle = log.open("a", encoding="utf-8")
         handle.write("--- engine loop cleanup started\n")
         handle.flush()
-        faulthandler.dump_traceback_later(6.0, repeat=False, file=handle)
-        return handle
     except OSError:
         return None
+    disarmed = threading.Event()
+
+    def wait() -> None:
+        if not disarmed.wait(6.0):
+            _write_stacks(handle, "Timeout (6 s)!\n")
+
+    threading.Thread(target=wait, name="cleanup-watchdog", daemon=True).start()
+    return handle, disarmed
 
 
-def _disarm_stall_dump(handle) -> None:
-    import faulthandler
-
-    if handle is None:
+def _disarm_stall_dump(armed) -> None:
+    if armed is None:
         return
-    faulthandler.cancel_dump_traceback_later()
+    handle, disarmed = armed
+    disarmed.set()
     with contextlib.suppress(OSError):
         handle.close()
 
@@ -200,6 +225,12 @@ def _startup_log(files_dir: str, message: str) -> None:
         message += f" (slow: {now - _LAST_STEP:.1f} s since the previous step; {_slow_details(files_dir)})"
     _LAST_STEP = now
     print(f"[engine +{elapsed} ms] {message}", flush=True)
+    _append_startup_line(files_dir, message)
+
+
+def _append_startup_line(files_dir: str, message: str) -> None:
+    import time
+
     with contextlib.suppress(OSError):
         log = Path(files_dir) / "agent-data" / "logs" / "engine-startup.log"
         log.parent.mkdir(parents=True, exist_ok=True)
@@ -209,21 +240,47 @@ def _startup_log(files_dir: str, message: str) -> None:
             handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{os.getpid()}] {message}\n")
 
 
-def _arm_startup_dump(files_dir: str) -> None:
-    """If start-up has not reached a listening server in 45 s, record every thread's stack once.
+# Until the server publishes its token: a start-up log line this often, and the stacks once after.
+_STARTUP_HEARTBEAT_SECONDS = 15.0
+_STARTUP_DUMP_SECONDS = 45.0
+_startup_finished = threading.Event()
 
-    The engine's own watchdog re-arms the same timer once the server runs, which cancels this one.
+
+def _arm_startup_dump(files_dir: str) -> None:
+    """Until the server publishes serve.token: "still starting (N s)" in the start-up log every
+    15 s, and every thread's stack once after 45 s.
+
+    A long step logs nothing while it runs (the full database check after an update takes 20 s
+    and more on months of history), and the loading screen replaces an engine that shows no
+    progress for about a minute; the heartbeat tells it the start is still working.
     """
-    import faulthandler
+    import time
 
     global _startup_dump
+    _startup_finished.clear()
     with contextlib.suppress(OSError):
         log = Path(files_dir) / "agent-data" / "logs" / "engine-stalls.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         _startup_dump = log.open("a", encoding="utf-8")
         _startup_dump.write(f"--- [{os.getpid()}] engine start-up began\n")
         _startup_dump.flush()
-        faulthandler.dump_traceback_later(45.0, repeat=False, file=_startup_dump)
+    started = time.monotonic()
+    token = Path(files_dir) / "serve.token"
+    dump = _startup_dump
+
+    def watch() -> None:
+        dumped = False
+        while not _startup_finished.wait(_STARTUP_HEARTBEAT_SECONDS):
+            if token.is_file():  # the server is up (run() removed the old token before starting)
+                return
+            elapsed = time.monotonic() - started
+            print(f"[engine] still starting ({elapsed:.0f} s)", flush=True)
+            _append_startup_line(files_dir, f"still starting ({elapsed:.0f} s)")
+            if not dumped and elapsed >= _STARTUP_DUMP_SECONDS and dump is not None:
+                dumped = True
+                _write_stacks(dump, f"Start-up still running after {elapsed:.0f} s\n")
+
+    threading.Thread(target=watch, name="startup-watch", daemon=True).start()
 
 
 def run(files_dir: str, provider_json: str = "{}") -> None:
@@ -292,6 +349,7 @@ def run(files_dir: str, provider_json: str = "{}") -> None:
                 loop.close()
         finally:
             _disarm_stall_dump(stall_log)
+            _startup_finished.set()
             if _startup_dump is not None:
                 with contextlib.suppress(OSError):
                     _startup_dump.close()

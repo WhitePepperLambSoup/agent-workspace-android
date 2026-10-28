@@ -2159,6 +2159,12 @@ class WebUiActivity : ComponentActivity() {
             step.startsWith("building the base runtime") -> "正在打开数据库与工具" to "Opening the database and tools"
             step.startsWith("base runtime ready") || step.startsWith("recovering") -> "正在恢复中断的任务" to "Recovering interrupted tasks"
             step.startsWith("recovered") || step.startsWith("agent runtime ready") -> "正在启动本地服务" to "Starting the local service"
+            // The engine's heartbeat during a long step, e.g. the database check after an update.
+            step.startsWith("still starting") -> {
+                val seconds = Regex("""\((\d+) s\)""").find(step)?.groupValues?.get(1) ?: "?"
+                "仍在启动（已 $seconds 秒）。更新后第一次启动要检查全部记录，可能需要几分钟，请不要关闭应用" to
+                    "Still starting ($seconds s). The first start after an update checks all records and can take a few minutes; keep the app open"
+            }
             step.startsWith("engine failed") || step.startsWith("service: engine ended") || step.startsWith("service: Python failed") ->
                 "引擎启动出错：${step.substringAfter(": ").take(120)}" to "Engine start-up error: ${step.substringAfter(": ").take(120)}"
             else -> return null

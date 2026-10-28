@@ -14,14 +14,14 @@ An AI agent that runs on your Android phone. It plans and carries out multi-step
 
 ## Download
 
-Get `AgentWorkspace_2.5.1_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app: it checks at every start and about every 12 hours, and you can check yourself under Menu → About and updates, or "Updates" on the loading screen. Changes in each version are listed in the [CHANGELOG](CHANGELOG.md).
+Get `AgentWorkspace_2.5.2_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app: it checks at every start and about every 12 hours, and you can check yourself under Menu → About and updates, or "Updates" on the loading screen. Changes in each version are listed in the [CHANGELOG](CHANGELOG.md).
 
 - Android 8.0 (API 26) or newer, 64-bit ARM (`arm64-v8a`) or `x86_64`; phones running a 32-bit-only system cannot install it.
 - The interface is shown by the system's Android System WebView, which must be Chromium 80 or newer. If WebView is disabled, missing or too old, the app explains why and links to the app store to update it.
 - Works on Android 15+ devices with 16 KB memory pages, foldables, split screen and external keyboards, and keeps its own colours under system or vendor "force dark" modes.
 - About 73 MB to install. Local models and the offline speech model are optional downloads inside the app.
 
-What changed in 2.5.1: the first start helps you pick a model; an on-device model prepares once after switching, and new conversations then start answering in about a second; model downloads continue on their own after the network drops; a failed reply says why and what to do; and the AI can find and change settings for you.
+2.5.2 fixes phones with a long history getting stuck on the start-up screen after the 2.5.1 update. What changed in 2.5.1: the first start helps you pick a model; an on-device model prepares once after switching, and new conversations then start answering in about a second; model downloads continue on their own after the network drops; a failed reply says why and what to do; and the AI can find and change settings for you.
 
 ## Features
 

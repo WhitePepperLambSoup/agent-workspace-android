@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.5.2 — 2026-10-28
+
+2.5.2 修复 2.5.1 更新后卡在启动界面的问题。Agent Workspace 2.5.2 fixes the app getting stuck on the start-up screen after the 2.5.1 update.
+
+电脑版 / Desktop app: https://github.com/WhitePepperLambSoup/agent-workspace-desktop
+
+### 中文
+
+- 修复：更新到 2.5.1 后，对话记录较多的手机打开应用会一直停在「正在启动 Agent 引擎」。更新后的第一次启动要检查全部记录；检查超过 45 秒时，记录卡顿位置的功能会让引擎崩溃，引擎重启后又从头检查，反复如此。现在不会再崩溃，检查完就正常进入。
+- 改进：启动时间较长时，加载页显示已经用了多久和原因，不会在约一分钟后误判引擎没有响应而重启它。
+- 覆盖安装即可，数据会保留。卡在加载页的手机装上 2.5.2 后，第一次打开可能要等一两分钟，请不要关闭应用；之后的启动恢复正常。
+
+### English
+
+- Fixed: after the update to 2.5.1, phones with a long conversation history stayed on "Starting the Agent engine". The first start after an update checks every record; when that took longer than 45 s, the tool that records where a start-up stalls crashed the engine, which then started the check over again, and again. It no longer crashes, and the app opens once the check is done.
+- Improved: during a long start-up the loading screen says how long it has taken and why, instead of deciding after about a minute that the engine is not responding and restarting it.
+- Install over the existing app; your data is kept. On a phone that was stuck, the first start after installing 2.5.2 can take a minute or two; keep the app open. Later starts are back to normal.
+
 ## 2.5.1 — 2026-10-28
 
 2.5.1 改进第一次使用、本机模型和出错提示，AI 也能帮你找设置、改设置。Agent Workspace 2.5.1 improves the first start, on-device models and error messages, and the AI can now find and change the app's settings for you.

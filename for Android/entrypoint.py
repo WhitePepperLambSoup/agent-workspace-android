@@ -14,6 +14,7 @@ import html
 import os
 import secrets
 import sys
+import threading
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -349,14 +350,35 @@ def _publish_serve_token(token: str) -> None:
 _STALL_LOG_BYTES = 256 * 1024
 
 
+def _write_stacks(handle: Any, header: str) -> None:
+    """Every other thread's stack, read by this Python thread with the GIL held.
+
+    faulthandler.dump_traceback_later read them from a C thread without the GIL while they ran:
+    on a phone whose first start after the 2.5.1 update took longer than its timer, that crashed
+    the engine (SIGSEGV in _Py_DumpTracebackThreads) at every start. A thread that keeps the GIL
+    in one long C call delays this dump until the call returns.
+    """
+    import traceback
+
+    names = {thread.ident: thread.name for thread in threading.enumerate()}
+    me = threading.get_ident()
+    lines = [header]
+    for ident, frame in sys._current_frames().items():
+        if ident == me:
+            continue
+        lines.append(f"Thread {ident:#x} ({names.get(ident, '?')}), most recent call last:\n")
+        lines.extend(traceback.format_stack(frame))
+    with suppress(OSError, ValueError):  # ValueError: the handle was closed meanwhile
+        handle.write("".join(lines))
+        handle.flush()
+
+
 async def _stall_watchdog(log_path: Path, *, interval: float = 5.0, stall_after: float = 45.0) -> None:
     """Record every thread's stack once whenever the event loop stops running for stall_after s.
 
-    faulthandler's timer runs in a C thread that needs neither the loop nor the GIL, so it still
-    fires when the engine is wedged; each heartbeat re-arms it while the loop is healthy.
+    The loop notes a heartbeat every `interval` s; a Python thread that needs neither the loop nor
+    the heartbeat writes the stacks when the heartbeat is older than stall_after.
     """
-    import faulthandler
-
     with suppress(OSError):
         log_path.parent.mkdir(parents=True, exist_ok=True)
         if log_path.exists() and log_path.stat().st_size > _STALL_LOG_BYTES:
@@ -365,19 +387,30 @@ async def _stall_watchdog(log_path: Path, *, interval: float = 5.0, stall_after:
         handle = log_path.open("a", encoding="utf-8")
     except OSError:
         return
+    beat = [time.monotonic()]
+    stop = threading.Event()
+
+    def watch() -> None:
+        reported = None
+        while not stop.wait(interval):
+            last = beat[0]
+            stalled = time.monotonic() - last
+            if stalled >= stall_after and reported != last:
+                reported = last
+                _write_stacks(handle, f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} Timeout ({stalled:.0f} s)!\n")
+
+    threading.Thread(target=watch, name="stall-watchdog", daemon=True).start()
     try:
         while True:
-            faulthandler.dump_traceback_later(stall_after, repeat=False, file=handle)
+            beat[0] = time.monotonic()
             await asyncio.sleep(interval)
     finally:
-        faulthandler.cancel_dump_traceback_later()
+        stop.set()
         handle.close()
 
 
 def _arm_stall_dump(log_path: Path, after: float) -> Any:
     """Dump every thread's stack to log_path if not disarmed within `after` seconds."""
-    import faulthandler
-
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         handle = log_path.open("a", encoding="utf-8")
@@ -385,16 +418,21 @@ def _arm_stall_dump(log_path: Path, after: float) -> Any:
         return None
     handle.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} engine shutdown started\n")
     handle.flush()
-    faulthandler.dump_traceback_later(after, repeat=False, file=handle)
-    return handle
+    disarmed = threading.Event()
+
+    def wait() -> None:
+        if not disarmed.wait(after):
+            _write_stacks(handle, f"Timeout ({after:.0f} s)!\n")
+
+    threading.Thread(target=wait, name="shutdown-watchdog", daemon=True).start()
+    return handle, disarmed
 
 
-def _disarm_stall_dump(handle: Any) -> None:
-    import faulthandler
-
-    if handle is None:
+def _disarm_stall_dump(armed: Any) -> None:
+    if armed is None:
         return
-    faulthandler.cancel_dump_traceback_later()
+    handle, disarmed = armed
+    disarmed.set()
     with suppress(OSError):
         handle.close()
 
