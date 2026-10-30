@@ -20,6 +20,7 @@ MAX_TASKS = 4
 _MAX_TITLE = 80
 _MAX_GOAL = 8000
 _MAX_CONTEXT = 8000
+_MAX_EXPERT = 32
 # Sub-agents can work for a long time; the call may wait up to the runner's ceiling.
 _WAIT_SECONDS = 3600.0
 
@@ -31,6 +32,8 @@ class SubagentTask:
     title: str
     goal: str
     isolation: Isolation = "shared"
+    # On an expert team's turn: the expert (id) who does the task.
+    expert: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +81,15 @@ def parse_tasks(arguments: dict[str, Any]) -> list[SubagentTask]:
         goal = _text(raw.get("goal"), "goal", _MAX_GOAL)
         if shared:
             goal = f"{goal}\n\nBackground from the conversation:\n{shared}"
-        tasks.append(SubagentTask(_text(raw.get("title"), "title", _MAX_TITLE), goal, isolation))
+        expert = raw.get("expert")
+        tasks.append(
+            SubagentTask(
+                _text(raw.get("title"), "title", _MAX_TITLE),
+                goal,
+                isolation,
+                _text(expert, "expert", _MAX_EXPERT) if expert is not None else None,
+            )
+        )
     if len({task.title.casefold() for task in tasks}) != len(tasks):
         raise ToolArgumentError("each task needs its own title")
     return tasks
@@ -101,7 +112,8 @@ class DelegateTasksTool:
             "unless two tasks change files that could collide; in a git repository 'worktree' "
             "gives a task its own copy on a separate branch, named in the result, which you then "
             "merge or report. The call waits until every task has finished. The user sees the "
-            "sub-agents on the Agent runs page and answers their approvals in this conversation."
+            "sub-agents on the Agent runs page and answers their approvals in this conversation. "
+            "When you lead an expert team, 'expert' names the expert (by id) who does a task."
         ),
         input_schema={
             "type": "object",
@@ -116,6 +128,7 @@ class DelegateTasksTool:
                             "title": {"type": "string", "minLength": 1, "maxLength": _MAX_TITLE},
                             "goal": {"type": "string", "minLength": 1, "maxLength": _MAX_GOAL},
                             "isolation": {"type": "string", "enum": ["shared", "worktree"]},
+                            "expert": {"type": "string", "minLength": 1, "maxLength": _MAX_EXPERT},
                         },
                         "required": ["title", "goal"],
                         "additionalProperties": False,

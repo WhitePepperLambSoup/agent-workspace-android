@@ -15,8 +15,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agent_workspace.application.agent_control import AgentControlService
+from agent_workspace.application.ports import Tool
 from agent_workspace.application.review_workflow import ReviewWorkflowService
 from agent_workspace.application.runtime_host import RuntimeSettings
+from agent_workspace.coding.desk import CodingDesk
 from agent_workspace.config import (
     ProviderConfig,
 )
@@ -49,6 +51,8 @@ from agent_workspace.tools.file_batches import (
 from agent_workspace.ui_gateway.device_hub import DeviceHub
 from agent_workspace.ui_gateway.device_link import (
     DeviceLink,
+    PairedDevice,
+    TaskOptions,
 )
 from agent_workspace.ui_gateway.gateway_common import (
     _CURRENT_SESSION,
@@ -60,6 +64,7 @@ from agent_workspace.ui_gateway.gateway_common import (
     _GatewaySubagents,
     _RunHostEntry,
     _SessionHostContext,
+    _TeamTurn,
 )
 from agent_workspace.ui_gateway.latex_desk import LatexDesk
 from agent_workspace.ui_gateway.protocol import (
@@ -93,10 +98,13 @@ class GatewayState:
     _backup_thread: threading.Thread | None
     _clock: Callable[[], float]
     _closing: bool
+    _coding: CodingDesk
+    _check_fix_rounds: dict[str, int]
     _cursor_key: bytes
     _daily_backup: Callable[[Path], object] | None
     _database: Path
     _delegations: dict[str, _Delegation]
+    _team_turns: dict[str, _TeamTurn]
     _device_host_starting: set[str]
     _device_hosted_sessions: dict[str, float]
     _device_hub: DeviceHub
@@ -190,6 +198,34 @@ class GatewayState:
         def _task_limits(self) -> TaskLimits | None: ...
 
         def _system_note(self) -> str: ...
+
+        def _folder_tools(self, workspace: Path) -> tuple[Tool, ...]: ...
+
+        def _open_folder(self) -> Path: ...
+
+        def _quick_provider(self) -> ProviderConfig: ...
+
+        # Used by the phone's code review (device_review.py), defined by other mixins.
+        def _device_call[T](self, function: Callable[..., T], *arguments: object) -> T: ...
+
+        def _get_git_diff(self, command: CommandEnvelope) -> GatewayReply: ...
+
+        def _list_review_snapshots(self, command: CommandEnvelope) -> GatewayReply: ...
+
+        def _get_review_snapshot(self, command: CommandEnvelope) -> GatewayReply: ...
+
+        def _create_review_snapshot(self, command: CommandEnvelope) -> GatewayReply: ...
+
+        def _create_review_comment(self, command: CommandEnvelope) -> GatewayReply: ...
+
+        def _followup_review_comment(self, command: CommandEnvelope) -> GatewayReply: ...
+
+        def _review_service(self) -> ReviewWorkflowService: ...
+
+        @staticmethod
+        def _check_device_autonomy(
+            device: PairedDevice, autonomy: Autonomy, options: TaskOptions
+        ) -> list[str]: ...
 
         def _control_service(self) -> AgentControlService: ...
 

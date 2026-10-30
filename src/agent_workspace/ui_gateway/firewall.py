@@ -110,6 +110,9 @@ def _powershell(
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     return subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+        # Not the gateway's stdin: a child given a pipe another thread is reading waits at
+        # start until that read ends (Windows).
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         timeout=timeout,

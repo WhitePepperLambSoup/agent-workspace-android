@@ -11,7 +11,12 @@ from typing import Any, cast
 
 from agent_workspace.application.background_jobs import BackgroundJobManager
 from agent_workspace.application.event_bus import EventBus
-from agent_workspace.application.ports import EventListener, ManagedModelProvider, Tool
+from agent_workspace.application.ports import (
+    EventListener,
+    ManagedModelProvider,
+    Tool,
+    ToolHooks,
+)
 from agent_workspace.application.scheduler import (
     ScheduledTaskHost,
     build_scheduled_host,
@@ -429,6 +434,7 @@ def _build_runtime_core(
     subagents: SubagentLauncher | None = None,
     phone_jobs: PhoneJobLauncher | None = None,
     extra_tools: Sequence[Tool] = (),
+    tool_hooks: ToolHooks | None = None,
 ) -> ApplicationRuntime:
     # Stack-managed resource allocation (R18 & R28)
     cleanup_stack: list[Callable[[], Any]] = []
@@ -536,6 +542,7 @@ def _build_runtime_core(
             parallel_tool_calls=parallel_tool_calls,
             profile_turns=profile_turns,
             raw_trace=RawConversationTrace.for_database(database_path),
+            tool_hooks=tool_hooks,
         )
 
         scheduler_factory: Callable[[], ScheduledTaskHost | None] | None = None
@@ -730,6 +737,7 @@ async def build_runtime_async(
     subagents: SubagentLauncher | None = None,
     phone_jobs: PhoneJobLauncher | None = None,
     extra_tools: Sequence[Tool] = (),
+    tool_hooks: ToolHooks | None = None,
 ) -> ApplicationRuntime:
     provider_config.validate()
     workspace_path = Path(workspace).resolve(strict=True)
@@ -806,4 +814,5 @@ async def build_runtime_async(
         subagents=subagents,
         phone_jobs=phone_jobs,
         extra_tools=extra_tools,
+        tool_hooks=tool_hooks,
     )

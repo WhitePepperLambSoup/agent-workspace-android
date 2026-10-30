@@ -21,12 +21,15 @@ from uuid import uuid4
 from agent_workspace.application.agent_control import AgentControlService
 from agent_workspace.application.review_workflow import ReviewWorkflowService
 from agent_workspace.application.runtime_host import RuntimeHost, RuntimeSettings
+from agent_workspace.coding.desk import CodingDesk
+from agent_workspace.coding.team_desk import team_lead_note
 from agent_workspace.config import (
     ProviderConfig,
     default_database_path,
     default_workspace_catalog_path,
 )
 from agent_workspace.core.events import Event
+from agent_workspace.core.experts import ExpertError, lead_instructions, parse_team
 from agent_workspace.core.git_diff_review import GitDiffReviewService
 from agent_workspace.core.models import (
     MAX_IMAGE_BYTES,
@@ -63,6 +66,8 @@ from agent_workspace.ui_gateway.device_hub import DeviceHub
 from agent_workspace.ui_gateway.device_link import (
     DeviceLink,
 )
+from agent_workspace.ui_gateway.device_review import DeviceReviewCommands
+from agent_workspace.ui_gateway.gateway_code import CODE_COMMANDS, CodeCommands
 from agent_workspace.ui_gateway.gateway_common import (
     _APPROVAL_DISPLAY_FIELDS,
     _BACKUP_CHECK_SECONDS,
@@ -110,11 +115,16 @@ from agent_workspace.ui_gateway.gateway_common import (
     _json_safe,
     _RunHostEntry,
     _SessionHostContext,
+    _TeamTurn,
 )
+from agent_workspace.ui_gateway.gateway_debug import DEBUG_COMMANDS, DebugCommands
 from agent_workspace.ui_gateway.gateway_devices import DeviceCommands
 from agent_workspace.ui_gateway.gateway_exports import EXPORT_COMMANDS, ExportCommands
+from agent_workspace.ui_gateway.gateway_git import GIT_COMMANDS, GitCommands
 from agent_workspace.ui_gateway.gateway_knowledge import KnowledgeCommands
 from agent_workspace.ui_gateway.gateway_latex import LATEX_COMMANDS, LatexCommands
+from agent_workspace.ui_gateway.gateway_office import OFFICE_COMMANDS, OfficeCommands
+from agent_workspace.ui_gateway.gateway_project import PROJECT_COMMANDS, ProjectCommands
 from agent_workspace.ui_gateway.gateway_providers import ProviderCommands
 from agent_workspace.ui_gateway.gateway_references import REFERENCE_COMMANDS, ReferenceCommands
 from agent_workspace.ui_gateway.gateway_review import ReviewCommands
@@ -122,7 +132,10 @@ from agent_workspace.ui_gateway.gateway_runs import RunCommands
 from agent_workspace.ui_gateway.gateway_schedules import ScheduleCommands
 from agent_workspace.ui_gateway.gateway_science import SCIENCE_COMMANDS, ScienceCommands
 from agent_workspace.ui_gateway.gateway_sessions import SessionCommands
+from agent_workspace.ui_gateway.gateway_shell import SHELL_COMMANDS, ShellCommands
+from agent_workspace.ui_gateway.gateway_specs import SPEC_COMMANDS, SpecCommands
 from agent_workspace.ui_gateway.gateway_state import GatewayState
+from agent_workspace.ui_gateway.gateway_tour import TOUR_COMMANDS, TourCommands
 from agent_workspace.ui_gateway.gateway_usage import UsageCommands
 from agent_workspace.ui_gateway.gateway_workspace import WorkspaceCommands
 from agent_workspace.ui_gateway.latex_desk import LatexDesk
@@ -206,15 +219,24 @@ _UNLOCKED_HANDLERS: Final = _handler_table(
     (["session.rewind"], "_rewind_session"),
     (["turn.files.diff"], "_turn_file_diff"),
     (["turn.files.undo"], "_undo_turn_files"),
+    (["turn.files.hunk.undo"], "_undo_turn_hunk"),
     (["skills.list", "skills.set", "skills.folder.open"], "_skills_command"),
     (["limits.get", "limits.set"], "_task_limits_command"),
     (["cost.estimate"], "_estimate_cost"),
     (_DEVICE_COMMANDS, "_device_command"),
     (_KNOWLEDGE_COMMANDS, "_knowledge_command"),
     (LATEX_COMMANDS, "_latex_command"),
+    (CODE_COMMANDS, "_code_command"),
+    (PROJECT_COMMANDS, "_project_command"),
+    (SHELL_COMMANDS, "_shell_command"),
+    (GIT_COMMANDS, "_git_command"),
+    (SPEC_COMMANDS, "_spec_command"),
+    (DEBUG_COMMANDS, "_debug_command"),
+    (TOUR_COMMANDS, "_tour_command"),
     (REFERENCE_COMMANDS, "_references_command"),
     (SCIENCE_COMMANDS, "_science_command"),
     (EXPORT_COMMANDS, "_export_command"),
+    (OFFICE_COMMANDS, "_office_command"),
     (_FILE_BATCH_COMMANDS, "_file_batches_command"),
     (_USAGE_COMMANDS, "_usage_command"),
     (_WATCH_COMMANDS, "_watch_command"),
@@ -228,6 +250,7 @@ _UNLOCKED_HANDLERS: Final = _handler_table(
     (["workspace.review.create"], "_create_review_snapshot"),
     (["workspace.review.pr.create"], "_create_review_pull_request"),
     (["workspace.review.pr.refresh"], "_refresh_review_pull_request"),
+    (["workspace.review.ai"], "_review_with_model"),
 )
 # Commands answered holding the gateway lock.
 _LOCKED_HANDLERS: Final = _handler_table(
@@ -310,6 +333,14 @@ _LOCKED_HANDLERS: Final = _handler_table(
 
 class GatewayRuntime(
     ProviderCommands,
+    CodeCommands,
+    ProjectCommands,
+    ShellCommands,
+    GitCommands,
+    SpecCommands,
+    DebugCommands,
+    TourCommands,
+    DeviceReviewCommands,
     SessionCommands,
     DeviceCommands,
     KnowledgeCommands,
@@ -317,6 +348,7 @@ class GatewayRuntime(
     ReferenceCommands,
     ScienceCommands,
     ExportCommands,
+    OfficeCommands,
     UsageCommands,
     WorkspaceCommands,
     ReviewCommands,
@@ -472,8 +504,15 @@ class GatewayRuntime(
         )
         self._skill_tool = UseSkillTool(self._skills)
         # Literature search, the folder's references, paper reading and the other research tools.
-        self._research_tools = ResearchTools(self._database)
+        self._research_tools = ResearchTools(self._database, self.speech_choice)
         self._latex = LatexDesk(self._database.parent)
+        # Language servers for the editor and the agent's code tools, and the project rules.
+        self._coding = CodingDesk(
+            self._database.parent / "tools", self._database.with_name("project-trust.json")
+        )
+        self._coding.on_results = lambda root, state: self._report_checks(root, state.results)
+        # Automatic fixes of failed checks handed to each conversation since its user last wrote.
+        self._check_fix_rounds: dict[str, int] = {}
         self._science = ScienceDesk(self._database.parent)
         self._science.publish_python()
         refresh_science_helpers(self._database.parent)
@@ -493,6 +532,9 @@ class GatewayRuntime(
         # also show in that conversation.
         self._delegations: dict[str, _Delegation] = {}
         self._subagents = _GatewaySubagents(self)
+        # The expert team of each conversation's turn in progress (turn.start "team"), by session:
+        # conversations left running in the background keep their own team.
+        self._team_turns: dict[str, _TeamTurn] = {}
         # Device link 2: what phones send and collect, and requests this desktop's AI sends them.
         self._device_hub = DeviceHub(self)
         self._phone_jobs = _GatewayPhoneJobs(self)
@@ -1165,6 +1207,8 @@ class GatewayRuntime(
     def drain_events(self) -> list[dict[str, object]]:
         with self._lock:
             self._collect_host_events()
+            self._collect_shell_output()
+            self._collect_debug_events()
             raw = self._pending_host_events
             self._pending_host_events = []
             documents: list[dict[str, object]] = []
@@ -1189,6 +1233,7 @@ class GatewayRuntime(
             self._stop_run_hosts()
             self._stop_session_hosts()
             self._stop_host()
+        self._coding.close()
 
     def _begin_close(self) -> None:
         self._closing = True
@@ -1396,6 +1441,7 @@ class GatewayRuntime(
                 "history": {"hasMore": False, "nextCursor": None, "cutoff": 0},
                 "approvals": [],
                 "sessionPresentation": {},
+                **({"subagents": subagents} if (subagents := self._subagent_documents()) else {}),
                 "truncated": True,
             }
         sessions = self._sessions(_MAX_SESSIONS)
@@ -1456,6 +1502,7 @@ class GatewayRuntime(
             "history": page["history"],
             "approvals": approvals,
             "sessionPresentation": self._workspace_presentations(),
+            **({"subagents": subagents} if (subagents := self._subagent_documents()) else {}),
             **({"approvalsTruncated": True} if len(unresolved) > len(approvals) else {}),
         }
 
@@ -2010,6 +2057,8 @@ class GatewayRuntime(
                 "reasoningEffort",
                 "model",
                 "planFirst",
+                "team",
+                "teamReview",
             },
         )
         self._require_selected_session(command.session_id, allow_unselected=True)
@@ -2049,14 +2098,26 @@ class GatewayRuntime(
         plan_first = command.payload.get("planFirst", False)
         if type(plan_first) is not bool:
             raise GatewayError("invalid_payload")
+        team = None
+        if "team" in command.payload:
+            if plan_first:
+                raise GatewayError("invalid_payload")
+            review = command.payload.get("teamReview", True)
+            if type(review) is not bool:
+                raise GatewayError("invalid_payload")
+            try:
+                chosen = parse_team(command.payload["team"])
+            except ExpertError:
+                raise GatewayError("invalid_team") from None
+            team = (_TeamTurn(chosen), team_lead_note(lead_instructions(chosen, review=review)))
         self._check_monthly_cap()
         prompt = prompt.strip()
         if references:
             prompt = f"{prompt}\n\n" + "\n".join(f"[File reference: {path}]" for path in references)
         busy = self._active_turn is not None or self._turn_requested or len(self._queued_turns) > 0
-        if (model is not None or plan_first) and (busy or self._busy):
-            # A queued turn keeps only what the queue stores; another model, or a plan, is
-            # asked at once.
+        if (model is not None or plan_first or team is not None) and (busy or self._busy):
+            # A queued turn keeps only what the queue stores; another model, a plan, or an
+            # expert team is asked at once.
             raise GatewayError("runtime_busy")
         if busy:
             if len(self._queued_turns) >= _MAX_TURN_QUEUE:
@@ -2106,9 +2167,15 @@ class GatewayRuntime(
                 images=images,
                 model=model,
                 plan_only=plan_first,
+                team=team[1] if team is not None else None,
             )
         except RuntimeError:
             raise GatewayError("runtime_unavailable") from None
+        owner = cast(str, command.session_id)
+        if team is not None:
+            self._team_turns[owner] = team[0]
+        else:
+            self._team_turns.pop(owner, None)
         self._turn_requested = True
         payload = {
             "epoch": self.epoch,
@@ -2128,6 +2195,7 @@ class GatewayRuntime(
         images: tuple[ImagePart, ...] = (),
         model: str | None = None,
         plan_only: bool = False,
+        team: str | None = None,
     ) -> Future[None]:
         """Submit a turn while keeping legacy test hosts compatible.
 
@@ -2153,6 +2221,8 @@ class GatewayRuntime(
             kwargs["model"] = model
         if plan_only:
             kwargs["plan_only"] = True
+        if team is not None:
+            kwargs["team"] = team
         limits = self._task_limits()
         if limits is not None:
             kwargs["limits"] = limits
@@ -2882,7 +2952,8 @@ class GatewayRuntime(
                 extra_tools=(self._skill_tool,),
                 system_note=self._system_note,
                 turn_files=start_turn_watch,
-                workspace_tools=self._research_tools,
+                workspace_tools=self._folder_tools,
+                tool_hooks=self._coding.hooks,
             )
         host: Host | None = None
         try:
@@ -3331,6 +3402,14 @@ class GatewayRuntime(
                 # stale events to the UI; they describe a host that is no
                 # longer authoritative.
                 continue
+            if run_id is None and event.type == TURN_FILES_EVENT:
+                self._after_turn_files(event)
+            elif (
+                run_id is None
+                and event.type == "message.created"
+                and (event.data.get("role") == "user")
+            ):
+                self._note_user_turn(event)
             display_event = event
             if run_id is not None:
                 display_event = Event(

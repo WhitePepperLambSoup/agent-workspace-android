@@ -22,11 +22,14 @@ from uuid import uuid4
 
 from agent_workspace.application.agent_control import AgentControlError, AgentControlService
 from agent_workspace.application.runtime_host import RuntimeSettings
+from agent_workspace.coding.team_desk import team_goal, team_tools
 from agent_workspace.config import (
     ProviderConfig,
 )
 from agent_workspace.core.durable_run_queue import DurableRunQueue, RunQueueStatus
 from agent_workspace.core.events import Event
+from agent_workspace.core.expert_library import expert_tools
+from agent_workspace.core.experts import find_expert
 from agent_workspace.core.git_ops import (
     GitOpsError,
     git_head_sha,
@@ -59,6 +62,8 @@ from agent_workspace.ui_gateway.gateway_common import (
     _COMMAND_TIMEOUT_SECONDS,
     _DELEGATION_ANSWER_CHARS,
     _DELEGATION_POLL_SECONDS,
+    _EXPERT_STOP_GRACE_SECONDS,
+    _EXPERT_TIME_LIMIT_SECONDS,
     _LIFECYCLE_TIMEOUT_SECONDS,
     _MAX_AGENT_RUN_CONTINUATIONS,
     _MAX_PARALLEL_AGENT_RUNS,
@@ -82,6 +87,24 @@ from agent_workspace.ui_gateway.protocol import (
     PROTOCOL_VERSION,
     CommandEnvelope,
 )
+
+
+def _accepts(function: Any, name: str) -> bool:
+    """Whether a host's method takes this keyword (hosts in tests may be older)."""
+    try:
+        parameters = inspect.signature(function).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        item.name == name or item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters
+    )
+
+
+def _expert_fields(delegation: _Delegation) -> dict[str, object]:
+    """An expert team member's id and round, for the events of its run."""
+    if delegation.expert is None:
+        return {}
+    return {"expert": delegation.expert, "phase": delegation.phase or "work"}
 
 
 class RunCommands(GatewayState):
@@ -714,7 +737,8 @@ class RunCommands(GatewayState):
                         session_id=session.id,
                         extra_tools=(self._skill_tool,),
                         system_note=self._system_note,
-                        workspace_tools=self._research_tools,
+                        workspace_tools=self._folder_tools,
+                        tool_hooks=self._coding.hooks,
                     )
                 )
                 entry = _RunHostEntry(
@@ -938,14 +962,15 @@ class RunCommands(GatewayState):
         )
 
     def _emit_run_update(self, run_id: str, session_id: str, state: str) -> None:
-        self._pending_host_events.append(
-            Event(
-                session_id=session_id,
-                type="agent.run.updated",
-                data={"run_id": run_id, "state": state},
-            )
-        )
         delegation = self._delegations.get(run_id)
+        data: dict[str, Any] = {"run_id": run_id, "state": state}
+        if delegation is not None and delegation.parent_session_id == session_id:
+            # A delegated run not started yet (waiting for a free slot) is still reported under
+            # its conversation: the window shows the sub-agent as about to start.
+            data.update(title=delegation.title, delegated=True, **_expert_fields(delegation))
+        self._pending_host_events.append(
+            Event(session_id=session_id, type="agent.run.updated", data=data)
+        )
         if delegation is not None and delegation.parent_session_id != session_id:
             self._pending_host_events.append(
                 Event(
@@ -956,9 +981,52 @@ class RunCommands(GatewayState):
                         "state": state,
                         "title": delegation.title,
                         "delegated": True,
+                        **_expert_fields(delegation),
                     },
                 )
             )
+
+    def _subagent_documents(self) -> list[dict[str, object]]:
+        """The sub-agents conversations wait on now, for a window that resynchronises: events it
+        dropped while it waited for a snapshot (a run queued for a free slot) are not sent again.
+        """
+        documents: list[dict[str, object]] = []
+        if not self._delegations:
+            return documents
+        with suppress(Exception):  # an unreadable run database leaves the list short
+            service = self._control_service()
+            for run_id, delegation in list(self._delegations.items()):
+                run = service.get_run(run_id)
+                if run is None:
+                    continue
+                documents.append(
+                    {
+                        "runId": run_id,
+                        "sessionId": delegation.parent_session_id,
+                        "title": delegation.title,
+                        "state": run.state.value,
+                        **_expert_fields(delegation),
+                    }
+                )
+        return documents
+
+    def _emit_delegated_activity(self, run_id: str, activity: str, tool: str | None) -> None:
+        """What a sub-agent is doing now (thinking, or which tool), for its conversation."""
+        delegation = self._delegations.get(run_id)
+        if delegation is None:
+            return
+        self._pending_host_events.append(
+            Event(
+                session_id=delegation.parent_session_id,
+                type="agent.run.activity",
+                data={
+                    "run_id": run_id,
+                    "activity": activity,
+                    **({"tool": tool} if tool else {}),
+                    **_expert_fields(delegation),
+                },
+            )
+        )
 
     async def _run_delegated_tasks(
         self, parent_session_id: str, tasks: Sequence[SubagentTask]
@@ -967,17 +1035,36 @@ class RunCommands(GatewayState):
 
         Runs in the conversation host's event loop, so every step that takes the gateway lock
         goes to a worker thread; the lock holder may itself be waiting on this loop.
+
+        On an expert team's turn no expert holds up the answer: runs still working at the time
+        limit are stopped and reported as cancelled ("time_limit") with what they recorded, and
+        the lead answers from the rest.
         """
+        team_turn = parent_session_id in self._team_turns
         run_ids = await asyncio.to_thread(self._create_delegated_runs, parent_session_id, tasks)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        over_time: list[str] = []
         finished = False
         try:
             while not await asyncio.to_thread(self._advance_delegated_runs, run_ids):
+                if team_turn and loop.time() - started >= _EXPERT_TIME_LIMIT_SECONDS:
+                    over_time = await asyncio.to_thread(
+                        self._cancel_delegated_runs, run_ids, forget=False
+                    )
+                    # Their cancelled state still reaches the conversation's expert cards.
+                    wind_down = loop.time() + _EXPERT_STOP_GRACE_SECONDS
+                    while loop.time() < wind_down and not await asyncio.to_thread(
+                        self._delegated_runs_finished, run_ids
+                    ):
+                        await asyncio.sleep(_DELEGATION_POLL_SECONDS)
+                    break
                 await asyncio.sleep(_DELEGATION_POLL_SECONDS)
             finished = True
         finally:
             if not finished:  # the conversation's turn was stopped: stop its sub-agents too
                 await asyncio.shield(asyncio.to_thread(self._cancel_delegated_runs, run_ids))
-        return await asyncio.to_thread(self._delegated_outcomes, run_ids)
+        return await asyncio.to_thread(self._delegated_outcomes, run_ids, over_time)
 
     def _create_delegated_runs(
         self, parent_session_id: str, tasks: Sequence[SubagentTask]
@@ -997,12 +1084,19 @@ class RunCommands(GatewayState):
         run_ids: list[str] = []
         with self._lock:
             service = self._control_service()
+            team = self._team_turns.get(parent_session_id)
+            phase = None
+            if team is not None and any(task.expert for task in tasks):
+                # The first call hands out the parts, later ones review the findings.
+                phase = "review" if team.rounds else "work"
+                team.rounds += 1
             for task in tasks:
+                expert = find_expert(team.team, task.expert) if team is not None else None
                 try:
                     run = service.create_run(
                         workspace=workspace,
                         session_id=parent_session_id,
-                        goal=task.goal,
+                        goal=team_goal(expert, task.goal) if expert is not None else task.goal,
                         title=task.title,
                         isolation=RunIsolation(task.isolation),
                     )
@@ -1017,7 +1111,12 @@ class RunCommands(GatewayState):
                         f"A sub-agent could not be created: {error}"
                     ) from None
                 run_ids.append(run.id)
-                self._delegations[run.id] = _Delegation(parent_session_id, task.title)
+                self._delegations[run.id] = _Delegation(
+                    parent_session_id,
+                    task.title,
+                    expert.id if expert is not None else None,
+                    phase if expert is not None else None,
+                )
                 self._emit_run_update(run.id, run.session_id, run.state.value)
         return run_ids
 
@@ -1063,7 +1162,20 @@ class RunCommands(GatewayState):
                         self._emit_run_update(run_id, failed.session_id, failed.state.value)
             return finished
 
-    def _cancel_delegated_runs(self, run_ids: Sequence[str]) -> None:
+    def _delegated_runs_finished(self, run_ids: Sequence[str]) -> bool:
+        with self._lock:
+            service = self._control_service()
+            return all(
+                run is None or self._delegated_run_finished(run, service)
+                for run in map(service.get_run, run_ids)
+            )
+
+    def _cancel_delegated_runs(self, run_ids: Sequence[str], *, forget: bool = True) -> list[str]:
+        """Stop the runs still working and return their ids.
+
+        ``forget`` also drops every run from the conversation, once its turn no longer waits.
+        """
+        stopped: list[str] = []
         with self._lock:
             service = self._control_service()
             for run_id in run_ids:
@@ -1073,6 +1185,7 @@ class RunCommands(GatewayState):
                     AgentRunState.FAILED,
                     AgentRunState.CANCELLED,
                 }:
+                    stopped.append(run_id)
                     with suppress(GatewayError, AgentControlError), self._unsent():
                         self._cancel_agent_run(
                             CommandEnvelope(
@@ -1083,9 +1196,13 @@ class RunCommands(GatewayState):
                                 session_id=run.session_id,
                             )
                         )
-                self._delegations.pop(run_id, None)
+                if forget:
+                    self._delegations.pop(run_id, None)
+        return stopped
 
-    def _delegated_outcomes(self, run_ids: Sequence[str]) -> list[SubagentOutcome]:
+    def _delegated_outcomes(
+        self, run_ids: Sequence[str], over_time: Sequence[str] = ()
+    ) -> list[SubagentOutcome]:
         with self._lock:
             service = self._control_service()
             runs = [service.get_run(run_id) for run_id in run_ids]
@@ -1118,14 +1235,19 @@ class RunCommands(GatewayState):
                         if last.truncated
                         else ""
                     )
+            # Stopped at the time limit, unless it finished on its own in the meantime.
+            stopped = run_id in over_time and run.state not in {
+                AgentRunState.SUCCEEDED,
+                AgentRunState.FAILED,
+            }
             outcomes.append(
                 SubagentOutcome(
                     run_id=run_id,
                     title=run.title,
-                    state=run.state.value,
+                    state=AgentRunState.CANCELLED.value if stopped else run.state.value,
                     answer=answer,
                     branch=run.branch if run.isolation is RunIsolation.WORKTREE else None,
-                    reason=run.blocking_reason,
+                    reason="time_limit" if stopped else run.blocking_reason,
                 )
             )
         return outcomes
@@ -1877,6 +1999,11 @@ class RunCommands(GatewayState):
         run = service.get_run(run_id)
         if run is None or entry.terminal:
             return
+        if event_type == "model.requested":
+            self._emit_delegated_activity(run_id, "thinking", None)
+        elif event_type == "tool.started":
+            tool = payload.get("toolName") or payload.get("name")
+            self._emit_delegated_activity(run_id, "tool", str(tool)[:64] if tool else None)
         attempt_id = payload.get("attemptId") or payload.get("toolCallId")
         if event_type == "tool.proposed":
             # Rejected calls often never emit tool.started.  Record the proposal
@@ -2010,10 +2137,18 @@ class RunCommands(GatewayState):
                     "do not claim unverified criteria passed."
                 )
                 limits = self._task_limits()
+                kwargs: dict[str, Any] = {}
                 if limits is not None:
-                    entry.host.submit_turn(prompt, limits=limits)
-                else:
-                    entry.host.submit_turn(prompt)
+                    kwargs["limits"] = limits
+                delegation = self._delegations.get(run_id)
+                tools = (
+                    team_tools(delegation.expert, expert_tools(delegation.expert))
+                    if delegation and delegation.expert
+                    else None
+                )
+                if tools is not None and _accepts(entry.host.submit_turn, "tools"):
+                    kwargs["tools"] = tools
+                entry.host.submit_turn(prompt, **kwargs)
                 entry.submitted = True
                 service.update_run(
                     run_id, state=AgentRunState.RUNNING, active_step_id=step.id if step else None

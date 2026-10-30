@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -254,6 +254,24 @@ class ToolRegistryPort(Protocol):
     def specs(self, mode: Mode | None = None) -> tuple[ToolSpec, ...]: ...
 
     def get(self, name: str) -> Tool: ...
+
+
+class ToolHooks(Protocol):
+    """What an embedding app adds around tool calls (the desktop's project rules and checks).
+
+    ``before_tool`` may refuse a call with a reason the model reads, before the policy is asked
+    (nobody is asked to approve what the project's rules forbid); ``after_tool`` may return text
+    added to a successful call's result (the language server's report on a file just written).
+    A hook that fails is ignored.
+    """
+
+    async def before_tool(
+        self, name: str, arguments: Mapping[str, Any], *, session_id: str
+    ) -> str | None: ...
+
+    async def after_tool(
+        self, name: str, arguments: Mapping[str, Any], result: str, *, session_id: str
+    ) -> str | None: ...
 
 
 @dataclass(frozen=True, slots=True)

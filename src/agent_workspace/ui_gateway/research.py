@@ -1,5 +1,5 @@
-"""The research tools each conversation gets for its folder (agent_workspace.scholar and
-agent_workspace.latex)."""
+"""The research and office tools each conversation gets for its folder (agent_workspace.scholar,
+agent_workspace.latex and agent_workspace.office)."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pathlib import Path
 
 from agent_workspace.application.ports import Tool
 from agent_workspace.latex.tools import latex_tools
+from agent_workspace.office.tools import SpeechSource, office_tools
 from agent_workspace.scholar.labbook import LabNotebookAddTool, LabNotebookSearchTool
 from agent_workspace.scholar.library import RecentWorks
 from agent_workspace.scholar.literature_tools import literature_tools
@@ -46,16 +47,19 @@ class FoundWorks:
 class ResearchTools:
     """Makes the research tools for a folder; works looked up lately are shared by all folders."""
 
-    def __init__(self, database: Path) -> None:
+    def __init__(self, database: Path, speech: SpeechSource | None = None) -> None:
         self.data_dir = database.parent
         self.versions = database.with_name("file-versions")
         self.recent = RecentWorks()
         self.found = FoundWorks()
+        # The speech-to-text service meeting transcription uses (Settings → Voice).
+        self.speech: SpeechSource = speech or (lambda: None)
 
     def __call__(self, workspace: Path) -> tuple[Tool, ...]:
         # Files these tools write are checkpointed and kept like write_file's, so the change list
         # under a turn shows them and can put them back.
-        writer = WriteFileTool(workspace, FileVersions(self.versions))
+        versions = FileVersions(self.versions)
+        writer = WriteFileTool(workspace, versions)
         return (
             *literature_tools(workspace, data_dir=self.data_dir, writer=writer, recent=self.recent),
             *latex_tools(workspace, data_dir=self.data_dir),
@@ -63,6 +67,7 @@ class ResearchTools:
             LabNotebookAddTool(workspace, writer),
             LabNotebookSearchTool(workspace),
             *remote_tools(workspace),
+            *office_tools(workspace, self.data_dir, versions, lambda: self.speech()),
         )
 
 

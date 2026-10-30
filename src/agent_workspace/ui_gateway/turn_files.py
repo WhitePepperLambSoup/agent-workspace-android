@@ -118,6 +118,13 @@ _NO_FOLDER_CHANGES: Final = frozenset(
         "background_job_logs",
         "stop_background_job",
         "discover_executables",
+        # The desktop's coding tools (check_page saves its screenshot under .agent/).
+        "code_diagnostics",
+        "find_definition",
+        "find_references",
+        "list_symbols",
+        "read_terminal",
+        "check_page",
     }
 )
 _QUARANTINE_MARKER: Final = ".agent-workspace-quarantine-"
@@ -519,15 +526,67 @@ def file_diff(workspace: Path, versions: FileVersions, entry: Mapping[str, Any])
     truncated = len(lines) > MAX_DIFF_LINES
     text = "".join(line if line.endswith("\n") else f"{line}\n" for line in lines[:MAX_DIFF_LINES])
     written = entry.get("after")
+    current = hashlib.sha256(after).hexdigest()
     return {
         "state": "ok",
         "diff": text,
         "truncated": truncated,
         "missing": missing,
-        "changedSince": not missing
-        and isinstance(written, str)
-        and hashlib.sha256(after).hexdigest() != written,
+        "changedSince": not missing and isinstance(written, str) and current != written,
+        # What the diff was made against: a part is put back only while the file is still this.
+        "currentSha256": None if missing else current,
     }
+
+
+def undo_hunk(
+    workspace: Path,
+    versions: FileVersions,
+    entry: Mapping[str, Any],
+    index: int,
+    expected_sha256: str,
+) -> str:
+    """Put one part of a turn's change in a text file back as it was before the turn: the
+    index-th hunk of the diff file_diff shows. Returns the file's new SHA-256; raises ValueError
+    with a reason the window shows."""
+    path = entry.get("path")
+    if not isinstance(path, str):
+        raise ValueError("unavailable")
+    try:
+        target = WorkspacePaths(workspace).resolve(path)
+    except WorkspacePathError:
+        raise ValueError("unavailable") from None
+    if entry.get("change") == "created":
+        before: bytes | None = b""
+    else:
+        digest = entry.get("before")
+        before = versions.read(digest) if isinstance(digest, str) else None
+    if before is None:
+        raise ValueError("not_kept")
+    try:
+        after = target.read_bytes()
+    except OSError:
+        raise ValueError("unavailable") from None
+    if hashlib.sha256(after).hexdigest() != expected_sha256:
+        raise ValueError("changed")  # changed since the diff was shown: show it again first
+    try:
+        old_lines = before.decode("utf-8").splitlines(keepends=True)
+        new_lines = after.decode("utf-8").splitlines(keepends=True)
+    except UnicodeDecodeError:
+        raise ValueError("binary") from None
+    groups = list(difflib.SequenceMatcher(None, old_lines, new_lines).get_grouped_opcodes(3))
+    if not 0 <= index < len(groups):
+        raise ValueError("unavailable")
+    result = list(new_lines)
+    # From the end, so the earlier positions stay where they are.
+    for tag, i1, i2, j1, j2 in reversed(groups[index]):
+        if tag != "equal":
+            result[j1:j2] = old_lines[i1:i2]
+    data = "".join(result).encode("utf-8")
+    versions.keep(after)  # what was replaced, like any write of the agent's
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.undo")
+    temporary.write_bytes(data)
+    os.replace(temporary, target)
+    return hashlib.sha256(data).hexdigest()
 
 
 __all__ = [
@@ -542,5 +601,6 @@ __all__ = [
     "file_diff",
     "list_folder",
     "start_turn_watch",
+    "undo_hunk",
     "undo_turn_files",
 ]

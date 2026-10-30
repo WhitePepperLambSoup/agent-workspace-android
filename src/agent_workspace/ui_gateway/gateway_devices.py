@@ -660,7 +660,8 @@ class DeviceCommands(GatewayState):
                     extra_tools=(self._skill_tool,),
                     system_note=self._system_note,
                     turn_files=start_turn_watch,
-                    workspace_tools=self._research_tools,
+                    workspace_tools=self._folder_tools,
+                    tool_hooks=self._coding.hooks,
                 )
             )
             host.start()

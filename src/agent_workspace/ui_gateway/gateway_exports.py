@@ -50,9 +50,9 @@ class ExportCommands(GatewayState):
         folder = paths.resolve(EXPORT_FOLDER)
         try:
             folder.mkdir(parents=True, exist_ok=True)
-            target = _unused(folder / export_name(title or markdown.splitlines()[0], f".{kind}"))
+            target = unused(folder / export_name(title or markdown.splitlines()[0], f".{kind}"))
             data = markdown_docx(markdown, title) if kind == "docx" else markdown.encode("utf-8")
-            _write_new(target, data)
+            write_new(target, data)
         except OSError:
             raise GatewayError("storage_unavailable") from None
         return self._reply(
@@ -62,7 +62,7 @@ class ExportCommands(GatewayState):
         )
 
 
-def _unused(target: Path) -> Path:
+def unused(target: Path) -> Path:
     """target, or target-2, -3 … when a file of that name is there (two saves in one second)."""
     candidate, number = target, 2
     while candidate.exists():
@@ -71,7 +71,7 @@ def _unused(target: Path) -> Path:
     return candidate
 
 
-def _write_new(target: Path, data: bytes) -> None:
+def write_new(target: Path, data: bytes) -> None:
     descriptor, temporary = tempfile.mkstemp(prefix=".export-", dir=target.parent)
     try:
         with os.fdopen(descriptor, "wb") as stream:

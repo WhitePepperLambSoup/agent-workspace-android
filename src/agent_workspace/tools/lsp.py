@@ -17,7 +17,7 @@ import os
 import subprocess
 from asyncio import StreamReader, StreamWriter
 from asyncio.subprocess import Process
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -159,9 +159,14 @@ class StdioLspClient:
         command: Sequence[str],
         *,
         init_timeout: float = 15.0,
+        extra_environment: Mapping[str, str] | None = None,
     ) -> None:
         self._command = tuple(command)
         self._init_timeout = init_timeout
+        # Added to the clean environment (the desktop runs JavaScript servers with its own
+        # Electron as Node: ELECTRON_RUN_AS_NODE=1).
+        self._extra_environment = dict(extra_environment or {})
+        self._workspace_folders: list[dict[str, str]] = []
         self._process: Process | None = None
         self._stdin: StreamWriter | None = None
         self._stdout: StreamReader | None = None
@@ -193,7 +198,10 @@ class StdioLspClient:
                 raise LspClientError("LSP client is already connected without capabilities")
             return capabilities
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        environment = _lsp_environment()
+        environment = {**_lsp_environment(), **self._extra_environment}
+        folders = initialize_params.get("workspaceFolders")
+        if isinstance(folders, list):
+            self._workspace_folders = [item for item in folders if isinstance(item, dict)]
         try:
             process = await asyncio.create_subprocess_exec(
                 *self._command,
@@ -332,7 +340,11 @@ class StdioLspClient:
         try:
             while True:
                 message = await self._read_frame(reader)
-                if "id" in message:
+                if "id" in message and isinstance(message.get("method"), str):
+                    # A request from the server (pyright asks for its settings): answered, not
+                    # taken for the response to one of ours that has the same id.
+                    await self._answer_server_request(message)
+                elif "id" in message:
                     self._resolve_response(message)
                 else:
                     self._handle_notification(message)
@@ -375,6 +387,18 @@ class StdioLspClient:
         if not isinstance(message, dict):
             raise LspClientError("LSP server sent a non-object JSON message")
         return message
+
+    async def _answer_server_request(self, message: dict[str, Any]) -> None:
+        method = message["method"]
+        params = message.get("params")
+        result: Any = None
+        if method == "workspace/configuration":
+            items = params.get("items") if isinstance(params, dict) else None
+            result = [None] * (len(items) if isinstance(items, list) else 0)
+        elif method == "workspace/workspaceFolders":
+            result = self._workspace_folders
+        with suppress(LspClientError, OSError):
+            await self._send({"jsonrpc": "2.0", "id": message["id"], "result": result})
 
     def _resolve_response(self, message: dict[str, Any]) -> None:
         request_id = message["id"]

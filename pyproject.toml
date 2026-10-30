@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-workspace"
-version = "0.1.0a1"
+version = "0.2.0a1"
 description = "Local-first Electron desktop and CLI agent workspace"
 readme = "README.md"
 requires-python = ">=3.12"

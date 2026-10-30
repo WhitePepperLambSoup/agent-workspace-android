@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 from uuid import uuid4
 
-from agent_workspace.application.ports import Tool
+from agent_workspace.application.ports import Tool, ToolHooks
 from agent_workspace.application.runner import RunResult
 from agent_workspace.application.runtime import (
     ApplicationRuntime,
@@ -93,6 +93,12 @@ _PLAN_FIRST = (
     "check the result. Do not write files or run commands yet; the user reads the plan and then "
     "asks you to carry it out. End with any questions that would change the plan."
 )
+
+
+def _tool_allowed(name: str, allowed: frozenset[str]) -> bool:
+    return name in allowed or any(
+        item.endswith("*") and name.startswith(item[:-1]) for item in allowed
+    )
 
 
 def _reads_only(spec: ToolSpec) -> bool:
@@ -220,6 +226,9 @@ class RuntimeSettings:
     turn_files: Callable[[Path], TurnObserver] | None = None
     # Tools that work on the open folder (the desktop's research tools), made for it at start.
     workspace_tools: Callable[[Path], tuple[Tool, ...]] | None = None
+    # What runs around tool calls in the open folder (the desktop's project rules), made for it
+    # at start; None runs tools as they are.
+    tool_hooks: Callable[[Path], ToolHooks] | None = None
 
 
 @dataclass(slots=True)
@@ -319,6 +328,8 @@ class RuntimeHost(threading.Thread):
                 extra_tools = (*extra_tools, *folder_tools(self.settings.workspace))
             if extra_tools:
                 build_options["extra_tools"] = extra_tools
+            if self.settings.tool_hooks is not None:
+                build_options["tool_hooks"] = self.settings.tool_hooks(self.settings.workspace)
             self._runtime = loop.run_until_complete(
                 build_runtime_async(
                     self.settings.workspace,
@@ -422,11 +433,15 @@ class RuntimeHost(threading.Thread):
         model: str | None = None,
         limits: TaskLimits | None = None,
         plan_only: bool = False,
+        team: str | None = None,
+        tools: frozenset[str] | None = None,
     ) -> Future[None]:
         """Run one turn; ``model`` overrides the Provider's model for this turn only.
 
         ``plan_only`` limits the turn to tools that only read, and asks for a plan the user
-        approves before anything changes.
+        approves before anything changes. ``team`` is the note that makes the agent lead an
+        expert team for this turn (core.experts.lead_instructions). ``tools`` limits the turn to
+        these tools (names, or prefixes ending in "*"), as an expert of a team gets.
         """
         loop = self._loop
         if loop is None or loop.is_closed() or not self._accepting or self._closing:
@@ -440,6 +455,8 @@ class RuntimeHost(threading.Thread):
                 model=model,
                 limits=limits,
                 plan_only=plan_only,
+                team=team,
+                tools=tools,
             ),
             loop,
         )
@@ -797,6 +814,8 @@ class RuntimeHost(threading.Thread):
         model: str | None = None,
         limits: TaskLimits | None = None,
         plan_only: bool = False,
+        team: str | None = None,
+        tools: frozenset[str] | None = None,
     ) -> None:
         if not self._accepting or self._closing:
             self._emit("runtime.command_rejected", {"reason": "runtime is stopping"})
@@ -890,6 +909,17 @@ class RuntimeHost(threading.Thread):
                 )
                 earlier = options.get("system_suffix")
                 options["system_suffix"] = f"{earlier}\n\n{_PLAN_FIRST}" if earlier else _PLAN_FIRST
+            if team:
+                earlier = options.get("system_suffix")
+                options["system_suffix"] = f"{earlier}\n\n{team}" if earlier else team
+            if tools is not None:
+                chosen = frozenset(
+                    spec.name
+                    for spec in runtime.service.tool_registry.specs()
+                    if _tool_allowed(spec.name, tools)
+                )
+                earlier_tools = options.get("allowed_tools")
+                options["allowed_tools"] = chosen & earlier_tools if earlier_tools else chosen
             if self.settings.turn_files is not None:
                 watch = await asyncio.to_thread(
                     _watch_turn, self.settings.turn_files, self.settings.workspace

@@ -62,6 +62,7 @@ from agent_workspace.ui_gateway.turn_files import (
     changed_file,
     display_record,
     file_diff,
+    undo_hunk,
     undo_turn_files,
 )
 
@@ -680,6 +681,44 @@ class SessionCommands(GatewayState):
         return self._reply(
             "turn.files.diff.result",
             {"epoch": self.epoch, "eventId": record.id, "path": path, **document},
+            session_id=None,
+        )
+
+    def _undo_turn_hunk(self, command: CommandEnvelope) -> GatewayReply:
+        """Put one part of a turn's change in a file back (the hunk the window shows)."""
+        self._require_payload(command, {"sessionId", "eventId", "path", "hunk", "sha256"})
+        session, record = self._turn_files_record(command)
+        path, hunk, sha256 = (command.payload.get(key) for key in ("path", "hunk", "sha256"))
+        if (
+            not isinstance(path, str)
+            or not path
+            or type(hunk) is not int
+            or not isinstance(sha256, str)
+        ):
+            raise GatewayError("invalid_payload")
+        try:
+            entry = changed_file(record, path)
+        except KeyError:
+            raise GatewayError("unknown_path") from None
+        with self._lock:
+            running = session.id == self._host_session_id and (
+                self._active_turn is not None or self._turn_requested
+            )
+        if running:
+            raise GatewayError("runtime_busy")  # the agent may still be changing the file
+        try:
+            current = undo_hunk(Path(session.workspace), self._file_versions, entry, hunk, sha256)
+        except ValueError as reason:
+            return self._reply(
+                "turn.files.hunk.undo.result",
+                {"epoch": self.epoch, "path": path, "undone": False, "reason": str(reason)},
+                session_id=None,
+            )
+        except OSError:
+            raise GatewayError("storage_unavailable") from None
+        return self._reply(
+            "turn.files.hunk.undo.result",
+            {"epoch": self.epoch, "path": path, "undone": True, "currentSha256": current},
             session_id=None,
         )
 

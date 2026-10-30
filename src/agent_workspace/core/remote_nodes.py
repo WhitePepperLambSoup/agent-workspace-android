@@ -257,6 +257,7 @@ class RemoteNodeRegistry:
                 if runner is not None
                 else subprocess.run(
                     command,
+                    stdin=subprocess.DEVNULL,
                     capture_output=True,
                     text=True,
                     timeout=node.heartbeat_timeout_seconds,

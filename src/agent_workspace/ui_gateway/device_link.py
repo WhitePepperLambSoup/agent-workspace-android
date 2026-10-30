@@ -63,6 +63,7 @@ FEATURES = (
     "inbox_read",
     "knowledge",
     "device",
+    "code_review",
 )
 DEFAULT_PORT = 8765
 _MAX_BODY_BYTES = 512 * 1024
@@ -684,6 +685,27 @@ class DeviceLinkBackend(Protocol):
 
     def device_unpair(self, device: PairedDevice) -> None: ...
 
+    # Code review from the phone (device_review.py).
+    def device_changes(self, device: PairedDevice) -> dict[str, object]: ...
+
+    def device_change_diff(self, device: PairedDevice, path: str) -> dict[str, object]: ...
+
+    def device_reviews(self, device: PairedDevice) -> dict[str, object]: ...
+
+    def device_review(self, device: PairedDevice, snapshot_id: str) -> dict[str, object]: ...
+
+    def device_review_create(
+        self, device: PairedDevice, payload: dict[str, Any]
+    ) -> dict[str, object]: ...
+
+    def device_review_comment(
+        self, device: PairedDevice, snapshot_id: str, payload: dict[str, Any]
+    ) -> dict[str, object]: ...
+
+    def device_review_followup(
+        self, device: PairedDevice, comment_id: str, payload: dict[str, Any]
+    ) -> dict[str, object]: ...
+
 
 @dataclass(frozen=True, slots=True)
 class TaskOptions:
@@ -917,6 +939,21 @@ class _Handler(BaseHTTPRequestHandler):
             elif parts == ["mobile", "inbox"]:
                 device = self._device("read")
                 self._reply(200, backend.device_inbox(device))
+            elif parts == ["mobile", "changes"]:
+                device = self._device("read")
+                self._reply(200, backend.device_changes(device))
+            elif parts == ["mobile", "changes", "diff"]:
+                device = self._device("read")
+                path = (self._query().get("path") or [""])[0]
+                if not path:
+                    raise DeviceLinkError("invalid_path")
+                self._reply(200, backend.device_change_diff(device, path))
+            elif parts == ["mobile", "reviews"]:
+                device = self._device("read")
+                self._reply(200, backend.device_reviews(device))
+            elif len(parts) == 3 and parts[:2] == ["mobile", "reviews"]:
+                device = self._device("read")
+                self._reply(200, backend.device_review(device, parts[2]))
             elif parts == ["sessions"]:
                 self._device("read")
                 self._reply(200, {"sessions": backend.device_sessions()})
@@ -1028,6 +1065,23 @@ class _Handler(BaseHTTPRequestHandler):
             elif parts == ["mobile", "device"]:
                 device = self._device("read")
                 self._reply(200, self.link.backend.device_settings(device, self._body()))
+            elif parts == ["mobile", "reviews"]:
+                device = self._device("tasks")
+                self._reply(201, self.link.backend.device_review_create(device, self._body()))
+            elif len(parts) == 4 and parts[:2] == ["mobile", "reviews"] and parts[3] == "comments":
+                device = self._device("tasks")
+                self._reply(
+                    201, self.link.backend.device_review_comment(device, parts[2], self._body())
+                )
+            elif (
+                len(parts) == 5
+                and parts[:3] == ["mobile", "reviews", "comments"]
+                and parts[4] == "followup"
+            ):
+                device = self._device("tasks")
+                self._reply(
+                    200, self.link.backend.device_review_followup(device, parts[3], self._body())
+                )
             elif parts == ["mobile", "device", "unpair"]:
                 device = self._device("read")
                 self._body()
@@ -1686,6 +1740,9 @@ def wake_targets() -> list[dict[str, str]]:
     try:
         completed = subprocess.run(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            # Not the gateway's stdin: a child given a pipe another thread is reading waits
+            # at start until that read ends (Windows).
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=15,

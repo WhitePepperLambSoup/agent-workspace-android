@@ -61,6 +61,8 @@ ACTIVITY_ACTIONS = frozenset(
         "job_sent",
         "job_finished",
         "knowledge_synced",
+        "review_comment",
+        "review_followup",
     }
 )
 

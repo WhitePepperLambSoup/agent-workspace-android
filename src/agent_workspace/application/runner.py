@@ -25,6 +25,7 @@ from agent_workspace.application.ports import (
     RetryObservableProvider,
     Tool,
     ToolExecutionContext,
+    ToolHooks,
     ToolRegistryPort,
 )
 from agent_workspace.application.turn_inputs import TurnInputBuffer
@@ -173,6 +174,7 @@ class AgentRunner:
         parallel_tool_calls: bool = False,
         profile_turns: bool = False,
         raw_trace: RawConversationTrace | None = None,
+        tool_hooks: ToolHooks | None = None,
     ) -> None:
         self._store = store
         self._provider = provider
@@ -185,6 +187,7 @@ class AgentRunner:
         self._parallel_tool_calls = parallel_tool_calls
         self._profile_turns = profile_turns
         self._raw_trace = raw_trace
+        self._tool_hooks = tool_hooks
         self._system_prompt_cache: dict[tuple[Mode, Autonomy, str], ChatMessage] = {}
         self._turn_inputs: dict[str, TurnInputBuffer] = {}
 
@@ -1824,6 +1827,32 @@ class AgentRunner:
             )
         return _tool_message(call, result)
 
+    async def _hook_before_tool(
+        self, name: str, arguments: dict[str, Any], session_id: str
+    ) -> str | None:
+        hooks = self._tool_hooks
+        if hooks is None:
+            return None
+        try:
+            refusal = await hooks.before_tool(name, arguments, session_id=session_id)
+        except Exception:
+            logging.getLogger(__name__).exception("tool hook before %s failed", name)
+            return None
+        return refusal if isinstance(refusal, str) and refusal.strip() else None
+
+    async def _hook_after_tool(
+        self, name: str, arguments: dict[str, Any], result: str, session_id: str
+    ) -> str | None:
+        hooks = self._tool_hooks
+        if hooks is None:
+            return None
+        try:
+            addendum = await hooks.after_tool(name, arguments, result, session_id=session_id)
+        except Exception:
+            logging.getLogger(__name__).exception("tool hook after %s failed", name)
+            return None
+        return addendum if isinstance(addendum, str) and addendum.strip() else None
+
     async def _execute_tool(
         self,
         session_id: str,
@@ -1953,6 +1982,26 @@ class AgentRunner:
                 f"Tool preparation failed ({type(exc).__name__}): {exc}. "
                 "Continue with another approach or retry with corrected arguments."
             )
+            await self._record(
+                Event(
+                    session_id=session_id,
+                    type="tool.rejected",
+                    data={
+                        "attempt_id": attempt_id,
+                        "tool_call_id": call.id,
+                        "name": call.name,
+                        "reason": result,
+                        "recoverable": True,
+                    },
+                    causation_id=proposed.id,
+                    correlation_id=correlation_id,
+                )
+            )
+            return _tool_message(call, result)
+
+        refusal = await self._hook_before_tool(call.name, execution_arguments, session_id)
+        if refusal is not None:
+            result = f"Refused by the project's rules: {refusal}"
             await self._record(
                 Event(
                     session_id=session_id,
@@ -2290,6 +2339,12 @@ class AgentRunner:
             return _tool_message(call, result)
 
         assert outcome.result is not None
+        addendum = await self._hook_after_tool(
+            call.name, execution_arguments, outcome.result, session_id
+        )
+        if addendum:
+            # Recorded with the result, so later requests (and a resumed turn) show the same text.
+            outcome = replace(outcome, result=f"{outcome.result}\n\n{addendum}")
         if self._raw_trace is not None:
             self._raw_trace.record(
                 session_id=session_id,
@@ -2414,7 +2469,11 @@ class AgentRunner:
                 "performing dependent actions.]"
             )
         tool_images: tuple[ImagePart, ...] = ()
-        if call.name in {"attach_image", "android_screenshot", "render_pdf"} and pending_artifacts:
+        # check_page is a tool only the desktop app adds (coding/page_check.py).
+        if (
+            call.name in {"attach_image", "android_screenshot", "render_pdf", "check_page"}
+            and pending_artifacts
+        ):
             tool_images = _image_parts_from_artifacts(tuple(pending_artifacts.values()))
         return _tool_message(call, result, images=tool_images)
 

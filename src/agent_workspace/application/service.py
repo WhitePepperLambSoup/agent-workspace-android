@@ -10,6 +10,7 @@ from agent_workspace.application.ports import (
     EventStore,
     ModelProvider,
     PolicyPort,
+    ToolHooks,
     ToolRegistryPort,
 )
 from agent_workspace.application.prompt_context import resolve_workspace_prompt_context
@@ -54,6 +55,7 @@ class ApplicationService:
         parallel_tool_calls: bool = False,
         profile_turns: bool = False,
         raw_trace: RawConversationTrace | None = None,
+        tool_hooks: ToolHooks | None = None,
     ) -> None:
         self.store = store
         self._tools = tools
@@ -81,6 +83,7 @@ class ApplicationService:
             parallel_tool_calls=parallel_tool_calls,
             profile_turns=profile_turns,
             raw_trace=raw_trace,
+            tool_hooks=tool_hooks,
         )
 
     def create_session(

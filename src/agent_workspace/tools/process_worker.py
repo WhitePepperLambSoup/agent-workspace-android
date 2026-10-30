@@ -417,6 +417,7 @@ def terminate_process_tree_pid(pid: int, *, timeout: float = _TERMINATE_SECONDS)
         completed = subprocess.run(
             ["taskkill.exe", "/PID", str(pid), "/T", "/F"],
             check=False,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             creationflags=creationflags,
         )

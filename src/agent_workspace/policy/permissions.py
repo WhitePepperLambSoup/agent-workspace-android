@@ -27,7 +27,9 @@ ApprovalResult = ApprovalDecision
 _LOCATION_KEYS = ("source", "destination", "repository", "cwd", "path")
 # Native actions with a fixed effect, not general command execution. add_calendar_event (the
 # Android app) writes one event to the user's calendar after a one-time approval.
-_FIXED_COMMAND_PROCESS_TOOLS = frozenset({"speak_text", "add_calendar_event"})
+# Process tools whose command the model does not write: run_checks runs the commands the user
+# set up for the folder.
+_FIXED_COMMAND_PROCESS_TOOLS = frozenset({"speak_text", "add_calendar_event", "run_checks"})
 
 
 type ApprovalValue = ApprovalResult | bool

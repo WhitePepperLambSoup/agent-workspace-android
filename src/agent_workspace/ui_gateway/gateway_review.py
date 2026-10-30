@@ -19,6 +19,7 @@ from typing import cast
 from agent_workspace.application.agent_control import AgentControlError
 from agent_workspace.application.github_delivery import GitHubDeliveryError, GitHubDeliveryService
 from agent_workspace.application.review_workflow import ReviewWorkflowError, ReviewWorkflowService
+from agent_workspace.coding.review_ai import ReviewAiError, review_change
 from agent_workspace.core.git_diff_review import FileDiff, GitDiffReviewService
 from agent_workspace.core.git_ops import (
     GitOpsError,
@@ -578,6 +579,55 @@ class ReviewCommands(GatewayState):
             raise GatewayError(str(error)) from None
         except (GitOpsError, OSError, ValueError):
             raise GatewayError("review_capture_failed") from None
+
+    def _review_with_model(self, command: CommandEnvelope) -> GatewayReply:
+        """The model reviews a snapshot; its findings become comments by "ai" on the diff."""
+        self._require_payload(command, {"snapshotId"}, optional={"language"})
+        snapshot_id = command.payload.get("snapshotId")
+        language = command.payload.get("language", "en-US")
+        if not isinstance(snapshot_id, str) or not snapshot_id or not isinstance(language, str):
+            raise GatewayError("invalid_snapshot")
+        service = self._review_service()
+        snapshot = service.get_snapshot(snapshot_id)
+        with self._lock:
+            workspace = self._workspace
+        if snapshot is None or workspace is None or snapshot.workspace != str(workspace):
+            raise GatewayError("snapshot_not_found")
+        config = self._quick_provider()
+        try:
+            findings, skipped = review_change(
+                config,
+                snapshot.files,
+                checkout=Path(snapshot.checkout_path),
+                language=language,
+            )
+        except ReviewAiError as error:
+            raise GatewayError(str(error)) from None
+        created = 0
+        for finding in findings:
+            try:
+                service.create_comment(
+                    snapshot.id,
+                    path=finding.path,
+                    side=finding.side,
+                    line=finding.line,
+                    body=finding.comment(),
+                    author="ai",
+                )
+            except ReviewWorkflowError:
+                skipped += 1
+            else:
+                created += 1
+        return self._reply(
+            "workspace.review.ai.result",
+            {
+                **self._review_details_payload(service, snapshot),
+                "aiFindings": created,
+                "aiSkipped": skipped,
+                "model": config.model,
+            },
+            session_id=snapshot.session_id,
+        )
 
     def _create_review_comment(self, command: CommandEnvelope) -> GatewayReply:
         self._require_payload(command, {"snapshotId", "path", "side", "line", "body"})

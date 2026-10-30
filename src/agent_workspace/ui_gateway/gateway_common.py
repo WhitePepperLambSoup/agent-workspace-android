@@ -28,6 +28,7 @@ from agent_workspace.core.budgets import (
     TaskLimits,
 )
 from agent_workspace.core.events import Event
+from agent_workspace.core.experts import Team
 from agent_workspace.core.models import (
     ApprovalScope,
     Autonomy,
@@ -87,6 +88,11 @@ _MAX_AGENT_RUN_CONTINUATIONS = 8
 # sub-agent's final answer goes back to it.
 _DELEGATION_POLL_SECONDS = 1.0
 _DELEGATION_ANSWER_CHARS = 6_000
+# On an expert team's turn the lead answers from the experts that finished once a call has
+# waited this long (coding experts with tools can take several minutes), after giving the
+# stopped ones a moment to wind down.
+_EXPERT_TIME_LIMIT_SECONDS = 12 * 60.0
+_EXPERT_STOP_GRACE_SECONDS = 30.0
 _MAX_PROVIDER_NAME_CHARS = 128
 _MAX_PROVIDER_BASE_URL_CHARS = 2_048
 _MAX_PROVIDER_MODEL_CHARS = 512
@@ -586,6 +592,18 @@ class _Delegation:
 
     parent_session_id: str
     title: str
+    # On an expert team's turn: the expert's id, and whether the run does its part ("work")
+    # or reviews the others' findings ("review").
+    expert: str | None = None
+    phase: str | None = None
+
+
+@dataclass(slots=True)
+class _TeamTurn:
+    """The expert team of the conversation turn in progress, and its delegate_tasks rounds."""
+
+    team: Team
+    rounds: int = 0
 
 
 class _GatewaySubagents:
