@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.6.1 — 2026-10-30
+
+2.6.1 修复开着专家团时输入框下方按钮重叠的问题。Agent Workspace 2.6.1 fixes the buttons under the message box overlapping when Expert team is on.
+
+电脑版 / Desktop app: https://github.com/WhitePepperLambSoup/agent-workspace-desktop
+
+### 中文
+
+- 修复：开着专家团时，常见宽度的手机上输入框下面那排按钮放不下：模型和计划按钮被压扁，图标叠在一起，发送和停止按钮伸出输入框。现在按钮保持原来的大小；地方不够时先缩短模型名，再让开着的「专家团」「计划」只显示图标、保留底色；屏幕更窄时这排按钮可以左右滑动，麦克风和发送按钮位置不变。
+- 改进：关着的「计划」「专家团」按钮改为圆形，和权限、知识库按钮一致。
+- 覆盖安装即可，数据会保留。
+
+### English
+
+- Fixed: with Expert team on, the row of buttons under the message box did not fit on phones of common width: the model and plan buttons were squeezed until their icons overlapped, and the send and stop buttons stuck out of the box. The buttons now keep their size. When room runs short the model's name gets shorter first, then Expert team and Plan show only their icons and keep their tint; on a narrower screen the row scrolls sideways while the mic and send buttons stay in place.
+- Improved: Plan and Expert team are round buttons while off, like the permission and knowledge base buttons.
+- Install over the existing app; your data is kept.
+
 ## 2.6.0 — 2026-10-30
 
 2.6.0 新增专家团和 3D 工作室，能查论文、处理办公文件，回复可以导出，任务改过的文件可以恢复。Agent Workspace 2.6.0 adds the expert team and its 3D studio, papers and Office files, exporting a reply, and putting back the files a task changed.

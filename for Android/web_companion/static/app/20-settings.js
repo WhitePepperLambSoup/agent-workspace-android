@@ -149,6 +149,32 @@
   }
   document.fonts?.ready?.then(() => { if (!disposed) resizePrompt(); });
 
+  // Switched-on chips (计划, 专家团) drop their words once the row overflows or the model's name is cut
+  // to almost nothing; measured with the words shown, in the same frame, so nothing flickers.
+  const composerToolbar = document.querySelector(".composer-toolbar");
+  const composerChips = document.querySelector(".composer-chips");
+  let toolbarFitQueued = false;
+  function fitComposerToolbar() {
+    toolbarFitQueued = false;
+    if (disposed) return;
+    delete composerToolbar.dataset.compact;
+    delete elements.modelBar.dataset.bare;
+    const nameCut = elements.modelBar.clientWidth < 72 && elements.modelSummary.scrollWidth > elements.modelSummary.clientWidth + 1;
+    if (nameCut || composerChips.scrollWidth > composerChips.clientWidth + 1) composerToolbar.dataset.compact = "true";
+    // No room for even a character or two: the icon alone (the chip's title still names the model).
+    if (elements.modelBar.clientWidth && elements.modelBar.clientWidth < 56) elements.modelBar.dataset.bare = "true";
+  }
+  function queueToolbarFit() {
+    if (toolbarFitQueued) return;
+    toolbarFitQueued = true;
+    if (window.requestAnimationFrame) window.requestAnimationFrame(fitComposerToolbar);
+    else window.setTimeout(fitComposerToolbar, 16);
+  }
+  if (typeof window.ResizeObserver === "function") new window.ResizeObserver(queueToolbarFit).observe(composerToolbar);
+  new MutationObserver(queueToolbarFit).observe(composerToolbar,
+    { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["class", "hidden"] });
+  document.fonts?.ready?.then(queueToolbarFit);
+
   function resizeVisibleViewport() {
     const viewport = window.visualViewport;
     if (!viewport || Math.abs((viewport.scale || 1) - 1) > 0.01 || !Number.isFinite(viewport.height) || viewport.height <= 0) return;

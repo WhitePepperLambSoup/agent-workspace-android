@@ -536,6 +536,15 @@ strong { font-weight: 600; }
 }
 .composer-toolbar > .icon-button { width: 40px; height: 40px; border-radius: 50%; }
 .composer-spacer { flex: 1 1 auto; }
+/* Chips keep their size: the model's name gives way first, then the words of switched-on chips
+   (data-compact, app/20-settings.js), and on a still narrower screen the row scrolls sideways.
+   The padding keeps the knowledge badge, the model's rim and focus rings inside the scroll box. */
+.composer-chips {
+  display: flex; flex: 0 1 auto; align-items: center; gap: 4px; min-width: 0; margin: -6px -6px -6px -4px; padding: 6px 6px 6px 4px;
+  overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-width: none;
+}
+.composer-chips::-webkit-scrollbar { display: none; }
+.composer-chips > .composer-chip { flex-shrink: 0; }
 .composer-chip {
   display: inline-flex; flex: 0 1 auto; align-items: center; gap: 5px; min-width: 0; height: 32px; padding: 0 10px;
   border: 1px solid var(--border); border-radius: var(--radius-pill); background: transparent; color: var(--text-2);
@@ -544,7 +553,8 @@ strong { font-weight: 600; }
 .composer-chip:active { background: var(--surface-2); }
 .composer-chip svg { flex: 0 0 14px; width: 14px; height: 14px; color: var(--accent); }
 .composer-chip > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#modelBar { flex: 0 1 auto; }
+#modelBar { flex: 0 1 auto; min-width: 36px; }
+#modelBar[data-bare="true"] > #modelSummary { display: none; }
 /* Mode is a color-coded shield: green workspace, amber YOLO, red full access. */
 .mode-chip { flex: 0 0 auto; width: 32px; padding: 0; justify-content: center; }
 .mode-chip > #executionSummary { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); }
@@ -1921,8 +1931,10 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
 .session-tag-input { display: flex; gap: 8px; }
 .session-tag-input > input { flex: 1; min-width: 0; min-height: 40px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--text); font: inherit; }
 /* Plan mode: an icon chip that says 计划 while on; the approval under a finished plan. */
-.plan-chip { padding: 0 10px; }
+.plan-chip { width: 32px; padding: 0; justify-content: center; }
+.plan-chip svg { width: 16px; height: 16px; }
 .plan-chip .plan-chip-label { display: none; }
+.plan-chip.active { width: auto; padding: 0 10px; }
 .plan-chip.active { border-color: transparent; background: var(--accent-soft); color: var(--accent-soft-text); }
 .plan-chip.active .plan-chip-label { display: inline; }
 .plan-approve { display: inline-flex; align-items: center; gap: 6px; margin-top: 12px; min-height: 40px; padding: 0 18px; border-radius: 999px; }
@@ -2186,11 +2198,14 @@ body.elder-mode #appShell { display: none; }
 .cost-estimate[hidden] { display: none; }
 
 /* Expert team (29-team.js): the composer chip, the team page, the experts under their step. */
-.team-chip { padding: 0 10px; }
+.team-chip { width: 32px; padding: 0; justify-content: center; }
+.team-chip svg { width: 16px; height: 16px; }
 .team-chip .team-chip-label { display: none; }
-/* On, it keeps its whole label; the model's name gives way first on a narrow phone. */
-.team-chip.active { flex-shrink: 0; border-color: transparent; background: var(--accent-soft); color: var(--accent-soft-text); }
+/* On, it says 专家团 while there is room (see .composer-chips). */
+.team-chip.active { width: auto; padding: 0 10px; border-color: transparent; background: var(--accent-soft); color: var(--accent-soft-text); }
 .team-chip.active .team-chip-label { display: inline; }
+.composer-toolbar[data-compact="true"] :is(.plan-chip, .team-chip).active { width: 32px; padding: 0; }
+.composer-toolbar[data-compact="true"] .active > :is(.plan-chip-label, .team-chip-label) { display: none; }
 .team-swatch { flex: 0 0 auto; width: 10px; height: 10px; border-radius: 3px; background: var(--swatch, var(--accent)); }
 .team-members { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
 .team-member { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 4px 8px 4px 10px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--surface); color: var(--text); font-size: 13px; }

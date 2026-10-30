@@ -14,14 +14,14 @@ An AI agent that runs on your Android phone. It plans and carries out multi-step
 
 ## Download
 
-Get `AgentWorkspace_2.6.0_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app: it checks at every start and about every 12 hours, and you can check yourself under Menu → About and updates, or "Updates" on the loading screen. Changes in each version are listed in the [CHANGELOG](CHANGELOG.md).
+Get `AgentWorkspace_2.6.1_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app: it checks at every start and about every 12 hours, and you can check yourself under Menu → About and updates, or "Updates" on the loading screen. Changes in each version are listed in the [CHANGELOG](CHANGELOG.md).
 
 - Android 8.0 (API 26) or newer, 64-bit ARM (`arm64-v8a`) or `x86_64`; phones running a 32-bit-only system cannot install it.
 - The interface is shown by the system's Android System WebView, which must be Chromium 80 or newer. If WebView is disabled, missing or too old, the app explains why and links to the app store to update it.
 - Works on Android 15+ devices with 16 KB memory pages, foldables, split screen and external keyboards, and keeps its own colours under system or vendor "force dark" modes.
 - About 75 MB to install. Local models and the offline speech model are optional downloads inside the app.
 
-2.6.0 adds the expert team (several experts research a question and the answer brings their work together) and a 3D studio to watch them; papers and reference checks; reading and writing Word, Excel, PowerPoint and PDF files; exporting one reply; putting back the files a task changed; and, with the desktop app paired, reviewing the computer's code changes on the phone.
+2.6.1 fixes the buttons under the message box overlapping when Expert team is on. 2.6.0 adds the expert team (several experts research a question and the answer brings their work together) and a 3D studio to watch them; papers and reference checks; reading and writing Word, Excel, PowerPoint and PDF files; exporting one reply; putting back the files a task changed; and, with the desktop app paired, reviewing the computer's code changes on the phone.
 
 ## Features
 
