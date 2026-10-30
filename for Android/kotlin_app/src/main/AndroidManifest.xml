@@ -143,6 +143,25 @@
             </intent-filter>
         </activity-alias>
 
+        <!-- "Ask the expert team" in the share menu: shared like any share (text in the composer, files
+             in the attachment inbox), with the expert team turned on for the message. -->
+        <activity-alias
+            android:name=".AskExpertTeam"
+            android:targetActivity=".WebUiActivity"
+            android:label="@string/ask_expert_team_label"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity-alias>
+
         <!-- The "Copy" button on a notification with text a computer sent (DeviceLinkNotices). -->
         <receiver
             android:name=".embedded.DeviceLinkActionReceiver"

@@ -393,6 +393,32 @@ class WebUiActivity : ComponentActivity() {
         }
     }
 
+    // Shared to "Ask the expert team" (an alias of this activity): received into the share inbox as
+    // any share; the page opens a fresh conversation, takes this share's batch into it and turns the
+    // expert team on for the message, which the user still sends.
+    private var pendingTeamShare: String? = null
+    private var deliveringTeamShare = false
+
+    private fun queueTeamShare(incoming: Intent?) {
+        if (incoming?.component?.className?.endsWith(".AskExpertTeam") != true) return
+        if (incoming.action !in setOf(Intent.ACTION_SEND, Intent.ACTION_SEND_MULTIPLE)) return
+        pendingTeamShare = incomingShareBatchId
+        deliverTeamShare()
+    }
+
+    private fun deliverTeamShare() {
+        val batch = pendingTeamShare ?: return
+        if (deliveringTeamShare || pendingSessionId != null || isDestroyed || isFinishing ||
+            webView.visibility != View.VISIBLE || !isTrustedConsoleUrl(webView.url ?: return)) return
+        deliveringTeamShare = true
+        webView.evaluateJavascript("(function(){return window.AgentMobileUi?.useExpertTeam?.(${JSONObject.quote(batch)}) === true;})()") { accepted ->
+            deliveringTeamShare = false
+            if (isDestroyed || isFinishing) return@evaluateJavascript
+            if (accepted == "true") { if (pendingTeamShare == batch) pendingTeamShare = null }
+            else shareHandler.postDelayed({ deliverTeamShare() }, 500)
+        }
+    }
+
     // A notification about a paired computer: its page, at the section the notification is about.
     private var pendingComputer: String? = null
     private var deliveringComputer = false
@@ -1030,6 +1056,7 @@ class WebUiActivity : ComponentActivity() {
                             deliverQuickAsk()
                             deliverPairingLink()
                             deliverComputerShare()
+                            deliverTeamShare()
                             deliverComputer()
                             if (voicePending) { voicePending = false; launchVoiceInput() }
                             requestTaskNotificationPermissionOnce()
@@ -1167,6 +1194,7 @@ class WebUiActivity : ComponentActivity() {
         queueComputer(intent)
         pendingQuickAsk = savedInstanceState?.getString("pending-quick-ask")
         if (savedInstanceState == null) queueQuickAsk(intent)
+        queueTeamShare(intent)
         if (!queueComputerShare(intent)) shareInbox.captureIntent(intent, incomingShareBatchId)
         voicePending = intent?.getBooleanExtra("voice_input", false) == true || intent?.action in listOf(Intent.ACTION_ASSIST, Intent.ACTION_VOICE_COMMAND)
         QuickEntry.publishShortcuts(this)
@@ -1272,6 +1300,7 @@ class WebUiActivity : ComponentActivity() {
         queueComputer(intent)
         queueQuickAsk(intent)
         incomingShareBatchId = UUID.randomUUID().toString()
+        queueTeamShare(intent)
         if (!queueComputerShare(intent)) shareInbox.captureIntent(intent, incomingShareBatchId)
         if (intent.getBooleanExtra("voice_input", false) || intent.action in listOf(Intent.ACTION_ASSIST, Intent.ACTION_VOICE_COMMAND)) {
             if (webView.visibility == View.VISIBLE) launchVoiceInput() else voicePending = true
@@ -1384,6 +1413,7 @@ class WebUiActivity : ComponentActivity() {
             deliverQuickAsk()
             deliverPairingLink()
             deliverComputerShare()
+            deliverTeamShare()
             deliverComputer()
             checkEngineOnResume()
             // Back from the overlay permission screen: show the ball now that it may draw.

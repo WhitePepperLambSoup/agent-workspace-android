@@ -41,6 +41,7 @@ SETTINGS: dict[str, dict[str, Any]] = {
     "task_notifications": {"title": "任务完成通知", "choices": _ON_OFF, "page": "notifications"},
     "offline_voice": {"title": "语音输入用离线识别", "choices": _ON_OFF, "page": "localModels"},
     "auto_update_check": {"title": "自动检查更新", "choices": _ON_OFF, "page": "about"},
+    "expert_team": {"title": "专家团（几位专家分工回答，需要云端模型）", "choices": _ON_OFF, "page": "team"},
 }
 
 # Settings pages the agent can open for the user, by the name in the menu.
@@ -51,6 +52,7 @@ PAGES: dict[str, str] = {
     "schedules": "定时任务", "notificationRules": "通知触发", "appCheck": "应用体检", "doctor": "设备与工具（无障碍、后台运行、权限）",
     "skills": "技能", "usage": "Token 与费用", "tasks": "任务中心", "files": "工作区文件", "workspaces": "工作区",
     "services": "后台服务", "extensions": "MCP 与扩展", "outbox": "待发送与接力", "provider": "服务商与 API 密钥",
+    "team": "专家团（组队方式、自定义专家、3D 工作室）",
 }
 
 # Current values, as the page last reported them (POST /mobile/app-settings/snapshot).

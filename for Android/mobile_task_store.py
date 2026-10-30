@@ -37,6 +37,8 @@ _ALLOWED_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
     ),
     TaskState.WAITING_APPROVAL: frozenset(
         {
+            # Another request of the same task is the one waited for (helpers ask side by side).
+            TaskState.WAITING_APPROVAL,
             TaskState.RUNNING,
             TaskState.SUCCEEDED,
             TaskState.FAILED,

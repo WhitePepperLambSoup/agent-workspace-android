@@ -16,6 +16,7 @@
     task_notifications: () => { const value = nativeJson("getNotificationSettings"); return value ? onOff(!!value.enabled) : null; },
     offline_voice: () => { const value = nativeJson("getVoiceInputSettings"); return value ? onOff(!!value.prefer_offline) : null; },
     auto_update_check: () => { const value = nativeJson("getUpdateSettings"); return value ? onOff(!!value.autoCheck) : null; },
+    expert_team: () => onOff(teamSettings.on),
   };
   // A setting control changed the way a tap on it does, so the page's own handler runs.
   function setControl(control, value) {
@@ -57,6 +58,7 @@
     execution_mode: [t("执行模式"), { workspace: t("仅工作区"), yolo: "YOLO", full_access: t("完全访问") }],
     floating_ball: [t("悬浮球"), onOffLabels], task_notifications: [t("任务完成通知"), onOffLabels],
     offline_voice: [t("语音输入用离线识别"), onOffLabels], auto_update_check: [t("自动检查更新"), onOffLabels],
+    expert_team: [t("专家团"), onOffLabels],
   };
   function settingValueLabel(key, value) { return settingLabels[key]?.[1]?.[value] || value; }
   // Applied only after the task: the engine restarts for these, which would stop the task.
@@ -77,6 +79,10 @@
     task_notifications: (value) => nativeSet("setTaskNotificationsEnabled", value === "on"),
     offline_voice: (value) => nativeSet("setVoiceInputPreferOffline", value === "on"),
     auto_update_check: (value) => nativeSet("setAutoUpdateCheck", value === "on"),
+    expert_team: (value) => {
+      if (value === "on" && isLocalModel()) throw new Error(t("专家团需要云端模型：本机模型要跑三到五轮，太慢。"));
+      saveTeam({ ...teamSettings, on: value === "on" });
+    },
   };
   // Pages the agent can open (app_settings_tool.PAGES); "provider" is the app's own dialog.
   function openSettingsPage(page) {

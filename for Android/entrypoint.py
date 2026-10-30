@@ -123,6 +123,11 @@ def _load_mobile_assets(token: str) -> tuple[str, dict[str, tuple[str, bytes]]]:
             "application/javascript; charset=utf-8",
             (web_root / "static" / "mobile-mermaid.js").read_bytes(),
         ),
+        # The expert team's 3D studio (three.js): app.js loads it when the studio opens.
+        "/static/mobile-studio.js": (
+            "application/javascript; charset=utf-8",
+            (web_root / "static" / "mobile-studio.js").read_bytes(),
+        ),
         "/static/management.js": (
             "application/javascript; charset=utf-8",
             (web_root / "static" / "management.js").read_bytes(),
@@ -437,6 +442,16 @@ def _disarm_stall_dump(armed: Any) -> None:
         handle.close()
 
 
+def _preload_tools() -> None:
+    """Builds the literature and office tools (about 2 s of imports on a phone) once the console's
+    first requests are served, so neither the start nor the first message waits for them."""
+    time.sleep(3)
+    with suppress(Exception):
+        from android_adapter.capabilities import preload_deferred_tools
+
+        preload_deferred_tools()
+
+
 def _recover_services(data_dir: Path) -> None:
     """End programs a crashed engine left behind, then start the services marked autostart."""
     from mobile_services import get_service_manager
@@ -524,6 +539,7 @@ async def _run_mobile_web_server(
         if data_dir
         else None
     )
+    threading.Thread(target=_preload_tools, name="tool-preload", daemon=True).start()
     try:
         await asyncio.Event().wait()
     finally:

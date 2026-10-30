@@ -13,10 +13,12 @@
   const REFRACTIVE_INDEX = 1.5;
   // Surfaces that float over the conversation. Larger panels get a wider bezel. Large panels skip the
   // dispersive filter: on a big surface it is barely visible, and switching filters is itself costly.
+  // clearRim: the tint across the curved rim as a share of the tint over the middle, where the
+  // control's own text sits; a clear rim is where the bent wallpaper and conversation show.
   const SURFACES = [
-    { selector: "#mobileHeader", bezel: 24, scale: 64, frost: 4 },
+    { selector: "#mobileHeader", bezel: 24, scale: 64, frost: 4, clearRim: 0.2 },
 
-    { selector: ".composer", bezel: 26, scale: 64, frost: 7 },
+    { selector: ".composer", bezel: 26, scale: 64, frost: 7, clearRim: 0.25 },
     { selector: "#btnJumpLatest", bezel: 18, scale: 40, frost: 0.4 },
     { selector: "#taskStatusBar", bezel: 14, scale: 30, frost: 8 },
     { selector: ".chip", bezel: 20, scale: 44, frost: 0.8 },
@@ -87,7 +89,7 @@
   }
 
   // The displacement map is smooth, so 1x is enough; the specular line is drawn at up to 2x to stay crisp.
-  function drawMaps(width, height, radius, bezel) {
+  function drawMaps(width, height, radius, bezel, clearRim = 0) {
     const margin = Math.max(bezel, radius);
     const displacementCanvas = document.createElement("canvas");
     displacementCanvas.width = width;
@@ -135,7 +137,26 @@
       specular.data.set([255, 255, 255, Math.round(Math.min(1, alpha) * 255)], (row * pixelsWide + column) * 4);
     });
     specularContext.putImageData(specular, 0, 0);
-    return { displacementCanvas, specularCanvas };
+    // The tint's mask: full over the middle, thinning out across the bezel towards the edge.
+    let fillCanvas = null;
+    if (clearRim) {
+      fillCanvas = document.createElement("canvas");
+      fillCanvas.width = width;
+      fillCanvas.height = height;
+      const fillContext = fillCanvas.getContext("2d");
+      const fill = fillContext.createImageData(width, height);
+      new Uint32Array(fill.data.buffer).fill(0xffffffff);
+      rimPixels(width, height, 1, margin, (row, column) => {
+        const { distance } = edge(column + 0.5, row + 0.5, width, height, radius);
+        const offset = (row * width + column) * 4 + 3;
+        if (distance < 0) { fill.data[offset] = 0; return; }
+        if (distance >= bezel) return;
+        const t = distance / bezel;
+        fill.data[offset] = Math.round((clearRim + (1 - clearRim) * t * t * (3 - 2 * t)) * 255);
+      });
+      fillContext.putImageData(fill, 0, 0);
+    }
+    return { displacementCanvas, specularCanvas, fillCanvas };
   }
 
   // PNG encoding is the slow part of a rebuild; toBlob does it off the main thread where available.
@@ -154,12 +175,12 @@
 
   // Elements of the same size and shape (the four suggestion cards) share one pair of maps.
   const mapCache = new Map();
-  function maps(width, height, radius, bezel) {
-    const key = `${width}x${height}r${radius}b${bezel}d${window.devicePixelRatio || 1}`;
+  function maps(width, height, radius, bezel, clearRim = 0) {
+    const key = `${width}x${height}r${radius}b${bezel}d${window.devicePixelRatio || 1}c${clearRim}`;
     if (!mapCache.has(key)) {
-      const { displacementCanvas, specularCanvas } = drawMaps(width, height, radius, bezel);
-      const pending = Promise.all([encode(displacementCanvas), encode(specularCanvas)])
-        .then(([displacementUrl, specularUrl]) => ({ displacementUrl, specularUrl }));
+      const { displacementCanvas, specularCanvas, fillCanvas } = drawMaps(width, height, radius, bezel, clearRim);
+      const pending = Promise.all([encode(displacementCanvas), encode(specularCanvas), fillCanvas ? encode(fillCanvas) : null])
+        .then(([displacementUrl, specularUrl, fillUrl]) => ({ displacementUrl, specularUrl, fillUrl }));
       mapCache.set(key, pending);
       if (mapCache.size > 24) mapCache.delete(mapCache.keys().next().value);
     }
@@ -220,7 +241,7 @@
     const bezel = Math.max(4, Math.min(surface.bezel, radius || surface.bezel, width / 2, height / 2));
     const token = (record.token || 0) + 1;
     record.token = token;
-    record.ready = maps(width, height, Math.max(radius, 1), bezel).then(({ displacementUrl, specularUrl }) => {
+    record.ready = maps(width, height, Math.max(radius, 1), bezel, surface.clearRim || 0).then(({ displacementUrl, specularUrl, fillUrl }) => {
       if (record.token !== token) return; // a newer size superseded this one
       const dispersion = surface.dispersion !== false;
       const created = filters(record.id, width, height, displacementUrl, surface.scale, dispersion);
@@ -231,6 +252,7 @@
       element.style.setProperty("--liquid-glass-moving", `blur(${surface.frost}px) url(#${record.id}) saturate(180%)`);
       element.style.setProperty("--liquid-glass-still", `blur(${surface.frost}px) url(#${record.id}${dispersion ? "-rich" : ""}) saturate(180%)`);
       element.style.setProperty("--liquid-glass-specular", `url("${specularUrl}")`);
+      if (fillUrl) element.style.setProperty("--liquid-glass-fill-mask", `url("${fillUrl}")`);
     });
     return record.ready;
   }

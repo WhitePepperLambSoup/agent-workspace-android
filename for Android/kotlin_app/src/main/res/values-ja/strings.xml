@@ -25,4 +25,5 @@
     <string name="widget_card_empty">「スケジュール」でタスクの「ホーム画面のカードに表示」をタップすると、その最新の結果がここに表示されます。</string>
     <!-- The share menu entry that sends files and text to a paired computer (device link). -->
     <string name="send_to_computer_label">パソコンに送る</string>
+    <string name="ask_expert_team_label">専門家チームに聞く</string>
 </resources>

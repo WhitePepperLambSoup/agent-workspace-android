@@ -1,3 +1,28 @@
+  // Put back what a task made or changed: first ask the engine what would happen, then confirm. A file
+  // changed again since (by a later task or by hand) is left alone.
+  async function undoTaskFiles(taskId, paths, button, status, panel) {
+    button.disabled = true;
+    const ask = (apply, chosen) => apiJson("/mobile/task-files/undo", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task_id: taskId, paths: chosen, apply }) });
+    try {
+      const preview = (await ask(false, paths)).files || [];
+      const doable = preview.filter((item) => !item.reason);
+      const kept = preview.length - doable.length;
+      if (!doable.length) {
+        status.textContent = kept ? t("没法撤销：这些文件在这次任务之后又被改过，或者没有留下改动前的版本") : t("这次任务没有可以撤销的文件改动");
+        return;
+      }
+      const lines = doable.map((item) => (item.action === "remove" ? t("删掉新建的 {0}", item.path) : t("把 {0} 恢复成任务前的样子", item.path)));
+      if (!window.confirm(t("撤销这些改动？\n{0}\n现在的内容会先另存一份。", lines.join("\n")))) return;
+      const done = ((await ask(true, doable.map((item) => item.path))).files || []).filter((item) => !item.reason);
+      for (const item of done) panel.querySelector(`.artifact-row[data-artifact-path="${CSS.escape(item.path)}"]`)?.classList.add("undone");
+      status.textContent = t("已撤销 {0} 个文件", done.length) + (kept ? t("；{0} 个文件之后又被改过，没有动", kept) : "");
+      haptic(16);
+    } catch (error) {
+      status.textContent = t("撤销失败：{0}", error.message);
+    } finally { button.disabled = false; }
+  }
+
   function renderTaskArtifacts(container, payload, taskId = "") {
     const files = taskArtifacts(payload.artifacts);
     const existing = [...container.querySelectorAll(".task-artifacts")].find(panel => panel.dataset.artifactTask === taskId);
@@ -44,9 +69,12 @@
         actions.push(["home_tool", "app-window", t("添加到桌面")]);
         row.classList.add("with-home-tool");
       }
+      // What the task made or changed can be put back as it was before (mobile_task_undo).
+      if (taskId) actions.push(["undo", "rotate-ccw", file.state === "modified" ? t("撤销对这个文件的修改") : t("撤销：删掉这个新建的文件")]);
+      row.style.setProperty("--artifact-actions", String(actions.length));
       for (const [action, glyph, title] of actions) {
         const button = actionButton(glyph, title, "data-file-action", action);
-        button.addEventListener("click", () => artifactAction(file, action, button, status));
+        button.addEventListener("click", () => (action === "undo" ? undoTaskFiles(taskId, [file.path], button, status, panel) : artifactAction(file, action, button, status)));
         row.appendChild(button);
       }
       row.appendChild(status);
@@ -68,6 +96,17 @@
         toggle.setAttribute("aria-expanded", String(!collapse));
       });
       panel.appendChild(toggle);
+    }
+    if (taskId && files.length > 1) {
+      const undoAll = document.createElement("button");
+      undoAll.type = "button";
+      undoAll.className = "text-action artifact-undo-all";
+      undoAll.textContent = t("撤销这次的全部改动");
+      const status = document.createElement("p");
+      status.className = "page-status artifact-status";
+      status.setAttribute("role", "status");
+      undoAll.addEventListener("click", () => undoTaskFiles(taskId, null, undoAll, status, panel));
+      panel.append(undoAll, status);
     }
     if (payload.artifacts_error || payload.artifacts_truncated) {
       const warning = document.createElement("p");
@@ -190,6 +229,7 @@
       const buttons = role === "assistant" ? [
         ["btn-copy", "copy", t("复制回复"), () => copyText(card.dataset.messageText)],
         ["btn-share", "share-2", t("分享回复"), () => shareText(t("Agent 回复"), card.dataset.messageText)],
+        ["btn-export", "download", t("导出这条回复（Word、PDF、长图）"), () => openAnswerExport(card)],
         ["btn-regenerate", "rotate-ccw", t("重新生成"), () => regenerateReply(card)],
         ["btn-fork", "git-branch", t("从这里分叉成新对话"), () => void forkFrom(card, true)],
         ["btn-compare", "cpu", t("换个模型对比"), () => void compareWithModel(card)],
@@ -254,6 +294,10 @@
     create_pdf: t("生成 PDF"), create_docx: t("生成 Word 文档"), create_xlsx: t("生成表格"),
     use_skill: t("使用技能"), save_skill: t("保存技能"),
     run_subagents: t("分给子任务"), ask_computer: t("交给电脑做"), app_settings: t("本应用设置"),
+    paper_search: t("检索论文"), paper_lookup: t("查找论文信息"), read_paper: t("阅读论文"), reference_library: t("管理参考文献"),
+    export_references: t("导出参考文献"), check_references: t("核对参考文献"),
+    office_read: t("读取办公文档"), word_document: t("修改 Word 文档"), spreadsheet: t("制作 Excel 表格"), pdf_tools: t("处理 PDF"),
+    slides_from_template: t("制作幻灯片"), office_template: t("按模板生成文档"),
     active_notifications: t("查看通知"), notification_reply: t("回复通知"), notification_open: t("打开通知"),
     app_audit: t("应用体检"), manage_app: t("处理应用"),
     compose_sms: t("写好短信"), system_settings: t("调整手机设置"), system_status: t("查看手机状态"),
@@ -283,7 +327,7 @@
     if (name === "android_action") return t("操作手机");
     if (args && name === "use_skill" && args.skill) return t("使用技能「{0}」", short(args.skill));
     if (args && name === "web_search" && args.query) return t("搜索「{0}」", short(args.query));
-    if (args && name === "run_subagents" && Array.isArray(args.tasks)) return t("分给 {0} 个子任务", args.tasks.length);
+    if (args && name === "run_subagents" && Array.isArray(args.tasks)) return teamToolLabel(args) || t("分给 {0} 个子任务", args.tasks.length);
     if (args && name === "ask_computer" && args.task) return t("让电脑做：{0}", short(args.task, 40));
     if (args && name === "notification_reply" && args.to) return t("回复「{0}」", short(args.to));
     if (args && name === "manage_app" && args.page) return `${appCheckActionName(args.page)} · ${short(args.package_name)}`;
@@ -303,14 +347,18 @@
     if (!card || !payload?.session_id) return;
     const steps = helperSteps.get(card) || new Map();
     helperSteps.set(card, steps);
-    steps.set(payload.session_id, toolTitles[payload.tool] || payload.tool || t("工具"));
+    // An expert who has just started has no step yet (expert team): they are thinking.
+    steps.set(payload.session_id, payload.tool ? toolTitles[payload.tool] || payload.tool : steps.get(payload.session_id) || "");
     let live = card.querySelector(".tool-live");
     if (!live) {
       live = document.createElement("pre");
       live.className = "tool-live";
       card.appendChild(live);
     }
-    live.textContent = [...steps.values()].map((step, index) => t("子任务 {0}：{1}", index + 1, step)).join("\n");
+    live.textContent = [...steps.entries()]
+      .map(([sessionId, step], index) => expertStepLine(sessionId, step) || t("子任务 {0}：{1}", index + 1, step || t("思考中")))
+      .join("\n");
+    if (expertStepLine(payload.session_id, "")) offerStudio(card);
   }
 
   function endToolOutput(card) {
@@ -379,6 +427,8 @@
     endToolOutput(card);
     // The agent proposed a settings change or a page to open: the user applies it from here.
     if (outcome === "done" && toolName === "app_settings") showAppSettingsStep(card, toolArguments.get(data.tool_call_id));
+    // An expert team's step lists each expert's part and report instead of the raw result.
+    if (outcome === "done" && toolName === "run_subagents" && showTeamResult(card, data.result)) return;
     const detail = outcome === "done" ? data.result : (data.error ?? data.reason ?? data.result);
     if (detail === undefined || detail === null || detail === "") return;
     const view = toolDetailView(detail);

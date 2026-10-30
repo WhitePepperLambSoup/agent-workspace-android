@@ -276,7 +276,18 @@ class MobileApprovalBroker:
         if not pending.future.done():
             pending.future.set_result(decision)
         self._pending.pop(request_id, None)
+        if allowed and scope == "task" and self._trusted_task_id == pending.task_id:
+            # The same task's other questions already waiting (a team's experts ask side by side)
+            # are what "allow for this task" means too, except what it never covers.
+            for other in list(self._pending.values()):
+                if (other.task_id == pending.task_id and "untrusted_content" not in other.details
+                        and self._covers(other.details.get("tool"), other.task_id)):
+                    self.resolve(other.request_id, True, "task")
         return True
+
+    def _covers(self, tool: Any, task_id: str | None) -> bool:
+        """Whether "allow for this task" covers a request for this tool (None: the model provider)."""
+        return tool not in _ALWAYS_ASK_TOOLS or (tool in _PHONE_CONTROL_TOOLS and self._phone_task_id == task_id)
 
     def pending(self, task_id: str | None = None) -> list[dict[str, object]]:
         result = []
@@ -298,9 +309,7 @@ class MobileApprovalBroker:
             raise RuntimeError("no active mobile task is registered")
         request_id = str(uuid4())
         tool = details.get("tool")
-        covered = tool not in _ALWAYS_ASK_TOOLS or (
-            tool in _PHONE_CONTROL_TOOLS and self._phone_task_id == self._active_task_id
-        )
+        covered = self._covers(tool, self._active_task_id)
         untrusted = self.distrusted(self._active_task_id) if kind == "tool" else None
         if _for_elder(self._active_session_id):
             # 长辈模式: the older person is never asked; asking them is the riskier choice. Everything

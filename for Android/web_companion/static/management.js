@@ -1498,7 +1498,8 @@
   const activityNames = { paired: t("配对"), task_sent: t("交了任务"), task_finished: t("任务完成"), approval_decided: t("审批"), turn_stopped: t("停止了电脑上的任务"),
     file_received: t("收到文件"), file_sent: t("发出文件"), text_received: t("收到文字"), text_sent: t("发出文字"), conversation_received: t("收到对话"), conversation_sent: t("发出对话"),
     job_sent: t("电脑发来请求"), job_received: t("收到电脑的请求"), job_accepted: t("接受了电脑的请求"), job_rejected: t("拒绝了电脑的请求"), job_finished: t("完成了电脑的请求"),
-    job_failed: t("电脑的请求没有完成"), job_cancelled: t("电脑取消了请求"), knowledge_synced: t("同步了知识库"), wake_sent: t("发送了唤醒"), address_changed: t("换到新地址") };
+    job_failed: t("电脑的请求没有完成"), job_cancelled: t("电脑取消了请求"), knowledge_synced: t("同步了知识库"), wake_sent: t("发送了唤醒"), address_changed: t("换到新地址"),
+    review_comment: t("评论了代码改动"), review_followup: t("把评论交给电脑上的 AI") };
   const jobStates = { waiting: t("等你决定"), accepted: t("已接受"), running: t("正在做"), succeeded: t("已完成"), failed: t("没有完成"), rejected: t("已拒绝"), expired: t("已过期"), cancelled: t("电脑已取消") };
   let computerPoll = null;
   let connectionsPoll = null;
@@ -1613,7 +1614,7 @@
     if (!ui.setSettingsPage("computer")) return false;
     stopPolls();
     selectedHost = host; computerState = null; knowledgeLists = null; browsePath = "";
-    remoteSessions = [];
+    remoteSessions = []; reviewHost = null; reviewOpen = null;
     $("settingsTitle").textContent = host.name;
     for (const id of ["remoteHistory", "computerConfirm"]) $(id).hidden = true;
     $("computerBrowse").open = false; $("computerRemoteActivity").open = false;
@@ -1691,7 +1692,7 @@
   async function renderComputer(isCurrent, first) {
     const host = selectedHost;
     const linked = host.api === "mobile";
-    for (const id of ["computerApprovals", "computerJobs", "computerFiles", "computerText", "computerKnowledge", "computerRunning"]) if (!linked) $(id).hidden = true;
+    for (const id of ["computerApprovals", "computerJobs", "computerFiles", "computerText", "computerKnowledge", "computerRunning", "computerCode"]) if (!linked) $(id).hidden = true;
     $("computerInbox").hidden = !linked;
     if (!linked) {
       renderSummary({ host, online: null });
@@ -1891,6 +1892,7 @@
     $("computerText").hidden = !(has(host, "messages") && allowed(host, "files"));
     for (const [id, method] of [["btnComputerPickFiles", "pickForComputer"], ["btnComputerPickPhotos", "pickForComputer"], ["btnComputerCamera", "pickForComputer"]]) $(id).hidden = typeof native?.[method] !== "function";
     $("btnComputerPaste").hidden = typeof native?.readClipboardText !== "function";
+    $("computerCode").hidden = !has(host, "code_review");
     const knowledge = has(host, "knowledge") && allowed(host, "knowledge");
     $("computerKnowledge").hidden = !knowledge;
     if (knowledge) {
@@ -2003,6 +2005,205 @@
     }
     if (listing.truncated) list.append(row(t("只列出前 500 项"), ""));
   }
+
+  // ---- The computer's code changes and reviews (feature code_review, the desktop's
+  // docs/DEVICE_LINK_API.md): the same snapshots and comments as the window's Changes page.
+  let reviewHost = null;
+  let reviewOpen = null;
+  const changeStates = { modified: t("已修改"), added: t("新增"), deleted: t("已删除"), renamed: t("已重命名"), untracked: t("新文件"), copied: t("已复制") };
+  function changeFacts(item) { return [changeStates[item.status] || item.status, `+${item.additions ?? 0} −${item.deletions ?? 0}`].filter(Boolean).join(" · "); }
+  function canComment() { return !!reviewHost && allowed(reviewHost, "tasks"); }
+  function hostQuery(host) { return `host_id=${encodeURIComponent(host.host_id)}`; }
+
+  async function openCodeReview() {
+    const host = selectedHost;
+    if (!host || !ui.setSettingsPage("codeReview")) return;
+    reviewHost = host;
+    await loadCodeReview();
+  }
+  async function loadCodeReview() {
+    const host = reviewHost;
+    if (!host) return;
+    const isCurrent = () => !closed && reviewHost === host && !$("settingsCodeReview").hidden;
+    status("codeReviewStatus", t("读取中..."));
+    $("btnFreezeReview").hidden = !canComment();
+    $("codeFreezeHint").textContent = canComment() ? t("把现在的改动定格成一份审查快照，就能点某一行写评论，再交给电脑上的 AI 去改。")
+      : t("电脑还没允许这台手机交任务，这里只能查看。要写评论，在电脑的「手机连接」里给这台手机勾上「交任务」。");
+    const [changes, reviews] = await Promise.all([
+      ui.apiJson(`/mobile/link/changes?${hostQuery(host)}`),
+      ui.apiJson(`/mobile/link/reviews?${hostQuery(host)}`).catch((error) => ({ error: error.message })),
+    ]);
+    if (!isCurrent()) return;
+    const files = changes.files || [];
+    const list = $("codeChangesList"); list.replaceChildren();
+    $("codeChangesSummary").textContent = files.length ? t("{0} 个文件 · +{1} −{2}", files.length,
+      files.reduce((sum, item) => sum + (item.additions || 0), 0), files.reduce((sum, item) => sum + (item.deletions || 0), 0)) : "";
+    if (changes.git === false) list.append(row(t("不是 Git 仓库"), t("电脑上打开的文件夹没有用 Git 管理，看不到改动。")));
+    else if (changes.error) list.append(row(t("读不到改动"), changes.error));
+    else if (!files.length) list.append(row(t("没有未提交的改动"), ""));
+    for (const item of files) {
+      const entry = row(item.path, changeFacts(item));
+      action(entry, "chevron-right", t("查看改动"), async () => openChangeDiff(item));
+      list.append(entry);
+    }
+    $("btnFreezeReview").disabled = !files.length;
+    const snapshots = $("codeReviewList"); snapshots.replaceChildren();
+    for (const item of reviews.snapshots || []) {
+      const entry = row(when(item.created_at) || t("审查"), t("{0} 个文件 · +{1} −{2}", item.files ?? 0, item.additions ?? 0, item.deletions ?? 0));
+      action(entry, "chevron-right", t("打开审查"), async () => openReview(item.id));
+      snapshots.append(entry);
+    }
+    if (reviews.error) snapshots.append(row(t("读不到审查记录"), localizeError(reviews.error)));
+    else if (!(reviews.snapshots || []).length) snapshots.append(row(t("还没有审查"), t("在这里或电脑的「变更」页捕获的审查快照都会列在这里")));
+    status("codeReviewStatus", "");
+  }
+
+  /** The diff page: a file's uncommitted changes (read only) or a review with its comments. */
+  async function showDiffPage(title, hint, load) {
+    if (!ui.setSettingsPage("codeDiff")) return;
+    const host = reviewHost;
+    const opened = reviewOpen = { host, title };
+    $("settingsTitle").textContent = title;
+    $("codeDiffHint").textContent = hint;
+    $("codeDiffBody").replaceChildren();
+    status("codeDiffStatus", t("读取中..."));
+    try {
+      const shown = await load(host);
+      if (reviewOpen !== opened || $("settingsCodeDiff").hidden) return;
+      $("codeDiffBody").replaceChildren(...shown.files.map((file) => diffFile(file, shown.comments)));
+      status("codeDiffStatus", shown.files.some((file) => file.truncated) ? t("改动太长，只显示了前面一部分，其余请在电脑上看") : "");
+    } catch (error) {
+      if (reviewOpen === opened) status("codeDiffStatus", error.message, true);
+    }
+  }
+  function fileName(path) { return String(path || "").split("/").pop(); }
+  async function openChangeDiff(item) {
+    await showDiffPage(fileName(item.path), t("还没提交的改动，只能查看。要写评论，回上一页点「开始审查」。"), async (host) => {
+      const diff = await ui.apiJson(`/mobile/link/change-diff?${hostQuery(host)}&path=${encodeURIComponent(item.path)}`);
+      return { files: [{ ...item, ...diff }], comments: null };
+    });
+  }
+  async function openReview(reviewId, loaded = null) {
+    const hint = canComment() ? t("点某一行写评论。评论可以交给电脑上的 AI 去改，它在单独的工作副本里改，不动电脑上打开的文件夹。")
+      : t("电脑还没允许这台手机交任务，这里只能查看。");
+    await showDiffPage(t("审查"), hint, async (host) => {
+      const value = loaded || await ui.apiJson(`/mobile/link/review?${hostQuery(host)}&id=${encodeURIComponent(reviewId)}`);
+      reviewOpen.review = value.snapshot;
+      if (value.snapshot?.created_at) $("settingsTitle").textContent = t("审查 · {0}", when(value.snapshot.created_at));
+      return { files: value.snapshot?.files || [], comments: value.comments || [] };
+    });
+  }
+
+  function diffFile(file, comments) {
+    const box = document.createElement("section"); box.className = "diff-file";
+    const head = document.createElement("div"); head.className = "diff-file-head";
+    const name = document.createElement("strong"); name.textContent = file.path;
+    const facts = document.createElement("small"); facts.textContent = changeFacts(file);
+    head.append(name, facts); box.append(head);
+    const anchored = new Set();
+    for (const hunk of file.hunks || []) {
+      const header = document.createElement("div"); header.className = "diff-hunk"; header.textContent = hunk.header || "";
+      box.append(header);
+      for (const line of hunk.lines || []) {
+        const element = diffLine(file.path, line, comments !== null);
+        box.append(element);
+        for (const comment of comments || []) {
+          if (comment.path !== file.path || String(comment.line) !== element.dataset.line || comment.side !== element.dataset.side) continue;
+          anchored.add(comment.id); box.append(commentCard(comment));
+        }
+      }
+    }
+    // A comment on a line past the part shown (a long diff is cut) still shows, after the file.
+    for (const comment of comments || []) if (comment.path === file.path && !anchored.has(comment.id)) box.append(commentCard(comment, true));
+    if (file.truncated) { const cut = document.createElement("p"); cut.className = "diff-cut"; cut.textContent = t("后面的改动太长，没有显示"); box.append(cut); }
+    return box;
+  }
+  function diffLine(path, line, reviewing) {
+    const side = line.kind === "delete" ? "old" : "new";
+    const number = side === "old" ? line.old_line : line.new_line;
+    const commentable = reviewing && Number.isInteger(number) && line.kind !== "marker";
+    const element = document.createElement(commentable ? "button" : "div");
+    element.className = `diff-line ${line.kind || "context"}`;
+    if (Number.isInteger(number)) Object.assign(element.dataset, { side, line: String(number) });
+    if (commentable) {
+      element.type = "button";
+      element.setAttribute("aria-label", t("在第 {0} 行写评论", number));
+      element.addEventListener("click", () => openComposer(element, path, side, number));
+    }
+    const cells = [line.old_line ?? "", line.new_line ?? "", { add: "+", delete: "−", marker: "\\" }[line.kind] || ""].map((value) => {
+      const cell = document.createElement("span"); cell.className = "diff-number"; cell.textContent = String(value); return cell;
+    });
+    cells[2].className = "diff-sign";
+    const code = document.createElement("code"); code.textContent = line.content ?? "";
+    element.append(...cells, code);
+    return element;
+  }
+  function commentCard(comment, elsewhere = false) {
+    const card = document.createElement("div"); card.className = "diff-comment";
+    const text = document.createElement("p"); text.textContent = comment.body || "";
+    const facts = document.createElement("small");
+    facts.textContent = [elsewhere ? t("第 {0} 行", comment.line) : "", comment.state === "resolved" ? t("已解决") : t("待处理"),
+      comment.followup_run_id ? t("已交给电脑上的 AI") : "", when(comment.created_at)].filter(Boolean).join(" · ");
+    card.append(text, facts);
+    if (canComment() && comment.state !== "resolved" && !comment.followup_run_id) {
+      const tools = document.createElement("div"); tools.className = "page-toolbar";
+      namedAction(tools, "wrench", t("交给电脑上的 AI 去改"), async () => {
+        const host = reviewHost;
+        const answer = await post("/mobile/link/review-followup", { host_id: host.host_id, comment_id: comment.id });
+        if (reviewHost !== host) return;
+        const updated = answer.comment || { ...comment, followup_run_id: answer.already ? comment.followup_run_id || "?" : answer.run_id };
+        card.replaceWith(commentCard({ ...comment, ...updated }, elsewhere));
+        status("codeDiffStatus", answer.already ? t("这条评论已经交给电脑上的 AI 了") : t("电脑上的 AI 开始处理这条评论了，结果在电脑上查看"));
+      });
+      card.append(tools);
+    }
+    return card;
+  }
+  function openComposer(lineElement, path, side, line) {
+    if (!canComment()) { status("codeDiffStatus", t("电脑还没允许这台手机交任务，这里只能查看。"), true); return; }
+    $("codeDiffBody").querySelector(".diff-composer")?.remove();
+    const form = document.createElement("form"); form.className = "diff-composer";
+    const input = document.createElement("textarea"); input.rows = 3; input.maxLength = 4000;
+    input.setAttribute("aria-label", t("第 {0} 行的评论", line)); input.placeholder = t("写下这一行哪里要改");
+    const tools = document.createElement("div"); tools.className = "page-toolbar";
+    const cancel = document.createElement("button"); cancel.type = "button"; cancel.className = "button-secondary"; cancel.textContent = t("取消");
+    const send = document.createElement("button"); send.type = "submit"; send.className = "button-primary"; send.textContent = t("发表评论");
+    cancel.addEventListener("click", () => form.remove());
+    tools.append(cancel, send); form.append(input, tools);
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (send.disabled) return;
+      if (!input.value.trim()) { input.focus(); return; }
+      const host = reviewHost; const opened = reviewOpen;
+      send.disabled = true;
+      try {
+        const answer = await post("/mobile/link/review-comment", { host_id: host.host_id, review_id: opened.review?.id, path, side, line, body: input.value });
+        if (reviewOpen !== opened) return;
+        form.replaceWith(commentCard(answer.comment));
+        status("codeDiffStatus", t("评论已发到电脑"));
+      } catch (error) {
+        status("codeDiffStatus", error.message, true);
+      } finally { send.disabled = false; }
+    });
+    // Under the line and the comments it already has.
+    let after = lineElement;
+    while (after.nextElementSibling?.classList.contains("diff-comment")) after = after.nextElementSibling;
+    after.after(form);
+    input.focus();
+  }
+  // Back from a diff, the list is read again (a review started there, changes made meanwhile).
+  new MutationObserver(() => {
+    if ($("settingsCodeReview").hidden || !reviewOpen) return;
+    reviewOpen = null;
+    void loadCodeReview().catch((error) => status("codeReviewStatus", error.message, true));
+  }).observe($("settingsCodeReview"), { attributes: true, attributeFilter: ["hidden"] });
+  // Back from the code review pages, the computer page reads the computer again: its reads stop
+  // while it is hidden.
+  new MutationObserver(() => {
+    if ($("settingsComputer").hidden || !reviewHost) return;
+    const host = reviewHost; reviewHost = null; reviewOpen = null;
+    void openComputer(host.host_id).catch((error) => status("computerStatus", error.message, true));
+  }).observe($("settingsComputer"), { attributes: true, attributeFilter: ["hidden"] });
 
   /** "Continue on the computer" on the conversation page: shown when a computer can take conversations. */
   function refreshRelay(hosts) {
@@ -2969,6 +3170,17 @@
     await loadRemoteSessions(() => true);
   }, "computerStatus");
   on("btnComputerRemove", "click", async () => { if (selectedHost) await removeComputer(selectedHost); }, "computerStatus");
+  on("btnComputerCode", "click", openCodeReview, "computerStatus");
+  on("btnCodeReviewRefresh", "click", loadCodeReview, "codeReviewStatus");
+  on("btnFreezeReview", "click", async () => {
+    const host = reviewHost;
+    if (!host) return;
+    status("codeReviewStatus", t("正在定格改动..."));
+    const value = await post("/mobile/link/review", { host_id: host.host_id });
+    if (reviewHost !== host) return;
+    status("codeReviewStatus", "");
+    await openReview(value.snapshot?.id, value);
+  }, "codeReviewStatus");
   on("computerJobsSetting", "change", async () => {
     const host = selectedHost; const choice = $("computerJobsSetting").value;
     if (choice === "auto") {

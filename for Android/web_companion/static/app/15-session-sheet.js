@@ -135,6 +135,52 @@
     } finally { button.disabled = false; }
   }
 
+  // One reply as a file (2.6): the same sheet, with the formats; the engine writes it into the
+  // conversation's workspace (exports/) and it is shared like any task output.
+  function openAnswerExport(card) {
+    const markdown = card?.dataset.messageText || "";
+    if (disposed || !markdown.trim() || !currentSessionId) return;
+    const sessionId = currentSessionId;
+    sheetSession = null;
+    haptic(14);
+    const sheet = $("sessionSheet");
+    $("sessionSheetTitle").textContent = t("导出这条回复");
+    $("sessionSheetStatus").textContent = "";
+    $("sessionSheetTags").hidden = true;
+    const run = (format) => async (event) => {
+      const button = event.currentTarget;
+      if (button.disabled) return;
+      const status = $("sessionSheetStatus");
+      status.textContent = format === "md" || format === "docx" ? t("正在导出...") : t("正在生成，长回复可能要几秒...");
+      button.disabled = true;
+      let result;
+      try {
+        const title = (sessions.find((item) => item.id === sessionId)?.title || "").slice(0, 120);
+        result = await apiJson("/mobile/answers/export", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: sessionId, format, markdown, title }) });
+      } catch (error) {
+        status.textContent = t("导出失败: {0}", error.message);
+        return;
+      } finally { button.disabled = false; }
+      const mime = { md: "text/markdown", pdf: "application/pdf", image: "image/jpeg",
+        docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }[format];
+      // Handing the file over disables the button again until the share sheet answers (an
+      // already disabled button would make artifactAction do nothing).
+      for (const path of result.paths || []) {
+        await artifactAction({ path, mime_type: mime, workspaceId: workspaceOfSession(sessionId) }, "share", button, status, true);
+      }
+      if (!status.textContent || status.textContent === t("准备文件...")) status.textContent = t("已导出到工作区 exports 文件夹");
+    };
+    $("sessionSheetActions").replaceChildren(
+      sheetButton("file-text", t("导出为 Word"), run("docx")),
+      sheetButton("download", t("导出为 PDF"), run("pdf")),
+      sheetButton("image-plus", t("导出为长图"), run("image")),
+      sheetButton("file-text", t("导出为 Markdown"), run("md")),
+    );
+    if (window.MobileMotion && sheet.hidden) window.MobileMotion.enter(sheet.querySelector(".action-sheet-panel"), { transform: "translateY(24px)" }, { spring: "snappy" });
+    sheet.hidden = false;
+  }
+
   // A picture guide from one of this conversation's phone tasks whose step pictures are still kept
   // (66-step-replay.js opens the editor).
   async function chooseTutorialTask(session, button) {

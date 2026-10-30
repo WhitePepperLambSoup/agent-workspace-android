@@ -1,5 +1,39 @@
 # Changelog
 
+## 2.6.0 — 2026-10-30
+
+2.6.0 新增专家团和 3D 工作室，能查论文、处理办公文件，回复可以导出，任务改过的文件可以恢复。Agent Workspace 2.6.0 adds the expert team and its 3D studio, papers and Office files, exporting a reply, and putting back the files a task changed.
+
+电脑版 / Desktop app: https://github.com/WhitePepperLambSoup/agent-workspace-desktop
+
+### 中文
+
+- 新增：专家团。点输入框里的「专家团」后发消息，AI 当队长，把问题拆给几位专家同时研究，需要时再请一位专家审阅成稿，最后汇总回答并写明分歧。专家从 73 位的专家库里自动挑选，也可以固定成员或添加自定义专家；可以给某位专家单独指定知识库。比普通回答慢、也更费 Token，适合需要多方面判断的问题；需要云端模型。专家在做什么会显示在对话和引擎通知里；在其他应用里分享文字到「问专家团」，会打开一个新对话并填好问题。
+- 新增：3D 工作室。在对话里点「去工作室看看」，可以看到队长和专家在办公室里分工、查资料、交稿，动作跟着真实的任务走；拖动旋转，双指缩放，点人物打开他的子任务。画面静止几秒后停止绘制，切到后台不耗电。
+- 新增：查论文和核对引用。按题目、作者、DOI、arXiv 编号或 PubMed 编号查文献，读工作区里的论文 PDF，逐条核对参考文献是否存在、信息对不对、有没有被撤稿，导出 BibTeX、RIS 等格式。
+- 新增：办公文件。读 Word、Excel、PowerPoint，用修订模式改 Word 文档，生成带公式的 Excel、套用模板的 PPT 和公文，合并、拆分、旋转 PDF 页面。这些工具第一次用到时才加载，不拖慢启动。
+- 新增：单条回复可以导出为 Word、PDF、长图或 Markdown，存到工作区的 exports 文件夹并打开分享。
+- 新增：任务改过的文件列在回复下方，可以一个一个或一次全部恢复成任务开始前的样子；之后又被改过的文件不会被覆盖。
+- 新增：附上照片或录音后，输入框上方给出常用操作：合成 PDF、记一笔账、加到日程、识别文字、整理成纪要。
+- 新增：配对电脑版后，可以在手机上审查电脑上的代码改动：看还没提交的改动和 diff，定格成审查快照，在某一行写评论，再交给电脑上的 AI 去改。需要电脑版也支持这项功能。
+- 改进：液态玻璃更清楚：顶栏和输入区边缘透光、中间不糊字，背景加了细光线。Android 12 及以上，「操作手机」小窗也是毛玻璃，背后的应用透出来。
+- 修复：回复里同一段出现两个价格（如 A$40,000 和 A$40k）时，中间的文字被当成公式显示成斜体、空格丢失。
+- 覆盖安装即可，数据会保留。
+
+### English
+
+- New: expert team. Turn on Expert team in the message box and send: the AI leads, splits the question among several experts who research it at the same time, has one of them review the draft when needed, and answers with the points they disagree on. Experts are picked from a library of 73, or you fix the members and add your own; an expert can be given a knowledge base of their own. It is slower and uses more tokens than a single answer, and suits questions that need several kinds of judgement; it needs a cloud model. What each expert is doing shows in the conversation and in the engine notification. Sharing text from another app to Ask the expert team opens a new conversation with the question filled in.
+- New: 3D studio. Tap Watch in the studio in a conversation to see the lead and the experts at work in an office, handing out parts, looking things up and handing in, following the real task; drag to turn, pinch to zoom, tap someone to open their sub-task. It stops drawing a few seconds after the picture settles, and uses no power in the background.
+- New: papers and references. Look up works by title, author, DOI, arXiv id or PubMed id, read a paper PDF in the workspace, check a reference list entry by entry (does the work exist, are the details right, was it retracted), and export it as BibTeX, RIS and other formats.
+- New: Office files. Read Word, Excel and PowerPoint files, revise a Word document with tracked changes, make Excel workbooks with real formulas, decks on a template and official documents, and merge, split or rotate PDF pages. These tools load the first time they are used, so starting the app is not slower.
+- New: export one reply as Word, PDF, a long picture or Markdown, saved in the workspace's exports folder and opened to share.
+- New: the files a task changed are listed under its reply and can be put back as they were before the task, one by one or all at once; a file changed again since is left alone.
+- New: attaching photos or a recording offers common next steps above the message box: make a PDF, log an expense, add to calendar, read the text, turn into minutes.
+- New: with the desktop app paired, review the computer's code changes on the phone: see the uncommitted changes and their diffs, freeze them into a review snapshot, comment on a line and hand the comment to the computer's AI. The desktop app needs to support it too.
+- Improved: clearer liquid glass: the top bar and the message box let light through at the rim and keep text clear in the middle, over a background with faint light lines. On Android 12 and newer the Operate phone window is frosted glass too, with the app behind it showing through.
+- Fixed: when a paragraph held two prices (such as A$40,000 and A$40k), the text between them was shown as an italic formula with its spaces gone.
+- Install over the existing app; your data is kept.
+
 ## 2.5.2 — 2026-10-28
 
 2.5.2 修复 2.5.1 更新后卡在启动界面的问题。Agent Workspace 2.5.2 fixes the app getting stuck on the start-up screen after the 2.5.1 update.

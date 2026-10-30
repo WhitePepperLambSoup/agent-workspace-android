@@ -683,7 +683,14 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._reply(
                 200,
-                {"tasks": [task.to_dict() for task in tasks], "services": _services_summary()},
+                {
+                    "tasks": [
+                        summarize(task) if callable(summarize := getattr(self._api.controller, "task_summary", None))
+                        else task.to_dict()
+                        for task in tasks
+                    ],
+                    "services": _services_summary(),
+                },
             )
             return
         if parts == ["mobile", "approvals"]:

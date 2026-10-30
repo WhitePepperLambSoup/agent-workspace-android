@@ -341,20 +341,23 @@ class TermuxDaemonService : Service() {
             "waiting_approval" in states -> "waiting_approval"
             else -> "ready"
         }
-        reportEngineState(state)
+        // An expert team at work: who does what, in place of "running a task".
+        val language = com.agentworkspace.mobile.UiText.language(this)
+        val team = tasks?.firstOrNull { it.state == "running" }?.teamProgress?.let { it[language] ?: it["en"] }
+        reportEngineState(state, team)
     }
 
     @Synchronized
-    private fun reportEngineState(state: String) {
+    private fun reportEngineState(state: String, detail: String? = null) {
         val now = System.currentTimeMillis()
         val services = runningServices
-        val key = "$state:$services"
+        val key = "$state:$services:${detail.orEmpty()}"
         if (key != lastReportedState || now - lastStateHeartbeat >= 15000) {
             lifecycleState.mark(state)
             lastReportedState = key
             lastStateHeartbeat = now
             val base = when (state) {
-                "running" -> com.agentworkspace.mobile.UiText.of(this@TermuxDaemonService, "Agent 正在执行任务", "Agent is running a task")
+                "running" -> detail ?: com.agentworkspace.mobile.UiText.of(this@TermuxDaemonService, "Agent 正在执行任务", "Agent is running a task")
                 "waiting_approval" -> com.agentworkspace.mobile.UiText.of(this@TermuxDaemonService, "Agent 任务等待批准", "Agent task awaiting approval")
                 "recovering" -> com.agentworkspace.mobile.UiText.of(this@TermuxDaemonService, "Agent 正在恢复连接", "Agent is reconnecting")
                 "starting" -> com.agentworkspace.mobile.UiText.of(this@TermuxDaemonService, "Agent 内置引擎正在启动...", "Agent engine starting...")

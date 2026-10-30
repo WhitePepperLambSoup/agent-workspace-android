@@ -24,6 +24,21 @@
         <item name="android:forceDarkAllowed" tools:targetApi="q">false</item>
     </style>
 
+    <!-- The phone control panel on Android 12+: a window of its own, so the system can blur what
+         lies under it. The panel draws its own glass; no dim, animation, shadow or minimum width. -->
+    <style name="Theme.AgentWorkspace.PanelWindow" parent="android:Theme.Material.Dialog.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowIsFloating">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:windowElevation">0dp</item>
+        <item name="android:windowMinWidthMajor">0dp</item>
+        <item name="android:windowMinWidthMinor">0dp</item>
+        <item name="android:windowCloseOnTouchOutside">false</item>
+        <item name="android:forceDarkAllowed" tools:targetApi="q">false</item>
+    </style>
+
     <!-- Circle to ask: invisible while the screen is captured, then the screenshot fills it. -->
     <style name="Theme.AgentWorkspace.ScreenAsk" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowIsTranslucent">true</item>

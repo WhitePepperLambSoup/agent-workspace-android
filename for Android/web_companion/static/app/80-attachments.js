@@ -152,7 +152,45 @@
       }
       elements.attachmentList.appendChild(chip);
     }
+    renderAttachmentSuggestions();
   }
+
+  // What people usually do with what they attached (2.6): one tap writes the request, which the
+  // user can still change before sending. Shown while the message is empty.
+  const audioAttachment = /\.(m4a|mp3|wav|aac|amr|ogg|oga|opus|flac|3gp)$/i;
+  function renderAttachmentSuggestions() {
+    const box = $("attachmentSuggestions");
+    const images = attachments.filter((item) => item.media_type?.startsWith("image/")).length;
+    const audio = attachments.some((item) => item.media_type?.startsWith("audio/") || audioAttachment.test(item.name || ""));
+    const suggestions = [];
+    if (images) {
+      suggestions.push(
+        ["file-text", t("合成 PDF"), t("把附件里的照片按顺序合成一个 PDF，每张一页、适合 A4 打印，保存到工作区的「扫描件」文件夹，告诉我文件名和页数。")],
+        ["shopping-cart", t("记一笔账"), t("附件是票据或小票的照片。读出日期、商家、金额和类别，追加到工作区的「记账/账本.csv」（没有就新建，第一行写：日期,商家,类别,金额,备注,票据），然后告诉我这一笔的内容，以及本月的合计和各类别的合计。看不清的地方问我，不要猜。")],
+        ["calendar", t("加到日程"), t("从附件里找出活动的时间、地点和事项，整理好后用「添加日程」加到手机日历；时间不明确的先问我。")],
+        ["eye", t("识别文字"), t("把附件里的文字原样识别出来，保持原来的分段和表格。")],
+      );
+    }
+    if (audio) suggestions.push(["mic", t("整理成纪要"), t("把附件里的录音转写成文字，整理成一份纪要（要点、决定、待办事项），保存为 Markdown 文件放到工作区的「录音速记」文件夹，再把纪要加入知识库。最后告诉我纪要的要点和文件位置。")]);
+    const show = suggestions.length > 0 && !elements.promptInput.value.trim() && !elderOn();
+    box.hidden = !show;
+    if (!show) { box.replaceChildren(); return; }
+    box.replaceChildren(...suggestions.map(([glyph, title, prompt]) => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "chip suggestion-chip";
+      chip.innerHTML = icon(glyph);
+      chip.append(title);
+      chip.addEventListener("click", () => {
+        elements.promptInput.value = prompt;
+        elements.promptInput.dispatchEvent(new Event("input", { bubbles: true }));
+        elements.promptInput.focus();
+        haptic(10);
+      });
+      return chip;
+    }));
+  }
+  elements.promptInput.addEventListener("input", () => { if (attachments.length) renderAttachmentSuggestions(); });
 
   function requestId(prefix) {
     return window.crypto?.randomUUID?.() || `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;

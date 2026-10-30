@@ -1,5 +1,6 @@
 package com.agentworkspace.mobile.automation
 
+import android.app.Dialog
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.content.res.Configuration
@@ -70,6 +71,7 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
         private const val DANGER = 0xFFB42318.toInt()
         private const val POLL_MS = 600L
         private const val MAX_STEPS = 6
+        private const val BLUR_DP = 24
         internal const val STOPPED_BY_USER = "stopped by the user"
     }
 
@@ -78,9 +80,14 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
     private val windowManager = service.getSystemService(WindowManager::class.java)
     private val main = Handler(Looper.getMainLooper())
     private var scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private var root: FrameLayout? = null
+    private var root: View? = null
     private var card: LinearLayout? = null
     private var params: WindowManager.LayoutParams? = null
+    // Android 12+: the panel is a dialog's window, the only kind the system blurs behind (the glass);
+    // the window is then the card itself and draws [glass] as its background.
+    private var dialog: Dialog? = null
+    private var glass: GlassPanelDrawable? = null
+    private var blurListener: java.util.function.Consumer<Boolean>? = null
     private var stage = Stage.COMPOSE
     private var targetPackage: String? = null
     private var targetLabel: String? = null
@@ -162,7 +169,6 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
     private fun accent() = if (dark()) ACCENT_DARK else ACCENT
     private fun primaryText() = if (dark()) Color.WHITE else 0xFF18201E.toInt()
     private fun secondaryText() = if (dark()) 0xFFA2AFAB.toInt() else 0xFF56625F.toInt()
-    private fun surface() = if (dark()) 0xFF1F2725.toInt() else Color.WHITE
     private fun field() = if (dark()) 0xFF2A3431.toInt() else 0xFFF1F5F4.toInt()
 
     // ---- Opening and closing -----------------------------------------------------------------
@@ -215,7 +221,12 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
         card = null
         shown = false
         hiddenDepth = 0
-        runCatching { windowManager.removeView(view) }
+        val window = dialog
+        dialog = null
+        glass = null
+        blurListener?.let { if (android.os.Build.VERSION.SDK_INT >= 31) runCatching { windowManager.removeCrossWindowBlurEnabledListener(it) } }
+        blurListener = null
+        if (window != null) runCatching { window.dismiss() } else runCatching { windowManager.removeView(view) }
         scope.cancel()
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
         sessionId = null; taskId = null; sequence = 0; result = null; failed = false; stopping = false
@@ -259,7 +270,15 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
     }
 
     private fun addWindow(): Boolean {
+        val glassy = android.os.Build.VERSION.SDK_INT >= 31
         val frame = object : FrameLayout(service) {
+            // Turning the phone or switching dark mode: the window's width and the glass follow.
+            override fun onConfigurationChanged(newConfig: Configuration?) {
+                super.onConfigurationChanged(newConfig)
+                glass?.dark = dark()
+                if (root != null) shape(collapsed && stage != Stage.COMPOSE)
+            }
+
             // While typing the panel has the focus, so Back comes here: it closes the panel, as it
             // would close a dialog, instead of being lost.
             override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
@@ -285,41 +304,93 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
                     ?.unregisterOnBackInvokedCallback(backCallback as android.window.OnBackInvokedCallback)
                 super.onDetachedFromWindow()
             }
-        }.apply { setPadding(dp(8), dp(4), dp(8), dp(10)); clipToPadding = false }
+        }.apply { if (!glassy) { setPadding(dp(8), dp(4), dp(8), dp(10)); clipToPadding = false } }
+        val surface = GlassPanelDrawable(dp(22).toFloat(), dp(1).toFloat()).apply { dark = dark() }
         val box = LinearLayout(service).apply {
             orientation = LinearLayout.VERTICAL
-            background = GradientDrawable().apply {
-                cornerRadius = dp(22).toFloat(); setColor(surface())
-                setStroke(dp(1), if (dark()) 0x26FFFFFF else 0x14000000)
-            }
-            elevation = dp(10).toFloat()
+            if (!glassy) { background = surface; elevation = dp(10).toFloat() }
             setPadding(dp(14), dp(2), dp(14), dp(12))
         }
         frame.addView(box, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         val statusBar = service.resources.getIdentifier("status_bar_height", "dimen", "android")
             .takeIf { it != 0 }?.let { service.resources.getDimensionPixelSize(it) } ?: dp(24)
         val layout = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT,
+            wideWidth(glassy), WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            y = statusBar + dp(2)
+            y = statusBar + dp(if (glassy) 6 else 2)
             softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
         }
-        runCatching { windowManager.addView(frame, layout) }.onFailure { failure ->
-            android.util.Log.w("PhoneControlPanel", "Could not show the panel", failure)
-            return false
+        val view: View
+        if (glassy) {
+            view = showGlassWindow(frame, layout, surface) ?: return false
+        } else {
+            runCatching { windowManager.addView(frame, layout) }.onFailure { failure ->
+                android.util.Log.w("PhoneControlPanel", "Could not show the panel", failure)
+                return false
+            }
+            view = frame
+            params = layout
         }
-        root = frame
+        root = view
         card = box
-        params = layout
+        glass = surface
         shown = true
-        frame.alpha = 0f
-        frame.translationY = -dp(24).toFloat()
-        frame.animate().alpha(1f).translationY(0f).setDuration(260).start()
+        view.alpha = 0f
+        view.translationY = -dp(24).toFloat()
+        view.animate().alpha(1f).translationY(0f).setDuration(260).start()
         return true
+    }
+
+    /**
+     * Android 12+: the panel as a dialog's window over the other apps, with the system blurring what
+     * lies under it while it can (battery saver and some phones turn blurs off; the glass then turns
+     * nearly solid). Returns the window's root view, or null if it could not be shown.
+     */
+    private fun showGlassWindow(content: View, layout: WindowManager.LayoutParams, surface: GlassPanelDrawable): View? {
+        if (android.os.Build.VERSION.SDK_INT < 31) return null
+        val panel = Dialog(service, R.style.Theme_AgentWorkspace_PanelWindow).apply {
+            setCancelable(false)
+            setContentView(content)
+        }
+        val window = panel.window ?: return null
+        window.setBackgroundDrawable(surface)
+        // After setContentView: a floating window's own layout would otherwise undo these.
+        window.attributes = layout
+        runCatching { panel.show() }.onFailure { failure ->
+            android.util.Log.w("PhoneControlPanel", "Could not show the panel", failure)
+            return null
+        }
+        dialog = panel
+        glass = surface
+        params = window.attributes
+        val listener = java.util.function.Consumer<Boolean> { enabled ->
+            surface.blurred = enabled
+            blur(hiddenDepth == 0)
+        }
+        // Called at once with whether blurs are on now, then on every change.
+        runCatching { windowManager.addCrossWindowBlurEnabledListener(service.mainExecutor, listener) }
+            .onSuccess { blurListener = listener }
+        return window.decorView
+    }
+
+    /** The glass's blur on or off: off while the panel is hidden for the agent's screenshots. */
+    private fun blur(on: Boolean) {
+        if (android.os.Build.VERSION.SDK_INT < 31) return
+        val window = dialog?.window ?: return
+        window.setBackgroundBlurRadius(if (on && glass?.blurred == true) dp(BLUR_DP) else 0)
+    }
+
+    /**
+     * The panel's width across the top. The glass window is the card itself (the blur fills the
+     * whole window), so it leaves the side margins the card had inside the old full-width window.
+     */
+    private fun wideWidth(glassy: Boolean = dialog != null): Int {
+        if (!glassy || android.os.Build.VERSION.SDK_INT < 30) return WindowManager.LayoutParams.MATCH_PARENT
+        return (windowManager.currentWindowMetrics.bounds.width() - dp(16)).coerceAtLeast(dp(240))
     }
 
     // ---- Getting out of the agent's way --------------------------------------------------------
@@ -343,6 +414,7 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
         if (hiddenDepth++ > 0) return
         view.animate().cancel()
         view.alpha = 0f
+        blur(false)
         params?.let {
             it.flags = it.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
             runCatching { windowManager.updateViewLayout(view, it) }
@@ -356,6 +428,7 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
             it.flags = it.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
             runCatching { windowManager.updateViewLayout(view, it) }
         }
+        blur(true)
         view.animate().alpha(1f).setDuration(120).start()
     }
 
@@ -417,16 +490,20 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
     private fun shape(pill: Boolean) {
         val layout = params ?: return
         val view = root ?: return
-        val width = if (pill) WindowManager.LayoutParams.WRAP_CONTENT else WindowManager.LayoutParams.MATCH_PARENT
+        val width = if (pill) WindowManager.LayoutParams.WRAP_CONTENT else wideWidth()
         val gravity = Gravity.TOP or (if (pill) Gravity.END else Gravity.CENTER_HORIZONTAL)
+        // The glass window is the card: the pill keeps its distance from the edge itself.
+        val x = if (pill && dialog != null) dp(8) else 0
+        glass?.dark = dark()
         card?.let { box ->
             if (pill) box.setPadding(dp(10), dp(4), dp(6), dp(4)) else box.setPadding(dp(14), dp(2), dp(14), dp(12))
-            (box.layoutParams as? FrameLayout.LayoutParams)?.let { it.width = width; box.layoutParams = it }
+            val boxWidth = if (pill) ViewGroup.LayoutParams.WRAP_CONTENT else ViewGroup.LayoutParams.MATCH_PARENT
+            (box.layoutParams as? FrameLayout.LayoutParams)?.let { it.width = boxWidth; box.layoutParams = it }
         }
-        if (layout.width == width && layout.gravity == gravity) return
+        if (layout.width == width && layout.gravity == gravity && layout.x == x) return
         layout.width = width
         layout.gravity = gravity
-        layout.x = 0
+        layout.x = x
         runCatching { windowManager.updateViewLayout(view, layout) }
     }
 

@@ -4,6 +4,7 @@
     if (elderOn() && !$("elderScreen").hidden) { void stopReading(); return true; }
     if (closeAttachMenu()) return true;
     if (!$("sessionSheet").hidden) { closeSessionSheet(); return true; }
+    if (closeStudio()) return true;
     if (closeSetup()) return true;
     if (closeModelSheet()) return true;
     if (closeDrawer()) return true;
@@ -531,6 +532,8 @@
   // A floating-ball screenshot arrives in the attachment inbox and is attached to that conversation.
   let quickShareBatch = null;
   let quickShareDeadline = 0;
+  /** The batch came from "Ask the expert team": the notice says the team answers. */
+  let quickShareTeam = false;
   // A finished voice note (the app's recorder checked its token): once its recording is attached,
   // the minutes request is sent without waiting for the user.
   let quickNote = null;
@@ -539,6 +542,7 @@
     const mode = ["text", "voice", "camera", "screen", "note"].includes(options?.mode) ? options.mode : "text";
     const batch = typeof options?.share_batch === "string" && options.share_batch ? options.share_batch : null;
     quickNote = mode === "note" && batch ? { batch, attached: false, deadline: Date.now() + 120000 } : null;
+    quickShareTeam = false;
     closeMenu();
     closeDrawer();
     // Reuse the current conversation while it is still empty instead of piling up blank ones.

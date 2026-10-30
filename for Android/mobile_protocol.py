@@ -163,6 +163,13 @@ class MobileTaskRequest:
     # Where the request came from (a paired computer's, which the user agreed to): told to the model
     # as a note, so the conversation and notifications show the request's own words.
     source_note: str | None = None
+    # Expert team (core.experts): "auto" (the agent picks experts from the library) or the members
+    # as [{id, name, brief?}]; the agent leads them through run_subagents. None: no team.
+    team: Any = None
+    # With a team: a second round where an expert checks the draft answer.
+    team_review: bool = True
+    # With a team: the knowledge base an expert searches instead of the conversation's, by expert id.
+    team_knowledge: Any = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.image_refs, tuple) or any(
@@ -206,6 +213,8 @@ class MobileTaskRequest:
             **({"on_device": True} if self.on_device else {}),
             **({"wait_for_network": True} if self.wait_for_network else {}),
             **({"source_note": self.source_note} if self.source_note else {}),
+            **({"team": self.team, "team_review": self.team_review} if self.team is not None else {}),
+            **({"team_knowledge": self.team_knowledge} if self.team_knowledge else {}),
         }
 
 
@@ -272,6 +281,37 @@ def parse_mobile_task_request(payload: Mapping[str, Any]) -> MobileTaskRequest:
     source_note = payload.get("source_note")
     if source_note is not None:
         source_note = _required_text(source_note, "source_note", max_length=1000)
+    team = payload.get("team")
+    team_review = payload.get("team_review", True)
+    if not isinstance(team_review, bool):
+        raise ValueError("team_review must be true or false")
+    if team is not None:
+        from agent_workspace.core.experts import ExpertError, parse_team
+
+        try:
+            parse_team(team)
+        except ExpertError as error:
+            raise ValueError(str(error)) from None
+        if phone_control or on_device:
+            raise ValueError("an expert team is for conversation tasks with a cloud model")
+        # Stored as sent: library experts by id and name, custom ones with their brief.
+        team = "auto" if team == "auto" else [
+            {key: item[key] for key in ("id", "name", "brief") if key in item} for item in team
+        ]
+    team_knowledge = payload.get("team_knowledge")
+    if team_knowledge is not None:
+        if team is None:
+            raise ValueError("team_knowledge goes with a team")
+        if (
+            not isinstance(team_knowledge, Mapping)
+            or len(team_knowledge) > 32
+            or not all(
+                isinstance(key, str) and 0 < len(key) <= 32 and isinstance(value, str) and 0 < len(value) <= 80
+                for key, value in team_knowledge.items()
+            )
+        ):
+            raise ValueError("team_knowledge maps expert ids to knowledge base ids")
+        team_knowledge = dict(team_knowledge)
     return MobileTaskRequest(
         session_id=session_id,
         prompt=prompt,
@@ -290,6 +330,9 @@ def parse_mobile_task_request(payload: Mapping[str, Any]) -> MobileTaskRequest:
         on_device=on_device,
         wait_for_network=wait_for_network,
         source_note=source_note,
+        team=team,
+        team_review=team_review,
+        team_knowledge=team_knowledge,
     )
 
 

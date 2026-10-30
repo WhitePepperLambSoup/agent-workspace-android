@@ -341,6 +341,10 @@ def configure_android_registry(
 
         factories["create_docx"] = lambda: CreateDocxTool(workspace)
         factories["create_xlsx"] = lambda: CreateXlsxTool(workspace)
+        # The desktop app's literature and office tools (shared core): papers, references, Word
+        # revisions, workbooks with formulas, PDF pages, documents from templates.
+        if os.getenv("AGENT_WORKSPACE_DATA_DIR"):
+            factories.update(_research_and_office_tools(workspace))
         if os.getenv("AGENT_WORKSPACE_DATA_DIR"):
             from .service_tools import (
                 ListServicesTool,
@@ -423,6 +427,125 @@ def _memory_tools() -> tuple[Any, Any]:
 
         _MEMORY_TOOLS = (MobileMemorySearchTool(), MobileMemoryWriteTool())
     return _MEMORY_TOOLS
+
+
+_RECENT_WORKS: Any | None = None
+# Shared-core tools the phone leaves out: e-mail drafts are .eml files for Outlook on a computer, and
+# meeting transcription uses the desktop's speech service (the phone has transcribe_audio).
+_DESKTOP_ONLY_OFFICE = frozenset({"email_files", "meeting_transcribe"})
+# The literature and office tools, named here so the registry can list them before their modules
+# load (tests check this against the shared core).
+RESEARCH_AND_OFFICE_TOOLS = (
+    "check_references", "export_references", "office_read", "office_template", "paper_lookup", "paper_search",
+    "pdf_tools", "read_paper", "reference_library", "slides_from_template", "spreadsheet", "word_document",
+)
+_DEFERRED_TOOLS: list[_DeferredTool] = []
+
+
+class _DeferredTool:
+    """A tool whose modules are slow to import (pypdf, the office formats: about 2 s on a phone).
+
+    It is built on first use, or by preload_deferred_tools() once the engine is serving, so the start
+    is not slower.
+    """
+
+    def __init__(self, name: str, load: Any) -> None:
+        self._name = name
+        self._load = load
+        self._tool: Any | None = None
+        self._lock = threading.Lock()
+
+    def _real(self) -> Any:
+        if self._tool is None:
+            with self._lock:
+                if self._tool is None:
+                    self._tool = self._load()[self._name]
+        return self._tool
+
+    def _loaded(self) -> Any | None:
+        try:
+            return self._real()
+        except Exception:
+            return None
+
+    @property
+    def spec(self) -> Any:
+        tool = self._loaded()
+        if tool is not None:
+            return tool.spec
+        from agent_workspace.core.models import ToolSpec
+
+        return ToolSpec(self._name, "Unavailable: its modules did not load.", {"type": "object"}, "none")
+
+    def offered(self) -> bool:
+        # One whose modules did not load is left out of the model's list.
+        tool = self._loaded()
+        offered = getattr(tool, "offered", None)
+        return tool is not None and (not callable(offered) or bool(offered()))
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._real(), name)
+
+
+def preload_deferred_tools() -> None:
+    """Builds the deferred tools now (from a worker thread once the engine is up)."""
+    for tool in list(_DEFERRED_TOOLS):
+        try:
+            tool._real()
+        except Exception:  # first use reports it with the tool's own error
+            return
+
+
+def _build_research_and_office_tools(workspace: str | os.PathLike[str]) -> dict[str, Any]:
+    global _RECENT_WORKS
+    from agent_workspace.office.tools import office_tools
+    from agent_workspace.scholar.library import RecentWorks
+    from agent_workspace.scholar.literature_tools import literature_tools
+    from agent_workspace.scholar.papers import ReadPaperTool
+    from agent_workspace.storage.file_versions import FileVersions
+    from agent_workspace.tools.filesystem import WriteFileTool
+
+    if _RECENT_WORKS is None:
+        # Works looked up lately, so reference_library can add one by its number in any workspace.
+        _RECENT_WORKS = RecentWorks()
+    root = Path(workspace)
+    data_dir = Path(os.environ["AGENT_WORKSPACE_DATA_DIR"])
+    versions = FileVersions(data_dir / "file-versions")
+    tools = (
+        *literature_tools(root, data_dir=data_dir, writer=WriteFileTool(root, versions), recent=_RECENT_WORKS),
+        ReadPaperTool(root),
+        *(tool for tool in office_tools(root, data_dir, versions, lambda: None) if tool.spec.name not in _DESKTOP_ONLY_OFFICE),
+    )
+    return {tool.spec.name: tool for tool in tools}
+
+
+def _research_and_office_tools(workspace: str | os.PathLike[str]) -> dict[str, Any]:
+    """The desktop app's literature and office tools for this workspace (ui_gateway/research.py).
+
+    Files they write keep a version in <data>/file-versions, like write_file's. Conversions that need
+    Office or LibreOffice, and the Windows text recognition of scanned PDFs, say so when asked.
+    """
+    built: dict[str, Any] = {}
+    failure: list[Exception] = []
+    lock = threading.Lock()
+
+    def load() -> dict[str, Any]:
+        with lock:
+            if failure:  # an import that failed fails again: not retried on every request
+                raise failure[0]
+            if not built:
+                try:
+                    built.update(_build_research_and_office_tools(workspace))
+                except Exception as error:
+                    failure.append(error)
+                    raise
+        return built
+
+    deferred = {name: _DeferredTool(name, load) for name in RESEARCH_AND_OFFICE_TOOLS}
+    _DEFERRED_TOOLS[:] = deferred.values()
+    return {name: (lambda tool=tool: tool) for name, tool in deferred.items()}
 
 
 _APP_NOTE_TOOL: Any | None = None

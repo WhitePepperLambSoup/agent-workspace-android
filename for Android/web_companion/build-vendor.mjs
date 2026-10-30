@@ -6,7 +6,7 @@ import { buildSync } from "../node_modules/esbuild/lib/main.js";
 // Android owns its web tooling: run `npm ci` in "for Android/" (see package.json), never desktop/.
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dependencies = path.resolve(root, "../node_modules");
-const names = ["activity", "archive", "archive-restore", "arrow-down", "arrow-up", "battery-medium", "bell", "bot", "book-open", "brain", "calendar", "camera", "chart-no-axes-column", "check", "chevron-down", "chevron-left", "chevron-right", "circle-alert", "circle-check", "circle-plus", "circle-x", "clipboard-check", "clock", "code", "copy", "cpu", "database-backup", "download", "ellipsis", "eye", "file-text", "folder", "folder-open", "app-window", "bell-ring", "git-branch", "globe", "graduation-cap", "hand", "hard-drive", "heart", "history", "image-plus", "info", "languages", "layers", "lightbulb", "link", "list-checks", "list-todo", "loader-circle", "log-out", "mail", "menu", "message-square-plus", "mic", "monitor-smartphone", "notebook-pen", "paperclip", "palette", "panel-left", "pause", "pencil", "phone", "play", "plus", "puzzle", "pin", "plane", "refresh-cw", "rotate-ccw", "save", "search", "send", "server", "settings", "share-2", "shield", "shield-check", "shopping-cart", "sparkles", "square", "square-pen", "star", "terminal", "trash-2", "upload", "user-round", "utensils", "volume-2", "wifi-off", "workflow", "wrench", "x", "zap"];
+const names = ["activity", "archive", "archive-restore", "arrow-down", "arrow-up", "battery-medium", "bell", "bot", "book-open", "brain", "building-2", "calendar", "camera", "chart-no-axes-column", "check", "chevron-down", "chevron-left", "chevron-right", "circle-alert", "circle-check", "circle-plus", "circle-x", "clipboard-check", "clock", "code", "copy", "cpu", "database-backup", "download", "ellipsis", "eye", "file-text", "folder", "folder-open", "app-window", "bell-ring", "git-branch", "globe", "graduation-cap", "hand", "hard-drive", "heart", "history", "image-plus", "info", "languages", "layers", "lightbulb", "link", "list-checks", "list-todo", "loader-circle", "log-out", "mail", "menu", "message-square-plus", "mic", "monitor-smartphone", "notebook-pen", "paperclip", "palette", "panel-left", "pause", "pencil", "phone", "play", "plus", "puzzle", "pin", "plane", "refresh-cw", "rotate-ccw", "save", "search", "send", "server", "settings", "share-2", "shield", "shield-check", "shopping-cart", "sparkles", "square", "square-pen", "star", "terminal", "trash-2", "upload", "user-round", "users", "utensils", "volume-2", "wifi-off", "workflow", "wrench", "x", "zap"];
 const icons = Object.fromEntries(await Promise.all(names.map(async (name) => {
   const file = path.join(dependencies, "lucide-react/dist/esm/icons", `${name}.mjs`);
   let module = await import(pathToFileURL(file).href);
@@ -41,6 +41,19 @@ buildSync({
   target: "es2020",
   legalComments: "inline",
 });
+// The expert team's studio (three.js and the office scene, web_companion/studio) is loaded only when
+// it opens, like the diagrams.
+buildSync({
+  entryPoints: [path.join(root, "studio/entry.ts")],
+  nodePaths: [dependencies],
+  outfile: path.join(root, "static/mobile-studio.js"),
+  bundle: true,
+  minify: true,
+  format: "iife",
+  platform: "browser",
+  target: "es2020",
+  legalComments: "inline",
+});
 // create_pdf typesets with KaTeX's HTML output, which needs its stylesheet and fonts (woff2 only:
 // every Chromium WebView reads it).
 const katexDist = path.join(dependencies, "katex/dist");
@@ -52,7 +65,7 @@ await writeFile(path.join(root, "pdf/katex.min.css"), css);
 for (const name of await readdir(path.join(katexDist, "fonts"))) {
   if (name.endsWith(".woff2")) await copyFile(path.join(katexDist, "fonts", name), path.join(pdfFonts, name));
 }
-const packages = ["unified", "remark-parse", "remark-gfm", "remark-math", "remark-rehype", "rehype-sanitize", "rehype-katex", "katex", "hast-util-to-html", "lucide-react", "mermaid"];
+const packages = ["unified", "remark-parse", "remark-gfm", "remark-math", "remark-rehype", "rehype-sanitize", "rehype-katex", "katex", "hast-util-to-html", "lucide-react", "mermaid", "three"];
 const licenses = await Promise.all(packages.map(async (name) => {
   const packageRoot = path.join(dependencies, name);
   const metadata = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8"));
@@ -66,4 +79,4 @@ const licenses = await Promise.all(packages.map(async (name) => {
   return `${name} ${metadata.version}\n${license.trim()}`;
 }));
 await writeFile(path.join(root, "static/mobile-vendor.LICENSE.txt"), `${licenses.join("\n\n")}\n`);
-console.log("Bundled offline Markdown, math, Lucide icons and the on-demand diagram renderer.");
+console.log("Bundled offline Markdown, math, Lucide icons, the on-demand diagram renderer and the studio.");

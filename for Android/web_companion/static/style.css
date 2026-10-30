@@ -376,8 +376,7 @@ strong { font-weight: 600; }
 
 .task-artifacts { min-width: 0; margin: 14px 0 4px; padding: 4px 4px 4px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
 .task-artifacts > h3 { margin: 8px 0 2px; color: var(--text-2); font-size: 12px; font-weight: 600; }
-.artifact-row { display: grid; grid-template-columns: minmax(0, 1fr) 44px 44px; align-items: center; min-width: 0; }
-.artifact-row.with-home-tool { grid-template-columns: minmax(0, 1fr) 44px 44px 44px; }
+.artifact-row { display: grid; grid-template-columns: minmax(0, 1fr) repeat(var(--artifact-actions, 2), 44px); align-items: center; min-width: 0; }
 .artifact-row + .artifact-row { border-top: 1px solid var(--border); }
 .artifact-link {
   display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 52px; padding: 6px 2px; border: 0; border-radius: var(--radius-sm);
@@ -1038,6 +1037,34 @@ strong { font-weight: 600; }
   min-width: 0; margin-top: 16px; padding: 12px 14px 14px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface);
 }
 .management-section > strong { display: block; font-size: 14.5px; }
+
+/* A computer's code changes (device link code review): unified diff, long lines wrap. */
+.code-diff { display: grid; gap: 12px; margin-top: 8px; }
+.diff-file { min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.diff-file-head { display: grid; gap: 2px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.diff-file-head strong { font-family: var(--font-mono); font-size: 12.5px; overflow-wrap: anywhere; }
+.diff-file-head small, .diff-comment small { color: var(--text-2); font-size: 12px; }
+.diff-hunk { padding: 4px 12px; background: var(--surface-2); color: var(--text-3); font-family: var(--font-mono); font-size: 11.5px; overflow-wrap: anywhere; }
+.diff-line {
+  display: grid; grid-template-columns: 4.2ch 4.2ch 1.6ch minmax(0, 1fr); width: 100%; min-height: 22px; margin: 0; padding: 1px 8px 1px 0;
+  border: 0; border-radius: 0; background: transparent; color: var(--text); font: 12px/1.55 var(--font-mono); text-align: left;
+}
+button.diff-line { cursor: pointer; -webkit-tap-highlight-color: transparent; }
+button.diff-line:active { background: var(--accent-soft); }
+button.diff-line:focus-visible { outline: none; box-shadow: inset var(--focus-ring); }
+.diff-line.add { background: var(--success-soft); }
+.diff-line.delete { background: var(--danger-soft); }
+.diff-line.marker { color: var(--text-3); }
+.diff-number { padding-right: 6px; color: var(--text-3); text-align: right; user-select: none; }
+.diff-sign { color: var(--text-2); user-select: none; }
+.diff-line.add .diff-sign { color: var(--success); }
+.diff-line.delete .diff-sign { color: var(--danger); }
+.diff-line code { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.diff-comment, .diff-composer { margin: 4px 8px 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); }
+.diff-comment p { margin: 0 0 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.diff-comment .page-toolbar, .diff-composer .page-toolbar { margin-top: 8px; }
+.diff-composer textarea { width: 100%; }
+.diff-cut { margin: 0; padding: 8px 12px; color: var(--text-2); font-size: 12px; }
 /* A choice to make before something goes to (or comes from) a paired computer: risks spelled out. */
 .confirm-panel { border-color: var(--warning-border); background: var(--warning-soft); }
 .confirm-panel[hidden] { display: none; }
@@ -1486,18 +1513,22 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
 :root { --wp-shade: transparent; }
 :root[data-theme="dark"] { --wp-shade: rgba(0, 0, 0, .5); }
 @media (prefers-color-scheme: dark) { :root[data-theme="system"] { --wp-shade: rgba(0, 0, 0, .5); } }
+/* A smooth gradient looks the same bent or not, so the colour fields (2.6) keep a firmer edge and lie
+   under faint diagonal light lines: the header and the dock straddle both, and the lens visibly bends
+   them. Conversation cards keep their veil, so the lines never run behind text. */
 :root[data-style="glass"] body, .backdrop-swatch.wallpaper {
-  --wp-base-1: var(--wp-l1); --wp-base-2: var(--wp-l2); --wp-a: .72;
+  --wp-base-1: var(--wp-l1); --wp-base-2: var(--wp-l2); --wp-a: .72; --wp-line: rgba(255, 255, 255, .26);
   background: var(--wp-image,
-    radial-gradient(75% 45% at 0% 0%, rgb(var(--wp-1) / var(--wp-a)), transparent 70%),
-    radial-gradient(65% 42% at 100% 20%, rgb(var(--wp-2) / var(--wp-a)), transparent 70%),
-    radial-gradient(75% 45% at 0% 70%, rgb(var(--wp-3) / var(--wp-a)), transparent 70%),
-    radial-gradient(75% 48% at 100% 100%, rgb(var(--wp-4) / var(--wp-a)), transparent 70%),
+    repeating-linear-gradient(118deg, var(--wp-line) 0 1.5px, transparent 1.5px 30px),
+    radial-gradient(75% 45% at 0% 0%, rgb(var(--wp-1) / var(--wp-a)) 30%, transparent 64%),
+    radial-gradient(65% 42% at 100% 20%, rgb(var(--wp-2) / var(--wp-a)) 28%, transparent 62%),
+    radial-gradient(75% 45% at 0% 70%, rgb(var(--wp-3) / var(--wp-a)) 30%, transparent 64%),
+    radial-gradient(75% 48% at 100% 100%, rgb(var(--wp-4) / var(--wp-a)) 30%, transparent 64%),
     linear-gradient(165deg, rgb(var(--wp-base-1)), rgb(var(--wp-base-2))));
 }
-:root[data-theme="dark"][data-style="glass"] body { --wp-base-1: var(--wp-d1); --wp-base-2: var(--wp-d2); --wp-a: .42; }
+:root[data-theme="dark"][data-style="glass"] body { --wp-base-1: var(--wp-d1); --wp-base-2: var(--wp-d2); --wp-a: .42; --wp-line: rgba(255, 255, 255, .07); }
 @media (prefers-color-scheme: dark) {
-  :root[data-theme="system"][data-style="glass"] body { --wp-base-1: var(--wp-d1); --wp-base-2: var(--wp-d2); --wp-a: .42; }
+  :root[data-theme="system"][data-style="glass"] body { --wp-base-1: var(--wp-d1); --wp-base-2: var(--wp-d2); --wp-a: .42; --wp-line: rgba(255, 255, 255, .07); }
 }
 :root[data-style="glass"][data-backdrop="plain"] body, .backdrop-swatch[data-wallpaper="plain"] { background: var(--bg); }
 :root[data-style="glass"][data-backdrop="custom"] body {
@@ -1731,6 +1762,18 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
 @media (prefers-color-scheme: dark) {
   :root.liquid-refraction[data-theme="system"] { --glass-control: rgba(20, 25, 26, .46); --glass-header: rgba(20, 25, 26, .28); }
 }
+/* Clear rims (2.6): the header and the composer keep that tint where their own text sits and thin it
+   out across the curved rim (a mask liquid-glass.js draws with the lens), so the bent wallpaper and
+   conversation show at the edge while the labels and the typed text keep their contrast. Until the
+   mask is ready the tint covers the whole surface, as before. */
+:root.liquid-refraction :is(#mobileHeader, .composer) { background-color: transparent; }
+:root.liquid-refraction #mobileHeader::before, :root.liquid-refraction .composer::before {
+  content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit; pointer-events: none;
+  -webkit-mask: var(--liquid-glass-fill-mask, none) center / 100% 100% no-repeat;
+  mask: var(--liquid-glass-fill-mask, none) center / 100% 100% no-repeat;
+}
+:root.liquid-refraction #mobileHeader::before { background: var(--glass-header, rgba(255, 255, 255, .2)); }
+:root.liquid-refraction .composer::before { background: var(--glass-control, rgba(255, 255, 255, .36)); }
 /* Everything inside the sidebar and the settings sheet (groups, rows, fields, lists on every page) is
    a lighter pane of the same glass rather than an opaque card. */
 :root[data-style="glass"] :is(#sessionDrawerPanel, #settingsSheet, #modelSheetPanel) {
@@ -2141,3 +2184,105 @@ body.elder-mode #appShell { display: none; }
 /* What a message will roughly cost (74-cost-estimate.js). */
 .cost-estimate { margin: 0; padding: 0 10px 2px; color: var(--text-3); font-size: 12px; line-height: 1.4; }
 .cost-estimate[hidden] { display: none; }
+
+/* Expert team (29-team.js): the composer chip, the team page, the experts under their step. */
+.team-chip { padding: 0 10px; }
+.team-chip .team-chip-label { display: none; }
+/* On, it keeps its whole label; the model's name gives way first on a narrow phone. */
+.team-chip.active { flex-shrink: 0; border-color: transparent; background: var(--accent-soft); color: var(--accent-soft-text); }
+.team-chip.active .team-chip-label { display: inline; }
+.team-swatch { flex: 0 0 auto; width: 10px; height: 10px; border-radius: 3px; background: var(--swatch, var(--accent)); }
+.team-members { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.team-member { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 4px 8px 4px 10px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--surface); color: var(--text); font-size: 13px; }
+.team-member svg { width: 14px; height: 14px; color: var(--text-3); }
+#teamSearch { margin-top: 4px; }
+.team-library { display: grid; gap: 4px; margin: 8px 0 4px; max-height: 52vh; overflow-y: auto; overscroll-behavior: contain; }
+.team-domain { margin: 10px 2px 2px; color: var(--text-2); font-size: 12px; font-weight: 600; }
+.team-expert { display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 9px 10px; border: 1px solid transparent; border-radius: var(--radius-sm); background: transparent; color: var(--text); text-align: left; }
+.team-expert .team-swatch { margin-top: 5px; }
+.team-expert > span:last-child { display: grid; gap: 2px; min-width: 0; }
+.team-expert strong { font-size: 14px; font-weight: 560; }
+.team-expert small { color: var(--text-2); font-size: 12px; line-height: 1.45; }
+.team-expert[aria-pressed="true"] { border-color: rgba(var(--accent-rgb), .45); background: var(--accent-soft); }
+.team-results { display: grid; gap: 6px; margin-top: 8px; }
+.team-result { padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); }
+.team-result summary { display: flex; align-items: center; gap: 8px; list-style: none; cursor: pointer; }
+.team-result summary::-webkit-details-marker { display: none; }
+.team-result summary strong { font-size: 14px; font-weight: 600; }
+.team-result summary small { margin-left: auto; color: var(--text-2); font-size: 12px; }
+.team-result[data-state="failed"] summary small { color: var(--danger); }
+.team-result-body { margin: 8px 0; color: var(--text); font-size: 13.5px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.team-result .button-secondary, .team-watch { min-height: 34px; margin-top: 4px; }
+.team-watch { display: inline-flex; align-items: center; gap: 6px; }
+.team-watch-row { display: flex; margin: -2px 0 4px; }
+.team-watch svg { width: 16px; height: 16px; }
+
+/* The studio: the same 3D office as the desktop app's, full screen, labels laid over the canvas. */
+.studio-sheet { position: fixed; inset: 0; z-index: 40; display: flex; flex-direction: column; background: var(--bg); padding-top: env(safe-area-inset-top); }
+.studio-sheet[hidden] { display: none; }
+.studio-header { display: flex; align-items: center; gap: 6px; padding: 8px 8px 6px; }
+.studio-heading { flex: 1 1 auto; min-width: 0; }
+.studio-heading h2 { margin: 0; font-size: 17px; }
+.studio-heading p { margin: 2px 0 0; color: var(--text-2); font-size: 12px; line-height: 1.4; }
+.studio-stage { position: relative; flex: 1 1 auto; min-height: 240px; overflow: hidden; }
+/* Not a flat page behind the room: light from above and two colour fields of the chosen background
+   (29-team.js sets --studio-1/2; the accent without one), under the heading too. Painted once by
+   the compositor: no frames. The roster below keeps a plain surface. */
+.studio-sheet {
+  --studio-top: #f8f9fd; --studio-bottom: #e3e8f1; --studio-pool: rgba(255, 255, 255, .92);
+  background:
+    radial-gradient(68% 36% at 50% 50%, var(--studio-pool), rgba(255, 255, 255, 0) 72%),
+    radial-gradient(95% 52% at 0% 0%, var(--studio-1, rgba(var(--accent-rgb), .2)), transparent 72%),
+    radial-gradient(95% 52% at 100% 100%, var(--studio-2, rgba(var(--accent-rgb), .16)), transparent 72%),
+    linear-gradient(180deg, var(--studio-top), var(--studio-bottom));
+}
+.studio-roster { background: var(--bg); }
+:root[data-theme="dark"] .studio-sheet { --studio-top: #171c26; --studio-bottom: #0b0f15; --studio-pool: rgba(150, 170, 220, .1); }
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] .studio-sheet { --studio-top: #171c26; --studio-bottom: #0b0f15; --studio-pool: rgba(150, 170, 220, .1); }
+}
+.studio-canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; touch-action: none; }
+.studio-overlay { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.studio-tag, .studio-bubble { position: absolute; top: 0; left: 0; will-change: transform; }
+.studio-tag { display: inline-flex; align-items: center; gap: 4px; max-width: 150px; padding: 2px 7px 2px 5px; color: var(--text); font: 600 10.5px/1.3 var(--font-sans); white-space: nowrap; border: 0; border-radius: 999px; background: rgba(255, 255, 255, .82); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .08), 0 3px 10px rgba(0, 0, 0, .16); pointer-events: auto; }
+.studio-tag-state { color: var(--text-2); font-weight: 500; }
+.studio-tag-name, .studio-tag-state { overflow: hidden; text-overflow: ellipsis; }
+/* English names and states are long ("Strategy consultant · Looking things up"): room for both, and
+   the state gives way first so the name stays readable. */
+.studio-tag { max-width: 210px; }
+.studio-tag-name { flex: 0 1 auto; min-width: 0; }
+.studio-tag-state { flex: 0 1000 auto; min-width: 0; }
+.studio-tag[data-compact="true"] { padding: 4px; }
+.studio-tag[data-compact="true"] .studio-tag-name, .studio-tag[data-compact="true"] .studio-tag-state { display: none; }
+.studio-tag-dot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: #9aa3ad; }
+.studio-tag[data-state="working"] .studio-tag-dot, .studio-tag[data-state="answering"] .studio-tag-dot { background: #38c98f; box-shadow: 0 0 0 3px rgba(56, 201, 143, .22); }
+.studio-tag[data-state="waiting"] .studio-tag-dot { background: #f2b33d; box-shadow: 0 0 0 3px rgba(242, 179, 61, .25); }
+.studio-tag[data-state="failed"] .studio-tag-dot { background: #e5534b; }
+.studio-tag[data-state="done"] .studio-tag-dot { background: var(--accent); }
+.studio-tag[data-lead="true"] { box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), .6), 0 3px 10px rgba(0, 0, 0, .16); }
+.studio-bubble { max-width: 170px; padding: 5px 9px; color: #1d2430; font: 500 11.5px/1.4 var(--font-sans); border-radius: 12px; background: rgba(255, 255, 255, .95); box-shadow: 0 6px 18px rgba(0, 0, 0, .2); pointer-events: none; }
+.studio-bubble::after { content: ""; position: absolute; left: 50%; bottom: -5px; width: 10px; height: 10px; background: inherit; transform: translateX(-50%) rotate(45deg); }
+.studio-bubble[data-state="waiting"] { background: #ffe7b3; font-weight: 700; }
+.studio-bubble[data-state="failed"] { background: #ffd2cc; font-weight: 700; }
+.studio-bubble[data-state="done"] { font-weight: 700; color: #1f7a54; }
+.studio-floor-sign { display: none; }
+.studio-hint, .studio-unsupported { position: absolute; left: 10px; bottom: 8px; margin: 0; padding: 4px 9px; color: var(--text-2); font-size: 11px; border-radius: 8px; background: rgba(var(--accent-rgb), .08); pointer-events: none; }
+.studio-hint[hidden], .studio-unsupported[hidden] { display: none; }
+.studio-unsupported { inset: 50% auto auto 50%; transform: translate(-50%, -50%); color: var(--text); font-size: 13px; text-align: center; }
+.studio-roster { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 10px 12px calc(12px + env(safe-area-inset-bottom)); list-style: none; border-top: 1px solid var(--border); }
+.studio-roster button { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 4px 10px; color: var(--text); font-size: 12.5px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); }
+.studio-roster button:disabled { opacity: 1; }
+.studio-roster button span:last-child { color: var(--text-2); }
+[data-theme="dark"] .studio-tag { background: rgba(22, 28, 27, .82); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12), 0 3px 10px rgba(0, 0, 0, .3); }
+@media (prefers-color-scheme: dark) { [data-theme="system"] .studio-tag { background: rgba(22, 28, 27, .82); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12), 0 3px 10px rgba(0, 0, 0, .3); } }
+@media (prefers-reduced-motion: reduce) { .studio-tag, .studio-bubble { will-change: auto; } }
+/* A task's file put back as it was (60-timeline.js undoTaskFiles). */
+.artifact-row.undone .artifact-link { opacity: .55; text-decoration: line-through; }
+.artifact-row.undone [data-file-action="undo"] { visibility: hidden; }
+.artifact-undo-all { margin-top: 6px; }
+/* Suggestions for what was attached (80-attachments.js renderAttachmentSuggestions). */
+.attachment-suggestions { display: flex; gap: 6px; overflow-x: auto; padding: 2px 0 4px; scrollbar-width: none; }
+.attachment-suggestions::-webkit-scrollbar { display: none; }
+.attachment-suggestions[hidden] { display: none; }
+.attachment-suggestions .suggestion-chip { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; min-height: 34px; padding: 4px 11px; font-size: 13px; }
+.attachment-suggestions .suggestion-chip svg { width: 15px; height: 15px; }

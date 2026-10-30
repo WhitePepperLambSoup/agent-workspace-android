@@ -55,6 +55,7 @@
       <div id="mentionPopup" class="mention-popup" role="listbox" aria-label="选择" hidden></div>
       <div class="composer">
         <div id="attachmentList" aria-live="polite"></div>
+        <div id="attachmentSuggestions" class="attachment-suggestions" role="group" aria-label="对附件常做的事" hidden></div>
         <input type="file" id="filePickerInput" hidden multiple>
         <textarea id="promptInput" rows="1" placeholder="给 Agent 布置任务…" aria-label="任务指令"></textarea>
         <p id="costEstimate" class="cost-estimate" aria-live="polite" hidden></p>
@@ -70,6 +71,7 @@
           <button id="modelBar" class="composer-chip" type="button" aria-label="模型与思考" title="模型与思考" aria-haspopup="dialog" aria-expanded="false" aria-controls="modelSheet"><span data-icon="cpu"></span><span id="modelSummary">正在读取模型...</span></button>
           <button id="btnModeChip" class="composer-chip mode-chip" type="button" aria-label="执行权限" title="执行权限"><span data-icon="shield"></span><span id="executionSummary"></span></button>
           <button id="btnPlanChip" class="composer-chip plan-chip" type="button" aria-pressed="false" aria-label="计划模式：先给计划，你批准后再动手" title="计划模式：先给计划，你批准后再动手"><span data-icon="list-checks"></span><span class="plan-chip-label">计划</span></button>
+          <button id="btnTeamChip" class="composer-chip team-chip" type="button" aria-pressed="false" aria-label="专家团：几位专家分工回答" title="专家团：几位专家分工回答"><span data-icon="users"></span><span class="team-chip-label">专家团</span></button>
           <button id="btnKnowledgeChip" class="composer-chip knowledge-chip" type="button" aria-label="本对话使用的知识库" title="本对话使用的知识库" hidden><span data-icon="book-open"></span><span id="knowledgeChipLabel"></span><span id="knowledgeChipBadge" hidden></span></button>
           <span class="composer-spacer"></span>
           <button id="btnVoiceInput" class="icon-button" type="button" title="语音输入" aria-label="语音输入" hidden><span data-icon="mic"></span></button>
@@ -100,6 +102,20 @@
   </div>
   <!-- Quick model sheet: opened from the composer's model chip. The full model page stays in the menu. -->
   <!-- First use: which model answers. A new install has none (app/27-setup.js). -->
+  <div id="studioSheet" class="studio-sheet" role="dialog" aria-modal="true" aria-labelledby="studioTitle" hidden>
+    <header class="studio-header">
+      <button id="btnStudioClose" class="icon-button" type="button" title="关闭" aria-label="关闭"><span data-icon="x"></span></button>
+      <div class="studio-heading"><h2 id="studioTitle">工作室</h2><p id="studioDescription">队长和专家们在这里工作，他们的动作跟着真实的任务走。</p></div>
+      <button id="btnStudioReset" class="icon-button" type="button" title="重置视角" aria-label="重置视角"><span data-icon="rotate-ccw"></span></button>
+      <button id="btnStudioPause" class="icon-button" type="button" title="暂停动画" aria-label="暂停动画" aria-pressed="false"><span data-icon="pause"></span></button>
+    </header>
+    <div id="studioStage" class="studio-stage" data-ready="false">
+      <div id="studioOverlay" class="studio-overlay" aria-hidden="true"></div>
+      <p id="studioUnsupported" class="studio-unsupported" role="status" hidden>这台手机无法显示 3D 工作室（WebGL 不可用）。</p>
+      <p id="studioHint" class="studio-hint" hidden>拖动旋转，双指缩放，点人物看他的任务。</p>
+    </div>
+    <ul id="studioRoster" class="studio-roster" aria-label="在场人员"></ul>
+  </div>
   <div id="setupSheet" hidden>
     <button id="setupSheetBackdrop" type="button" aria-label="关闭" tabindex="-1"></button>
     <section id="setupSheetPanel" role="dialog" aria-modal="true" aria-labelledby="setupSheetTitle">
@@ -224,6 +240,7 @@
           <div class="menu-group">
             <button id="btnModelPage" class="menu-row" type="button" data-keywords="API 密钥 服务商 云端 思考 推理 deepseek openai provider key reasoning model cloud"><span data-icon="cpu"></span><span>模型与思考<small id="menuModelSummary"></small></span><span data-icon="chevron-right"></span></button>
             <button id="btnPermissionPage" class="menu-row" type="button" data-keywords="审批 批准 授权 自动执行 完全访问 approval autonomy"><span data-icon="shield"></span><span>执行权限<small id="menuPermissionSummary"></small></span><span data-icon="chevron-right"></span></button>
+            <button id="btnTeamPage" class="menu-row" type="button" data-keywords="专家 团队 多个 工作室 3D 审阅 expert team studio review"><span data-icon="users"></span><span>专家团<small>几位专家分工研究，再汇总回答</small></span><span data-icon="chevron-right"></span></button>
             <button id="btnLocalModelsPage" class="menu-row" type="button" data-keywords="离线 下载模型 下载来源 魔搭 视觉 上下文 线程 内存 性能测试 语音识别 语音输入 麦克风 录音 转写 听写 qwen gguf sensevoice local model offline download modelscope hugging face vision context threads benchmark speech voice microphone dictation transcribe"><span data-icon="hard-drive"></span><span>本地模型</span><span data-icon="chevron-right"></span></button>
             <button id="btnUsagePage" class="menu-row" type="button" data-keywords="费用 价格 统计 cost price usage"><span data-icon="chart-no-axes-column"></span><span>Token 与费用</span><span data-icon="chevron-right"></span></button>
             <button id="btnMemoryPage" class="menu-row" type="button" data-keywords="记住 偏好 memory"><span data-icon="brain"></span><span>记忆<small>AI 记住的关于你的信息</small></span><span data-icon="chevron-right"></span></button>
@@ -330,6 +347,39 @@
           <strong>不再询问就发送的服务商</strong>
           <p class="setting-hint">发给这些服务商时不再每个对话询问。取消后，下次发送会先问你。</p>
           <div id="trustedProviderList" class="management-list"></div>
+        </div>
+      </div>
+      <div id="settingsTeam" class="settings-page" hidden>
+        <p class="setting-hint">开启后，AI 当队长：把问题拆给几位专家同时研究，需要时再请一位专家审阅，最后汇总回答并写明分歧。比普通对话多花几倍的时间和费用，适合需要多方面判断的问题。手机上的专家只查资料、读文件和网页，不改文件、不运行命令。需要云端模型。</p>
+        <label class="toggle-row" for="teamOnToggle"><span>发消息时使用专家团</span><input id="teamOnToggle" type="checkbox"></label>
+        <div class="page-toolbar"><button id="btnOpenStudio" class="button-secondary" type="button"><span data-icon="building-2"></span>打开工作室</button></div>
+        <label for="teamModeSelect">组队方式</label>
+        <select id="teamModeSelect"><option value="auto">自动组队</option><option value="fixed">固定成员</option></select>
+        <p id="teamModeHint" class="setting-hint"></p>
+        <div id="teamFixedSection" hidden>
+          <div id="teamMembers" class="team-members"></div>
+          <input id="teamSearch" type="search" autocomplete="off" spellcheck="false" placeholder="搜索专家" aria-label="搜索专家">
+          <div id="teamLibrary" class="team-library"></div>
+        </div>
+        <label class="toggle-row" for="teamReviewToggle"><span>审阅成稿</span><input id="teamReviewToggle" type="checkbox"></label>
+        <p class="setting-hint">答案数字多、结论有分歧或事关重大决定时，队长先写成稿，请一位专家逐个复算、挑错，再给你最终答案。关掉会更快、更省。</p>
+        <label for="teamKnowledgeMode">专家查哪个知识库</label>
+        <select id="teamKnowledgeMode"><option value="shared">都用这个对话的知识库</option><option value="separate">给某些专家单独指定</option></select>
+        <p class="setting-hint">共用时，每位专家查这个对话选用的知识库。单独指定后，那位专家只查你给他的知识库，其他专家照旧。</p>
+        <div id="teamKnowledgeSection" hidden>
+          <div id="teamKnowledgeList" class="management-list"></div>
+          <label for="teamKnowledgeExpert">专家</label><select id="teamKnowledgeExpert"></select>
+          <label for="teamKnowledgeBase">知识库</label><select id="teamKnowledgeBase"></select>
+          <div class="page-toolbar"><button id="btnAddTeamKnowledge" class="button-secondary" type="button"><span data-icon="plus"></span>指定</button></div>
+        </div>
+        <div class="management-section">
+          <strong>自定义专家</strong>
+          <p class="setting-hint">写上名称和他负责什么、怎么做，固定成员里就能选他。</p>
+          <div id="teamCustomList" class="management-list"></div>
+          <label for="teamCustomName">名称</label><input id="teamCustomName" type="text" maxlength="24" autocomplete="off">
+          <label for="teamCustomBrief">负责什么、怎么做</label><textarea id="teamCustomBrief" rows="3" maxlength="1200" placeholder="例如：熟悉中国劳动法，回答时引用具体条款。"></textarea>
+          <div class="page-toolbar"><button id="btnAddCustomExpert" class="button-secondary" type="button"><span data-icon="plus"></span>添加专家</button></div>
+          <p id="teamStatus" class="page-status" role="status"></p>
         </div>
       </div>
       <div id="settingsAppearance" class="settings-page" hidden>
@@ -922,6 +972,11 @@
           <strong class="form-title">正在运行</strong>
           <div id="computerRunningList" class="management-list"></div>
         </section>
+        <section id="computerCode" class="management-form" hidden>
+          <strong class="form-title">代码改动</strong>
+          <p class="setting-hint">电脑上打开的文件夹里还没提交的改动。可以逐行写评论，交给电脑上的 AI 去改。</p>
+          <button id="btnComputerCode" class="menu-row" type="button"><span data-icon="git-branch"></span><span>查看代码改动</span><span data-icon="chevron-right"></span></button>
+        </section>
         <section id="computerInbox" class="management-form">
           <strong class="form-title">收件箱</strong>
           <p class="setting-hint">电脑上任务的结果、定时任务的结果，以及电脑发到这台手机的文件、文字和对话。收到的文件放在工作区的「来自电脑」文件夹。</p>
@@ -963,6 +1018,27 @@
           <details id="computerRemoteActivity" class="management-section" hidden><summary>电脑上的记录</summary><div id="computerRemoteActivityList" class="management-list"></div></details>
           <button id="btnComputerRemove" class="button-secondary apply-button danger-button" type="button"><span data-icon="trash-2"></span>移除这台电脑</button>
         </section>
+      </div>
+      <!-- A paired computer's code changes and reviews (feature code_review, the desktop's docs/DEVICE_LINK_API.md). -->
+      <div id="settingsCodeReview" class="settings-page" hidden>
+        <button id="btnCodeReviewRefresh" data-header-action class="icon-button" type="button" aria-label="刷新代码改动" title="刷新代码改动"><span data-icon="refresh-cw"></span></button>
+        <p id="codeReviewStatus" class="page-status" role="status"></p>
+        <section class="management-form">
+          <strong class="form-title">未提交的改动</strong>
+          <p id="codeChangesSummary" class="setting-hint"></p>
+          <div id="codeChangesList" class="management-list"></div>
+          <button id="btnFreezeReview" class="button-primary apply-button" type="button"><span data-icon="message-square-plus"></span>开始审查</button>
+          <p id="codeFreezeHint" class="setting-hint"></p>
+        </section>
+        <section class="management-form">
+          <strong class="form-title">审查记录</strong>
+          <div id="codeReviewList" class="management-list"></div>
+        </section>
+      </div>
+      <div id="settingsCodeDiff" class="settings-page" hidden>
+        <p id="codeDiffStatus" class="page-status" role="status"></p>
+        <p id="codeDiffHint" class="setting-hint"></p>
+        <div id="codeDiffBody" class="code-diff"></div>
       </div>
       <div id="settingsOutbox" class="settings-page" hidden>
         <button id="btnOutboxRefresh" data-header-action class="icon-button" type="button" aria-label="刷新待发送" title="刷新待发送"><span data-icon="refresh-cw"></span></button>

@@ -145,6 +145,15 @@ class MobileManagement:
             return 200, self.connections.use_address(host_id, payload.get("url"))
         if action == "retry-transfer":
             return 200, link.retry_transfer(host_id, payload.get("transfer_id"))
+        if action == "review":
+            return 200, await link.freeze_review(host_id)
+        if action == "review-comment":
+            return 200, await link.review_comment(
+                host_id, payload.get("review_id"), payload.get("path"), payload.get("side"),
+                payload.get("line"), payload.get("body"),
+            )
+        if action == "review-followup":
+            return 200, await link.review_followup(host_id, payload.get("comment_id"))
         return None
 
     @staticmethod
@@ -579,6 +588,14 @@ class MobileManagement:
                 return 200, await self.link.knowledge_bases(host_id)
             if action == "device":
                 return 200, await self.link.remote_device(host_id)
+            if action == "changes":
+                return 200, await self.link.changes(host_id)
+            if action == "change-diff":
+                return 200, await self.link.change_diff(host_id, query.get("path", [""])[0])
+            if action == "reviews":
+                return 200, await self.link.reviews(host_id)
+            if action == "review":
+                return 200, await self.link.review(host_id, query.get("id", [""])[0])
         if path == "/mobile/connections/sessions":
             return 200, await self.connections.sessions(query.get("host_id", [""])[0])
         if path == "/mobile/connections/events":
@@ -604,6 +621,38 @@ class MobileManagement:
         if path == "/mobile/approvals/trusted-providers":
             # Providers sent to without asking (Execution mode page), each can be asked about again.
             return 200, {"trusted": sorted(self.controller.approvals.trusted_providers())}
+        if path == "/mobile/experts":
+            # The expert library for the team settings and the studio: names and one-line summaries
+            # in the app's languages, by field (core.expert_library).
+            from agent_workspace.core.expert_library import DOMAINS, LOCALES
+            from agent_workspace.core.experts import MAX_EXPERTS
+            from mobile_expert_names_ko import DOMAIN_NAMES as KO_DOMAINS, EXPERTS as KO_EXPERTS
+
+            def localized(values: tuple[str, ...], korean: str | None) -> dict[str, str]:
+                names = dict(zip(LOCALES, values, strict=True))
+                if korean:
+                    names["ko-KR"] = korean
+                return names
+
+            return 200, {
+                "max_experts": MAX_EXPERTS,
+                "domains": [
+                    {
+                        "id": domain.id,
+                        "names": localized(domain.names, KO_DOMAINS.get(domain.id)),
+                        "color": domain.color,
+                        "experts": [
+                            {
+                                "id": expert.id,
+                                "names": localized(expert.names, KO_EXPERTS.get(expert.id, (None, None))[0]),
+                                "summaries": localized(expert.summaries, KO_EXPERTS.get(expert.id, (None, None))[1]),
+                            }
+                            for expert in domain.experts
+                        ],
+                    }
+                    for domain in DOMAINS
+                ],
+            }
         if path == "/mobile/local-models/engine":
             # What the on-device model is doing now, polled by a conversation while it waits: how
             # much of the prompt it has read (the first answer reads all of it, for minutes).
@@ -1075,6 +1124,39 @@ class MobileManagement:
             title = str(payload.get("title") or "")[:120] or "Agent Workspace"
             labels = export_labels(payload.get("labels"))
             return 200, await export_conversation(session.workspace, title, events, fmt, labels)
+        if path == "/mobile/task-files/undo":
+            # Put back what a task created or changed in the workspace (apply false: only say what
+            # would happen).
+            from mobile_task_undo import task_file_versions, undo_task_files
+
+            task_id, paths, apply = payload.get("task_id"), payload.get("paths"), payload.get("apply")
+            if not isinstance(task_id, str) or not isinstance(apply, bool) or (
+                paths is not None and (not isinstance(paths, list) or not all(isinstance(item, str) for item in paths))
+            ):
+                return 400, {"error": "task_id, apply and optionally paths are required"}
+            try:
+                task = self.controller.get(task_id)
+            except KeyError:
+                return 404, {"error": "unknown task"}
+            if task.state.value in {"queued", "running", "waiting_approval"}:
+                return 409, {"error": "the task is still running"}
+            session = self.runtime.service.get_session(task.session_id)
+            versions = task_file_versions(self.controller.events(task_id))
+            files = await asyncio.to_thread(undo_task_files, session.workspace, task.session_id, versions, paths, apply=apply)
+            return 200, {"files": files, "applied": apply}
+        if path == "/mobile/answers/export":
+            # One reply as a file to share or keep (the reply's own Markdown, from the console).
+            from mobile_conversation_export import ANSWER_FORMATS, export_answer
+
+            session_id, fmt = payload.get("session_id"), payload.get("format")
+            if not isinstance(session_id, str) or fmt not in ANSWER_FORMATS:
+                return 400, {"error": f"session_id and a format ({', '.join(ANSWER_FORMATS)}) are required"}
+            session = self.runtime.service.get_session(session_id)
+            title = str(payload.get("title") or "")[:120]
+            try:
+                return 200, await export_answer(session.workspace, title, payload.get("markdown"), fmt)
+            except ValueError as error:
+                return 400, {"error": str(error)}
         if path == "/mobile/sessions/fork":
             from mobile_session_fork import fork_conversation
 

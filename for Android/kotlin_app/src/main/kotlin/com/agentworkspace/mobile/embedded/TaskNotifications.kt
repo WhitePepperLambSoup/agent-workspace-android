@@ -75,6 +75,8 @@ data class TaskNotificationSnapshot(
     val approvalId: String?,
     val sequence: Long,
     val updatedAtMillis: Long? = null,
+    /** An expert team at work: what its experts do, by app language ("zh", "en", "ja", "ko"). */
+    val teamProgress: Map<String, String> = emptyMap(),
 ) {
     companion object {
         private val states = setOf("queued", "running", "waiting_approval", "succeeded", "failed", "cancelled", "interrupted")
@@ -91,6 +93,9 @@ data class TaskNotificationSnapshot(
                 value.optString("approval_id").takeUnless { it.isBlank() || it == "null" },
                 value.optLong("last_sequence"),
                 isoMillis(value.optString("updated_at")),
+                value.optJSONObject("team_progress")?.let { lines ->
+                    lines.keys().asSequence().associateWith { lines.optString(it).take(200) }.filterValues { it.isNotBlank() }
+                } ?: emptyMap(),
             )
         }
 

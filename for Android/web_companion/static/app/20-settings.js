@@ -279,7 +279,7 @@
   }
 
   // Sub-pages return to their parent page rather than to the menu.
-  const subPageParents = { pricing: "usage", quickTasks: "appearance", computer: "connections" };
+  const subPageParents = { pricing: "usage", quickTasks: "appearance", computer: "connections", codeReview: "computer", codeDiff: "codeReview" };
 
   function setSettingsPage(page, initial = false) {
     if (settingsPage === "files" && page !== "files" && !canLeaveFileEditor()) return false;
@@ -291,7 +291,7 @@
     if (settingsPage === "files" && page !== "files") { filesGeneration += 1; resetFilePreview(); }
     if (settingsPage === "usage" && page !== "usage") usageGeneration += 1;
     settingsPage = page;
-    const titles = { home: t("菜单"), model: t("模型与思考"), permission: t("执行权限"), appearance: t("界面偏好"), search: t("搜索会话"), tasks: t("任务中心"), files: t("工作区文件"), attachments: t("附件收件箱"), session: t("会话名称"), notifications: t("通知"), usage: t("Token 与费用"), pricing: t("模型费率"), doctor: t("设备与工具"), extensions: t("MCP 与扩展"), skills: t("技能"), schedules: t("定时任务"), connections: t("设备连接"), computer: t("电脑"), outbox: t("待发送与接力"), workflows: t("可复用流程"), evaluations: t("任务评测"), localModels: t("本地模型"), workspaces: t("工作区"), quickTasks: t("快捷任务"), memory: t("记忆"), knowledge: t("知识库"), conversationKnowledge: t("本对话的知识库"), services: t("后台服务"), globalEntry: t("全局入口"), notificationRules: t("通知触发"), backup: t("备份与恢复"), about: t("关于与更新"), elder: t("长辈模式"), appCheck: t("应用体检") };
+    const titles = { home: t("菜单"), model: t("模型与思考"), permission: t("执行权限"), appearance: t("界面偏好"), search: t("搜索会话"), tasks: t("任务中心"), files: t("工作区文件"), attachments: t("附件收件箱"), session: t("会话名称"), notifications: t("通知"), usage: t("Token 与费用"), pricing: t("模型费率"), doctor: t("设备与工具"), extensions: t("MCP 与扩展"), skills: t("技能"), schedules: t("定时任务"), connections: t("设备连接"), computer: t("电脑"), codeReview: t("代码改动"), codeDiff: t("改动"), outbox: t("待发送与接力"), workflows: t("可复用流程"), evaluations: t("任务评测"), localModels: t("本地模型"), workspaces: t("工作区"), quickTasks: t("快捷任务"), memory: t("记忆"), knowledge: t("知识库"), conversationKnowledge: t("本对话的知识库"), services: t("后台服务"), globalEntry: t("全局入口"), notificationRules: t("通知触发"), backup: t("备份与恢复"), about: t("关于与更新"), elder: t("长辈模式"), appCheck: t("应用体检"), team: t("专家团") };
     document.querySelectorAll(".settings-page").forEach((element) => { element.hidden = true; });
     const selectedPage = document.getElementById(`settings${page[0].toUpperCase()}${page.slice(1)}`);
     if (selectedPage) {

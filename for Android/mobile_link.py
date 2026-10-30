@@ -53,6 +53,16 @@ _ASK_POLL_SECONDS = 5.0
 _TRANSFER_ATTEMPTS = 5
 _JOB_SETTINGS = ("ask", "auto", "off")
 _TERMINAL = {"completed", "failed", "cancelled"}
+_REVIEW_REFUSALS = {
+    "unknown_path": "that file has no changes on the computer any more",
+    "unknown_review": "that review is no longer on the computer",
+    "unknown_comment": "that comment is no longer on the computer",
+    "invalid_session": "the conversation no longer exists on the computer",
+    "invalid_comment": "write a comment of at most 4,000 characters",
+    "invalid_comment_anchor": "that line is not in this review's changes",
+    "no_changes": "there are no uncommitted changes on the computer",
+    "review_too_large": "the changes are too large to review on the phone; review them on the computer",
+}
 _MAC = re.compile(r"[0-9a-f]{2}([:-]?)(?:[0-9a-f]{2}\1){4}[0-9a-f]{2}")
 _ID = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 _STAGED = re.compile(r"[A-Za-z0-9._-]{1,200}")
@@ -1011,6 +1021,71 @@ class MobileLink:
             raise
         self.activity(host_id, "file_received", target.name)
         return {"path": target.relative_to(self.workspace).as_posix(), "name": target.name, "sha256": received["sha256"]}
+
+    # ---- code review (feature "code_review", the desktop's docs/DEVICE_LINK_API.md) ---------------
+
+    async def _review_call(self, host_id: str, method: str, route: str, payload: Any = None) -> dict[str, Any]:
+        """The changes of the folder open on the computer, through the window's own Changes page."""
+        self._needs(self._host(host_id), "code_review")
+        try:
+            _, answer = await self.connections.request(host_id, method, route, payload, timeout=30)
+        except RemoteHTTPError as error:
+            if error.code in _REVIEW_REFUSALS:
+                raise ValueError(_REVIEW_REFUSALS[error.code]) from None
+            if error.code in {"scope_denied", "no_workspace"}:
+                raise ValueError(refusal_reason(error)) from None
+            raise
+        return answer
+
+    async def changes(self, host_id: str) -> dict[str, Any]:
+        return await self._review_call(host_id, "GET", "/mobile/changes")
+
+    async def change_diff(self, host_id: str, path: object) -> dict[str, Any]:
+        if not isinstance(path, str) or not path or len(path) > 1000:
+            raise ValueError("invalid file")
+        return await self._review_call(host_id, "GET", f"/mobile/changes/diff?{urlencode({'path': path})}")
+
+    async def reviews(self, host_id: str) -> dict[str, Any]:
+        return await self._review_call(host_id, "GET", "/mobile/reviews")
+
+    async def review(self, host_id: str, review_id: object) -> dict[str, Any]:
+        review_id = _checked_id(review_id, "review")
+        return await self._review_call(host_id, "GET", f"/mobile/reviews/{quote(review_id, safe='')}")
+
+    async def freeze_review(self, host_id: str) -> dict[str, Any]:
+        """The changes frozen into a review, under the conversation open in the computer's window."""
+        return await self._review_call(host_id, "POST", "/mobile/reviews", {})
+
+    async def review_comment(
+        self, host_id: str, review_id: object, path: object, side: object, line: object, body: object
+    ) -> dict[str, Any]:
+        review_id = _checked_id(review_id, "review")
+        text = body.strip() if isinstance(body, str) else ""
+        if not text or len(text) > 4000:
+            raise ValueError("write a comment of at most 4,000 characters")
+        if not isinstance(path, str) or not path or side not in {"old", "new"} or type(line) is not int or line < 1:
+            raise ValueError("that line is not in this review's changes")
+        answer = await self._review_call(
+            host_id, "POST", f"/mobile/reviews/{quote(review_id, safe='')}/comments",
+            {"path": path, "side": side, "line": line, "body": text},
+        )
+        self.activity(host_id, "review_comment", f"{path}:{line}")
+        return answer
+
+    async def review_followup(self, host_id: str, comment_id: object) -> dict[str, Any]:
+        """A comment handed to the computer's AI, which works on it in a copy of the folder of its own."""
+        comment_id = _checked_id(comment_id, "comment")
+        try:
+            answer = await self._review_call(
+                host_id, "POST", f"/mobile/reviews/comments/{quote(comment_id, safe='')}/followup", {}
+            )
+        except RemoteHTTPError as error:
+            # Handed over already (here, from the window, or a request whose answer was lost).
+            if error.code == "followup_already_exists":
+                return {"already": True}
+            raise
+        self.activity(host_id, "review_followup", str(answer.get("run_id") or comment_id))
+        return answer
 
     def _staged(self, entry: object) -> tuple[Path, bool]:
         """A file to send: one staged by the app for this purpose (deleted once sent), or a file in the

@@ -49,6 +49,7 @@ _SOURCE_SUFFIXES = {
     ".js",
     ".mjs",
     ".cjs",
+    ".ts",
     ".json",
     ".toml",
     ".md",

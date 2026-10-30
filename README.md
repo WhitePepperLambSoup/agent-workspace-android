@@ -14,14 +14,14 @@ An AI agent that runs on your Android phone. It plans and carries out multi-step
 
 ## Download
 
-Get `AgentWorkspace_2.5.2_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app: it checks at every start and about every 12 hours, and you can check yourself under Menu → About and updates, or "Updates" on the loading screen. Changes in each version are listed in the [CHANGELOG](CHANGELOG.md).
+Get `AgentWorkspace_2.6.0_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app: it checks at every start and about every 12 hours, and you can check yourself under Menu → About and updates, or "Updates" on the loading screen. Changes in each version are listed in the [CHANGELOG](CHANGELOG.md).
 
 - Android 8.0 (API 26) or newer, 64-bit ARM (`arm64-v8a`) or `x86_64`; phones running a 32-bit-only system cannot install it.
 - The interface is shown by the system's Android System WebView, which must be Chromium 80 or newer. If WebView is disabled, missing or too old, the app explains why and links to the app store to update it.
 - Works on Android 15+ devices with 16 KB memory pages, foldables, split screen and external keyboards, and keeps its own colours under system or vendor "force dark" modes.
-- About 73 MB to install. Local models and the offline speech model are optional downloads inside the app.
+- About 75 MB to install. Local models and the offline speech model are optional downloads inside the app.
 
-2.5.2 fixes phones with a long history getting stuck on the start-up screen after the 2.5.1 update. What changed in 2.5.1: the first start helps you pick a model; an on-device model prepares once after switching, and new conversations then start answering in about a second; model downloads continue on their own after the network drops; a failed reply says why and what to do; and the AI can find and change settings for you.
+2.6.0 adds the expert team (several experts research a question and the answer brings their work together) and a 3D studio to watch them; papers and reference checks; reading and writing Word, Excel, PowerPoint and PDF files; exporting one reply; putting back the files a task changed; and, with the desktop app paired, reviewing the computer's code changes on the phone.
 
 ## Features
 
@@ -44,6 +44,19 @@ Get `AgentWorkspace_2.5.2_android.apk` from [Releases](https://github.com/WhiteP
 - **Per-task limit.** Model & reasoning sets a cost and a token limit for each task, counting the sub-tasks it starts; a task that reaches one stops and says which. Tokens & cost shows conversations, summaries and sub-tasks separately. Before you send, the line under the input box estimates what the message is likely to cost, from recent tasks.
 - **Fork a conversation.** Start a new conversation from any message. From your message, it keeps what came before and puts the message back in the input box to rewrite; from a reply, it keeps everything up to that reply. The original stays as it is, the AI in the new one remembers what came before, and both share the workspace's files.
 - **Compare with another model.** Ask another model of the current provider the same question and see both answers together, each with its model time (not counting the wait for your approval) and tokens; continue with the other answer if you prefer it.
+
+### Expert team
+
+<p align="center">
+  <img src="docs/screenshots/team-en.png" width="250" alt="An answer after the experts split the work">
+  <img src="docs/screenshots/studio-en.png" width="250" alt="The lead and the experts in the 3D studio">
+  <img src="docs/screenshots/team-page-en.png" width="250" alt="Expert team settings and the expert library">
+</p>
+
+- **Several experts at once.** Turn on Expert team in the message box and send: the AI leads, splits the question among several experts who research it at the same time, has one of them review the draft when needed, and answers with the points they disagree on. It is slower and uses more tokens than a single answer, and suits questions that need several kinds of judgement; it needs a cloud model. On the phone the experts only look things up and read files and web pages; they do not change files or run commands.
+- **Expert library.** 73 experts grouped by field; the team is picked for each question, or you fix its members (up to 4) and add your own, describing what they do and how. Experts share the conversation's knowledge bases, or an expert gets one of their own.
+- **3D studio.** Tap Watch in the studio in a conversation to see the lead and the experts at work in an office, handing out parts, looking things up and handing in, following the real task; drag to turn, pinch to zoom, tap someone to open their sub-task. It stops drawing a few seconds after the picture settles, and not at all in the background.
+- **Progress everywhere.** What each expert is doing shows in the conversation and in the engine notification; sharing text from another app to Ask the expert team opens a new conversation with the question filled in.
 
 ### Phone control
 
@@ -134,17 +147,23 @@ The phone and the computer need to be on the same network, or both on Tailscale.
 - **Text and links.** Both ways; a notification copies the text in one tap and opens a link in one more.
 - **Wake the computer.** When the computer allows it, the phone sends a wake-on-LAN packet and notifies you once the computer is back.
 - **Scheduled results and knowledge base sync.** Results of the computer's scheduled tasks come to the phone, listed in the computer page's inbox. Pair a knowledge base on each side and each gets what the other has; documents with the same content are added once.
+- **Review code changes.** When the desktop app supports it, the computer page has Code changes: see the uncommitted changes in the folder open on the computer and their diffs, tap Start a review to freeze them into a review snapshot, comment on a line and hand the comment to the computer's AI, which works in a separate copy and leaves the open folder alone. Without the hand-over permission the pages only show.
 - **Device and activity.** The Device part of the computer page lists permissions, addresses and the activity on both sides; removing a computer on the phone also removes this phone from the computer. When the computer's IP address changes, the phone finds it again on the local network by the computer's id.
+
+<p align="center">
+  <img src="docs/screenshots/code-review-list-en.png" width="250" alt="Uncommitted changes on the computer and the reviews">
+  <img src="docs/screenshots/code-review-en.png" width="250" alt="A comment on a line of the diff">
+</p>
 
 ### Files, knowledge bases and memory
 
 - **Workspaces and files.** Each workspace is a folder. Generated files can be opened, previewed (Markdown, images, sandboxed HTML), shared or saved; text files can be edited in the app, files and folders can be renamed, moved, deleted and created, and workspaces appear in Android's file picker.
 - **Home-screen tools.** An HTML file the AI made can be added to the home screen and opened from its own icon. A tool runs offline, cannot reach the network or the app's data, and keeps the data it saves; manage tools at the top of the Files page.
-- **File history.** Before the agent rewrites, deletes or moves a file, and before you save or delete one on the Files page, its content is kept for 30 days. Earlier versions on a file previews and restores them in one tap; Recent changes lists the whole workspace.
-- **Share anything in.** Share files from WeChat, QQ or any app into a conversation; photos, pictures and files picked in the message box go straight into the open conversation, with large pictures shrunk; PDFs are read page by page with OCR for scanned pages.
+- **File history.** Before the agent rewrites, deletes or moves a file, and before you save or delete one on the Files page, its content is kept for 30 days. Earlier versions on a file previews and restores them in one tap; Recent changes lists the whole workspace. The files a task changed are listed under its reply and can be put back as they were before the task, one by one or all at once.
+- **Share anything in.** Share files from WeChat, QQ or any app into a conversation; photos, pictures and files picked in the message box go straight into the open conversation, with large pictures shrunk; PDFs are read page by page with OCR for scanned pages. Attaching photos or a recording offers common next steps above the message box: make a PDF, log an expense, add to calendar, read the text, turn into minutes.
 - **Knowledge bases.** Add manuals, contracts, notes and e-books (PDF, Word, Excel, EPUB, web pages, Markdown, text) and the agent answers from the relevant passages, citing the document and page. Scanned PDFs are read with offline text recognition on the phone, and a web page can be saved from a pasted or shared link as it is at that moment. Sort documents into several knowledge bases and choose which ones each conversation uses. Documents stay on the phone and are searched by keyword with built-in and custom synonyms, at no API cost; with the optional 334 MB EmbeddingGemma model they are also searched by meaning on the phone, so "how early must I give notice" finds "30 days' written notice".
 - **Memory.** The agent remembers your preferences and recurring details within limits (up to 500 notes organized by topic and searchable, no near-duplicates, never passwords or verification codes); the Memory page shows, edits and deletes them.
-- **Backup and export.** Conversations, memory, automation, workspace files and settings go into one zip for a new phone or a reinstall, optionally locked with a passphrase; a conversation can be exported as Markdown, PDF or one long image.
+- **Backup and export.** Conversations, memory, automation, workspace files and settings go into one zip for a new phone or a reinstall, optionally locked with a passphrase; a conversation can be exported as Markdown, PDF or one long image, and one reply as Word, PDF, a long image or Markdown.
 
 ### Interface and entry points
 
@@ -152,7 +171,7 @@ The phone and the computer need to be on the same network, or both on Tailscale.
   <img src="docs/screenshots/appearance-en.png" width="250" alt="Appearance: liquid glass and twelve backgrounds">
 </p>
 
-- **Liquid-glass interface.** The top bar, composer and menus are glass that refracts light, with light-catching rims; twelve backgrounds or your own wallpaper, five accent colours, light/dark themes and spring-based motion (panels can be dragged closed and follow the system's reduce-motion setting) — or a plain standard style. The quick tasks above the input are yours to edit, and the menu has a search box for features and settings.
+- **Liquid-glass interface.** The top bar, composer and menus are glass that refracts light, with light-catching rims; twelve backgrounds or your own wallpaper, five accent colours, light/dark themes and spring-based motion (panels can be dragged closed and follow the system's reduce-motion setting) — or a plain standard style. On Android 12 and newer the Operate phone window is frosted glass too, with the app behind it showing through. The quick tasks above the input are yours to edit, and the menu has a search box for features and settings.
 - **Simplified Chinese, Traditional Chinese, English, Japanese and Korean.** The interface follows the system language or can be switched at any time.
 - **Ask from anywhere.** The floating bubble (operate phone, new chat, ask by voice, circle to ask, voice note; drag it onto the × at the bottom to hide it), an "Ask Agent" quick settings tile, home screen widgets (quick ask, task status, quick tasks), app icon shortcuts, and asking about a photo.
 - **Ask the AI about settings.** Ask where to turn on the floating bubble, or for dark mode: the AI gives a button that opens that settings page, or a card showing the change from one value to the other, applied only when you tap Apply. API keys, the app lock and system permissions can only be opened, for you to change.
@@ -161,6 +180,8 @@ The phone and the computer need to be on the same network, or both on Tailscale.
 
 ### More tools
 
+- **Papers and references.** Look up works by title, author, DOI, arXiv id or PubMed id, read a paper PDF in the workspace (outline, chosen pages, figure captions), check a reference list entry by entry (does the work exist, are the details right, was it retracted), keep a project's reference library and export it as BibTeX, RIS, CSL-JSON or a reference list.
+- **Office files.** Read Word, Excel and PowerPoint files, revise a Word document with tracked changes (accepted or rejected one by one in Word), make Excel workbooks with real formulas, decks on a template and official documents to the Chinese GB/T 9704 layout, and merge, split, pick or rotate PDF pages. These tools load the first time they are used.
 - **Alarms, timers and calendar.** Say "wake me at 7 tomorrow" or "remind me in 20 minutes" and the agent sets it in the system Clock app; with calendar access it can also list and add events.
 - **Built-in browser.** The agent uses the phone's WebView to open pages, read sites that need JavaScript, click, fill in forms and take screenshots, asking your approval before opening pages and clicking.
 - **Background services and long commands.** Web servers, bots and other programs the agent starts keep running, with output and controls on the Background services page; installs and builds can run for up to 30 minutes with live output.

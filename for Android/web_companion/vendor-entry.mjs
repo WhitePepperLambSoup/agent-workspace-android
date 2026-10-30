@@ -41,10 +41,41 @@ const escapeAttribute = (value) => String(value).replace(/[&<>"']/g, (character)
 // display formulas on one line as $$ … $$ (which Markdown treats as inline). Rewrite both to the
 // forms remark-math expects, leaving fenced and inline code untouched.
 function normalizeMath(text) {
-  return String(text || "").split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/g).map((part, index) => index % 2 ? part : part
+  return String(text || "").split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/g).map((part, index) => index % 2 ? part : escapeMoney(part
     .replace(/\\\[([\s\S]+?)\\\]/g, (_, body) => `\n$$\n${body.trim()}\n$$\n`)
     .replace(/\\\(([\s\S]+?)\\\)/g, (_, body) => `$${body.trim()}$`)
-    .replace(/^([ \t]*)\$\$([^\n]+?)\$\$[ \t]*$/gm, (_, indent, body) => `${indent}$$\n${indent}${body.trim()}\n${indent}$$`)).join("");
+    .replace(/^([ \t]*)\$\$([^\n]+?)\$\$[ \t]*$/gm, (_, indent, body) => `${indent}$$\n${indent}${body.trim()}\n${indent}$$`))).join("");
+}
+
+// A single "$" is a formula's edge only as pandoc reads it: an opening one has no space after it, and
+// the next "$" closes it if it has no space before it and no digit after it, in the same paragraph (a
+// formula holds no bare "$"). Any other "$" is money ("A$40,000 … A$40k", "$5 and $10") and is
+// escaped, or the text between two prices turned into one italic formula. "$$" is left as it is.
+function escapeMoney(part) {
+  const singles = [];
+  for (let at = 0; at < part.length; at += 1) {
+    if (part[at] === "\\") { at += 1; continue; }
+    if (part[at] !== "$") continue;
+    if (part[at + 1] === "$") { at += 1; continue; }
+    singles.push(at);
+  }
+  const formula = new Set();
+  for (let index = 0; index + 1 < singles.length; index += 1) {
+    const open = singles[index];
+    const close = singles[index + 1];
+    if (!part[open + 1] || /\s/.test(part[open + 1]) || /\n[ \t]*\n/.test(part.slice(open, close))) continue;
+    if (/\s/.test(part[close - 1]) || /\d/.test(part[close + 1] || "")) continue;
+    formula.add(open).add(close);
+    index += 1;
+  }
+  let escaped = "";
+  let from = 0;
+  for (const at of singles) {
+    if (formula.has(at)) continue;
+    escaped += `${part.slice(from, at)}\\$`;
+    from = at + 1;
+  }
+  return escaped + part.slice(from);
 }
 
 window.MobileUi = {

@@ -146,7 +146,13 @@
     } else if (event.event_type === "task.step_shots") {
       task.stepShots = Number(payload.count) || 0;
     } else if (event.event_type === "task.subagent.step") {
+      noteExpertStep(payload);
       showSubagentStep(payload);
+    } else if (event.event_type === "task.team") {
+      task.team = true;
+      noteTeamTask(task);
+    } else if (event.event_type === "task.team.expert") {
+      noteExpert(task, payload);
     } else if (event.event_type === "task.on_device") {
       task.onDevice = true;
       markOnDevice(task.card);
@@ -320,6 +326,7 @@
       if (task.state !== "cancelled") { offerPlanExecution(task); offerShortcut(task); offerStepShots(task); continueVoiceConversation(task); }
     }
     elderTaskDone(task);
+    endTeamTask(task);
     activeTask = null;
     if (backgroundTasks.get(task.sessionId) === task) backgroundTasks.delete(task.sessionId);
     settleUnfinishedTools();
@@ -623,7 +630,7 @@
     const payload = { session_id: sessionId, prompt: submittedPrompt, model: settings.model,
       reasoning_effort: settings.reasoning_effort, ...(imageRefs.length ? { image_refs: imageRefs } : {}),
       ...(rewind ? { rewind_from_event_id: rewind.eventId, rewind_reason: rewind.reason } : {}),
-      ...(planMode ? { plan_mode: true } : {}),
+      ...(planMode ? { plan_mode: true } : {}), ...teamRequest(route.onDevice),
       ...(route.onDevice ? { on_device: true } : {}), ...(route.waitForNetwork ? { wait_for_network: true } : {}) };
     // The replaced turns disappear while the new one is submitted, and come back if it fails.
     const replacedCards = rewind ? cardsFrom(rewind.card) : [];

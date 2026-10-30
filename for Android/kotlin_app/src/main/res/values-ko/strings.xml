@@ -25,4 +25,5 @@
     <string name="widget_card_empty">‘예약 작업’에서 작업의 ‘홈 화면 카드에 표시’를 누르면 그 최신 결과가 여기에 표시됩니다.</string>
     <!-- The share menu entry that sends files and text to a paired computer (device link). -->
     <string name="send_to_computer_label">컴퓨터로 보내기</string>
+    <string name="ask_expert_team_label">전문가 팀에 묻기</string>
 </resources>

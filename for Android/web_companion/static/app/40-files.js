@@ -1,16 +1,19 @@
   function attachQuickShare() {
     if (!quickShareBatch || typeof bridge?.confirmShareInbox !== "function") return;
-    if (Date.now() > quickShareDeadline || !currentSessionId) { quickShareBatch = null; return; }
+    if (Date.now() > quickShareDeadline || !currentSessionId) { quickShareBatch = null; quickShareTeam = false; return; }
     const items = shareInbox.items.filter((item) => item.batch_id === quickShareBatch);
     if (!items.length || items.some((item) => item.state === "staging")) return; // wait for the next inbox change
     const pending = items.filter((item) => item.state === "pending").map((item) => item.id);
+    const team = quickShareTeam;
     quickShareBatch = null;
+    quickShareTeam = false;
     if (!pending.length) return;
     try {
       const result = JSON.parse(bridge.confirmShareInbox(JSON.stringify({ request_id: requestId("share"),
         session_id: currentSessionId, workspace_id: workspaceOfSession(currentSessionId), item_ids: pending })));
       if (!result.ok) throw new Error(localizeError(result.error) || t("无法导入附件"));
       if (quickNote?.batch === items[0].batch_id) notice(t("录音已保存，正在整理纪要…"), "info");
+      else if (team) notice(t("这次由专家团回答：看一下问题和附件，点发送。"), "info");
       else notice(t("截图已添加到这次对话，输入你的问题吧"), "info");
     } catch (error) { notice(error.message); }
   }
@@ -47,7 +50,7 @@
   }
 
   window.AgentMobileUi = { openMenu, closeMenu, handleBack, notice, reloadForLanguage: () => window.location.reload(), receiveSharedText, openSession, quickAsk, apiJson, setSettingsPage, adoptTask,
-    readLocalContextDraft, setLocalContextDraft,
+    readLocalContextDraft, setLocalContextDraft, useExpertTeam,
     // ID and bank card numbers in text going to a paired computer (management.js, device link 2.2).
     privateParts: (text) => privateParts(text),
     setLocalContextBusy: (busy) => { localContextBusy = !!busy; syncControls(); },

@@ -23,13 +23,14 @@
 | 10 | 定时任务结果收件箱 | 通知、列表、标记已读 | `POST /mobile/inbox/read` | 2.13 |
 | 11 | 知识库同步 | 选好要对应的知识库，按内容去重，双向补齐 | 知识库列表、文档内容的读和写 | 2.14 |
 | 12 | 设备管理和活动记录 | 本机记录；查看电脑上的记录；移除时同时注销 | `GET/POST /mobile/device`；`POST /mobile/device/unpair` | 2.15 |
+| 13 | 在手机上审查电脑的代码改动 | 改动列表和 diff；定格成审查快照，按行评论，交给电脑上的 AI | 电脑端已做（`code_review`，电脑版 DEVICE_LINK_API.md「Code review」） | 2.16 |
 
 ## 2. 各项细节
 
 ### 通用约定
 
 - **版本**：`GET /mobile/runtime` 返回 `"device_link": 2`。`features` 列出电脑实现了的功能，安卓端只显示列出的部分；没列出的功能，手机上不出现对应按钮。第 2 版的功能名：
-  `autonomy_ack`、`private_ack`、`phone_jobs`、`turns`、`stop`、`task_activity`、`addresses`、`mdns`、`files`、`transfers`、`messages`、`conversations`、`wake`、`inbox_read`、`knowledge`、`device`。
+  `autonomy_ack`、`private_ack`、`phone_jobs`、`turns`、`stop`、`task_activity`、`addresses`、`mdns`、`files`、`transfers`、`messages`、`conversations`、`wake`、`inbox_read`、`knowledge`、`device`，以及后加的 `code_review`（2.16）。
 - **权限**：在第 1 版 `read`、`tasks`、`approvals` 之外新增三个：
   - `broad_autonomy`：可以往「自动批准一切 / 完全访问」的对话交任务（2.1）。默认不勾，勾选时电脑要提示风险。
   - `files`：收发文件和文字、浏览打开的文件夹、对话接力里的文件（2.7、2.8、2.11）。
@@ -492,6 +493,17 @@ POST /mobile/inbox/read      权限：read
 - 电脑页的「设备」区显示：权限、地址、配对时间、上次连上的时间、手机这边的记录（交的任务、收发的文件、审批、接受或拒绝的请求、同步）、电脑上的记录（`activity`）。
 - 移除电脑时先调用 `unpair`；电脑连不上时只在手机上删除，并提示到电脑上把这台手机也移除。
 
+### 2.16 在手机上审查电脑的代码改动
+
+电脑端先做好（2026-10-29），接口和错误码以电脑版仓库 DEVICE_LINK_API.md 的「Code review」一节为准：`GET /mobile/changes`、`GET /mobile/changes/diff?path=`、`GET /mobile/reviews`、`GET /mobile/reviews/{id}`、`POST /mobile/reviews`、`POST /mobile/reviews/{id}/comments`、`POST /mobile/reviews/comments/{id}/followup`。读用 `read`，定格、评论、交给 AI 用 `tasks`。和电脑窗口的「变更」页走同一套处理，两边看到同一份快照和评论。
+
+**安卓端**（`features` 有 `code_review` 时才出现）
+
+- 电脑页「代码改动」→ 改动列表（文件、状态、增删行数）和审查记录。点文件看未提交的 diff，只读。
+- 「开始审查」把当前改动定格成快照并打开；点某一行（删除的行算旧侧，其余算新侧）写评论；评论下的「交给电脑上的 AI 去改」发起后续任务，电脑在单独的工作副本里改，结果在电脑上看。重复提交收到 `followup_already_exists` 时按已交出处理，不再发起。
+- 没有 `tasks` 权限时只能查看，页面说明要在电脑上给这台手机勾「交任务」。不是 Git 仓库、没有改动、diff 被截断（3000 行）都有说明。
+- 手机这边的记录加 `review_comment`、`review_followup`。
+
 ## 3. 接口一览（第 2 版新增或有改动的）
 
 | 方法和路径 | 权限 | 说明 |
@@ -517,6 +529,8 @@ POST /mobile/inbox/read      权限：read
 | `POST /mobile/knowledge/documents` | knowledge | 写入一篇文档 |
 | `GET /mobile/device`、`POST /mobile/device` | read | 这台设备的信息、设置、活动记录 |
 | `POST /mobile/device/unpair` | read | 手机主动解除配对 |
+| `GET /mobile/changes`、`/mobile/changes/diff`、`/mobile/reviews`、`/mobile/reviews/{id}` | read | 代码改动、diff、审查快照（2.16） |
+| `POST /mobile/reviews`、`/mobile/reviews/{id}/comments`、`/mobile/reviews/comments/{id}/followup` | tasks | 定格快照、按行评论、交给电脑上的 AI（2.16） |
 
 ## 4. 收件箱（第 2 版完整形状）
 

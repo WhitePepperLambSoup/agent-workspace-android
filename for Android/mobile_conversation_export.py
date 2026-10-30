@@ -15,6 +15,9 @@ from pathlib import Path
 from typing import Any
 
 FORMATS = ("md", "pdf", "image")
+# One reply can also go out as a Word document (the shared core's Markdown to .docx, as on the desktop).
+ANSWER_FORMATS = ("docx", "pdf", "image", "md")
+_MAX_ANSWER_CHARS = 262144
 _UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
 # The words the export is written with; the console sends them in its language.
 LABELS = {"user": "你", "agent": "Agent", "empty": "（这个对话还没有内容）"}
@@ -80,11 +83,35 @@ async def export_conversation(
     """Writes the export into <workspace>/exports and returns its workspace-relative paths."""
     if fmt not in FORMATS:
         raise ValueError(f"format must be one of {', '.join(FORMATS)}")
+    markdown = conversation_markdown(title or "Agent Workspace", visible_events(events), labels)
+    return await _write(Path(workspace), _file_stem(title or "conversation"), markdown, fmt)
+
+
+async def export_answer(workspace: str | Path, title: str, markdown: str, fmt: str) -> dict[str, Any]:
+    """One reply as a file in <workspace>/exports: Word, PDF, long pictures or Markdown."""
+    if fmt not in ANSWER_FORMATS:
+        raise ValueError(f"format must be one of {', '.join(ANSWER_FORMATS)}")
+    if not isinstance(markdown, str) or not markdown.strip() or len(markdown) > _MAX_ANSWER_CHARS:
+        raise ValueError(f"markdown must be the reply's text, up to {_MAX_ANSWER_CHARS} characters")
     root = Path(workspace)
+    stem = _file_stem(title or markdown.strip().splitlines()[0])
+    if fmt == "docx":
+        from agent_workspace.tools.office_formats import markdown_docx
+
+        folder = root / "exports"
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / f"{stem}.docx"
+        data = await asyncio.to_thread(markdown_docx, markdown, title)
+        target.write_bytes(data)
+        return {"paths": [target.relative_to(root).as_posix()]}
+    # The conversation's title on top, unless the reply opens with a title of its own.
+    heading = f"# {title}\n\n" if title and not markdown.lstrip().startswith("# ") else ""
+    return await _write(root, stem, heading + markdown, fmt)
+
+
+async def _write(root: Path, stem: str, markdown: str, fmt: str) -> dict[str, Any]:
     folder = root / "exports"
     folder.mkdir(parents=True, exist_ok=True)
-    markdown = conversation_markdown(title or "Agent Workspace", visible_events(events), labels)
-    stem = _file_stem(title or "conversation")
     if fmt == "md":
         target = folder / f"{stem}.md"
         target.write_text(markdown, encoding="utf-8")

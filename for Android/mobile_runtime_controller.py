@@ -31,7 +31,7 @@ from mobile_model_roles import model_for_task, subagent_model, summary_model
 from mobile_pause import bind_task, forget_task, make_pausable
 from mobile_screen import bind as bind_screen
 from mobile_screen import reset as reset_screen
-from mobile_subagents import SubagentHost, bind_host, reset_host
+from mobile_subagents import SubagentHost, bind_host, reset_host, task_team, team_note, team_progress
 from mobile_task_limits import TaskLimits, limits_for_task
 from mobile_prompt_cache import SHARED_ON_DEVICE, FrozenPrompts, prefix_cache_endpoint
 from mobile_prompt_cache import assemble as assemble_prompt
@@ -603,6 +603,9 @@ class MobileRuntimeController:
                 return existing
         model = request.model or self.default_model or ("declarative-replay" if execution else None)
         effort = request.reasoning_effort or self.default_reasoning_effort
+        if request.team is not None and self._local_endpoint():
+            # Three to five model runs per question: minutes each on a phone's own model.
+            raise ValueError("an expert team needs a cloud model; switch to one first")
         on_device = request.on_device and not self._local_endpoint()
         if on_device:
             # Privacy routing: answered by an installed on-device model (mobile_privacy_route).
@@ -668,6 +671,11 @@ class MobileRuntimeController:
                 self.tasks.append_event(task.task_id, "task.plan_mode", {})
             if request.source_note:
                 self.tasks.append_event(task.task_id, "task.source_note", {"text": request.source_note})
+            if request.team is not None:
+                self.tasks.append_event(task.task_id, "task.team", {
+                    "team": request.team, "review": request.team_review,
+                    **({"knowledge": request.team_knowledge} if request.team_knowledge else {}),
+                })
             if on_device:
                 self.tasks.append_event(task.task_id, "task.on_device", {"model": model})
             elif request.wait_for_network and not self._local_endpoint():
@@ -804,8 +812,10 @@ class MobileRuntimeController:
         arguments: dict[str, Any],
     ) -> RuntimeApprovalDecision:
         task_id = self._require_active_task()
-        decision = await self.approvals.request_tool(tool.name, arguments)
-        self._resume_after_approval(task_id)
+        try:
+            decision = await self.approvals.request_tool(tool.name, arguments)
+        finally:
+            self._sync_approval_state(task_id)
         return RuntimeApprovalDecision(
             decision.allowed,
             decision.reason or ("approved by mobile" if decision.allowed else "denied by mobile"),
@@ -817,8 +827,10 @@ class MobileRuntimeController:
         request: ProviderEgressRequest,
     ) -> RuntimeApprovalDecision:
         task_id = self._require_active_task()
-        decision = await self.approvals.request_egress(request)
-        self._resume_after_approval(task_id)
+        try:
+            decision = await self.approvals.request_egress(request)
+        finally:
+            self._sync_approval_state(task_id)
         return RuntimeApprovalDecision(
             decision.allowed,
             "approved by mobile" if decision.allowed else "denied by mobile",
@@ -963,6 +975,21 @@ class MobileRuntimeController:
                     policy.revoke_session_grant(session_id)
             with suppress(KeyError):
                 self.tasks.append_event(task_id, "task.untrusted_content", {"tool": tool, **found})
+
+    def task_summary(self, task: Any) -> dict[str, Any]:
+        """A task for the list (GET /mobile/tasks); a team task at work says what its experts do,
+        for the engine's ongoing notification."""
+        summary = task.to_dict()
+        if summary.get("state") == "running":
+            progress = team_progress(self.tasks.events(task.task_id))
+            if progress:
+                summary["team_progress"] = progress
+        return summary
+
+    def _note_expert(self, task_id: str, payload: dict[str, Any]) -> None:
+        """An expert of the task's team started or finished their part (task.team.expert)."""
+        with suppress(KeyError):
+            self.tasks.append_event(task_id, "task.team.expert", payload)
 
     async def handle_runtime_event(self, event: Event) -> None:
         task_id = self._active_task_id
@@ -1248,6 +1275,10 @@ class MobileRuntimeController:
                     readonly = _readonly_tools(registry)
                     previous = options.get("allowed_tools")
                     options["allowed_tools"] = readonly if previous is None else previous & readonly
+                # Expert team: the agent leads library or custom experts through run_subagents.
+                team = task_team(task_events)
+                if team is not None:
+                    context_notes = (*context_notes, team_note(team.team, team.review))
                 if task.budget_steps is not None:
                     options["budget"] = TaskBudget(
                         max_tool_calls=task.budget_steps,
@@ -1277,6 +1308,10 @@ class MobileRuntimeController:
                     reasoning_effort=task.reasoning_effort,
                     summary_model=options.get("summary_model"),
                     limits=self._limits,
+                    team=team.team if team is not None else None,
+                    knowledge=team.knowledge if team is not None else {},
+                    # Who works on which part, for the conversation's expert list and the studio.
+                    notify=lambda payload, task_id=task_id: self._note_expert(task_id, payload),
                 )
                 host_token = bind_host(self._host)
                 # A conversation's task may use the background screen; a panel task is about the
@@ -1561,23 +1596,22 @@ class MobileRuntimeController:
 
     async def _on_approval_requested(self, request: dict[str, Any]) -> None:
         task_id = request.get("task_id")
-        if not isinstance(task_id, str):
-            return
-        try:
-            current = self.tasks.get(task_id)
-            if current.state is TaskState.RUNNING:
-                self.tasks.transition(
-                    task_id,
-                    TaskState.WAITING_APPROVAL,
-                    approval_id=str(request.get("request_id", "")) or None,
-                )
-        except (KeyError, ValueError):
-            return
+        if isinstance(task_id, str):
+            self._sync_approval_state(task_id)
 
-    def _resume_after_approval(self, task_id: str) -> None:
+    def _sync_approval_state(self, task_id: str) -> None:
+        """The task waits for the user while any of its requests does, showing the oldest one still
+        open, and runs again once none is. A team's experts ask side by side: one of them being
+        answered (or allowed by itself) must not hide another's question, and a request dropped
+        with its helper must not stay the one shown."""
         try:
             current = self.tasks.get(task_id)
-            if current.state is TaskState.WAITING_APPROVAL:
+            pending = getattr(self.approvals, "pending", None)
+            open_ids = [str(item["request_id"]) for item in pending(task_id)] if callable(pending) else []
+            if open_ids:
+                if current.state in {TaskState.RUNNING, TaskState.WAITING_APPROVAL} and current.approval_id != open_ids[0]:
+                    self.tasks.transition(task_id, TaskState.WAITING_APPROVAL, approval_id=open_ids[0])
+            elif current.state is TaskState.WAITING_APPROVAL:
                 self.tasks.transition(task_id, TaskState.RUNNING)
         except (KeyError, ValueError):
             return
