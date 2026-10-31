@@ -78,6 +78,23 @@ export interface StudioScene {
   dispose(): void
 }
 
+/**
+ * The label (a person's tag or a sign) shown at a point of the screen, the top one first. On the phone
+ * the labels let touches through to the view (style.css), so a drag or a pinch that starts on one still
+ * turns or zooms it; a tap there is matched here and clicks the label.
+ */
+export function labelAt(overlay: HTMLElement, x: number, y: number): HTMLElement | null {
+  const labels = [...overlay.querySelectorAll<HTMLElement>('.studio-tag, .studio-floor-sign')]
+  for (let index = labels.length - 1; index >= 0; index--) {
+    const label = labels[index]
+    const rect = label.getBoundingClientRect()
+    if (!rect.width || x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) continue
+    const style = getComputedStyle(label)
+    if (style.visibility !== 'hidden' && Number(style.opacity) >= 0.1) return label
+  }
+  return null
+}
+
 const TARGET = new THREE.Vector3(-0.3, 0.5, 0.2)
 const FLOOR_ANGLES = { polar: 0.98, azimuth: 0.62 }
 const BUILDING_ANGLES = { polar: 1.16, azimuth: 0.72 }
@@ -1040,8 +1057,10 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
   }
   const onUp = (event: PointerEvent): void => {
     if (down && Math.hypot(event.clientX - down.x, event.clientY - down.y) < 5) {
-      const found = hit(event)
-      if (found?.person) handlers.pick(found.floor, found.person)
+      const label = labelAt(overlay, event.clientX, event.clientY)
+      const found = label ? null : hit(event)
+      if (label) label.click()
+      else if (found?.person) handlers.pick(found.floor, found.person)
       else if (found) handlers.pickFloor(found.floor)
     }
     down = null

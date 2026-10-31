@@ -1558,7 +1558,10 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
 .studio-backdrop[data-viewing="true"] .studio-overlay { display: block; }
 :root[data-studio-view="true"] #appShell { visibility: hidden; }
 .studio-sheet[data-over="backdrop"] { background: transparent; }
-.studio-sheet[data-over="backdrop"] .studio-stage { pointer-events: none; }
+/* The sheet covers the screen: over the backdrop only its header, place buttons and roster take touches,
+   and the room between them goes to the backdrop's canvas to be turned, zoomed and tapped. */
+.studio-sheet[data-over="backdrop"] { pointer-events: none; }
+.studio-sheet[data-over="backdrop"] > :not(.studio-stage) { pointer-events: auto; }
 .studio-sheet[data-over="backdrop"] .studio-header { background: var(--bg); background: color-mix(in srgb, var(--bg) 78%, transparent); }
 :root[data-style="glass"][data-backdrop="custom"] body {
   background: linear-gradient(var(--wallpaper-scrim), var(--wallpaper-scrim)), var(--custom-wallpaper) center / cover no-repeat, var(--bg);
@@ -2283,7 +2286,10 @@ body.elder-mode #appShell { display: none; }
 .studio-canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; touch-action: none; }
 .studio-overlay { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
 .studio-tag, .studio-bubble { position: absolute; top: 0; left: 0; will-change: transform; }
-.studio-tag { display: inline-flex; align-items: center; gap: 4px; max-width: 150px; padding: 2px 7px 2px 5px; color: var(--text); font: 600 10.5px/1.3 var(--font-sans); white-space: nowrap; border: 0; border-radius: 999px; background: rgba(255, 255, 255, .82); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .08), 0 3px 10px rgba(0, 0, 0, .16); pointer-events: auto; }
+/* People's tags and the places' signs take no touches (the overlay's pointer-events: none): a drag or
+   a pinch that starts on one still turns or zooms the view, and a tap on one is matched by the scene
+   (labelAt in studio/scene.ts), which clicks it. */
+.studio-tag { display: inline-flex; align-items: center; gap: 4px; max-width: 150px; padding: 2px 7px 2px 5px; color: var(--text); font: 600 10.5px/1.3 var(--font-sans); white-space: nowrap; border: 0; border-radius: 999px; background: rgba(255, 255, 255, .82); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .08), 0 3px 10px rgba(0, 0, 0, .16); }
 .studio-tag-state { color: var(--text-2); font-weight: 500; }
 .studio-tag-name, .studio-tag-state { overflow: hidden; text-overflow: ellipsis; }
 /* English names and states are long ("Strategy consultant · Looking things up"): room for both, and
@@ -2315,7 +2321,7 @@ body.elder-mode #appShell { display: none; }
 .studio-sheet[data-over="backdrop"] .studio-places { padding-top: 2px; background: var(--bg); background: color-mix(in srgb, var(--bg) 78%, transparent); }
 .place-stage[hidden], .studio-stage[hidden] { display: none; }
 /* Signs over things in a place: a name and what goes on there. */
-.place-stage .studio-floor-sign { display: grid; position: absolute; top: 0; left: 0; max-width: 170px; gap: 1px; padding: 4px 9px; color: var(--text); font: 600 11px/1.3 var(--font-sans); text-align: left; border: 0; border-radius: 10px; background: rgba(255, 255, 255, .88); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .08), 0 4px 12px rgba(0, 0, 0, .16); pointer-events: auto; will-change: transform; }
+.place-stage .studio-floor-sign { display: grid; position: absolute; top: 0; left: 0; max-width: 170px; gap: 1px; padding: 4px 9px; color: var(--text); font: 600 11px/1.3 var(--font-sans); text-align: left; border: 0; border-radius: 10px; background: rgba(255, 255, 255, .88); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .08), 0 4px 12px rgba(0, 0, 0, .16); will-change: transform; }
 .place-stage .studio-floor-title, .place-stage .studio-floor-summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .place-stage .studio-floor-summary { color: var(--text-2); font-weight: 500; }
 .place-stage .studio-floor-summary[hidden] { display: none; }

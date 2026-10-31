@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.7.2 — 2026-10-31
+
+2.7.2 修复工作室全屏查看时不能拖动旋转和双指缩放的问题。Agent Workspace 2.7.2 fixes turning and zooming the studio shown in full.
+
+电脑版 / Desktop app: https://github.com/WhitePepperLambSoup/agent-workspace-desktop
+
+### 中文
+
+- 修复：液态玻璃风格下全屏查看工作室时，拖动不能旋转、双指不能缩放，点画面里的人物也没有反应（2.7.0 起）。原因是全屏时顶栏和按钮所在的透明层盖住了整个画面，接走了所有触摸。现在只有顶栏、地点按钮和底部名单接触摸，画面区域交给工作室。
+- 修复：在工作室和园区里，手指先落在人物名牌或地点标牌上时，拖动和双指缩放不起作用。现在从名牌、标牌上开始也能转动和缩放；轻点名牌、标牌仍然打开对应的人或地方。
+- 覆盖安装即可，数据会保留。
+
+### English
+
+- Fixed: under liquid glass, the studio shown in full could not be turned by dragging or zoomed with two fingers, and tapping someone in it did nothing (since 2.7.0). A see-through layer holding the header and buttons covered the whole view and took every touch. Now only the header, the place buttons and the list at the bottom take touches; the rest goes to the studio.
+- Fixed: in the studio and the campus, a drag or a pinch that started on a person's tag or a place's sign did nothing. It now turns and zooms the view; a tap on a tag or a sign still opens that person or place.
+- Install over the existing app; your data is kept.
+
 ## 2.7.1 — 2026-10-31
 
 2.7.1 让工作室背景在滑动和静止时看起来一样，AI 走动时画面更流畅，顶栏新增工作室按钮。Agent Workspace 2.7.1 keeps the studio backdrop looking the same while scrolling and at rest, draws it more smoothly while the AI walks, and adds a studio button to the header.

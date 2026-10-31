@@ -6,7 +6,7 @@ import type { Place, Point } from '../layout'
 import { createFinishes, disposeFinishes, type Finishes } from '../mesh-kit'
 import type { FloorGrid } from '../paths'
 import { Person, type Action } from '../person'
-import type { StudioOptions } from '../scene'
+import { labelAt, type StudioOptions } from '../scene'
 
 /**
  * The stage the campus's places are drawn on: the renderer, the light, the camera that frames a
@@ -471,8 +471,10 @@ export function createPlaceScene<M>(
   }
   const onUp = (event: PointerEvent): void => {
     if (down && Math.hypot(event.clientX - down.x, event.clientY - down.y) < 5) {
-      const pick = pickAt(event)
-      if (pick) handlers.pick(pick)
+      const label = labelAt(overlay, event.clientX, event.clientY)
+      const pick = label ? null : pickAt(event)
+      if (label) label.click()
+      else if (pick) handlers.pick(pick)
     }
     down = null
   }
