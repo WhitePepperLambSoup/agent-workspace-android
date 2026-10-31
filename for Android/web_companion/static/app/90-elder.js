@@ -86,6 +86,7 @@
     $("elderScreen").hidden = false;
     // The app underneath takes no focus or touches while the screen is up.
     elements.appShell.inert = true;
+    syncStudioBackdrop();
     elderToday();
     elderCallButton();
     if ($("elderStatus").textContent === t("准备中...")) elderStatus("");
@@ -110,6 +111,7 @@
     document.body.classList.remove("elder-mode");
     $("elderScreen").hidden = true;
     elements.appShell.inert = false;
+    syncStudioBackdrop();
   }
 
   function elderToday() {

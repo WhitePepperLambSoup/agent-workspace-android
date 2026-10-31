@@ -425,6 +425,8 @@
     }
     setToolState(card, outcome);
     endToolOutput(card);
+    // Its sub-agents are done: in the studio they go out by the door.
+    if (toolName === "run_subagents") endHelpers();
     // The agent proposed a settings change or a page to open: the user applies it from here.
     if (outcome === "done" && toolName === "app_settings") showAppSettingsStep(card, toolArguments.get(data.tool_call_id));
     // An expert team's step lists each expert's part and report instead of the raw result.
@@ -501,18 +503,33 @@
     elements.btnJumpLatest.hidden = true;
   }
 
+  // A new conversation opens on a greeting for the time of day, now and then naming the day of the
+  // week. The pick follows the conversation's id, so redrawing the same conversation keeps it.
+  function greeting(now = new Date(), seed = 0) {
+    const hour = now.getHours();
+    const day = now.getDay();
+    const weekend = day === 0 || day === 6;
+    const options = hour < 5 || hour >= 23 ? [t("夜深了")]
+      : hour < 11 ? [t("早上好"), day === 1 ? t("周一早上好") : weekend ? t("周末早上好") : t("早上好")]
+      : hour < 13 ? [t("中午好")]
+      : hour < 18 ? [t("下午好")]
+      : [t("晚上好"), day === 5 ? t("周五晚上好") : weekend ? t("周末晚上好") : t("晚上好")];
+    return options[seed % options.length];
+  }
+
   function emptyState() {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    const glyph = document.createElement("span");
-    glyph.className = "empty-state-icon";
-    glyph.innerHTML = icon("sparkles");
     const title = document.createElement("strong");
-    title.textContent = t("开始一个新任务");
-    const hint = document.createElement("span");
+    const seed = [...String(currentSessionId || "")].reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) >>> 0, 0);
+    title.textContent = greeting(new Date(), seed);
+    empty.append(title);
     const workspace = workspaces.find(item => item.id === currentWorkspaceId);
-    hint.textContent = workspace?.name ? t("描述你想完成的事情，Agent 会在「{0}」中执行。", workspace.name) : t("描述你想完成的事情，Agent 会在当前工作区中执行。");
-    empty.append(glyph, title, hint);
+    if (workspace?.name) {
+      const hint = document.createElement("span");
+      hint.textContent = t("工作区：{0}", workspace.name);
+      empty.append(hint);
+    }
     return empty;
   }
 

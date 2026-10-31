@@ -6,6 +6,7 @@ import { Batch, boxShape, coneShape, cylinderShape, sphereShape, torusShape, typ
 
 /** What a person's body does where they are; walking is handled by the move itself. */
 export type Action = 'rest' | 'type' | 'read' | 'think' | 'write' | 'talk' | 'raise' | 'cheer' | 'slump' | 'sip' | 'operate'
+  | 'browse' | 'paper' | 'gaze' | 'carry'
 
 const WALK_SPEED = 1.35
 const TURN_SPEED = 8
@@ -35,7 +36,10 @@ export class Person {
   heading = 0
   path: Point[] = []
   place: Place | null = null
-  action: Action = 'rest'
+  private doing: Action = 'rest'
+  /** When the action last changed or the person last came to a stop, for poses that start with a move. */
+  private changedAt = 0
+  private settledAt = 0
   /** Seated (0..1, eased) and the walk cycle's phase. */
   private sit = 0
   private stride = 0
@@ -50,6 +54,8 @@ export class Person {
   private readonly book: THREE.Mesh
   private readonly cup: THREE.Mesh
   private readonly marker: THREE.Mesh
+  private readonly paper: THREE.Mesh
+  private readonly pages: THREE.Mesh
   private readonly geometries: THREE.BufferGeometry[] = []
   private readonly finishes: Finishes
   private readonly phase: number
@@ -154,6 +160,21 @@ export class Person {
     this.marker.position.set(0, -0.05, 0.08)
     this.marker.visible = false
     this.arms[1].end.add(this.marker)
+    // A page held up to read, and printed pages carried in both hands.
+    const paper = new Batch()
+    paper.add(boxShape(0.21, 0.29, 0.006), '#fbfaf6')
+    for (let line = 0; line < 6; line += 1) paper.add(boxShape(0.15 - (line % 3) * 0.02, 0.012, 0.002), '#9aa1ab', { y: 0.1 - line * 0.035, z: 0.004 })
+    this.paper = this.meshOf(paper, false)
+    this.paper.position.set(0, 0.64, 0.25)
+    this.paper.rotation.x = -0.35
+    this.paper.visible = false
+    this.body.add(this.paper)
+    const pages = new Batch()
+    for (let sheet = 0; sheet < 4; sheet += 1) pages.add(boxShape(0.21, 0.007, 0.29), '#fbfaf6', { y: sheet * 0.008, ry: (sheet % 2) * 0.05 })
+    this.pages = this.meshOf(pages)
+    this.pages.position.set(0, 0.6, 0.27)
+    this.pages.visible = false
+    this.body.add(this.pages)
 
     this.root.add(this.body)
     this.root.position.set(start.x, 0, start.z)
@@ -233,6 +254,16 @@ export class Person {
     }
   }
 
+  get action(): Action {
+    return this.doing
+  }
+
+  set action(next: Action) {
+    if (next === this.doing) return
+    this.doing = next
+    this.changedAt = performance.now() / 1000
+  }
+
   /** Walk to a place along a path (the last point is the place itself). */
   goTo(place: Place, path: Point[]): void {
     this.place = place
@@ -258,6 +289,7 @@ export class Person {
 
   update(dt: number, now: number, still: boolean): void {
     // Moving along the path.
+    const wasMoving = this.moving
     this.moving = false
     if (this.path.length > 0) {
       const next = this.path[0]!
@@ -276,6 +308,7 @@ export class Person {
       }
       this.moving = this.path.length > 0 || distance > step
     }
+    if (wasMoving && !this.moving) this.settledAt = now
     const arrived = !this.moving && this.place !== null
     if (arrived && this.place) {
       this.turnToward(Math.atan2(this.place.face.x - this.position.x, this.place.face.z - this.position.z), dt, still)
@@ -320,7 +353,11 @@ export class Person {
     this.book.visible = false
     this.cup.visible = false
     this.marker.visible = false
-    const action = this.moving ? 'walk' : this.action
+    this.paper.visible = false
+    this.pages.visible = false
+    // Printed pages stay in the hands on the way back to the desk.
+    const action = this.moving && this.action !== 'carry' ? 'walk' : this.action
+    const settled = now - Math.max(this.settledAt, this.changedAt)
     const cheering = now < this.cheerUntil && !still
     if (cheering) {
       const lift = Math.sin(((this.cheerUntil - now) / 1.4) * Math.PI)
@@ -332,11 +369,40 @@ export class Person {
       left = { x: -1.05 + tap, z: 0.1, elbow: -0.55 }
       right = { x: -1.05 - tap, z: -0.1, elbow: -0.55 }
       headX = 0.12 + (still ? 0 : Math.sin(t * 2.1) * 0.03)
+    } else if (action === 'read' && sit < 0.5 && settled < 1.3 && !still) {
+      // At the shelf: reach up and take a book out first.
+      const reach = Math.sin(Math.min(1, settled / 1.3) * Math.PI)
+      right = { x: -2.4 * reach, z: -0.12, elbow: -0.25 }
+      left = { x: -0.2, z: 0.08, elbow: -0.3 }
+      headX = -0.18 * reach
     } else if (action === 'read') {
       left = { x: -0.95, z: 0.2, elbow: -0.9 }
       right = { x: -0.95, z: -0.2, elbow: -0.9 }
       headX = 0.3
       this.book.visible = true
+    } else if (action === 'browse') {
+      // A hand on the mouse, now and then a scroll; the eyes go along the page.
+      const scroll = still ? 0 : Math.max(0, Math.sin(t * 0.7)) ** 8 * 0.12
+      right = { x: -1.0 - scroll, z: -0.2, elbow: -0.55 + scroll }
+      left = { x: -0.8, z: 0.16, elbow: -0.75 }
+      headX = 0.1 + (still ? 0 : Math.sin(t * 0.45) * 0.04)
+      headY = still ? 0 : Math.sin(t * 0.6) * 0.12
+    } else if (action === 'paper') {
+      left = { x: -1.0, z: 0.16, elbow: -0.85 }
+      right = { x: -1.0, z: -0.16, elbow: -0.85 }
+      headX = 0.26 + (still ? 0 : Math.sin(t * 0.5) * 0.04)
+      this.paper.visible = true
+    } else if (action === 'gaze') {
+      // Hands behind the back, looking out of the window.
+      left = { x: 0.45, z: 0.12, elbow: -0.6 }
+      right = { x: 0.45, z: -0.12, elbow: -0.6 }
+      headX = -0.1
+      headY = still ? 0 : Math.sin(t * 0.35) * 0.22
+    } else if (action === 'carry') {
+      left = { x: -0.75, z: 0.12, elbow: -0.75 }
+      right = { x: -0.75, z: -0.12, elbow: -0.75 }
+      headX = 0.12
+      this.pages.visible = true
     } else if (action === 'think') {
       right = { x: -1.6, z: -0.35, elbow: -1.9 }
       left = { x: -0.3, z: 0.25, elbow: -1.2 }

@@ -15,6 +15,7 @@
     if (approval && activeTask?.resolvedApprovals.has(approval.request_id)) approval = null;
     const changed = approval?.request_id !== pendingApproval?.request_id;
     pendingApproval = approval;
+    if (changed) queueStudioRefresh();
     elements.appShell.dataset.waiting = String(!!approval);
     elements.approvalShelf.hidden = !approval;
     elements.approvalShelf.classList.toggle("hidden", !approval);
@@ -118,6 +119,8 @@
   function renderTaskEvent(task, event) {
     if (event.task_id !== task.id || event.sequence <= task.sequence) return;
     task.sequence = event.sequence;
+    // The studio behind the conversation follows the task's steps.
+    queueStudioRefresh();
     const envelope = event.payload || {};
     const payload = envelope.data && typeof envelope.data === "object" ? envelope.data : envelope;
     if (event.event_type === "assistant.delta") {
@@ -146,7 +149,7 @@
     } else if (event.event_type === "task.step_shots") {
       task.stepShots = Number(payload.count) || 0;
     } else if (event.event_type === "task.subagent.step") {
-      noteExpertStep(payload);
+      noteSubagentStep(task, payload);
       showSubagentStep(payload);
     } else if (event.event_type === "task.team") {
       task.team = true;

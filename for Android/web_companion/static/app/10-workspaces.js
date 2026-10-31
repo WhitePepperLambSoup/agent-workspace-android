@@ -383,6 +383,7 @@
     if (disposed || layerOpen(elements.sessionDrawer)) return;
     if (layerOpen(elements.settingsOverlay) && !closeMenu()) return;
     closeModelSheet({ instant: true, keepFocus: true });
+    if (elements.drawerSearchInput.value) { elements.drawerSearchInput.value = ""; syncDrawerSearch(); }
     renderDrawer();
     void loadSessionMeta();
     showLayer(elements.sessionDrawer, (motion) => {

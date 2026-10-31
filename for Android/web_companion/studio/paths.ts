@@ -9,15 +9,18 @@ export class FloorGrid {
   readonly columns: number
   readonly rows: number
   private readonly blocked: Uint8Array
+  /** The floor's edges: the studio's room unless a place has a floor of another size. */
+  private readonly bounds: Box
 
-  constructor(boxes: readonly Box[]) {
-    this.columns = Math.round((ROOM.x1 - ROOM.x0) / CELL)
-    this.rows = Math.round((ROOM.z1 - ROOM.z0) / CELL)
+  constructor(boxes: readonly Box[], bounds: Box = ROOM) {
+    this.bounds = { x0: bounds.x0, x1: bounds.x1, z0: bounds.z0, z1: bounds.z1 }
+    this.columns = Math.round((bounds.x1 - bounds.x0) / CELL)
+    this.rows = Math.round((bounds.z1 - bounds.z0) / CELL)
     this.blocked = new Uint8Array(this.columns * this.rows)
     for (let row = 0; row < this.rows; row += 1) {
       for (let column = 0; column < this.columns; column += 1) {
         const { x, z } = this.center(column, row)
-        const edge = x < ROOM.x0 + 0.25 || x > ROOM.x1 - 0.15 || z < ROOM.z0 + 0.25 || z > ROOM.z1 - 0.15
+        const edge = x < bounds.x0 + 0.25 || x > bounds.x1 - 0.15 || z < bounds.z0 + 0.25 || z > bounds.z1 - 0.15
         const inside = boxes.some((box) => x > box.x0 - CLEARANCE && x < box.x1 + CLEARANCE && z > box.z0 - CLEARANCE && z < box.z1 + CLEARANCE)
         this.blocked[row * this.columns + column] = edge || inside ? 1 : 0
       }
@@ -25,12 +28,12 @@ export class FloorGrid {
   }
 
   center(column: number, row: number): Point {
-    return { x: ROOM.x0 + (column + 0.5) * CELL, z: ROOM.z0 + (row + 0.5) * CELL }
+    return { x: this.bounds.x0 + (column + 0.5) * CELL, z: this.bounds.z0 + (row + 0.5) * CELL }
   }
 
   cell(point: Point): [number, number] {
-    const column = Math.min(this.columns - 1, Math.max(0, Math.floor((point.x - ROOM.x0) / CELL)))
-    const row = Math.min(this.rows - 1, Math.max(0, Math.floor((point.z - ROOM.z0) / CELL)))
+    const column = Math.min(this.columns - 1, Math.max(0, Math.floor((point.x - this.bounds.x0) / CELL)))
+    const row = Math.min(this.rows - 1, Math.max(0, Math.floor((point.z - this.bounds.z0) / CELL)))
     return [column, row]
   }
 

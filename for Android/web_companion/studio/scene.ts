@@ -4,11 +4,18 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import type { StudioActor } from './cast'
 import {
   BOARD_PLACE,
+  DOOR_PLACE,
+  ENTRANCE,
+  GLASS,
   IDLE_PLACES,
+  OUTSIDE,
+  PRINTER_PLACE,
   ROOM,
+  SANDBOX_PLACES,
   SHELF_PLACES,
   TABLE_PLACES,
   TERMINAL_PLACES,
+  WINDOW_PLACES,
   deskSeat,
   obstacles,
   type Place,
@@ -48,13 +55,26 @@ export interface StudioHandlers {
   pickFloor(floorId: string): void
 }
 
+/**
+ * 'room': the studio page, to look around in. 'backdrop': behind the conversation, under frosted
+ * glass: drawn small and seldom, the camera close on the agent and following it, no input.
+ */
+export type StudioMode = 'room' | 'backdrop'
+
 export interface StudioScene {
   /** The floors, floor 1 first; a single floor is shown as one room. */
   update(floors: readonly StudioFloorView[]): void
+  /** Between the frosted backdrop and the room to look around in; the camera flies between them. */
+  setMode(mode: StudioMode): void
+  /** Stops drawing altogether (another page draws the studio, or the window is hidden). */
+  setActive(active: boolean): void
   /** Up close on a floor, or (null) out to the whole building. */
   focus(floorId: string | null): void
   setPaused(paused: boolean): void
   resetView(): void
+  /** Draws for this long as while someone walks, whatever the room does: the page times the frames
+   * to find a phone too slow for the studio behind the conversation. */
+  exercise(ms: number): void
   dispose(): void
 }
 
@@ -79,16 +99,35 @@ const MOVE_SECONDS = 1.35
 const FRAME_MS = 1000 / 30
 /** How long someone who finished stays at their desk before they wander off. */
 const DONE_SECONDS = 20
-const DOOR: Point = { x: 5.5, z: 1.2 }
+/** Newcomers appear outside the room's door and walk in. */
+const DOOR: Point = { x: OUTSIDE.x, z: OUTSIDE.z }
+const DOORWAY: Point = { x: ENTRANCE.x, z: (ENTRANCE.z0 + ENTRANCE.z1) / 2 }
+/** Seconds between newcomers sent for at once going in. */
+const ENTRY_GAP = 1.5
+/** How far the door swings out for someone passing. */
+const DOOR_OPEN = 1.35
 /** Where the key light comes from, relative to what it lights. */
 const SUN = new THREE.Vector3(-5, 11, 8)
 /** A sticky note on the whiteboard; its colour is the expert's. */
 const NOTE = boxShape(0.01, 0.2, 0.22, 0.004)
+/** The middle of the sandbox's doorway. */
+const DOOR_CENTER = { x: (GLASS.door.x0 + GLASS.door.x1) / 2, z: GLASS.z }
+/** How long someone at the window stands still before they start pacing in front of it. */
+const PACE_AFTER = 14
+/** At the printer: the pages come out, then they take them back to their desk. */
+const PRINT_SECONDS = 1.6
 /** Frames a second while nothing walks, turns or flies: idle sways look the same at a lower rate. */
 const RESTING_FRAME_MS = 1000 / 12
 /** With nobody working, nothing on the way and no touch for this long, drawing stops until something
  * changes (a phone's battery: an unchanging picture needs no frames). */
 const SLEEP_AFTER_MS = 4000
+/** Behind the conversation: a smaller picture (pixels per CSS pixel), 18 frames a second while
+ * someone walks (the desktop draws 30; each frame also has the glass above it drawn again), one
+ * while they only work. */
+const BACKDROP_PIXELS = 0.75
+const BACKDROP_FRAME_MS = 1000 / 18
+const BACKDROP_REST_MS = 1000
+const BACKDROP_ANGLES = { polar: 1.02, azimuth: 0.5 }
 
 interface Member {
   person: Person
@@ -102,6 +141,15 @@ interface Member {
   key: string
   /** The tag's full size in pixels (name and state shown), measured when its text changes. */
   tagSize: [number, number] | null
+  /** When their spot last changed (the window: pacing after a while). */
+  spotSince: number
+  /** Documents already fetched from the printer, and the fetch under way. */
+  errands: Set<string>
+  errand: { phase: 'fetch' | 'carry'; at: number | null } | null
+  /** A sub-agent that went out by the door, its task done: not drawn until it has work again. */
+  gone: boolean
+  /** Several sent for at once come in one after another: this one waits outside until then. */
+  enters: number
 }
 
 /** A value that eases to a new target over a few frames. */
@@ -174,16 +222,22 @@ function placeKey(place: Place): string {
 
 function actionFor(member: Member, place: Place): Action {
   const { actor } = member
+  if (member.errand) return member.errand.phase === 'carry' ? 'carry' : 'operate'
   if (actor.state === 'waiting') return 'raise'
   if (actor.state === 'failed') return 'slump'
   if (actor.state === 'answering') return 'type'
   if (actor.state === 'working') {
     if (actor.spot === 'shelf') return 'read'
-    if (actor.spot === 'terminal') return 'operate'
+    if (actor.spot === 'terminal' || actor.spot === 'sandbox') return 'operate'
     if (actor.spot === 'board') return 'write'
     if (actor.spot === 'table') return 'talk'
+    if (actor.spot === 'window') return 'gaze'
+    // At the desk: a web page, a page of a file, or writing.
+    if (actor.activity === 'search') return 'browse'
+    if (actor.activity === 'read') return 'paper'
     return actor.activity === 'thinking' ? 'think' : 'type'
   }
+  if (WINDOW_PLACES.includes(place)) return 'gaze'
   if (place === IDLE_PLACES[0] || (place.x === IDLE_PLACES[1]!.x && place.z === IDLE_PLACES[1]!.z)) return 'sip'
   return 'rest'
 }
@@ -195,12 +249,14 @@ function actionFor(member: Member, place: Place): Action {
  * flies into a floor while the floors above lift away, and back out. Labels, speech bubbles and
  * floor signs are HTML laid over the canvas.
  */
-export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, options: StudioOptions, handlers: StudioHandlers): StudioScene {
-  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'low-power' })
+export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, options: StudioOptions, handlers: StudioHandlers, initialMode: StudioMode = 'room'): StudioScene {
+  let mode = initialMode
   // A phone's screens have 2.5-3.5 pixels per CSS pixel; 1.25 with antialiasing still reads well.
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.25))
+  const pixelRatio = (): number => (mode === 'backdrop' ? BACKDROP_PIXELS : Math.min(window.devicePixelRatio || 1, 1.25))
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'low-power' })
+  renderer.setPixelRatio(pixelRatio())
   renderer.shadowMap.enabled = true
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap
+  renderer.shadowMap.type = THREE.PCFShadowMap
   // Shadows are drawn again only when something moves or changes (see the loop), not every frame.
   renderer.shadowMap.autoUpdate = false
   renderer.outputColorSpace = THREE.SRGBColorSpace
@@ -219,6 +275,8 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
   controls.enablePan = false
   controls.rotateSpeed = 0.6
   controls.zoomSpeed = 0.8
+  controls.enabled = mode === 'room'
+  stage.dataset.mode = mode
 
   scene.add(new THREE.HemisphereLight(options.dark ? '#9fb0e0' : '#fff6ea', options.dark ? '#3a3040' : '#b8a48c', options.dark ? 1.35 : 1.5))
   const key = new THREE.DirectionalLight(options.dark ? '#b9c8ff' : '#fff1dc', options.dark ? 1.5 : 2.2)
@@ -352,7 +410,35 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
     return distance
   }
   const towerHeight = (): number => ordered.length * STOREY + 0.6
+  /**
+   * Close on the agent, a little closer while it works, the room's middle kept in the picture;
+   * while its team is at work, wide enough for the desks, the board and the table.
+   */
+  const backdropView = (): View => {
+    const room = ordered[0]
+    const lead = room?.members.get('lead')
+    const at = lead?.person.position ?? deskSeat(0)
+    const working = lead !== undefined && lead.actor.state !== 'idle' && lead.actor.state !== 'done' && lead.actor.state !== 'stopped'
+    // The agent a little right of the middle, where the conversation's lines are shorter; on a phone
+    // held upright the lines are as long on both sides, so in the middle.
+    const right = new THREE.Vector3(Math.cos(BACKDROP_ANGLES.azimuth), 0, -Math.sin(BACKDROP_ANGLES.azimuth))
+    const upright = camera.aspect < 1
+    const team = room !== undefined && [...room.members.values()].some((member) => !member.actor.lead
+      && (member.actor.state === 'working' || member.actor.state === 'arriving' || member.actor.state === 'waiting'))
+    // Upright, the picture moves up by this share of the screen's height: the agent above a new
+    // conversation's greeting, the newest messages over the floor in front of it.
+    const raise = (view: View, share: number): View => {
+      if (!upright) return view
+      const half = view.radius * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2)
+      return { ...view, target: view.target.clone().setY(view.target.y - (2 * share * half) / Math.sin(view.polar)) }
+    }
+    if (team) return raise({ target: TARGET.clone().addScaledVector(right, upright ? 0 : -0.9), radius: fitRadius(ROOM_RADIUS) * 0.52, ...BACKDROP_ANGLES }, 0.08)
+    const target = TARGET.clone().lerp(new THREE.Vector3(at.x, 0.75, at.z), upright ? 0.85 : 0.7).addScaledVector(right, upright ? 0 : -1.1)
+    // Close enough that the room fills the window: walls, floor and window behind every pane.
+    return raise({ target, radius: fitRadius(ROOM_RADIUS) * (working ? 0.31 : 0.38), ...BACKDROP_ANGLES }, 0.18)
+  }
   const destination = (): View => {
+    if (mode === 'backdrop') return backdropView()
     if (overview()) {
       const height = towerHeight()
       // The building sits left of centre, leaving room on its right for the floors' signs.
@@ -398,7 +484,7 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
     const to = destination()
     if (!animate || still || !framed) {
       move = null
-      controls.enabled = true
+      controls.enabled = mode === 'room'
       setCamera(to)
       limit()
       controls.update()
@@ -421,7 +507,7 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
     })
     if (now - move.start >= MOVE_SECONDS) {
       move = null
-      controls.enabled = true
+      controls.enabled = mode === 'room'
       setCamera(to)
       limit()
       controls.update()
@@ -478,8 +564,11 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
 
   const addMember = (floor: Floor, actor: StudioActorView, desk: number, now: number): Member => {
     const seat = deskSeat(desk)
-    const person = new Person(actor.id, actor.look, floor.first ? seat : DOOR, options.accent, finishes)
-    if (floor.first) person.heading = Math.atan2(seat.face.x - seat.x, seat.face.z - seat.z)
+    // A sub-agent whose task was over before it was seen has gone already.
+    const out = Boolean(actor.leaves) && actor.state !== 'working' && actor.state !== 'arriving' && actor.state !== 'waiting' && actor.state !== 'answering'
+    const person = new Person(actor.id, actor.look, floor.first && !out ? seat : DOOR, options.accent, finishes)
+    if (floor.first && !out) person.heading = Math.atan2(seat.face.x - seat.x, seat.face.z - seat.z)
+    person.root.visible = !out
     floor.group.add(person.root)
     const tag = document.createElement('button')
     tag.type = 'button'
@@ -496,7 +585,11 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
     const bubble = document.createElement('div')
     bubble.className = 'studio-bubble'
     overlay.append(bubble, tag)
-    const member: Member = { person, actor, desk, tag, bubble, since: now, idleNext: now + 4 + Math.random() * 6, idlePlace: null, key: '', tagSize: null }
+    const member: Member = {
+      person, actor, desk, tag, bubble, since: now, idleNext: now + 4 + Math.random() * 6, idlePlace: null,
+      spotSince: now, errands: new Set(actor.errand ? [actor.errand] : []), errand: null, gone: out, enters: 0,
+      key: out ? placeKey(OUTSIDE) : '', tagSize: null,
+    }
     label(member)
     return member
   }
@@ -549,17 +642,22 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
       floor.members.delete(id)
     }
     let desk = 1
+    let arriving = 0
     for (const actor of cast) {
       const index = actor.lead ? 0 : desk++
       const existing = floor.members.get(actor.id)
       if (!existing) {
-        floor.members.set(actor.id, addMember(floor, actor, index, now))
+        const member = addMember(floor, actor, index, now)
+        // Newcomers through the door one after another, not in a heap.
+        if (!floor.first && !member.gone) member.enters = now + ENTRY_GAP * arriving++
+        floor.members.set(actor.id, member)
         continue
       }
       if (existing.actor.state !== actor.state) {
         existing.since = now
         if (actor.state === 'done') existing.person.cheer(now)
       }
+      if (existing.actor.spot !== actor.spot) existing.spotSince = now
       existing.actor = actor
       existing.desk = index
       label(existing)
@@ -625,10 +723,40 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
       const { actor, person } = member
       const seat = deskSeat(member.desk)
       const resting = actor.state === 'idle' || actor.state === 'stopped' || (actor.state === 'done' && now - member.since > DONE_SECONDS)
+      // A document was just made: fetch it from the printer, once, unless something else comes first.
+      if (actor.errand && !member.errands.has(actor.errand)) {
+        member.errands.add(actor.errand)
+        if (!still) member.errand = { phase: 'fetch', at: null }
+      }
+      if (member.errand && (resting || actor.state === 'waiting' || actor.state === 'failed')) member.errand = null
+      // A sub-agent whose task is over goes out by the door (one that failed after a while too).
+      const leaving = Boolean(actor.leaves) && (resting || (actor.state === 'failed' && now - member.since > DONE_SECONDS))
+      if (!leaving && member.gone) {
+        member.gone = false
+        person.root.visible = true
+      }
       let place: Place
-      if (resting) {
-        if (!still && now > member.idleNext && !person.walking) {
-          // Now and then an idle person gets up: coffee, water, the sofa, or back to the desk.
+      if (leaving) {
+        place = OUTSIDE
+        if (member.key === placeKey(OUTSIDE) && !person.walking && !member.gone) {
+          member.gone = true
+          person.root.visible = false
+        }
+      } else if (member.errand) {
+        const errand = member.errand
+        const there = (target: Place): boolean => member.key === placeKey(target) && !person.walking
+        if (errand.phase === 'fetch' && there(PRINTER_PLACE)) {
+          errand.at ??= now
+          if (now - errand.at > PRINT_SECONDS) errand.phase = 'carry'
+        } else if (errand.phase === 'carry' && there(seat)) {
+          member.errand = null
+        }
+        place = member.errand?.phase === 'fetch' ? PRINTER_PLACE : seat
+      } else if (resting) {
+        // Behind the conversation an idle room stays still (a phone's battery: no frames while nothing
+        // goes on); looked at in full, an idle person gets up now and then: coffee, water, the sofa,
+        // or back to the desk.
+        if (!still && mode === 'room' && now > member.idleNext && !person.walking) {
           const choices = [seat, ...IDLE_PLACES].filter((item) => item === seat || !taken.has(placeKey(item)))
           member.idlePlace = choices[Math.floor(Math.random() * choices.length)] ?? seat
           member.idleNext = now + (actor.lead ? 22 : 12) + Math.random() * 16
@@ -639,10 +767,17 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
         member.idleNext = now + 6
         place = actor.spot === 'shelf' ? slot(SHELF_PLACES, seat)
           : actor.spot === 'terminal' ? slot(TERMINAL_PLACES, seat)
+          : actor.spot === 'sandbox' ? slot(SANDBOX_PLACES, seat)
+          : actor.spot === 'door' ? slot([DOOR_PLACE], seat)
             : actor.spot === 'table' ? slot(actor.lead ? [TABLE_PLACES[3]!, ...TABLE_PLACES] : TABLE_PLACES, seat)
               : actor.spot === 'board' ? slot([BOARD_PLACE], seat)
-                : seat
+                : actor.spot === 'window'
+                  // After a while at the window they pace in front of it.
+                  ? WINDOW_PLACES[now - member.spotSince > PACE_AFTER && !still ? Math.floor((now - member.spotSince) / 7) % 2 : 0]!
+                  : seat
       }
+      // Waiting outside the door for the one before to go in.
+      if (now < member.enters) place = { x: DOOR.x, z: DOOR.z, face: DOORWAY, sit: false }
       taken.set(placeKey(place), 1)
       const keyed = placeKey(place)
       if (keyed !== member.key) {
@@ -662,9 +797,12 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
     }
     room.screens.forEach((screen, index) => {
       const member = atDesk.get(index)
-      const busy = member && (member.person.action === 'type' || member.person.action === 'think')
-      screen.emissive.set(busy ? (options.dark ? '#3d7bd9' : '#4b8fe6') : '#203048')
-      screen.emissiveIntensity = busy ? 0.9 + (still ? 0 : Math.sin(now * 7 + index) * 0.08) : member ? 0.45 : 0.25
+      const action = member?.person.action
+      const busy = action === 'type' || action === 'think' || action === 'browse'
+      // A web page is brighter, and flickers as it scrolls.
+      const web = action === 'browse'
+      screen.emissive.set(web ? (options.dark ? '#8ab4ea' : '#9cc3f2') : busy ? (options.dark ? '#3d7bd9' : '#4b8fe6') : '#203048')
+      screen.emissiveIntensity = busy ? (web ? 1.0 : 0.9) + (still ? 0 : Math.sin(now * (web ? 3 : 7) + index) * (web ? 0.14 : 0.08)) : member ? 0.45 : 0.25
     })
     const workers = [...members.values()].filter((member) => !member.actor.lead && (member.actor.state === 'working' || member.actor.state === 'arriving'))
     const signature = workers.map((member) => member.actor.look.shirt).join()
@@ -681,6 +819,28 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
         room.notes.add(note)
       })
     }
+    // Working on its own, the agent has its desk lamp on; pages wait in the printer's tray.
+    const lead = members.get('lead')
+    const alone = [...members.values()].every((member) => member.actor.lead)
+    const late = alone && lead !== undefined && (lead.actor.state === 'working' || lead.actor.state === 'answering' || lead.actor.state === 'waiting' || lead.errand !== null)
+    const glow = late ? (options.dark ? 6 : 2.5) : 0
+    room.deskLamp.intensity += (glow - room.deskLamp.intensity) * (still ? 1 : 0.08)
+    room.printout.visible = [...members.values()].some((member) => member.errand?.phase === 'fetch')
+    // The sandbox's door opens for whoever comes near; its strip is green while code runs inside,
+    // amber while someone waits outside to be allowed to touch this computer.
+    const near = [...members.values()].some((member) => Math.hypot(member.person.position.x - DOOR_CENTER.x, member.person.position.z - DOOR_CENTER.z) < 1.0)
+    const door = room.sandbox.door
+    const closed = (GLASS.door.x0 + GLASS.door.x1) / 2
+    const target = closed - (near ? (GLASS.door.x1 - GLASS.door.x0) * 0.9 : 0)
+    door.position.x += (target - door.position.x) * (still ? 1 : 0.12)
+    const inside = [...members.values()].some((member) => member.actor.spot === 'sandbox' && member.person.action === 'operate' && !member.person.walking)
+    const waiting = [...members.values()].some((member) => member.actor.spot === 'door' && member.actor.state === 'waiting')
+    const pulse = still ? 1 : 0.75 + Math.sin(now * 3) * 0.25
+    room.sandbox.strip.color.set(inside ? '#38d39f' : waiting ? '#f2b33d' : options.dark ? '#3a4558' : '#c4ccd6')
+    if (inside || waiting) room.sandbox.strip.color.multiplyScalar(pulse * 1.4)
+    // The room's door swings out for whoever passes through it.
+    const passing = [...members.values()].some((member) => !member.gone && Math.hypot(member.person.position.x - DOORWAY.x, member.person.position.z - DOORWAY.z) < 1.3)
+    room.entrance.rotation.y += ((passing ? DOOR_OPEN : 0) - room.entrance.rotation.y) * (still ? 1 : 0.14)
     const reviewing = [...members.values()].some((member) => member.actor.state === 'working' && member.actor.spot === 'table')
     room.ring.visible = reviewing
     if (reviewing && !still) {
@@ -720,6 +880,7 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
       floor.posts.visible = wide
       // At night the room up close has all its lamps on; from outside each floor shows one.
       floor.room.lamps.forEach((lamp, index) => { lamp.visible = (close && settled) || (wide && index === 0) })
+      floor.room.deskLamp.visible = close && settled
     }
     // The key light frames the floor in view, or the whole building.
     const span = wide ? towerHeight() : ROOM.height
@@ -757,6 +918,22 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
       visible: projected.z < 1 && Math.abs(projected.x) < 1.2 && Math.abs(projected.y) < 1.2,
     }
   }
+  /** Behind the conversation the camera drifts after the agent; true while it is still on its way. */
+  const follow = (dt: number): boolean => {
+    const from = current()
+    const to = backdropView()
+    const k = still ? 1 : 1 - Math.exp(-dt * 1.4)
+    const away = from.target.distanceTo(to.target) + Math.abs(from.radius - to.radius) * 0.2 + Math.abs(from.polar - to.polar) + Math.abs(from.azimuth - to.azimuth)
+    if (away < 0.01) return false
+    setCamera({
+      target: from.target.lerp(to.target, k),
+      radius: THREE.MathUtils.lerp(from.radius, to.radius, k),
+      polar: THREE.MathUtils.lerp(from.polar, to.polar, k),
+      azimuth: THREE.MathUtils.lerp(from.azimuth, to.azimuth, k),
+    })
+    return true
+  }
+
   const place = (): void => {
     const inView = focusFloor()
     const signs = overview() && move === null
@@ -771,7 +948,7 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
         .sort((a, b) => a.point.z - b.point.z)
       const taken: Array<[number, number, number, number]> = []
       for (const { member, point } of people) {
-        const shown = tags && point.visible
+        const shown = tags && point.visible && !member.gone
         let compact = false
         if (shown) {
           let size = member.tagSize
@@ -805,6 +982,7 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
   }
 
   const resize = (): void => {
+    renderer.setPixelRatio(pixelRatio())
     const width = Math.max(1, stage.clientWidth)
     const height = Math.max(1, stage.clientHeight)
     renderer.setSize(width, height, false)
@@ -845,7 +1023,7 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
     }
     const floor = focusFloor() ?? ordered[0]
     if (!floor) return null
-    const found = raycaster.intersectObjects([...floor.members.values()].map((member) => member.person.root), true)[0]
+    const found = raycaster.intersectObjects([...floor.members.values()].filter((member) => !member.gone).map((member) => member.person.root), true)[0]
     const person = found ? (found.object.userData.personId as string | undefined) ?? null : null
     return person ? { floor: floor.id, person } : null
   }
@@ -898,25 +1076,54 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
   let calmSince = performance.now()
   /** The shadows need drawing again: something changed or moved since they were last drawn. */
   let shadowsStale = true
+  /** Off while another page draws the studio, a place of the campus is shown instead, or the app is away. */
+  let active = true
+  /** A long wait for the next frame (a second behind the conversation) goes by this timer, 0 when none. */
+  let timer = 0
+  /** Until when frames are drawn as while someone walks (exercise), whatever happens in the room. */
+  let exercising = 0
   const working = (): boolean => ordered.some((floor) => [...floor.members.values()].some((member) =>
     member.actor.state === 'working' || member.actor.state === 'answering' || member.actor.state === 'arriving' || member.actor.state === 'waiting'))
+  const halt = (): void => {
+    cancelAnimationFrame(frame)
+    window.clearTimeout(timer)
+    frame = 0
+    timer = 0
+  }
   function wake(): void {
     calmSince = performance.now()
     shadowsStale = true
     stage.dataset.sleeping = 'false'
-    if (frame === 0 && !disposed && !document.hidden) {
+    if (frame === 0 && active && !disposed && !document.hidden) {
+      window.clearTimeout(timer)
+      timer = 0
       last = performance.now()
       frame = requestAnimationFrame(loop)
     }
   }
+  /** The next frame in this long: a screen frame soon, a timer for a longer wait (asking for every
+   * screen frame only to skip it keeps the page busy for nothing). */
+  const later = (wait: number): void => {
+    if (wait <= 50) {
+      frame = requestAnimationFrame(loop)
+      return
+    }
+    timer = window.setTimeout(() => {
+      timer = 0
+      if (frame === 0 && active && !disposed && !document.hidden) frame = requestAnimationFrame(loop)
+    }, wait - 16)
+  }
+  // 30 frames a second while things move, 12 while people only sway or type; never more, also on
+  // faster screens. Behind the conversation fewer, except while the camera flies.
+  const frameInterval = (time: number): number => (move ? FRAME_MS
+    : mode === 'backdrop' ? (lively || time < exercising ? BACKDROP_FRAME_MS : BACKDROP_REST_MS)
+      : lively || time < handledUntil || time < exercising ? FRAME_MS : RESTING_FRAME_MS)
   const loop = (time: number): void => {
     frame = 0
-    if (disposed || document.hidden) return
-    // 30 frames a second while things move, 12 while people only sway or type; never more,
-    // also on faster screens.
-    const interval = lively || time < handledUntil ? FRAME_MS : RESTING_FRAME_MS
+    if (disposed || !active || document.hidden) return
+    const interval = frameInterval(time)
     if (time - drawn < interval - 2) {
-      frame = requestAnimationFrame(loop)
+      later(interval - (time - drawn))
       return
     }
     drawn = time
@@ -937,13 +1144,14 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
     }
     lively = stack(now) === false || walking || move !== null
     if (move) stepMove(now)
+    else if (mode === 'backdrop') lively = follow(dt) || lively
     else controls.update()
-    if (lively || shadowsStale) {
+    if (lively || shadowsStale || time < exercising) {
       renderer.shadowMap.needsUpdate = true
       shadowsStale = false
     }
     renderer.render(scene, camera)
-    place()
+    if (mode === 'room') place()
     spent += performance.now() - began
     measured += 1
     if (measured >= 60) {
@@ -955,8 +1163,8 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
     }
     // Nothing moves, nobody works and nobody touches the view: stop drawing until something changes.
     const clock = performance.now()
-    if (lively || clock < handledUntil || (working() && !paused)) calmSince = clock
-    if (clock - calmSince < SLEEP_AFTER_MS) frame = requestAnimationFrame(loop)
+    if (lively || clock < handledUntil || clock < exercising || (working() && !paused)) calmSince = clock
+    if (clock - calmSince < SLEEP_AFTER_MS) later(frameInterval(clock))
     else stage.dataset.sleeping = 'true'
   }
   // Out of sight (the app in the background, the screen off): no frames until it is back.
@@ -980,13 +1188,34 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
       paused = next
       wake()
     },
+    setMode(next) {
+      if (disposed || next === mode) return
+      mode = next
+      stage.dataset.mode = next
+      controls.enabled = false
+      resize()
+      travel(true)
+      wake()
+    },
+    setActive(next) {
+      if (disposed || next === active) return
+      active = next
+      stage.dataset.active = String(next)
+      if (active) wake()
+      else halt()
+    },
     resetView() {
       travel(true)
       wake()
     },
+    exercise(ms) {
+      if (disposed) return
+      exercising = performance.now() + ms
+      wake()
+    },
     dispose() {
       disposed = true
-      cancelAnimationFrame(frame)
+      halt()
       document.removeEventListener('visibilitychange', onVisibility)
       observer.disconnect()
       renderer.domElement.removeEventListener('pointerdown', onDown)

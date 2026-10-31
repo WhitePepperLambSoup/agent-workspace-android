@@ -7,30 +7,30 @@
 An AI agent that runs on your Android phone. It plans and carries out multi-step tasks with real tools — files, PDFs, web search, an optional Linux toolchain and Android system actions — and, with the accessibility service turned on, operates other apps on the phone when you ask it to. It uses a cloud model you choose, Ollama on a computer in your local network, or a model that runs entirely on the phone. Everything is packaged in one APK; no Termux or root is needed.
 
 <p align="center">
-  <img src="docs/screenshots/home-en.png" width="250" alt="New task screen">
+  <img src="docs/screenshots/home-en.png" width="250" alt="A new conversation: the greeting, the 3D studio behind it">
   <img src="docs/screenshots/chat-tools-en.png" width="250" alt="Tool calls in a conversation">
   <img src="docs/screenshots/phone-done-en.png" width="250" alt="The Operate phone window over the Clock app">
 </p>
 
 ## Download
 
-Get `AgentWorkspace_2.6.1_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app: it checks at every start and about every 12 hours, and you can check yourself under Menu → About and updates, or "Updates" on the loading screen. Changes in each version are listed in the [CHANGELOG](CHANGELOG.md).
+Get `AgentWorkspace_2.7.0_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app: it checks at every start and about every 12 hours, and you can check yourself under Menu → About and updates, or "Updates" on the loading screen. Changes in each version are listed in the [CHANGELOG](CHANGELOG.md).
 
 - Android 8.0 (API 26) or newer, 64-bit ARM (`arm64-v8a`) or `x86_64`; phones running a 32-bit-only system cannot install it.
 - The interface is shown by the system's Android System WebView, which must be Chromium 80 or newer. If WebView is disabled, missing or too old, the app explains why and links to the app store to update it.
 - Works on Android 15+ devices with 16 KB memory pages, foldables, split screen and external keyboards, and keeps its own colours under system or vendor "force dark" modes.
 - About 75 MB to install. Local models and the offline speech model are optional downloads inside the app.
 
-2.6.1 fixes the buttons under the message box overlapping when Expert team is on. 2.6.0 adds the expert team (several experts research a question and the answer brings their work together) and a 3D studio to watch them; papers and reference checks; reading and writing Word, Excel, PowerPoint and PDF files; exporting one reply; putting back the files a task changed; and, with the desktop app paired, reviewing the computer's code changes on the phone.
+2.7.0 has a quieter look and a new icon. Under liquid glass the conversation sits over its 3D studio, where what the AI does follows the task; around the studio a campus shows the knowledge bases, the workspace's files, the scheduled tasks and the paired computers.
 
 ## Features
 
 ### Conversations and multi-step tasks
 
 <p align="center">
-  <img src="docs/screenshots/chat-tools-en.png" width="250" alt="List files, write a file and read a file, then the reply">
+  <img src="docs/screenshots/chat-tools-en.png" width="250" alt="Listing, reading and writing files, the AI in the studio behind">
   <img src="docs/screenshots/approval-en.png" width="250" alt="Tool approval before writing a file">
-  <img src="docs/screenshots/cards-en.png" width="250" alt="An event card in a reply">
+  <img src="docs/screenshots/cards-en.png" width="250" alt="An event card and a place card in a reply">
 </p>
 
 - **Multi-step tasks.** The agent plans, calls tools and shows every step live: the streamed reply, its reasoning, and each tool call as running, finished, failed or cancelled. Generated files appear under the reply, ready to open, share or save.
@@ -49,14 +49,26 @@ Get `AgentWorkspace_2.6.1_android.apk` from [Releases](https://github.com/WhiteP
 
 <p align="center">
   <img src="docs/screenshots/team-en.png" width="250" alt="An answer after the experts split the work">
-  <img src="docs/screenshots/studio-en.png" width="250" alt="The lead and the experts in the 3D studio">
+  <img src="docs/screenshots/studio-en.png" width="250" alt="The studio in full: what the lead and each expert are doing">
   <img src="docs/screenshots/team-page-en.png" width="250" alt="Expert team settings and the expert library">
 </p>
 
 - **Several experts at once.** Turn on Expert team in the message box and send: the AI leads, splits the question among several experts who research it at the same time, has one of them review the draft when needed, and answers with the points they disagree on. It is slower and uses more tokens than a single answer, and suits questions that need several kinds of judgement; it needs a cloud model. On the phone the experts only look things up and read files and web pages; they do not change files or run commands.
 - **Expert library.** 73 experts grouped by field; the team is picked for each question, or you fix its members (up to 4) and add your own, describing what they do and how. Experts share the conversation's knowledge bases, or an expert gets one of their own.
-- **3D studio.** Tap Watch in the studio in a conversation to see the lead and the experts at work in an office, handing out parts, looking things up and handing in, following the real task; drag to turn, pinch to zoom, tap someone to open their sub-task. It stops drawing a few seconds after the picture settles, and not at all in the background.
+- **3D studio.** The lead and the experts hand out parts, look things up and hand in in the studio, following the real task; see [Studio and campus](#studio-and-campus).
 - **Progress everywhere.** What each expert is doing shows in the conversation and in the engine notification; sharing text from another app to Ask the expert team opens a new conversation with the question filled in.
+
+### Studio and campus
+
+<p align="center">
+  <img src="docs/screenshots/studio-backdrop-en.png" width="250" alt="An answer over the 3D studio">
+  <img src="docs/screenshots/campus-en.png" width="250" alt="The campus around the studio">
+  <img src="docs/screenshots/site-en.png" width="250" alt="The building site: the workspace's folders and files">
+</p>
+
+- **The studio behind the conversation.** Under liquid glass the conversation sits over its 3D studio, and what the AI does there follows the real task: at the window while it thinks, at its desk while it reads the web, at the shelves while it searches a knowledge base, in the glass sandbox while it runs a command, at the printer for a document it made, and outside the glass door while it waits for you to approve a change or a command. Experts and sub-tasks it calls in come through the door and leave by it when done. A light veil keeps the text clear. The picture is still with no task running and not drawn in the background; phones that are not fast enough, have no WebGL, or drop frames in the first seconds keep the colour background. It can be turned off in Appearance.
+- **In full.** Tap Watch in the studio and the conversation steps aside: the same scene can be turned and zoomed, and tapping someone opens their sub-task.
+- **The campus.** In full, a row of buttons switches to the campus and its places. The library is the knowledge bases, a bookcase each, with documents still being read in on a cart; the building site is the workspace's files, a block per folder and a building per file, with scaffolding on the ones this conversation changed; the duty room is the scheduled tasks, an officer each; the front desk is the paired computers, and one with a request or an approval waiting for you comes to the counter. By default the view follows the AI to wherever it is working. Tap a building to go in; tap something inside to open its page or file.
 
 ### Phone control
 
@@ -168,10 +180,10 @@ The phone and the computer need to be on the same network, or both on Tailscale.
 ### Interface and entry points
 
 <p align="center">
-  <img src="docs/screenshots/appearance-en.png" width="250" alt="Appearance: liquid glass and twelve backgrounds">
+  <img src="docs/screenshots/appearance-en.png" width="250" alt="Appearance: the glass backgrounds and the studio switch">
 </p>
 
-- **Liquid-glass interface.** The top bar, composer and menus are glass that refracts light, with light-catching rims; twelve backgrounds or your own wallpaper, five accent colours, light/dark themes and spring-based motion (panels can be dragged closed and follow the system's reduce-motion setting) — or a plain standard style. On Android 12 and newer the Operate phone window is frosted glass too, with the app behind it showing through. The quick tasks above the input are yours to edit, and the menu has a search box for features and settings.
+- **Liquid-glass interface.** The top bar, composer and menus are glass that refracts light, with light-catching rims; seven backgrounds (drifting slowly on a fast enough phone), a plain one or your own wallpaper, five accent colours, light/dark themes and spring-based motion (panels can be dragged closed and follow the system's reduce-motion setting) — or a plain standard style. On Android 12 and newer the Operate phone window is frosted glass too, with the app behind it showing through. The quick tasks above the input are yours to edit; the conversation list has a search box for conversations, and the menu one for features and settings.
 - **Simplified Chinese, Traditional Chinese, English, Japanese and Korean.** The interface follows the system language or can be switched at any time.
 - **Ask from anywhere.** The floating bubble (operate phone, new chat, ask by voice, circle to ask, voice note; drag it onto the × at the bottom to hide it), an "Ask Agent" quick settings tile, home screen widgets (quick ask, task status, quick tasks), app icon shortcuts, and asking about a photo.
 - **Ask the AI about settings.** Ask where to turn on the floating bubble, or for dark mode: the AI gives a button that opens that settings page, or a card showing the change from one value to the other, applied only when you tap Apply. API keys, the app lock and system permissions can only be opened, for you to change.

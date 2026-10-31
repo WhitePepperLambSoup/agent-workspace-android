@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.7.0 — 2026-10-31
+
+2.7.0 换了更安静的界面和新图标。液态玻璃风格下，聊天背后是 3D 工作室；工作室外面是园区，能看到知识库、工作区文件、定时任务和配对的电脑。Agent Workspace 2.7.0 has a quieter look and a new icon; under liquid glass the conversation sits over the 3D studio, and around the studio a campus shows the knowledge bases, the workspace's files, the scheduled tasks and the paired computers.
+
+电脑版 / Desktop app: https://github.com/WhitePepperLambSoup/agent-workspace-desktop
+
+### 中文
+
+- 新增：工作室当聊天背景。液态玻璃风格下，聊天背后是这个对话的 3D 工作室，AI 的动作跟着任务走：想事情时站在窗前，查网页在工位上，查知识库去书架，运行命令进玻璃沙箱间，生成的文档去打印机取；等你批准改文件或运行命令时，站在玻璃门外。叫来的专家和子任务从门进来，做完从门离开。上面盖一层淡色，文字照样清楚。没有任务时画面静止，任务进行中耗电略多。性能不够、不支持 WebGL，或者开始几秒就掉帧的手机，自动换回颜色背景。可以在「界面偏好」里关掉。
+- 新增：园区。点「去工作室看看」全屏查看时，上方一排按钮可以切到园区和其中各处：图书馆是知识库，一个知识库一个书架；工地是工作区文件，一个文件夹一个街区，这个对话改过的文件搭着脚手架；值班室是定时任务；前台是配对的电脑，有请求或审批在等你时，那台电脑走到台前。默认跟着 AI 去它干活的地方。点园区里的楼会进去，点里面的东西会打开对应的页面或文件。
+- 改进：界面更安静。会话列表顶部是搜索框；新对话按时间问候，下面是工作区；建议卡片去掉了彩色图标。
+- 改进：液态玻璃背景重做。去掉了斜光线，色块更大更柔和；新增「沙丘」，「青柠」换成低饱和的「林间」，去掉了流光、光斑、网格、彩带（选过的会换成极光）。性能够的手机上颜色会缓慢流动，30 秒不操作就停下，掉帧的手机自动关闭。可以在「界面偏好」里关掉。
+- 改进：新图标，支持 Android 13 及以上的主题图标。
+- 修复：英文、日文、韩文界面里，任务进行中输入框的提示文字显示不全。
+- 覆盖安装即可，数据会保留。
+
+### English
+
+- New: the studio behind the conversation. Under liquid glass the conversation sits over its 3D studio, and what the AI does there follows the task: at the window while it thinks, at its desk while it reads the web, at the shelves while it searches a knowledge base, in the glass sandbox while it runs a command, at the printer for a document it made, and outside the glass door while it waits for you to approve a change or a command. Experts and sub-tasks it calls in come through the door and leave by it when done. A light veil keeps the text clear. The picture is still with no task running and uses a little more power while one runs. Phones that are not fast enough, have no WebGL, or drop frames in the first seconds keep the colour background. It can be turned off in Appearance.
+- New: the campus. With the studio open in full (Watch in the studio), a row of buttons switches to the campus and its places: the library is the knowledge bases, a bookcase each; the building site is the workspace's files, a block per folder, with scaffolding on the files this conversation changed; the duty room is the scheduled tasks; the front desk is the paired computers, and one with a request or an approval waiting for you comes to the counter. By default the view follows the AI to wherever it is working. Tap a building to go in; tap something inside to open its page or file.
+- Improved: a quieter look. The conversation list opens on a search box; a new conversation greets you by the time of day, with the workspace under it; the suggestion cards lose their coloured icons.
+- Improved: the glass backgrounds were redone, without the diagonal light lines and with larger, softer colour fields. Dune is new, Lime became the muted Forest, and Iris, Bokeh, Grid and Ribbons are gone (a phone that used one gets Aurora). On a fast enough phone the colours drift slowly and stop after 30 seconds without a touch; a phone that drops frames turns it off by itself. It can be turned off in Appearance.
+- Improved: a new icon, with a themed-icon layer for Android 13 and newer.
+- Fixed: in English, Japanese and Korean the message box's hint while a task runs was cut off.
+- Install over the existing app; your data is kept.
+
 ## 2.6.1 — 2026-10-30
 
 2.6.1 修复开着专家团时输入框下方按钮重叠的问题。Agent Workspace 2.6.1 fixes the buttons under the message box overlapping when Expert team is on.

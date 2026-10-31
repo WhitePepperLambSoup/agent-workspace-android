@@ -10,6 +10,8 @@
     const busy = !!activeTask || isLoadingSession || restartPending || isPreparingSubmission || localDeviceTesting;
     elements.appShell.dataset.busy = String(!!activeTask);
     syncKeepScreenOn();
+    // A task started or ended, or another conversation is on screen: the studio behind it follows.
+    queueStudioRefresh();
     // 长辈模式's big button speaks, or stops while an answer is coming (90-elder.js).
     if (elderShown()) renderElderButton();
     syncCostEstimate();
@@ -417,21 +419,27 @@
     searchTimer = null;
   }
 
-  function queueSessionSearch() {
+  // The menu's search page and the drawer's search box run the same search into their own list.
+  const searchViews = {
+    page: { input: elements.sessionSearchInput, status: elements.searchStatus, results: elements.searchResults, done: () => closeMenu() },
+    drawer: { input: elements.drawerSearchInput, status: elements.drawerSearchStatus, results: elements.drawerSearchResults, done: () => closeDrawer() },
+  };
+
+  function queueSessionSearch(view = searchViews.page) {
     invalidateSearch();
-    const query = elements.sessionSearchInput.value.trim();
+    const query = view.input.value.trim();
     const generation = searchGeneration;
-    elements.searchResults.replaceChildren();
+    view.results.replaceChildren();
     if (!query) {
-      elements.searchStatus.textContent = t("输入关键词搜索");
+      view.status.textContent = t("输入关键词搜索");
       return;
     }
-    elements.searchStatus.textContent = t("搜索中...");
+    view.status.textContent = t("搜索中...");
     searchTimer = window.setTimeout(async () => {
       if (disposed || generation !== searchGeneration) return;
       try {
         const data = await apiJson(`/mobile/sessions/search?q=${encodeURIComponent(query)}&limit=30`);
-        if (disposed || generation !== searchGeneration || elements.sessionSearchInput.value.trim() !== query) return;
+        if (disposed || generation !== searchGeneration || view.input.value.trim() !== query) return;
         const results = Array.isArray(data.results) ? data.results : [];
         for (const result of results.slice(0, 30)) {
           if (!result || typeof result.session_id !== "string" || !result.session_id) continue;
@@ -447,18 +455,27 @@
           kind.textContent = result.document_kind === "comment" ? t("评论") : t("对话");
           button.append(title, snippet, kind);
           button.addEventListener("click", async () => {
-            if (await switchSession(result.session_id, title.textContent)) closeMenu();
+            if (await switchSession(result.session_id, title.textContent)) view.done();
           });
-          elements.searchResults.appendChild(button);
+          view.results.appendChild(button);
         }
-        elements.searchStatus.textContent = elements.searchResults.children.length ? "" : t("没有找到结果");
+        view.status.textContent = view.results.children.length ? "" : t("没有找到结果");
         syncControls();
       } catch (error) {
         if (disposed || generation !== searchGeneration) return;
-        elements.searchResults.replaceChildren();
-        elements.searchStatus.textContent = t("搜索失败: {0}", error.message);
+        view.results.replaceChildren();
+        view.status.textContent = t("搜索失败: {0}", error.message);
       }
     }, 180);
+  }
+
+  // Typing in the drawer's box swaps its lists for the results; an empty box brings them back.
+  function syncDrawerSearch() {
+    const searching = !!elements.drawerSearchInput.value.trim();
+    elements.drawerBody.dataset.searching = String(searching);
+    elements.drawerSearchView.hidden = !searching;
+    if (searching) queueSessionSearch(searchViews.drawer);
+    else invalidateSearch();
   }
 
   function openMenu() {

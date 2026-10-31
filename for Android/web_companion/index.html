@@ -11,6 +11,11 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+  <canvas id="liveBackdrop" aria-hidden="true"></canvas>
+  <!-- Under liquid glass: the conversation's studio behind the app (app/33-studio-backdrop.js). -->
+  <div id="studioBackdrop" class="studio-backdrop" aria-hidden="true" data-ready="false" data-viewing="false" hidden>
+    <div id="studioBackdropStage" class="studio-backdrop-stage"><div id="studioBackdropOverlay" class="studio-overlay" aria-hidden="true"></div></div>
+  </div>
   <div id="appShell">
     <header id="mobileHeader">
       <button id="btnSessions" class="icon-button" type="button" title="会话列表" aria-label="会话列表" aria-expanded="false" aria-controls="sessionDrawer"><span data-icon="panel-left"></span></button>
@@ -30,7 +35,7 @@
     </header>
     <div id="timelineArea">
       <main id="timelineContainer">
-        <div id="timelineList"><div class="empty-state"><span class="empty-state-icon" data-icon="sparkles"></span><strong>开始一个新任务</strong><span>描述你想完成的事情，Agent 会在当前工作区中执行。</span></div></div>
+        <div id="timelineList"><div class="empty-state"><strong></strong></div></div>
       </main>
       <button id="btnJumpLatest" class="icon-button" type="button" title="回到最新消息" aria-label="回到最新消息" hidden><span data-icon="arrow-down"></span></button>
       <!-- What a screen reader says once: a finished reply, an approval to give (70-tasks.js announce). -->
@@ -86,14 +91,16 @@
   </div>
   <div id="sessionDrawer" hidden>
     <button id="sessionDrawerBackdrop" type="button" aria-label="关闭会话列表" tabindex="-1"></button>
-    <aside id="sessionDrawerPanel" role="dialog" aria-modal="true" aria-labelledby="sessionDrawerTitle">
+    <aside id="sessionDrawerPanel" role="dialog" aria-modal="true" aria-label="会话列表">
       <div class="drawer-header">
-        <span class="brand-mark" aria-hidden="true">A</span>
-        <h2 id="sessionDrawerTitle">Agent Workspace</h2>
-        <button id="btnDrawerSearch" class="icon-button" type="button" title="搜索所有会话" aria-label="搜索所有会话"><span data-icon="search"></span></button>
+        <label class="drawer-search"><span data-icon="search"></span><input id="drawerSearchInput" type="search" autocomplete="off" enterkeyhint="search" placeholder="搜索会话" aria-label="搜索所有会话"></label>
         <button id="btnDrawerClose" class="icon-button" type="button" title="关闭" aria-label="关闭"><span data-icon="x"></span></button>
       </div>
-      <div class="drawer-body">
+      <div id="drawerBody" class="drawer-body">
+        <div id="drawerSearchView" class="drawer-search-view" hidden>
+          <p id="drawerSearchStatus" class="setting-hint" role="status"></p>
+          <div id="drawerSearchResults" class="search-results"></div>
+        </div>
         <div class="drawer-section-title"><span>工作区</span><button id="btnDrawerWorkspaces" class="text-action" type="button">管理</button></div>
         <div id="drawerWorkspaces" class="drawer-workspaces" role="radiogroup" aria-label="工作区"></div>
         <button id="btnDrawerNewSession" class="drawer-new" type="button"><span data-icon="square-pen"></span>新建会话</button>
@@ -107,14 +114,28 @@
   <div id="studioSheet" class="studio-sheet" role="dialog" aria-modal="true" aria-labelledby="studioTitle" hidden>
     <header class="studio-header">
       <button id="btnStudioClose" class="icon-button" type="button" title="关闭" aria-label="关闭"><span data-icon="x"></span></button>
-      <div class="studio-heading"><h2 id="studioTitle">工作室</h2><p id="studioDescription">队长和专家们在这里工作，他们的动作跟着真实的任务走。</p></div>
+      <div class="studio-heading"><h2 id="studioTitle">工作室</h2><p id="studioDescription">AI 和它叫来的专家、子任务在这里干活，动作跟着真实的任务走。</p></div>
       <button id="btnStudioReset" class="icon-button" type="button" title="重置视角" aria-label="重置视角"><span data-icon="rotate-ccw"></span></button>
       <button id="btnStudioPause" class="icon-button" type="button" title="暂停动画" aria-label="暂停动画" aria-pressed="false"><span data-icon="pause"></span></button>
     </header>
+    <!-- Where to look (app/34-campus.js): following the agent to its work, the studio, or a place of the campus. -->
+    <div id="studioPlaces" class="studio-places" role="radiogroup" aria-label="看哪里">
+      <button type="button" role="radio" data-place="follow" aria-checked="true"><span data-icon="crosshair"></span><span id="studioFollowLabel">跟随 AI</span></button>
+      <button type="button" role="radio" data-place="studio" aria-checked="false"><span data-icon="building-2"></span>工作室</button>
+      <button type="button" role="radio" data-place="campus" aria-checked="false"><span data-icon="map"></span>园区</button>
+      <button type="button" role="radio" data-place="library" aria-checked="false"><span data-icon="book-open"></span>图书馆</button>
+      <button type="button" role="radio" data-place="site" aria-checked="false"><span data-icon="construction"></span>工地</button>
+      <button type="button" role="radio" data-place="duty" aria-checked="false"><span data-icon="clock"></span>值班室</button>
+      <button type="button" role="radio" data-place="desk" aria-checked="false"><span data-icon="monitor-smartphone"></span>前台</button>
+    </div>
     <div id="studioStage" class="studio-stage" data-ready="false">
       <div id="studioOverlay" class="studio-overlay" aria-hidden="true"></div>
       <p id="studioUnsupported" class="studio-unsupported" role="status" hidden>这台手机无法显示 3D 工作室（WebGL 不可用）。</p>
       <p id="studioHint" class="studio-hint" hidden>拖动旋转，双指缩放，点人物看他的任务。</p>
+    </div>
+    <div id="placeStage" class="studio-stage place-stage" data-ready="false" hidden>
+      <div id="placeOverlay" class="studio-overlay" aria-hidden="true"></div>
+      <p id="placeHint" class="studio-hint" hidden></p>
     </div>
     <ul id="studioRoster" class="studio-roster" aria-label="在场人员"></ul>
   </div>
@@ -397,11 +418,8 @@
             <button class="backdrop-option" type="button" role="radio" data-backdrop-option="aurora" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="aurora" aria-hidden="true"></span>极光</button>
             <button class="backdrop-option" type="button" role="radio" data-backdrop-option="sunset" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="sunset" aria-hidden="true"></span>晚霞</button>
             <button class="backdrop-option" type="button" role="radio" data-backdrop-option="ocean" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="ocean" aria-hidden="true"></span>深海</button>
-            <button class="backdrop-option" type="button" role="radio" data-backdrop-option="meadow" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="meadow" aria-hidden="true"></span>青柠</button>
-            <button class="backdrop-option" type="button" role="radio" data-backdrop-option="iris" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="iris" aria-hidden="true"></span>流光</button>
-            <button class="backdrop-option" type="button" role="radio" data-backdrop-option="bokeh" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="bokeh" aria-hidden="true"></span>光斑</button>
-            <button class="backdrop-option" type="button" role="radio" data-backdrop-option="grid" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="grid" aria-hidden="true"></span>网格</button>
-            <button class="backdrop-option" type="button" role="radio" data-backdrop-option="ribbon" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="ribbon" aria-hidden="true"></span>彩带</button>
+            <button class="backdrop-option" type="button" role="radio" data-backdrop-option="meadow" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="meadow" aria-hidden="true"></span>林间</button>
+            <button class="backdrop-option" type="button" role="radio" data-backdrop-option="sand" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="sand" aria-hidden="true"></span>沙丘</button>
             <button class="backdrop-option" type="button" role="radio" data-backdrop-option="dusk" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="dusk" aria-hidden="true"></span>暮光</button>
             <button class="backdrop-option" type="button" role="radio" data-backdrop-option="graphite" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="graphite" aria-hidden="true"></span>石墨</button>
             <button class="backdrop-option" type="button" role="radio" data-backdrop-option="plain" aria-checked="false"><span class="backdrop-swatch wallpaper" data-wallpaper="plain" aria-hidden="true"></span>纯色</button>
@@ -413,6 +431,8 @@
           </div>
           <input id="wallpaperInput" type="file" accept="image/*" hidden>
           <p class="setting-hint">玻璃要在下方有颜色或内容时才看得出来。自定义壁纸只保存在这台手机上。</p>
+          <label class="toggle-row" for="studioBackdropToggle"><span>工作室当背景<small id="studioBackdropHint"></small></span><input id="studioBackdropToggle" type="checkbox"></label>
+          <label class="toggle-row" for="liveBackdropToggle"><span>动态背景<small id="liveBackdropHint"></small></span><input id="liveBackdropToggle" type="checkbox"></label>
         </div>
         <label id="accentLabel">主题色</label>
         <div id="accentPicker" class="accent-picker" role="radiogroup" aria-labelledby="accentLabel">

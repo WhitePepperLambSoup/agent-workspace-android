@@ -187,10 +187,6 @@ strong { font-weight: 600; }
 .status-indicator.offline { background: var(--danger); }
 /* The native selects remain for state and automation but are not shown. */
 .session-navigation { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
-.brand-mark {
-  display: grid; place-items: center; flex: 0 0 34px; width: 34px; height: 34px; border-radius: 11px;
-  background: var(--accent); color: var(--accent-contrast); font-weight: 750; font-size: 16px; line-height: 1;
-}
 
 /* ---------- Buttons ---------- */
 .icon-button {
@@ -232,14 +228,10 @@ strong { font-weight: 600; }
 }
 
 .empty-state {
-  display: flex; flex-direction: column; align-items: center; gap: 8px; max-width: 320px; margin: 10vh auto 0; padding: 8px 12px;
+  display: flex; flex-direction: column; align-items: center; gap: 8px; max-width: 320px; margin: 20vh auto 0; padding: 8px 12px;
   color: var(--text-2); text-align: center; font-size: 13.5px; line-height: 1.6;
 }
 .empty-state > strong { color: var(--text); font-size: 18px; font-weight: 650; }
-.empty-state-icon {
-  width: 52px; height: 52px; margin-bottom: 6px; border-radius: 16px; background: var(--accent-soft); color: var(--accent);
-}
-.empty-state-icon svg { width: 26px; height: 26px; }
 
 .message-card { min-width: 0; word-break: normal; overflow-wrap: anywhere; }
 .message-card.user {
@@ -427,12 +419,13 @@ strong { font-weight: 600; }
 #quickChipsBar.many::-webkit-scrollbar { display: none; }
 #quickChipsBar.many .chip { scroll-snap-align: start; }
 .chip {
-  display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 56px; padding: 9px 12px; border: 1px solid var(--border);
-  border-radius: var(--radius); background: var(--surface); color: var(--text); font-size: 13.5px; font-weight: 600; text-align: left;
+  display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 56px; padding: 9px 12px; border: 1px solid var(--border);
+  border-radius: var(--radius); background: var(--surface); color: var(--text); font-size: 13.5px; font-weight: 500; text-align: left;
   transition: background-color .15s, border-color .15s, transform .15s var(--ease-out);
 }
-.chip > [data-icon] { flex: 0 0 30px; width: 30px; height: 30px; border-radius: 9px; background: var(--accent-soft); color: var(--accent); }
-.chip > [data-icon] svg { width: 16px; height: 16px; }
+/* The task's icon is a small grey mark on its title line, not a coloured tile. */
+.chip > [data-icon] { flex: 0 0 16px; align-self: flex-start; width: 16px; height: 20px; color: var(--text-3); }
+.chip > [data-icon] svg { width: 15px; height: 15px; }
 .chip > span:last-child { display: grid; gap: 1px; min-width: 0; }
 .chip small { overflow: hidden; color: var(--text-3); font-size: 11.5px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
 .chip:active:not(:disabled) { transform: scale(.97); background: var(--surface-2); }
@@ -585,9 +578,26 @@ strong { font-weight: 600; }
 #sessionDrawer:not([hidden]) #sessionDrawerPanel { animation: drawer-enter 240ms var(--ease-out); }
 #sessionDrawer:not([hidden]) #sessionDrawerBackdrop { animation: settings-backdrop-enter 180ms ease-out; }
 @keyframes drawer-enter { from { transform: translateX(var(--drawer-from, -100%)); opacity: var(--drawer-fade, 1); } to { transform: none; opacity: 1; } }
-.drawer-header { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; min-height: 60px; padding: 8px 6px 8px 14px; }
-.drawer-header h2 { flex: 1; min-width: 0; margin: 0 0 0 8px; font-size: 16px; font-weight: 700; }
+.drawer-header { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; min-height: 64px; padding: 10px 6px 6px 12px; }
+/* The drawer opens on a search box, not a title. */
+.drawer-search {
+  display: flex; flex: 1 1 auto; align-items: center; gap: 8px; min-width: 0; height: 44px; padding: 0 12px;
+  border-radius: 12px; background: var(--surface-2); color: var(--text-3); cursor: text;
+}
+.drawer-search svg { width: 18px; height: 18px; }
+.drawer-search input {
+  flex: 1 1 auto; min-width: 0; height: 100%; padding: 0; border: 0; background: transparent; color: var(--text); font-size: 15px;
+}
+.drawer-search input::placeholder { color: var(--text-3); }
+.drawer-search input::-webkit-search-cancel-button { filter: grayscale(1); opacity: .6; }
+.drawer-search:focus-within { box-shadow: var(--focus-ring); }
+:root[data-style="glass"] .drawer-search { background: rgba(255, 255, 255, .42); box-shadow: inset 0 0 0 .5px var(--glass-outline, rgba(0, 0, 0, .08)); }
+:root[data-style="glass"][data-theme="dark"] .drawer-search { background: rgba(255, 255, 255, .08); }
+@media (prefers-color-scheme: dark) { :root[data-style="glass"][data-theme="system"] .drawer-search { background: rgba(255, 255, 255, .08); } }
 .drawer-body { flex: 1 1 auto; min-height: 0; padding: 0 10px 16px; overflow-y: auto; overscroll-behavior: contain; }
+.drawer-body[data-searching="true"] > :not(.drawer-search-view) { display: none; }
+.drawer-search-view { padding-top: 6px; }
+.drawer-search-view > .setting-hint:empty { display: none; }
 .drawer-section-title {
   display: flex; align-items: center; justify-content: space-between; min-height: 32px; margin: 10px 4px 4px;
   color: var(--text-3); font-size: 12px; font-weight: 600;
@@ -600,11 +610,12 @@ strong { font-weight: 600; }
   background: transparent; color: var(--text-2); font-size: 13px; text-overflow: ellipsis; white-space: nowrap;
 }
 .drawer-workspace[aria-checked="true"] { border-color: transparent; background: var(--accent-soft); color: var(--accent-soft-text); font-weight: 600; }
+/* New conversation: a plain row lined up with the conversations under it. */
 .drawer-new {
-  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 46px; margin: 10px 0 2px; padding: 8px 12px;
-  border: 1px dashed var(--border-strong); border-radius: var(--radius); background: transparent; color: var(--text); font-size: 14px; font-weight: 600;
+  display: flex; align-items: center; gap: 12px; width: 100%; min-height: 48px; margin: 8px 0 0; padding: 8px 12px;
+  border: 0; border-radius: 12px; background: transparent; color: var(--text); font-size: 14.5px; font-weight: 500; text-align: left;
 }
-.drawer-new svg { width: 18px; height: 18px; color: var(--accent); }
+.drawer-new svg { width: 18px; height: 18px; color: var(--text-2); }
 .drawer-new:active:not(:disabled) { background: var(--surface-2); }
 .drawer-sessions { display: grid; gap: 2px; }
 .drawer-session {
@@ -1110,6 +1121,16 @@ button.diff-line:focus-visible { outline: none; box-shadow: inset var(--focus-ri
 .search-result strong { font-size: 14px; }
 .search-result span { color: var(--text-2); font-size: 12.5px; line-height: 1.5; }
 .search-result small { color: var(--accent); font-size: 11.5px; font-weight: 600; }
+/* In the drawer the results are rows like the conversations: two lines of the match, no card. */
+.drawer-search-view .search-results:not(:empty) { margin: 0; padding: 0; border: 0; background: none; gap: 2px; }
+.drawer-search-view .search-result { gap: 2px; padding: 9px 12px; border: 0; border-radius: 12px; }
+.drawer-search-view .search-result:active { background: var(--surface-2); }
+.drawer-search-view .search-result strong { overflow: hidden; font-size: 14.5px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.drawer-search-view .search-result span {
+  display: -webkit-box; overflow: hidden; color: var(--text-3); font-size: 12.5px; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.drawer-search-view .search-result small { display: none; }
+.drawer-search-view .setting-hint { margin: 8px 12px; }
 #settingsSearch #searchStatus { margin-top: 10px; }
 
 .task-center-row { padding: 12px 0; border-bottom: 1px solid var(--border); }
@@ -1299,11 +1320,9 @@ button.diff-line:focus-visible { outline: none; box-shadow: inset var(--focus-ri
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes caret-blink { 0%, 45% { opacity: 1; } 50%, 100% { opacity: 0; } }
 @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
-@keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
 
 #timelineList > .message-card, #timelineList > .task-error, #timelineList > .history-error { animation: rise-in 320ms var(--ease-out) both; }
 .empty-state { animation: fade-in 420ms ease-out both; }
-.empty-state-icon { animation: float 5s ease-in-out 1; }
 #approvalShelf:not([hidden]) { animation: rise-in 280ms var(--ease-out) both; }
 #noticeText:not([hidden]), #taskStatusBar:not([hidden]), .import-notice:not([hidden]) { animation: fade-in 200ms ease-out both; }
 #btnJumpLatest:not([hidden]) { animation: rise-in 220ms var(--ease-out) both; }
@@ -1394,7 +1413,6 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
 .menu-row:active > [data-icon]:last-child:not(:first-child) { transform: translateX(3px); }
 
 :root[data-motion="reduced"] { --rise: 0px; --pop-scale: 1; --pop-from: 1; --pop-turn: 0deg; }
-:root[data-motion="reduced"] .empty-state-icon { animation: none !important; }
 :root[data-motion="reduced"] .settings-page { --settings-page-offset: 0px; }
 :root[data-motion="reduced"] #settingsSheet { --settings-sheet-x: 0px; --settings-sheet-y: 0px; --settings-sheet-fade: .4; }
 :root[data-motion="reduced"] #sessionDrawerPanel { --drawer-from: 0px; --drawer-fade: 0; }
@@ -1406,7 +1424,6 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
   :root[data-motion="auto"] .settings-page:not([hidden]), :root[data-motion="auto"] #settingsOverlay:not([hidden]) #settingsSheet,
   :root[data-motion="auto"] #settingsOverlay:not([hidden]) #settingsBackdrop { animation: none; }
   :root[data-motion="auto"] #sessionDrawer:not([hidden]) :is(#sessionDrawerPanel, #sessionDrawerBackdrop) { animation: none; }
-  :root[data-motion="auto"] .empty-state-icon,
   :root[data-motion="auto"] .effort-control *, :root[data-motion="auto"] .effort-control *::before,
   :root[data-motion="auto"] .effort-control *::after, :root[data-motion="auto"] #modelBar::before,
   :root[data-motion="auto"] #appShell[data-busy="true"] .status-indicator::after { animation: none !important; }
@@ -1459,88 +1476,89 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
    palette, like the colour fields behind iOS controls. The colour fields are placed so the header
    and the dock straddle their edges, which is where the lens visibly bends them. Static, so the
    refraction filters only re-run when content scrolls. Users can tone it down or turn it off. */
-/* Presets: a diagonal base gradient plus four colour fields in the corners and along the sides.
-   Each preset names its colours once ("r g b"); light and dark themes pick their own base and strength. */
+/* Presets: a soft diagonal base and four large colour fields that fade out slowly, like a photo
+   out of focus. Each names its colours once ("r g b"); light and dark themes pick their own base and
+   strength. 2.7 dropped the firm field edges and light lines of 2.6 and the loud patterned presets. */
 [data-backdrop="aurora"], [data-wallpaper="aurora"] {
   --wp-image: initial; /* colour-field preset: use the shared template, not an inherited pattern */
-  --wp-l1: 224 231 255; --wp-l2: 207 250 254; --wp-d1: 15 23 42; --wp-d2: 30 27 75;
-  --wp-1: 129 140 248; --wp-2: 240 171 252; --wp-3: 94 234 212; --wp-4: 147 197 253;
+  --wp-l1: 238 240 255; --wp-l2: 232 247 250; --wp-d1: 16 19 40; --wp-d2: 26 24 56;
+  --wp-1: 150 160 250; --wp-2: 222 182 246; --wp-3: 136 218 208; --wp-4: 160 198 250;
 }
 [data-backdrop="sunset"], [data-wallpaper="sunset"] {
-  --wp-image: initial; /* colour-field preset: use the shared template, not an inherited pattern */
-  --wp-l1: 255 237 213; --wp-l2: 251 207 232; --wp-d1: 41 20 31; --wp-d2: 49 24 64;
-  --wp-1: 251 146 60; --wp-2: 244 114 182; --wp-3: 253 186 116; --wp-4: 167 139 250;
+  --wp-image: initial;
+  --wp-l1: 255 243 234; --wp-l2: 252 236 240; --wp-d1: 42 24 30; --wp-d2: 46 26 50;
+  --wp-1: 250 184 150; --wp-2: 244 168 192; --wp-3: 252 210 170; --wp-4: 204 182 240;
 }
 [data-backdrop="ocean"], [data-wallpaper="ocean"] {
-  --wp-image: initial; /* colour-field preset: use the shared template, not an inherited pattern */
-  --wp-l1: 219 234 254; --wp-l2: 204 251 241; --wp-d1: 8 25 48; --wp-d2: 4 47 46;
-  --wp-1: 59 130 246; --wp-2: 34 211 238; --wp-3: 99 102 241; --wp-4: 45 212 191;
+  --wp-image: initial;
+  --wp-l1: 232 241 252; --wp-l2: 228 247 248; --wp-d1: 10 24 44; --wp-d2: 8 38 46;
+  --wp-1: 130 170 240; --wp-2: 130 210 232; --wp-3: 156 166 236; --wp-4: 128 210 200;
 }
 [data-backdrop="meadow"], [data-wallpaper="meadow"] {
-  --wp-image: initial; /* colour-field preset: use the shared template, not an inherited pattern */
-  --wp-l1: 236 252 203; --wp-l2: 209 250 229; --wp-d1: 20 33 20; --wp-d2: 6 44 34;
-  --wp-1: 163 230 53; --wp-2: 52 211 153; --wp-3: 250 204 21; --wp-4: 45 212 191;
+  --wp-image: initial;
+  --wp-l1: 240 246 236; --wp-l2: 234 244 240; --wp-d1: 18 30 24; --wp-d2: 14 36 32;
+  --wp-1: 176 206 168; --wp-2: 146 202 182; --wp-3: 214 220 172; --wp-4: 156 206 200;
+}
+[data-backdrop="sand"], [data-wallpaper="sand"] {
+  --wp-image: initial;
+  --wp-l1: 250 245 237; --wp-l2: 245 238 230; --wp-d1: 36 30 24; --wp-d2: 42 32 28;
+  --wp-1: 232 204 170; --wp-2: 226 184 164; --wp-3: 240 222 190; --wp-4: 204 194 180;
 }
 [data-backdrop="graphite"], [data-wallpaper="graphite"] {
-  --wp-image: initial; /* colour-field preset: use the shared template, not an inherited pattern */
-  --wp-l1: 229 231 235; --wp-l2: 203 213 225; --wp-d1: 17 19 23; --wp-d2: 30 33 40;
-  --wp-1: 148 163 184; --wp-2: 203 213 225; --wp-3: 100 116 139; --wp-4: 226 232 240;
+  --wp-image: initial;
+  --wp-l1: 232 234 238; --wp-l2: 216 222 230; --wp-d1: 17 19 23; --wp-d2: 30 33 40;
+  --wp-1: 168 178 194; --wp-2: 208 216 228; --wp-3: 134 146 166; --wp-4: 224 230 238;
 }
-/* Patterned presets: shapes and lines are what the lens visibly bends. Each is a complete background;
-   the dark theme lays a shade over it. */
-[data-backdrop="iris"], [data-wallpaper="iris"] {
-  --wp-image: linear-gradient(var(--wp-shade), var(--wp-shade)),
-    radial-gradient(60% 40% at 15% 85%, rgba(255, 255, 255, .45), transparent 70%),
-    conic-gradient(from 200deg at 72% 28%, #ff7ab6, #9b7bff, #4cc9f0, #5ef2b4, #ffd166, #ff8f70, #ff7ab6);
-}
-[data-backdrop="bokeh"], [data-wallpaper="bokeh"] {
-  --wp-image: linear-gradient(var(--wp-shade), var(--wp-shade)),
-    radial-gradient(circle at 18% 20%, rgba(255, 122, 182, .85) 0 38px, rgba(255, 122, 182, 0) 41px),
-    radial-gradient(circle at 80% 14%, rgba(124, 131, 255, .8) 0 56px, rgba(124, 131, 255, 0) 59px),
-    radial-gradient(circle at 64% 46%, rgba(64, 224, 200, .72) 0 72px, rgba(64, 224, 200, 0) 75px),
-    radial-gradient(circle at 22% 62%, rgba(255, 196, 80, .82) 0 46px, rgba(255, 196, 80, 0) 49px),
-    radial-gradient(circle at 86% 76%, rgba(244, 114, 182, .75) 0 62px, rgba(244, 114, 182, 0) 65px),
-    radial-gradient(circle at 38% 92%, rgba(96, 165, 250, .82) 0 54px, rgba(96, 165, 250, 0) 57px),
-    linear-gradient(160deg, #f4f1ff, #e9fbff);
-}
-[data-backdrop="grid"], [data-wallpaper="grid"] {
-  --wp-image: linear-gradient(var(--wp-shade), var(--wp-shade)),
-    linear-gradient(rgba(70, 80, 120, .16) 1px, transparent 1px) 0 0 / 26px 26px,
-    linear-gradient(90deg, rgba(70, 80, 120, .16) 1px, transparent 1px) 0 0 / 26px 26px,
-    radial-gradient(70% 45% at 0% 0%, rgba(129, 140, 248, .45), transparent 70%),
-    radial-gradient(70% 45% at 100% 100%, rgba(45, 212, 191, .4), transparent 70%),
-    linear-gradient(165deg, #eef1fb, #e8f7f6);
-}
-[data-backdrop="ribbon"], [data-wallpaper="ribbon"] {
-  --wp-image: linear-gradient(var(--wp-shade), var(--wp-shade)),
-    repeating-linear-gradient(135deg, #ffd3e6 0 44px, #d7e3ff 44px 88px, #d2fbef 88px 132px, #fff0bf 132px 176px);
-}
+/* Dusk: an evening sky with a low sun. The dark theme lays a shade over it. */
 [data-backdrop="dusk"], [data-wallpaper="dusk"] {
   --wp-image: linear-gradient(var(--wp-shade), var(--wp-shade)),
-    radial-gradient(circle at 74% 20%, rgba(255, 244, 214, .95) 0 44px, rgba(255, 226, 180, 0) 96px),
-    linear-gradient(180deg, #ffb59c 0%, #ff8fc4 36%, #a98bfa 70%, #6aa8fa 100%);
+    radial-gradient(circle at 74% 20%, rgba(255, 248, 232, .9) 0 34px, rgba(255, 240, 220, 0) 120px),
+    linear-gradient(180deg, #f6cbbb 0%, #efbdd6 38%, #cbbcf2 72%, #b4cdf6 100%);
 }
 :root { --wp-shade: transparent; }
 :root[data-theme="dark"] { --wp-shade: rgba(0, 0, 0, .5); }
 @media (prefers-color-scheme: dark) { :root[data-theme="system"] { --wp-shade: rgba(0, 0, 0, .5); } }
-/* A smooth gradient looks the same bent or not, so the colour fields (2.6) keep a firmer edge and lie
-   under faint diagonal light lines: the header and the dock straddle both, and the lens visibly bends
-   them. Conversation cards keep their veil, so the lines never run behind text. */
 :root[data-style="glass"] body, .backdrop-swatch.wallpaper {
-  --wp-base-1: var(--wp-l1); --wp-base-2: var(--wp-l2); --wp-a: .72; --wp-line: rgba(255, 255, 255, .26);
+  --wp-base-1: var(--wp-l1); --wp-base-2: var(--wp-l2); --wp-a: .62;
   background: var(--wp-image,
-    repeating-linear-gradient(118deg, var(--wp-line) 0 1.5px, transparent 1.5px 30px),
-    radial-gradient(75% 45% at 0% 0%, rgb(var(--wp-1) / var(--wp-a)) 30%, transparent 64%),
-    radial-gradient(65% 42% at 100% 20%, rgb(var(--wp-2) / var(--wp-a)) 28%, transparent 62%),
-    radial-gradient(75% 45% at 0% 70%, rgb(var(--wp-3) / var(--wp-a)) 30%, transparent 64%),
-    radial-gradient(75% 48% at 100% 100%, rgb(var(--wp-4) / var(--wp-a)) 30%, transparent 64%),
+    radial-gradient(110% 62% at 0% 0%, rgb(var(--wp-1) / var(--wp-a)), transparent 72%),
+    radial-gradient(95% 55% at 100% 22%, rgb(var(--wp-2) / var(--wp-a)), transparent 72%),
+    radial-gradient(110% 60% at 0% 80%, rgb(var(--wp-3) / var(--wp-a)), transparent 72%),
+    radial-gradient(105% 62% at 100% 100%, rgb(var(--wp-4) / var(--wp-a)), transparent 72%),
     linear-gradient(165deg, rgb(var(--wp-base-1)), rgb(var(--wp-base-2))));
 }
-:root[data-theme="dark"][data-style="glass"] body { --wp-base-1: var(--wp-d1); --wp-base-2: var(--wp-d2); --wp-a: .42; --wp-line: rgba(255, 255, 255, .07); }
+:root[data-theme="dark"][data-style="glass"] body { --wp-base-1: var(--wp-d1); --wp-base-2: var(--wp-d2); --wp-a: .38; }
 @media (prefers-color-scheme: dark) {
-  :root[data-theme="system"][data-style="glass"] body { --wp-base-1: var(--wp-d1); --wp-base-2: var(--wp-d2); --wp-a: .42; --wp-line: rgba(255, 255, 255, .07); }
+  :root[data-theme="system"][data-style="glass"] body { --wp-base-1: var(--wp-d1); --wp-base-2: var(--wp-d2); --wp-a: .38; }
 }
 :root[data-style="glass"][data-backdrop="plain"] body, .backdrop-swatch[data-wallpaper="plain"] { background: var(--bg); }
+/* Live backdrop (2.7, app/32-live-backdrop.js): the same fields drifting, drawn on a small canvas the
+   browser smooths up to the screen, under everything else. */
+#liveBackdrop { display: none; }
+:root[data-style="glass"][data-live="on"] #liveBackdrop {
+  display: block; position: fixed; inset: 0; z-index: -1; width: 100%; height: 100%; pointer-events: none;
+}
+/* The studio behind the conversation (2.7, app/33-studio-backdrop.js): over the colour field, under
+   everything else. Dimmed by a veil, not a CSS filter (a filter on a full-screen canvas is redone at
+   every frame the glass above changes); the small picture is soft enough by itself. */
+.studio-backdrop { position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none; }
+.studio-backdrop[hidden] { display: none; }
+.studio-backdrop-stage { position: absolute; inset: 0; }
+.studio-backdrop .studio-canvas { opacity: 0; transition: opacity .9s ease; }
+.studio-backdrop[data-ready="true"] .studio-canvas { opacity: 1; }
+.studio-backdrop::after { content: ""; position: absolute; inset: 0; background: var(--studio-veil); pointer-events: none; transition: opacity .35s ease; }
+.studio-backdrop { --studio-veil: rgba(247, 248, 250, .5); }
+:root[data-theme="dark"] .studio-backdrop { --studio-veil: rgba(9, 12, 18, .42); }
+@media (prefers-color-scheme: dark) { :root[data-theme="system"] .studio-backdrop { --studio-veil: rgba(9, 12, 18, .42); } }
+.studio-backdrop .studio-overlay { display: none; }
+/* Shown in full: over the app (which steps aside), under the studio sheet's header and roster. */
+.studio-backdrop[data-viewing="true"] { z-index: 39; pointer-events: auto; }
+.studio-backdrop[data-viewing="true"]::after { opacity: 0; }
+.studio-backdrop[data-viewing="true"] .studio-overlay { display: block; }
+:root[data-studio-view="true"] #appShell { visibility: hidden; }
+.studio-sheet[data-over="backdrop"] { background: transparent; }
+.studio-sheet[data-over="backdrop"] .studio-stage { pointer-events: none; }
+.studio-sheet[data-over="backdrop"] .studio-header { background: var(--bg); background: color-mix(in srgb, var(--bg) 78%, transparent); }
 :root[data-style="glass"][data-backdrop="custom"] body {
   background: linear-gradient(var(--wallpaper-scrim), var(--wallpaper-scrim)), var(--custom-wallpaper) center / cover no-repeat, var(--bg);
   background-attachment: fixed;
@@ -1550,12 +1568,9 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
 :root[data-style="glass"][data-backdrop="sunset"] { --system-bar: #fdd9c0; --system-bar-dark: #3a2030; }
 :root[data-style="glass"][data-backdrop="ocean"] { --system-bar: #c8dcfc; --system-bar-dark: #0f2c4d; }
 :root[data-style="glass"][data-backdrop="meadow"] { --system-bar: #def5b8; --system-bar-dark: #1f3418; }
+:root[data-style="glass"][data-backdrop="sand"] { --system-bar: #f0e2d2; --system-bar-dark: #2c241e; }
 :root[data-style="glass"][data-backdrop="graphite"] { --system-bar: #d9dde3; --system-bar-dark: #22262d; }
-:root[data-style="glass"][data-backdrop="iris"] { --system-bar: #e3b4f0; --system-bar-dark: #3a2c47; }
-:root[data-style="glass"][data-backdrop="bokeh"] { --system-bar: #f4f1ff; --system-bar-dark: #2a2836; }
-:root[data-style="glass"][data-backdrop="grid"] { --system-bar: #e4e6f8; --system-bar-dark: #24262e; }
-:root[data-style="glass"][data-backdrop="ribbon"] { --system-bar: #ffe1ec; --system-bar-dark: #3b2e34; }
-:root[data-style="glass"][data-backdrop="dusk"] { --system-bar: #ffb59c; --system-bar-dark: #4a2f29; }
+:root[data-style="glass"][data-backdrop="dusk"] { --system-bar: #f6cbbb; --system-bar-dark: #4a2f29; }
 :root[data-style="glass"][data-theme="dark"]:not([data-backdrop="plain"], [data-backdrop="custom"]) { --system-bar: var(--system-bar-dark); }
 @media (prefers-color-scheme: dark) {
   :root[data-style="glass"][data-theme="system"]:not([data-backdrop="plain"], [data-backdrop="custom"]) { --system-bar: var(--system-bar-dark); }
@@ -1596,18 +1611,12 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
 @media (prefers-reduced-transparency: reduce) {
   :root[data-style="glass"]:not([data-backdrop="plain"]) .message-card.assistant { background: var(--content-veil); -webkit-backdrop-filter: none; backdrop-filter: none; }
 }
-/* The welcome card is a pane of the same glass as the controls, not an opaque white block. */
-:root[data-style="glass"]:not([data-backdrop="plain"]) .empty-state {
-  padding: 24px 20px; border-radius: 28px; background-color: var(--glass-fill); background-image: var(--glass-sheen);
-  -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
-}
-:root[data-style="glass"]:not([data-backdrop="plain"]) .empty-state-icon { background: rgba(255, 255, 255, .35); box-shadow: inset 0 1px 1px rgba(255, 255, 255, .7), 0 4px 12px rgba(var(--accent-rgb), .18); }
-:root.liquid-refraction:not([data-backdrop="plain"]) .empty-state {
-  -webkit-backdrop-filter: var(--liquid-glass-still, var(--glass-blur)); backdrop-filter: var(--liquid-glass-still, var(--glass-blur));
-}
-:root.liquid-refraction:not([data-backdrop="plain"]) #timelineList .empty-state::after {
-  content: ""; position: absolute; inset: 0; z-index: -1; padding: 0; border-radius: inherit; pointer-events: none;
-  background: var(--liquid-glass-specular, none) center / 100% 100% no-repeat; -webkit-mask: none; mask: none;
+/* The greeting sits on the wallpaper itself; a soft glow keeps it readable over any colour. */
+:root[data-style="glass"]:not([data-backdrop="plain"]) .empty-state { color: var(--text-2); }
+:root[data-style="glass"]:not([data-backdrop="plain"]) .empty-state > * { text-shadow: 0 0 18px rgba(255, 255, 255, .7); }
+:root[data-style="glass"][data-theme="dark"]:not([data-backdrop="plain"]) .empty-state > * { text-shadow: 0 0 18px rgba(0, 0, 0, .55); }
+@media (prefers-color-scheme: dark) {
+  :root[data-style="glass"][data-theme="system"]:not([data-backdrop="plain"]) .empty-state > * { text-shadow: 0 0 18px rgba(0, 0, 0, .55); }
 }
 :root:not([data-style="glass"]) .glass-only { display: none; }
 
@@ -1627,7 +1636,7 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
 @media (prefers-color-scheme: dark) {
   :root[data-style="glass"][data-theme="system"] { --glass-rim: var(--glass-rim-dark); --glass-outline: rgba(0, 0, 0, .35); }
 }
-:root[data-style="glass"] :is(.chip, .composer, .composer-chip, .message-card.user, .message-card.tool, .menu-group, .toggle-row, .empty-state, #approvalShelf, #taskStatusBar) {
+:root[data-style="glass"] :is(.chip, .composer, .composer-chip, .message-card.user, .message-card.tool, .menu-group, .toggle-row, #approvalShelf, #taskStatusBar) {
   position: relative;
 }
 :root[data-style="glass"] :is(#mobileHeader, .composer, #sessionDrawerPanel, #settingsSheet, #modelSheetPanel, #approvalShelf, #btnJumpLatest, .chip, #taskStatusBar,
@@ -1636,7 +1645,7 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
 }
 :root[data-style="glass"] :is(#mobileHeader, .composer, #sessionDrawerPanel, #settingsSheet, #modelSheetPanel, #approvalShelf, #btnJumpLatest, .chip, #taskStatusBar,
   .composer-chip, .message-card.user, .message-card.tool, .menu-group, .toggle-row)::after,
-:root[data-style="glass"]:not([data-backdrop="plain"]) :is(.message-card.assistant, .empty-state)::after {
+:root[data-style="glass"]:not([data-backdrop="plain"]) .message-card.assistant::after {
   content: ""; position: absolute; inset: 0; z-index: 1; padding: 1.2px; border-radius: inherit; pointer-events: none;
   background: var(--glass-rim);
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor;
@@ -1647,7 +1656,7 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
 :root[data-style="glass"] :is(.chip, .composer-chip, .message-card.user, .message-card.tool, .menu-group, .toggle-row) {
   box-shadow: 0 0 0 .5px var(--glass-outline), 0 4px 14px rgba(15, 23, 42, .06);
 }
-:root[data-style="glass"]:not([data-backdrop="plain"]) :is(.message-card.assistant, .empty-state) {
+:root[data-style="glass"]:not([data-backdrop="plain"]) .message-card.assistant {
   box-shadow: 0 0 0 .5px var(--glass-outline), 0 6px 20px rgba(15, 23, 42, .07);
 }
 /* Cards become frosted panes of their own: translucent fill instead of an opaque surface. */
@@ -1688,7 +1697,7 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
 :root[data-style="glass"] #bottomDock { position: absolute; left: 0; right: 0; bottom: env(safe-area-inset-bottom); margin-top: auto; }
 :root[data-style="glass"] #btnJumpLatest { bottom: calc(var(--dock-h, 120px) + env(safe-area-inset-bottom) + 10px); }
 :root[data-style="glass"] #inputFooter { background: transparent; padding-bottom: 12px; }
-:root[data-style="glass"] .empty-state { margin-top: calc(var(--header-h, 64px) + 6vh); }
+:root[data-style="glass"] .empty-state { margin-top: calc(var(--header-h, 64px) + 18vh); }
 
 /* The material: frosted fill, bright top rim, faint inner edge, soft drop shadow, specular sheen. */
 :root[data-style="glass"] :is(#mobileHeader, .composer, #sessionDrawerPanel, #settingsSheet, #modelSheetPanel, #approvalShelf, #btnJumpLatest, .chip, #taskStatusBar) {
@@ -1900,9 +1909,9 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
 /* The composer floats a little above the page. */
 .composer { border-radius: 26px; box-shadow: 0 6px 24px rgba(15, 23, 22, .08), 0 1px 3px rgba(15, 23, 22, .06); }
 :root[data-theme="dark"] .composer { box-shadow: 0 6px 24px rgba(0, 0, 0, .35); }
-/* A new conversation: a larger greeting. */
-.empty-state > strong { font-size: 22px; letter-spacing: .01em; }
-.empty-state-icon { width: 56px; height: 56px; border-radius: 18px; }
+/* A new conversation: a greeting for the time of day, the workspace under it. */
+.empty-state { gap: 6px; color: var(--text-3); }
+.empty-state > strong { font-size: 26px; font-weight: 600; line-height: 1.25; letter-spacing: .01em; }
 /* Drawer (2.0): groups by date, tag filter, tags under titles, a quiet ⋯ for the actions. */
 .drawer-group { margin: 14px 12px 4px; color: var(--text-3); font-size: 11.5px; font-weight: 650; letter-spacing: .04em; }
 .drawer-tag-filter { display: flex; gap: 6px; margin: 4px 8px 6px; overflow-x: auto; scrollbar-width: none; }
@@ -2281,6 +2290,26 @@ body.elder-mode #appShell { display: none; }
 .studio-bubble[data-state="failed"] { background: #ffd2cc; font-weight: 700; }
 .studio-bubble[data-state="done"] { font-weight: 700; color: #1f7a54; }
 .studio-floor-sign { display: none; }
+/* Where to look (2.7, app/34-campus.js): a row of choices under the header, scrolled sideways. */
+.studio-places { display: flex; gap: 6px; padding: 0 10px 8px; overflow-x: auto; scrollbar-width: none; }
+.studio-places::-webkit-scrollbar { display: none; }
+.studio-places button { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; min-height: 32px; padding: 4px 11px; color: var(--text); font-size: 12.5px; white-space: nowrap; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); }
+.studio-places button [data-icon] { color: var(--text-2); }
+.studio-places button[aria-checked="true"] { color: #fff; border-color: transparent; background: var(--accent); }
+.studio-places button[aria-checked="true"] [data-icon] { color: inherit; }
+.studio-sheet[data-over="backdrop"] .studio-places { padding-top: 2px; background: var(--bg); background: color-mix(in srgb, var(--bg) 78%, transparent); }
+.place-stage[hidden], .studio-stage[hidden] { display: none; }
+/* Signs over things in a place: a name and what goes on there. */
+.place-stage .studio-floor-sign { display: grid; position: absolute; top: 0; left: 0; max-width: 170px; gap: 1px; padding: 4px 9px; color: var(--text); font: 600 11px/1.3 var(--font-sans); text-align: left; border: 0; border-radius: 10px; background: rgba(255, 255, 255, .88); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .08), 0 4px 12px rgba(0, 0, 0, .16); pointer-events: auto; will-change: transform; }
+.place-stage .studio-floor-title, .place-stage .studio-floor-summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.place-stage .studio-floor-summary { color: var(--text-2); font-weight: 500; }
+.place-stage .studio-floor-summary[hidden] { display: none; }
+[data-theme="dark"] .place-stage .studio-floor-sign { background: rgba(22, 28, 27, .86); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12), 0 4px 12px rgba(0, 0, 0, .3); }
+@media (prefers-color-scheme: dark) { [data-theme="system"] .place-stage .studio-floor-sign { background: rgba(22, 28, 27, .86); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12), 0 4px 12px rgba(0, 0, 0, .3); } }
+:root .place-stage .studio-floor-sign[data-tone="busy"] { box-shadow: inset 0 0 0 1.5px #38c98f, 0 4px 12px rgba(0, 0, 0, .16); }
+:root .place-stage .studio-floor-sign[data-tone="alert"] { box-shadow: inset 0 0 0 1.5px #e0a13a, 0 4px 12px rgba(0, 0, 0, .16); }
+.studio-roster li[data-busy="true"] button { border-color: rgba(56, 201, 143, .6); }
+.studio-roster button span:not(:first-child) { color: var(--text-2); }
 .studio-hint, .studio-unsupported { position: absolute; left: 10px; bottom: 8px; margin: 0; padding: 4px 9px; color: var(--text-2); font-size: 11px; border-radius: 8px; background: rgba(var(--accent-rgb), .08); pointer-events: none; }
 .studio-hint[hidden], .studio-unsupported[hidden] { display: none; }
 .studio-unsupported { inset: 50% auto auto 50%; transform: translate(-50%, -50%); color: var(--text); font-size: 13px; text-align: center; }

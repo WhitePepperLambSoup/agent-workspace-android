@@ -39,7 +39,7 @@
     "btnAttachmentsPage", "btnImportNotice", "importNoticeText", "menuImportSummary", "btnPickImportFiles", "btnRefreshImports",
     "shareTargetControls", "shareTargetSession", "shareInboxStatus", "shareInboxList", "shareImportActions", "btnImportShares", "btnDiscardShares", "browserUploadList",
     "btnSessions", "btnSessionTitle", "sessionTitleText", "workspaceTitleText", "sessionDrawer", "sessionDrawerBackdrop", "sessionDrawerPanel",
-    "btnDrawerClose", "btnDrawerSearch", "drawerWorkspaces", "drawerSessionList", "btnDrawerNewSession", "btnDrawerWorkspaces",
+    "btnDrawerClose", "drawerBody", "drawerSearchInput", "drawerSearchView", "drawerSearchStatus", "drawerSearchResults", "drawerWorkspaces", "drawerSessionList", "btnDrawerNewSession", "btnDrawerWorkspaces",
     "btnModeChip", "settingsHeaderActions", "bottomDock", "mobileHeader",
   ].map((id) => [id, $(id)]));
   const token = document.querySelector('meta[name="agent-token"]')?.content || "";
@@ -126,7 +126,8 @@
   const appearanceChoices = {
     theme: ["system", "light", "dark"], textSize: ["small", "normal", "large"],
     style: ["solid", "glass"], accent: ["teal", "blue", "violet", "amber", "rose"], motion: ["auto", "full", "reduced", "off"], language: ["auto", "zh", "zh-Hant", "en", "ja", "ko"],
-    backdrop: ["aurora", "sunset", "ocean", "meadow", "iris", "bokeh", "grid", "ribbon", "dusk", "graphite", "plain", "custom"],
+    // 2.7 dropped iris, bokeh, grid and ribbon: a stored one of those falls back to aurora.
+    backdrop: ["aurora", "sunset", "ocean", "meadow", "sand", "dusk", "graphite", "plain", "custom"],
   };
   const preferences = {
     theme: "system", textSize: "normal", quickActions: true, haptics: true, style: "solid", accent: "teal", motion: "auto", language: "auto", backdrop: "aurora",
@@ -438,6 +439,8 @@
     elements.quickActionsToggle.checked = !!preferences.quickActions;
     elements.hapticsToggle.checked = !!preferences.haptics;
     syncSystemBars();
+    syncStudioBackdrop();
+    syncLiveBackdrop();
     // Home screen widgets take the chosen style (their glass needs no backdrop-filter support).
     try { bridge?.setWidgetStyle?.(preferences.style === "glass" ? "glass" : "solid"); } catch { /* Older APKs have no widgets. */ }
   }

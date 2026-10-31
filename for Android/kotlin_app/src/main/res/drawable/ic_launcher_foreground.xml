@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- App icon mark: an A drawn as two strokes, its crossbar a teal dot. Inside the 66 dp safe circle. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:pathData="M38.5,73.5 L54,33.5 L69.5,73.5"
+        android:strokeColor="#FFF2F5F7"
+        android:strokeWidth="7.4"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path android:pathData="M49.1,60.5a4.9,4.9 0,1 0,9.8 0a4.9,4.9 0,1 0,-9.8 0z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="52.6"
+                android:centerY="59"
+                android:gradientRadius="6.4">
+                <item android:offset="0" android:color="#FF9AF7E7" />
+                <item android:offset="1" android:color="#FF2DD4BF" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

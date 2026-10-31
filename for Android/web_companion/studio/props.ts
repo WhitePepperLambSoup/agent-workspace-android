@@ -7,7 +7,10 @@ import {
   COUNTER,
   DESK_SIZE,
   DESK_X_COUNT,
+  ENTRANCE,
+  GLASS,
   PLANTS,
+  PRINTER,
   RACK,
   ROOM,
   SEAT_Z,
@@ -47,6 +50,14 @@ export interface Room {
   leds: THREE.MeshBasicMaterial[]
   clock: { hour: THREE.Object3D; minute: THREE.Object3D }
   lamps: THREE.PointLight[]
+  /** The lead's desk lamp: on while the agent works on its own. */
+  deskLamp: THREE.PointLight
+  /** Pages in the printer's tray, shown when a document was just made. */
+  printout: THREE.Mesh
+  /** The sandbox's sliding door (moved along x to open) and the light strip over its glass. */
+  sandbox: { door: THREE.Group; strip: THREE.MeshBasicMaterial }
+  /** The room's door, on its hinge: turned about y to open. */
+  entrance: THREE.Group
   dispose(): void
 }
 
@@ -61,6 +72,12 @@ export interface RoomKit {
   readonly floor: { geometry: THREE.BufferGeometry; material: THREE.MeshStandardMaterial; texture: THREE.Texture }
   readonly leds: [THREE.BufferGeometry, THREE.BufferGeometry]
   readonly hands: { hour: THREE.BufferGeometry; minute: THREE.BufferGeometry; material: THREE.MeshStandardMaterial }
+  /** A few printed pages, slightly fanned. */
+  readonly printout: THREE.BufferGeometry
+  /** The sandbox's door leaf (glass in a frame) and its light strip. */
+  readonly sandbox: { door: ReturnType<Batch['build']>; strip: THREE.BufferGeometry }
+  /** The room's door leaf, from its hinge along +z. */
+  readonly entrance: ReturnType<Batch['build']>
   dispose(): void
 }
 
@@ -312,6 +329,40 @@ function furnish(theme: RoomTheme): Batch {
   batch.add(cylinderShape(0.15, 0.15, 0.4, 20), '#8fc9ff', { x: COOLER.x, y: 1.0, z: COOLER.z }, 'glass', false)
   batch.add(cylinderShape(0.05, 0.05, 0.05, 12), '#3f88c5', { x: COOLER.x, y: 1.22, z: COOLER.z }, 'satin', false)
 
+  // The door on the open right side: a frame, its lintel, and a mat inside.
+  const doorZ = (ENTRANCE.z0 + ENTRANCE.z1) / 2
+  for (const z of [ENTRANCE.z0, ENTRANCE.z1]) batch.add(boxShape(0.14, 2.2, 0.1, 0.02), c.woodLight, { x: ENTRANCE.x + 0.04, y: 1.1, z }, 'satin')
+  batch.add(boxShape(0.16, 0.14, ENTRANCE.z1 - ENTRANCE.z0 + 0.1, 0.02), c.woodLight, { x: ENTRANCE.x + 0.04, y: 2.2, z: doorZ }, 'satin')
+  batch.add(boxShape(0.55, 0.012, 0.95, 0.004), c.rugLounge, { x: ENTRANCE.x - 0.4, y: 0.007, z: doorZ }, 'matte', false)
+
+  // The sandbox: glass walls in thin metal frames around the rack and the console's inner screen.
+  const glassHeight = 2.2
+  const glassTint = theme.dark ? '#7fb6d6' : '#cfe8f4'
+  const frame = theme.dark ? '#8a93a3' : '#aeb5bf'
+  const sideLength = GLASS.z - ROOM.z0
+  batch.add(boxShape(0.025, glassHeight, sideLength), glassTint, { x: GLASS.x, y: glassHeight / 2, z: ROOM.z0 + sideLength / 2 }, 'glass', false)
+  for (const [x0, x1] of [[GLASS.x, GLASS.door.x0], [GLASS.door.x1, CONSOLE.x0]] as const) {
+    batch.add(boxShape(x1 - x0, glassHeight, 0.025), glassTint, { x: (x0 + x1) / 2, y: glassHeight / 2, z: GLASS.z }, 'glass', false)
+  }
+  for (const y of [0.02, glassHeight]) {
+    batch.add(boxShape(0.05, 0.04, sideLength), frame, { x: GLASS.x, y, z: ROOM.z0 + sideLength / 2 }, 'metal', false)
+    batch.add(boxShape(CONSOLE.x0 - GLASS.x, 0.04, 0.05), frame, { x: (GLASS.x + CONSOLE.x0) / 2, y, z: GLASS.z }, 'metal', false)
+  }
+  for (const z of [ROOM.z0 + 0.7, ROOM.z0 + 1.4, GLASS.z]) batch.add(boxShape(0.05, glassHeight, 0.05), frame, { x: GLASS.x, y: glassHeight / 2, z }, 'metal', false)
+  for (const x of [GLASS.door.x0, GLASS.door.x1]) batch.add(boxShape(0.04, glassHeight, 0.05), frame, { x, y: glassHeight / 2, z: GLASS.z }, 'metal', false)
+
+  // The printer on a low cabinet in the back-left corner; its tray holds what it printed.
+  const printerX = (PRINTER.x0 + PRINTER.x1) / 2
+  const printerZ = (PRINTER.z0 + PRINTER.z1) / 2
+  const printerWidth = PRINTER.x1 - PRINTER.x0
+  const printerDepth = PRINTER.z1 - PRINTER.z0
+  batch.add(boxShape(printerWidth, 0.55, printerDepth, 0.02), c.wood, { x: printerX, y: 0.275, z: printerZ }, 'satin')
+  batch.add(boxShape(printerWidth - 0.08, 0.004, 0.01), c.woodLight, { x: printerX, y: 0.3, z: PRINTER.z1 + 0.002 }, 'matte', false)
+  batch.add(boxShape(printerWidth - 0.1, 0.24, printerDepth - 0.06, 0.03), theme.dark ? '#c9ccd2' : '#eef0f3', { x: printerX, y: 0.67, z: printerZ - 0.02 }, 'satin')
+  batch.add(boxShape(printerWidth - 0.16, 0.04, printerDepth - 0.14, 0.012), '#3a3f4b', { x: printerX, y: 0.81, z: printerZ - 0.04 }, 'satin', false)
+  batch.add(boxShape(0.3, 0.012, 0.16, 0.004), '#5d6470', { x: printerX, y: 0.6, z: PRINTER.z1 + 0.04, rx: 0.12 }, 'satin', false)
+  batch.add(boxShape(0.03, 0.03, 0.01), '#38d39f', { x: printerX + 0.22, y: 0.74, z: PRINTER.z1 - 0.03 }, 'glow', false)
+
   // Plants: a pot with soil and a full crown; two are tall plants on a stem.
   for (const [index, plant] of PLANTS.entries()) {
     batch.add(cylinderShape(0.21, 0.15, 0.38, 18), c.pot, { x: plant.x, y: 0.19, z: plant.z }, 'satin')
@@ -351,6 +402,22 @@ export function createRoomKit(theme: RoomTheme, finishes: Finishes): RoomKit {
   const hour = boxShape(0.03, 0.14, 0.01).clone().translate(0, 0.06, 0)
   const minute = boxShape(0.02, 0.21, 0.01).clone().translate(0, 0.095, 0)
   const handMaterial = new THREE.MeshStandardMaterial({ color: '#25252a', roughness: 0.5 })
+  const pages = new Batch()
+  for (let sheet = 0; sheet < 3; sheet += 1) pages.add(boxShape(0.21, 0.006, 0.28), '#fbfaf6', { y: sheet * 0.007, ry: (sheet - 1) * 0.07 })
+  const printout = pages.build()[0]!.geometry
+  const doorWidth = GLASS.door.x1 - GLASS.door.x0
+  const leaf = new Batch()
+  leaf.add(boxShape(doorWidth - 0.04, 2.1, 0.02), theme.dark ? '#7fb6d6' : '#cfe8f4', { y: 1.07 }, 'glass', false)
+  for (const x of [-doorWidth / 2 + 0.02, doorWidth / 2 - 0.02]) leaf.add(boxShape(0.035, 2.12, 0.035), theme.dark ? '#8a93a3' : '#aeb5bf', { x, y: 1.07 }, 'metal', false)
+  leaf.add(boxShape(0.02, 0.32, 0.04, 0.008), '#5d6470', { x: doorWidth / 2 - 0.09, y: 1.05, z: 0.03 }, 'metal', false)
+  const door = leaf.build()
+  const stripGeometry = new THREE.BoxGeometry(CONSOLE.x0 - GLASS.x, 0.025, 0.03)
+  const entranceWidth = ENTRANCE.z1 - ENTRANCE.z0 - 0.12
+  const doorLeaf = new Batch()
+  doorLeaf.add(boxShape(0.05, 2.06, entranceWidth, 0.015), theme.dark ? '#5f4836' : '#bf9468', { y: 1.04, z: entranceWidth / 2 }, 'satin')
+  doorLeaf.add(boxShape(0.06, 0.6, entranceWidth - 0.3, 0.01), theme.dark ? '#4e3b2c' : '#a5784f', { y: 1.5, z: entranceWidth / 2 }, 'satin', false)
+  doorLeaf.add(boxShape(0.1, 0.03, 0.12, 0.01), '#aeb5bf', { y: 1.0, z: entranceWidth - 0.12 }, 'metal', false)
+  const entrance = doorLeaf.build()
   return {
     theme,
     finishes,
@@ -358,8 +425,14 @@ export function createRoomKit(theme: RoomTheme, finishes: Finishes): RoomKit {
     floor: { geometry: floorGeometry, material: floorMaterial, texture },
     leds,
     hands: { hour, minute, material: handMaterial },
+    printout,
+    sandbox: { door, strip: stripGeometry },
+    entrance,
     dispose() {
       for (const part of furniture) part.geometry.dispose()
+      for (const part of entrance) part.geometry.dispose()
+      for (const part of door) part.geometry.dispose()
+      stripGeometry.dispose()
       floorGeometry.dispose()
       floorMaterial.dispose()
       texture.dispose()
@@ -367,6 +440,7 @@ export function createRoomKit(theme: RoomTheme, finishes: Finishes): RoomKit {
       hour.dispose()
       minute.dispose()
       handMaterial.dispose()
+      printout.dispose()
     },
   }
 }
@@ -418,6 +492,34 @@ export function buildRoom(kit: RoomKit): Room {
   minute.position.set(3.6, 1.85, ROOM.z0 + 0.09)
   group.add(hour, minute)
 
+  const lead = deskCenter(0)
+  // Off until the agent works on its own; the scene fades it in.
+  const deskLamp = new THREE.PointLight('#ffc978', 0, 3.2, 1.6)
+  deskLamp.position.set(lead.x - 0.5, 0.98, lead.z - 0.05)
+  deskLamp.visible = false
+  group.add(deskLamp)
+  const printout = new THREE.Mesh(kit.printout, finishes.matte)
+  printout.position.set((PRINTER.x0 + PRINTER.x1) / 2, 0.615, PRINTER.z1 + 0.05)
+  printout.rotation.x = 0.12
+  printout.visible = false
+  group.add(printout)
+
+  // The sandbox's door slides along its wall; the strip over the glass shows what goes on inside.
+  const door = new THREE.Group()
+  for (const mesh of meshesOf(kit.sandbox.door, finishes)) door.add(mesh)
+  door.position.set((GLASS.door.x0 + GLASS.door.x1) / 2, 0, GLASS.z + 0.045)
+  group.add(door)
+  const strip = new THREE.MeshBasicMaterial({ color: theme.dark ? '#3a4558' : '#c4ccd6', toneMapped: false })
+  owned.push(strip)
+  const stripMesh = new THREE.Mesh(kit.sandbox.strip, strip)
+  stripMesh.position.set((GLASS.x + CONSOLE.x0) / 2, 2.25, GLASS.z)
+  group.add(stripMesh)
+
+  const entrance = new THREE.Group()
+  for (const mesh of meshesOf(kit.entrance, finishes)) entrance.add(mesh)
+  entrance.position.set(ENTRANCE.x + 0.04, 0, ENTRANCE.z0 + 0.06)
+  group.add(entrance)
+
   // Warm lamps at night: over the desks, by the sofa and over the table.
   const lamps: THREE.PointLight[] = []
   if (theme.dark) {
@@ -437,11 +539,16 @@ export function buildRoom(kit: RoomKit): Room {
     leds,
     clock: { hour, minute },
     lamps,
+    deskLamp,
+    printout,
+    sandbox: { door, strip },
+    entrance,
     dispose() {
       group.removeFromParent()
       for (const note of notes.children) ((note as THREE.Mesh).material as THREE.Material).dispose()
       for (const material of owned) material.dispose()
       for (const lamp of lamps) lamp.dispose()
+      deskLamp.dispose()
     },
   }
 }

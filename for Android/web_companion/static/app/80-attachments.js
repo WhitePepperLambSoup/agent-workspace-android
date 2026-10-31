@@ -779,7 +779,8 @@
   elements.btnSessionTitle.addEventListener("click", openDrawer);
   elements.btnDrawerClose.addEventListener("click", closeDrawer);
   elements.sessionDrawerBackdrop.addEventListener("click", closeDrawer);
-  elements.btnDrawerSearch.addEventListener("click", () => { closeDrawer(); openMenu(); setSettingsPage("search"); });
+  elements.drawerSearchInput.addEventListener("input", syncDrawerSearch);
+  elements.drawerSearchInput.addEventListener("keydown", (event) => { if (event.key === "Enter") elements.drawerSearchInput.blur(); });
   elements.btnDrawerWorkspaces.addEventListener("click", () => { closeDrawer(); openMenu(); setSettingsPage("workspaces"); });
   elements.btnModeChip.addEventListener("click", () => { if (!layerOpen(elements.settingsOverlay)) openMenu(); setSettingsPage("permission"); });
   elements.settingsBackButton.addEventListener("click", () => setSettingsPage(subPageParents[settingsPage] || "home"));
@@ -865,7 +866,7 @@
     try { bridge?.openNotificationSettings?.(); }
     catch (error) { pageStatus(elements.notificationPermissionStatus, t("打开通知设置失败: {0}", error.message), true); }
   });
-  elements.sessionSearchInput.addEventListener("input", queueSessionSearch);
+  elements.sessionSearchInput.addEventListener("input", () => queueSessionSearch());
   elements.btnApplySettings.addEventListener("click", applyRuntimeSettings);
   elements.contextSummaryToggle.addEventListener("change", () => { contextSummaryDirty = true; });
   elements.btnProviderSettings.addEventListener("click", () => { if (!elements.btnProviderSettings.disabled) { closeMenu(); bridge?.openSettings?.(); } });
