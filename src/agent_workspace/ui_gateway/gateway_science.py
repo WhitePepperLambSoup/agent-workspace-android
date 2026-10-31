@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_workspace.science import env
+from agent_workspace.science.remote import find_program, ssh_config_hosts
 from agent_workspace.tools.base import ToolError
 from agent_workspace.tools.paths import WorkspacePaths
 from agent_workspace.ui_gateway.gateway_common import _LOGGER, GatewayError, GatewayReply
@@ -27,6 +28,7 @@ SCIENCE_COMMANDS = frozenset(
         "science.install",
         "science.cancel",
         "science.remove",
+        "science.servers",
         "figures.points",
         "figures.correct",
     }
@@ -55,6 +57,7 @@ class ScienceCommands(GatewayState):
             "science.install": self._science_install,
             "science.cancel": self._science_cancel,
             "science.remove": self._science_remove,
+            "science.servers": self._science_servers,
             "figures.points": self._figure_points,
             "figures.correct": self._figure_correct,
         }[command.type]
@@ -135,6 +138,22 @@ class ScienceCommands(GatewayState):
         if error is not None:
             raise GatewayError(f"science_{error['code']}")
         return self._science_status_document()
+
+    def _science_servers(self, command: CommandEnvelope) -> dict[str, object]:
+        """The servers of ~/.ssh/config, by name and address, for the server room; nothing is
+        connected to."""
+        self._require_payload(command, set())
+        hosts = []
+        for host in ssh_config_hosts(self._ssh_config):
+            item = {"name": host["name"]}
+            if host.get("hostname"):
+                item["hostname"] = host["hostname"]
+            hosts.append(item)
+        return {"hosts": hosts, "ssh": bool(find_program("ssh"))}
+
+    @property
+    def _ssh_config(self) -> Path:
+        return Path.home() / ".ssh" / "config"
 
     def _science_cancel(self, command: CommandEnvelope) -> dict[str, object]:
         self._require_payload(command, set())
