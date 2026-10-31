@@ -121,11 +121,12 @@ const RESTING_FRAME_MS = 1000 / 12
 /** With nobody working, nothing on the way and no touch for this long, drawing stops until something
  * changes (a phone's battery: an unchanging picture needs no frames). */
 const SLEEP_AFTER_MS = 4000
-/** Behind the conversation: a smaller picture (pixels per CSS pixel), 18 frames a second while
- * someone walks (the desktop draws 30; each frame also has the glass above it drawn again), one
- * while they only work. */
+/** Behind the conversation: a smaller picture (pixels per CSS pixel), 30 frames a second while
+ * someone walks or the view follows them, as on the desktop (18 made the whole picture judder as
+ * it panned, and 30 divides 60, 90 and 120 Hz evenly; each frame also has the glass above it drawn
+ * again, kept cheap in style.css), one while they only work. */
 const BACKDROP_PIXELS = 0.75
-const BACKDROP_FRAME_MS = 1000 / 18
+const BACKDROP_FRAME_MS = 1000 / 30
 const BACKDROP_REST_MS = 1000
 const BACKDROP_ANGLES = { polar: 1.02, azimuth: 0.5 }
 

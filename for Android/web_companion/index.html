@@ -29,6 +29,8 @@
         <select id="sessionSelector" aria-label="选择会话" tabindex="-1"><option value="">正在加载会话...</option></select>
       </div>
       <div class="header-right">
+        <!-- Shown while the studio is behind the conversation: the same studio in full (app/33-studio-backdrop.js). -->
+        <button id="btnStudioView" class="icon-button" type="button" title="打开工作室" aria-label="打开工作室" hidden><span data-icon="building-2"></span></button>
         <button id="btnNewSession" class="icon-button" type="button" title="新建会话" aria-label="新建会话"><span data-icon="square-pen"></span></button>
         <button id="btnSettings" class="icon-button" type="button" title="菜单" aria-label="菜单" aria-expanded="false" aria-controls="settingsOverlay"><span data-icon="ellipsis"></span></button>
       </div>

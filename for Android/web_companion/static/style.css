@@ -1540,7 +1540,8 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
 }
 /* The studio behind the conversation (2.7, app/33-studio-backdrop.js): over the colour field, under
    everything else. Dimmed by a veil, not a CSS filter (a filter on a full-screen canvas is redone at
-   every frame the glass above changes); the small picture is soft enough by itself. */
+   every frame the glass above changes: the desktop's blur(3px), at 2px here, made swiping janky on a
+   Snapdragon 888 with one frame in ten late); the small picture is soft enough by itself. */
 .studio-backdrop { position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none; }
 .studio-backdrop[hidden] { display: none; }
 .studio-backdrop-stage { position: absolute; inset: 0; }
@@ -1594,6 +1595,13 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
    card re-blurs its backdrop on each frame, which held scrolling near 50 fps on a Snapdragon 888 at 90 Hz.
    Over the smooth preset wallpapers the tint alone looks the same in motion; the blur returns at rest. */
 :root[data-style="glass"][data-glass-moving]:not([data-backdrop="plain"]) .message-card.assistant {
+  -webkit-backdrop-filter: none; backdrop-filter: none;
+}
+/* Over the studio (app/33-studio-backdrop.js) the replies are tint only, still or scrolling: the room
+   behind them stays the same while the page moves instead of showing sharp in motion and frosted at
+   rest, and no reply is blurred again with each of the studio's frames. The studio's own small picture
+   under its veil is soft enough for the text. */
+:root[data-style="glass"][data-studio-backdrop="on"]:not([data-backdrop="plain"]) .message-card.assistant {
   -webkit-backdrop-filter: none; backdrop-filter: none;
 }
 /* Quotes, table headers and inline code inside a reply are lighter panes of the same glass. */
@@ -1757,6 +1765,13 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
   box-shadow: inset 0 -12px 18px -16px rgba(0, 0, 0, .12), var(--glass-shadow);
 }
 :root.liquid-refraction[data-glass-moving] :is(#mobileHeader, .composer, #sessionDrawerPanel, #settingsSheet, #modelSheetPanel, #approvalShelf, #btnJumpLatest, .chip, #taskStatusBar) {
+  -webkit-backdrop-filter: var(--liquid-glass-moving, var(--glass-blur));
+  backdrop-filter: var(--liquid-glass-moving, var(--glass-blur));
+}
+/* Over the studio the page is never still for long (each of its frames is under the glass): always the
+   single-pass filter, with no change of look when scrolling starts or stops. On a Snapdragon 888 with
+   the agent walking this took the app from 62 to 50 % of a core and swiping from 1.9 to 0.2 % janky frames. */
+:root.liquid-refraction[data-studio-backdrop="on"] :is(#mobileHeader, .composer, #sessionDrawerPanel, #settingsSheet, #modelSheetPanel, #approvalShelf, #btnJumpLatest, .chip, #taskStatusBar) {
   -webkit-backdrop-filter: var(--liquid-glass-moving, var(--glass-blur));
   backdrop-filter: var(--liquid-glass-moving, var(--glass-blur));
 }

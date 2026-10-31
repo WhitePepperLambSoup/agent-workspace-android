@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.7.1 — 2026-10-31
+
+2.7.1 让工作室背景在滑动和静止时看起来一样，AI 走动时画面更流畅，顶栏新增工作室按钮。Agent Workspace 2.7.1 keeps the studio backdrop looking the same while scrolling and at rest, draws it more smoothly while the AI walks, and adds a studio button to the header.
+
+电脑版 / Desktop app: https://github.com/WhitePepperLambSoup/agent-workspace-desktop
+
+### 中文
+
+- 修复：工作室当聊天背景时，回复卡片一滑动就变清楚，停下又变模糊。现在工作室在背后时，回复只用半透明底色，顶栏和输入框的玻璃也固定用一种效果，滑动和静止看起来一样。
+- 改进：AI 走动、镜头跟着平移时，工作室画面从每秒 18 帧提高到 30 帧，平移不再一顿一顿。在骁龙 888 上，AI 走动时上下滑动对话，掉帧从 2.8% 降到 1% 以下。AI 只工作不走动时仍是每秒 1 帧，没有任务时不绘制。
+- 新增：工作室当背景时，顶栏标题右边有工作室按钮，点它全屏查看工作室，点左上角 × 回到对话。
+- 覆盖安装即可，数据会保留。
+
+### English
+
+- Fixed: with the studio behind the conversation, replies turned sharp as soon as the page scrolled and frosted again when it stopped. Over the studio, replies now have a see-through tint only, and the glass of the header and the message box keeps one effect, so the page looks the same moving and at rest.
+- Improved: while the AI walks and the view follows it, the studio is drawn at 30 frames a second instead of 18, so panning no longer judders. On a Snapdragon 888, swiping the conversation while the AI walks now drops under 1 % of frames instead of 2.8 %. While the AI only works it is still drawn once a second, and not at all with no task running.
+- New: with the studio behind the conversation, a studio button right of the title in the header shows it in full; × at the top left brings the conversation back.
+- Install over the existing app; your data is kept.
+
 ## 2.7.0 — 2026-10-31
 
 2.7.0 换了更安静的界面和新图标。液态玻璃风格下，聊天背后是 3D 工作室；工作室外面是园区，能看到知识库、工作区文件、定时任务和配对的电脑。Agent Workspace 2.7.0 has a quieter look and a new icon; under liquid glass the conversation sits over the 3D studio, and around the studio a campus shows the knowledge bases, the workspace's files, the scheduled tasks and the paired computers.

@@ -14,14 +14,14 @@ An AI agent that runs on your Android phone. It plans and carries out multi-step
 
 ## Download
 
-Get `AgentWorkspace_2.7.0_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app: it checks at every start and about every 12 hours, and you can check yourself under Menu → About and updates, or "Updates" on the loading screen. Changes in each version are listed in the [CHANGELOG](CHANGELOG.md).
+Get `AgentWorkspace_2.7.1_android.apk` from [Releases](https://github.com/WhitePepperLambSoup/agent-workspace-android/releases) and install it. The release notes list its SHA-256. Later versions can be installed from inside the app: it checks at every start and about every 12 hours, and you can check yourself under Menu → About and updates, or "Updates" on the loading screen. Changes in each version are listed in the [CHANGELOG](CHANGELOG.md).
 
 - Android 8.0 (API 26) or newer, 64-bit ARM (`arm64-v8a`) or `x86_64`; phones running a 32-bit-only system cannot install it.
 - The interface is shown by the system's Android System WebView, which must be Chromium 80 or newer. If WebView is disabled, missing or too old, the app explains why and links to the app store to update it.
 - Works on Android 15+ devices with 16 KB memory pages, foldables, split screen and external keyboards, and keeps its own colours under system or vendor "force dark" modes.
 - About 75 MB to install. Local models and the offline speech model are optional downloads inside the app.
 
-2.7.0 has a quieter look and a new icon. Under liquid glass the conversation sits over its 3D studio, where what the AI does follows the task; around the studio a campus shows the knowledge bases, the workspace's files, the scheduled tasks and the paired computers.
+2.7.1 keeps the studio backdrop looking the same while scrolling and at rest, draws it more smoothly while the AI walks, and adds a studio button to the header. 2.7.0 has a quieter look and a new icon. Under liquid glass the conversation sits over its 3D studio, where what the AI does follows the task; around the studio a campus shows the knowledge bases, the workspace's files, the scheduled tasks and the paired computers.
 
 ## Features
 
@@ -67,7 +67,7 @@ Get `AgentWorkspace_2.7.0_android.apk` from [Releases](https://github.com/WhiteP
 </p>
 
 - **The studio behind the conversation.** Under liquid glass the conversation sits over its 3D studio, and what the AI does there follows the real task: at the window while it thinks, at its desk while it reads the web, at the shelves while it searches a knowledge base, in the glass sandbox while it runs a command, at the printer for a document it made, and outside the glass door while it waits for you to approve a change or a command. Experts and sub-tasks it calls in come through the door and leave by it when done. A light veil keeps the text clear. The picture is still with no task running and not drawn in the background; phones that are not fast enough, have no WebGL, or drop frames in the first seconds keep the colour background. It can be turned off in Appearance.
-- **In full.** Tap Watch in the studio and the conversation steps aside: the same scene can be turned and zoomed, and tapping someone opens their sub-task.
+- **In full.** Tap the studio button right of the title in the header, or Watch in the studio, and the conversation steps aside: the same scene can be turned and zoomed, and tapping someone opens their sub-task.
 - **The campus.** In full, a row of buttons switches to the campus and its places. The library is the knowledge bases, a bookcase each, with documents still being read in on a cart; the building site is the workspace's files, a block per folder and a building per file, with scaffolding on the ones this conversation changed; the duty room is the scheduled tasks, an officer each; the front desk is the paired computers, and one with a request or an approval waiting for you comes to the counter. By default the view follows the AI to wherever it is working. Tap a building to go in; tap something inside to open its page or file.
 
 ### Phone control

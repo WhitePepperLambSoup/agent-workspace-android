@@ -2,16 +2,18 @@
   // ---- The studio behind the conversation (2.7) ---------------------------------------------------
   // Under liquid glass the conversation's studio (29-team.js, the desktop app's studio) is the
   // backdrop: the agent at work in its room, its experts and sub-agents with it, dimmed so the text on
-  // the glass stays readable. The scene draws a small picture (three quarters of a CSS pixel), 18 frames
+  // the glass stays readable. The scene draws a small picture (three quarters of a CSS pixel), 30 frames
   // a second only while someone walks, one a second while they work, and nothing once all is still,
-  // while the app is away or the studio is shown in its own sheet. The studio button shows it in full:
-  // the app steps aside and the room can be turned and its people tapped.
+  // while the app is away or the studio is shown in its own sheet. The studio button in the header
+  // (and the team page's) shows it in full: the app steps aside and the room can be turned and its
+  // people tapped.
   // Only on a capable phone (the live backdrop's test) and over the colour-field backgrounds; without
   // WebGL, or if the scene fails, the colour field stays for this run; a phone whose frames fall
   // behind while the studio draws (probeStudio) keeps the colour field until the switch is turned on again.
   const studioBackdropHost = $("studioBackdrop");
   const studioBackdropToggle = $("studioBackdropToggle");
   const studioBackdropHint = $("studioBackdropHint");
+  const studioViewButton = $("btnStudioView");
   const studioBackdropPresets = new Set(["aurora", "sunset", "ocean", "meadow", "sand", "dusk", "graphite"]);
   const studioSlowKey = "agent-mobile-studio-backdrop-slow";
   // three.js loads once the app has painted and settled; the colour field shows until then.
@@ -57,6 +59,7 @@
       if (!backdropScene && !backdropLoading && !backdropTimer) backdropTimer = window.setTimeout(startBackdrop, studioBackdropDelayMs);
     }
     document.documentElement.dataset.studioBackdrop = studioBackdropShown() ? "on" : "off";
+    studioViewButton.hidden = !studioBackdropShown();
     renderStudioBackdropSetting();
   }
 
@@ -137,6 +140,7 @@
       : t("聊天背后是 3D 工作室，AI 的动作跟着任务走。任务进行中耗电略多，没有任务时画面静止。");
   }
 
+  studioViewButton.addEventListener("click", () => { void openStudio(); });
   studioBackdropToggle.addEventListener("change", () => {
     preferences.studioBackdrop = studioBackdropToggle.checked;
     if (studioBackdropToggle.checked) { writeStorage(studioSlowKey, false); studioProbed = false; }
