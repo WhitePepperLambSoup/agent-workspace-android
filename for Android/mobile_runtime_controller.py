@@ -27,10 +27,11 @@ from mobile_hosted_limits import budget as hosted_budget
 from mobile_hosted_limits import reason as hosted_limit_reason
 from mobile_images import resolve_mobile_images
 from mobile_injection import assess as assess_injection
-from mobile_model_roles import model_for_task, subagent_model, summary_model
+from mobile_model_roles import model_for_task, subagent_effort, subagent_model, summary_model
 from mobile_pause import bind_task, forget_task, make_pausable
 from mobile_screen import bind as bind_screen
 from mobile_screen import reset as reset_screen
+from mobile_studio_pose import next_pose
 from mobile_subagents import SubagentHost, bind_host, reset_host, task_team, team_note, team_progress
 from mobile_task_limits import TaskLimits, limits_for_task
 from mobile_prompt_cache import SHARED_ON_DEVICE, FrozenPrompts, prefix_cache_endpoint
@@ -445,6 +446,8 @@ class MobileRuntimeController:
         self._host: SubagentHost | None = None
         self._limits: TaskLimits | None = None
         self._limit_reasons: dict[str, str] = {}
+        # Where the agent is in its studio during each running task (mobile_studio_pose), for the widget.
+        self._poses: dict[str, str] = {}
         self._started = False
         self._closing = False
         self._restart_pending = False
@@ -702,6 +705,13 @@ class MobileRuntimeController:
             self.protocol = config.protocol.value
             self.base_url = config.base_url
         return previous
+
+    def _supported_efforts(self) -> Any:
+        """A model's thinking efforts at the current provider, or None when it is not known."""
+        if self.protocol is None or self.base_url is None:
+            return None
+        protocol, base_url = self.protocol, self.base_url
+        return lambda model: supported_reasoning_efforts(protocol, base_url, model or self.default_model or "")
 
     def _rewind_target(self, request: MobileTaskRequest) -> Event:
         """The user message an edit or regenerate replaces, after checking it may be replaced."""
@@ -976,14 +986,44 @@ class MobileRuntimeController:
             with suppress(KeyError):
                 self.tasks.append_event(task_id, "task.untrusted_content", {"tool": tool, **found})
 
+    def _record_timing(self, task_id: str) -> None:
+        """A task that succeeded: its working time and its tools, kept by the kind of its first tool."""
+        import mobile_task_timing
+
+        task = self.tasks.get(task_id)
+        transitions = [
+            (event.type.removeprefix("mobile.task."), event.created_at)
+            for event in self.tasks.event_store.list_events(task.session_id)
+            if event.type.startswith("mobile.task.") and event.data.get("task_id") == task_id
+        ]
+        tools = []
+        for event in self.tasks.events(task_id):
+            if event.event_type == "runtime.tool.started":
+                payload = event.payload or {}
+                data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+                tools.append(str(data.get("name") or data.get("tool_name") or ""))
+        mobile_task_timing.record_task(transitions, tools)
+
     def task_summary(self, task: Any) -> dict[str, Any]:
         """A task for the list (GET /mobile/tasks); a team task at work says what its experts do,
         for the engine's ongoing notification."""
         summary = task.to_dict()
         if summary.get("state") == "running":
-            progress = team_progress(self.tasks.events(task.task_id))
+            events = self.tasks.events(task.task_id)
+            progress = team_progress(events)
             if progress:
                 summary["team_progress"] = progress
+            from mobile_pause import paused
+
+            summary["paused"] = paused(task.task_id)
+            # Told when it goes quiet (TaskNotifications): not while paused, nor on the phone's own
+            # model, whose first reading of a long prompt can take minutes without an event.
+            summary["quiet_check"] = not summary["paused"] and not self._local_endpoint() and not any(
+                event.event_type == "task.on_device" for event in events
+            )
+        if summary.get("state") in {"running", "waiting_approval"}:
+            # Before its first event the agent thinks at the window (the studio widget's picture).
+            summary["pose"] = self._poses.get(task.task_id, "window")
         return summary
 
     def _note_expert(self, task_id: str, payload: dict[str, Any]) -> None:
@@ -1013,6 +1053,12 @@ class MobileRuntimeController:
             self._check_outside_content(task_id, event)
         if event.session_id != self._active_session_id:
             return
+        pose = next_pose(event.type, event.data, self._poses.get(task_id))
+        if pose is not None:
+            self._poses.pop(task_id, None)
+            self._poses[task_id] = pose
+            while len(self._poses) > 32:
+                self._poses.pop(next(iter(self._poses)))
         scope = self._artifact_scopes.get(task_id)
         checkpoint_allowed = True
         if scope is not None:
@@ -1300,12 +1346,16 @@ class MobileRuntimeController:
                 bind_task(task_id)
                 # Helpers (run_subagents) and the per-task spending limit, both for this run only.
                 self._limits = limits_for_task(self._price_lookup())
+                helper_model = subagent_model(task_model=model, local=local)
                 self._host = SubagentHost(
                     runtime=self.runtime,
                     session=session,
-                    model=subagent_model(task_model=model, local=local),
+                    model=helper_model,
                     task_model=model,
-                    reasoning_effort=task.reasoning_effort,
+                    reasoning_effort=subagent_effort(
+                        task_effort=task.reasoning_effort, helper_model=helper_model,
+                        supported=self._supported_efforts(), local=local,
+                    ),
                     summary_model=options.get("summary_model"),
                     limits=self._limits,
                     team=team.team if team is not None else None,
@@ -1374,6 +1424,9 @@ class MobileRuntimeController:
                 # The AI card on the home screen shows the chosen conversation's latest reply.
                 with suppress(Exception):
                     await asyncio.to_thread(widget_card_task_finished, task.session_id, str(getattr(result, "text", "") or ""))
+                # How long it took, for later tasks of its kind (mobile_task_timing).
+                with suppress(Exception):
+                    await asyncio.to_thread(self._record_timing, task_id)
         except asyncio.CancelledError:
             current = self.tasks.get(task_id)
             # Stopped by its own spending limit: a failure that says which limit, not a cancel.

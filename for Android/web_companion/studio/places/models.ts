@@ -70,7 +70,8 @@ export interface SiteDistrict {
   buildings: SiteBuilding[]
 }
 
-export type WorkerState = 'idle' | 'editing' | 'testing' | 'reading'
+/** The agent at the site: between two steps of its turn it thinks at the office. */
+export type WorkerState = 'idle' | 'editing' | 'testing' | 'reading' | 'thinking'
 
 export interface SiteModel {
   folder: string | null

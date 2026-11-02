@@ -219,16 +219,50 @@
   document.querySelectorAll("[data-icon]").forEach((node) => { node.innerHTML = icon(node.dataset.icon); });
   renderQuickChips();
 
-  // Models by purpose: a cheaper model of the same provider for phone control and summaries.
+  // Models by purpose: a cheaper model of the same provider for phone control and summaries, and how
+  // hard sub-tasks and experts think. The last read, for the team page and the agent's app_settings.
+  let modelRoles = null;
   async function loadModelRoles() {
     const status = $("modelRolesStatus");
     try {
-      const { roles = {} } = await apiJson("/mobile/model-roles");
-      $("phoneModelInput").value = roles.phone || "";
-      $("summaryModelInput").value = roles.summary || "";
-      $("subagentModelInput").value = roles.subagent || "";
+      const value = await apiJson("/mobile/model-roles");
+      modelRoles = { roles: value.roles || {}, efforts: value.efforts || {} };
+      $("phoneModelInput").value = modelRoles.roles.phone || "";
+      $("summaryModelInput").value = modelRoles.roles.summary || "";
+      $("subagentModelInput").value = modelRoles.roles.subagent || "";
+      fillSubagentEfforts(value.subagent_efforts, modelRoles.efforts.subagent || "");
       status.textContent = "";
     } catch (error) { status.textContent = t("读取失败：{0}", error.message); }
+  }
+  /** "Same as the task" and the efforts the sub-task model offers (the main model's when left empty). */
+  function fillSubagentEfforts(efforts, chosen) {
+    const select = $("subagentEffortSelector");
+    const values = ["", ...(Array.isArray(efforts) ? efforts.filter((effort) => effort in effortLabels) : ["auto"])];
+    select.replaceChildren(...values.map((value) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value ? effortLabels[value] : t("跟主任务一样");
+      return option;
+    }));
+    select.value = values.includes(chosen) ? chosen : "";
+  }
+  // Another sub-task model offers other efforts: asked again a moment after typing stops.
+  let subagentEffortTimer = 0;
+  function refreshSubagentEfforts() {
+    window.clearTimeout(subagentEffortTimer);
+    subagentEffortTimer = window.setTimeout(async () => {
+      const model = $("subagentModelInput").value.trim();
+      try {
+        const value = await apiJson(`/mobile/model-roles?model=${encodeURIComponent(model)}`);
+        if ($("subagentModelInput").value.trim() === model) fillSubagentEfforts(value.subagent_efforts, $("subagentEffortSelector").value);
+      } catch { /* the list stays; saving checks the choice */ }
+    }, 400);
+  }
+  /** Saves part of the roles or efforts (the settings page sends all of them, the agent's card one). */
+  async function saveModelRolesChange(change) {
+    const value = await apiJson("/mobile/model-roles", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(change) });
+    modelRoles = { roles: value.roles || {}, efforts: value.efforts || {} };
+    return modelRoles;
   }
   async function saveModelRoles() {
     const status = $("modelRolesStatus");
@@ -237,10 +271,11 @@
       summary: $("summaryModelInput").value.trim(),
       subagent: $("subagentModelInput").value.trim(),
     };
+    const efforts = { subagent: $("subagentEffortSelector").value };
     try {
-      await apiJson("/mobile/model-roles", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ roles }) });
-      status.textContent = roles.phone || roles.summary || roles.subagent ? t("已保存，下一个任务开始生效") : t("已保存：都使用主模型");
-    } catch (error) { status.textContent = t("保存失败：{0}", error.message); }
+      await saveModelRolesChange({ roles, efforts });
+      status.textContent = roles.phone || roles.summary || roles.subagent || efforts.subagent ? t("已保存，下一个任务开始生效") : t("已保存：都使用主模型");
+    } catch (error) { status.textContent = t("保存失败：{0}", localizeError(error.message)); }
   }
 
   // A spending limit per task, its sub-tasks included (mobile_task_limits). Tokens are entered in units of 10,000.

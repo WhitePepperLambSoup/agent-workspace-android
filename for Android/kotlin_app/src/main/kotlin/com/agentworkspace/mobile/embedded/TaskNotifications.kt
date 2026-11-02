@@ -77,9 +77,14 @@ data class TaskNotificationSnapshot(
     val updatedAtMillis: Long? = null,
     /** An expert team at work: what its experts do, by app language ("zh", "en", "ja", "ko"). */
     val teamProgress: Map<String, String> = emptyMap(),
+    /** Where the agent is in its studio while the task runs (mobile_studio_pose.POSES), for the studio widget. */
+    val pose: String? = null,
+    /** A running task to report when it goes quiet: not paused, not on the phone's own model. */
+    val quietCheck: Boolean = false,
 ) {
     companion object {
         private val states = setOf("queued", "running", "waiting_approval", "succeeded", "failed", "cancelled", "interrupted")
+        val poses = setOf("window", "desk", "shelf", "sandbox", "console", "board", "door", "idle")
 
         fun fromJson(value: JSONObject): TaskNotificationSnapshot? {
             val id = value.optString("task_id").trim()
@@ -96,6 +101,8 @@ data class TaskNotificationSnapshot(
                 value.optJSONObject("team_progress")?.let { lines ->
                     lines.keys().asSequence().associateWith { lines.optString(it).take(200) }.filterValues { it.isNotBlank() }
                 } ?: emptyMap(),
+                value.optString("pose").takeIf { it in poses },
+                value.optBoolean("quiet_check"),
             )
         }
 
@@ -132,6 +139,16 @@ class TaskNotificationTracker(storageFile: File, private val startupAtMillis: Lo
                 changes.add(TaskNotificationChange(TaskNotificationChange.Kind.CANCEL, task))
                 waitingVisible = false
             }
+            // When its events last moved: a running task with nothing new for five minutes is told
+            // once (the desktop app's quiet conversation), and the notice goes when it moves on.
+            val lastSequence = previous?.optLong("sequence", -1L) ?: -1L
+            val movedAt = if (previous == null || task.sequence != lastSequence) nowMillis
+                else previous.optLong("moved_at", nowMillis)
+            var quietVisible = previous?.optBoolean("quiet_visible") == true
+            if (quietVisible && (task.state != "running" || task.sequence != lastSequence || !enabled)) {
+                changes.add(TaskNotificationChange(TaskNotificationChange.Kind.CANCEL, task))
+                quietVisible = false
+            }
 
             val key = when (task.state) {
                 "waiting_approval" -> if (task.approvalId != null) "approval:${task.approvalId}"
@@ -151,25 +168,42 @@ class TaskNotificationTracker(storageFile: File, private val startupAtMillis: Lo
                 }
                 handledKeys.add(key)
             }
+            val quietKey = "quiet:${task.sequence}"
+            if (enabled && task.state == "running" && task.quietCheck && nowMillis - movedAt >= QUIET_MILLIS &&
+                quietKey !in handledKeys) {
+                changes.add(TaskNotificationChange(TaskNotificationChange.Kind.NOTIFY, task.copy(state = QUIET_STATE)))
+                handledKeys.add(quietKey)
+                quietVisible = true
+            }
             records.put(task.taskId, JSONObject()
                 .put("session_id", task.sessionId)
                 .put("state", task.state)
                 .put("approval_key", if (task.state == "waiting_approval") key else JSONObject.NULL)
                 .put("waiting_visible", waitingVisible)
+                .put("sequence", task.sequence)
+                .put("moved_at", movedAt)
+                .put("quiet_visible", quietVisible)
                 .put("handled", JSONArray(handledKeys.toList())))
         }
         for (id in records.keys().asSequence().toList()) {
             val record = records.optJSONObject(id) ?: continue
-            if (id !in seen && record.optBoolean("waiting_visible")) {
+            if (id !in seen && (record.optBoolean("waiting_visible") || record.optBoolean("quiet_visible"))) {
                 changes.add(TaskNotificationChange(TaskNotificationChange.Kind.CANCEL, TaskNotificationSnapshot(
                     id, record.optString("session_id"), record.optString("state"), "", null, null, 0,
                 )))
                 record.put("waiting_visible", false)
+                record.put("quiet_visible", false)
             }
         }
         ledger = JSONObject().put("baseline_at", baseline).put("tasks", records)
         writeAtomicJson(storage, ledger)
         return changes
+    }
+
+    companion object {
+        const val QUIET_MILLIS = 5 * 60_000L
+        /** The notice's own state: a running task with nothing new for QUIET_MILLIS. */
+        const val QUIET_STATE = "quiet"
     }
 }
 
@@ -192,6 +226,7 @@ class TaskNotificationPublisher(private val context: Context) {
         val title = when (task.state) {
             "waiting_approval" -> com.agentworkspace.mobile.UiText.of(context, "任务等待批准", "Task awaiting approval")
             "failed" -> com.agentworkspace.mobile.UiText.of(context, "任务执行失败", "Task failed")
+            TaskNotificationTracker.QUIET_STATE -> com.agentworkspace.mobile.UiText.of(context, "任务 5 分钟没有新进展", "No progress on a task for 5 minutes")
             else -> com.agentworkspace.mobile.UiText.of(context, "任务已完成", "Task completed")
         }
         val openTask = PendingIntent.getActivity(context, 0, navigationIntent(context, task),
@@ -248,7 +283,8 @@ class TaskNotificationMonitor(
     private val context: Context,
     storageFile: File = File(context.filesDir, "task-notification-state.json"),
     private val tokenFile: File = File(context.filesDir, "serve.token"),
-    private val endpoint: URL = URL("http://127.0.0.1:8080/mobile/tasks"),
+    /** Null: the engine's address at each poll (EngineAddress). */
+    private val fixedEndpoint: URL? = null,
     private val taskStateListener: (List<TaskNotificationSnapshot>?) -> Unit = {},
     /** Running long-lived services and whether they should keep the CPU awake. */
     private val servicesListener: (Int, Boolean) -> Unit = { _, _ -> },
@@ -280,6 +316,7 @@ class TaskNotificationMonitor(
             return 2000
         }
         try {
+            val endpoint = fixedEndpoint ?: URL("${EngineAddress.baseUrl(context)}/mobile/tasks")
             val connection = endpoint.openConnection() as HttpURLConnection
             val snapshot = try {
                 connection.setRequestProperty("Authorization", "Bearer $token")

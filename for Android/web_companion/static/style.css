@@ -470,6 +470,9 @@ strong { font-weight: 600; }
   border: 2px solid var(--accent-soft); border-top-color: var(--accent); animation: spin 1s steps(8) infinite;
 }
 #taskStateLabel { min-width: 0; overflow-wrap: anywhere; }
+/* The plan's steps (app/70-tasks.js renderProgress): a thin line under the status, done steps filled. */
+.task-progress { flex: 1 0 100%; height: 3px; margin: 1px 0 2px; overflow: hidden; border-radius: 2px; background: var(--accent-soft); }
+.task-progress > span { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--accent); transition: width .45s cubic-bezier(.2, .7, .2, 1); }
 .import-notice { max-width: 100%; margin-bottom: 6px; }
 /* A shared link: offer to save the page to the knowledge base too. */
 .link-clip {
@@ -1899,6 +1902,8 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
 /* Reply actions: small and quiet until needed. */
 .card-action-bar { gap: 2px; margin: 2px 0 0 -8px; }
 .btn-card-action { width: 34px; height: 34px; min-width: 34px; min-height: 34px; border-radius: 10px; opacity: .72; }
+/* A reply's nine actions on a phone 360 pixels wide: side by side without gaps, all inside the card. */
+@media (max-width: 380px) { .message-card.assistant .card-action-bar { gap: 0; } }
 .btn-card-action svg { width: 16px; height: 16px; }
 .btn-card-action:active { opacity: 1; background: var(--surface-2); }
 /* Reasoning: a quiet line that opens to the full text. */
@@ -1957,6 +1962,19 @@ body, #mobileHeader, #modelBar, .composer, .menu-group, .sheet-header, .message-
 .session-tags-editor { display: grid; gap: 10px; margin: 10px 8px 0; }
 .session-tag-input { display: flex; gap: 8px; }
 .session-tag-input > input { flex: 1; min-width: 0; min-height: 40px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--text); font: inherit; }
+/* 「以后都这样做」 (app/73-repeat.js): the request as a scheduled task, its fields in one column. */
+.repeat-panel { display: flex; flex-direction: column; gap: 10px; }
+.repeat-panel > strong { margin-bottom: 0; }
+.repeat-panel > small { margin: 0 8px; color: var(--text-2); font-size: 12.5px; line-height: 1.45; }
+.repeat-panel label { display: grid; gap: 4px; margin: 0 8px; color: var(--text-2); font-size: 12.5px; }
+.repeat-panel input:not([type="checkbox"]), .repeat-panel textarea, .repeat-panel select {
+  min-width: 0; min-height: 40px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface); color: var(--text); font: inherit; font-size: 15px;
+}
+.repeat-panel textarea { resize: vertical; line-height: 1.45; }
+.repeat-when { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0 8px; }
+.repeat-when label { margin: 0; }
+.repeat-panel .repeat-phone { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 14px; }
 /* Plan mode: an icon chip that says 计划 while on; the approval under a finished plan. */
 .plan-chip { width: 32px; padding: 0; justify-content: center; }
 .plan-chip svg { width: 16px; height: 16px; }
@@ -2319,16 +2337,41 @@ body.elder-mode #appShell { display: none; }
 .studio-places button[aria-checked="true"] { color: #fff; border-color: transparent; background: var(--accent); }
 .studio-places button[aria-checked="true"] [data-icon] { color: inherit; }
 .studio-sheet[data-over="backdrop"] .studio-places { padding-top: 2px; background: var(--bg); background: color-mix(in srgb, var(--bg) 78%, transparent); }
+/* Where the studio widget's frames are drawn (app/36-studio-widget.js): out of sight, still drawn. */
+.studio-widget-stage { position: fixed; top: 0; left: 0; z-index: -5; width: 400px; height: 200px; opacity: .01; pointer-events: none; }
+.studio-widget-stage .studio-overlay { display: none; }
+/* A task's replay film (app/74-task-film.js): drawn upright out of sight, shown as the film's own frames. */
+.task-film-stage { position: fixed; top: 0; left: 0; z-index: -5; width: 360px; height: 640px; opacity: .01; pointer-events: none; }
+.task-film-stage .studio-overlay { display: none; }
+.step-replay.task-film { background: #0b0f0e; }
+.task-film-picture { display: block; flex: 1; min-height: 0; width: auto; max-width: calc(100% - 32px); aspect-ratio: 9 / 16; margin: 0 auto; border-radius: 16px; object-fit: contain; background: #111; }
+.task-film .compare-actions { display: flex; gap: 8px; margin-inline-start: auto; }
+/* The building's floor signs in the studio: the number and the conversation on one line, so a phone's
+   short storeys hold a sign each; a floor at work is ringed like a busy place. */
+#studioOverlay .studio-floor-sign, #studioBackdropOverlay .studio-floor-sign { grid-template-columns: auto minmax(0, 1fr); column-gap: 5px; align-items: baseline; }
+#studioOverlay .studio-floor-summary, #studioBackdropOverlay .studio-floor-summary { grid-column: 1 / -1; }
+:root .studio-overlay .studio-floor-sign[data-busy="true"] { box-shadow: inset 0 0 0 1.5px #38c98f, 0 4px 12px rgba(0, 0, 0, .16); }
+/* The building's lift (app/29-team.js): the floor number, then whose conversation; a floor at work is marked. */
+.studio-floors button strong { font-weight: 650; }
+.studio-floors button[data-busy="true"]:not([aria-checked="true"]) { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
 .place-stage[hidden], .studio-stage[hidden] { display: none; }
+/* A place comes in once its first frame is drawn and fades as the camera dives into a building;
+   its tags and signs show once the camera has arrived (studio/places/stage.ts). */
+.place-stage > :is(.studio-canvas, .studio-overlay) { opacity: 0; transition: opacity .32s ease-out; }
+.place-stage[data-drawn="true"] > .studio-canvas,
+.place-stage[data-drawn="true"] > .studio-overlay:not([data-moving="true"]) { opacity: 1; }
+.place-stage[data-leaving="true"] > :is(.studio-canvas, .studio-overlay) { opacity: 0; transition: opacity .26s ease-in .34s; }
+:root[data-motion="reduced"] .place-stage > :is(.studio-canvas, .studio-overlay) { transition: none; }
+@media (prefers-reduced-motion: reduce) { .place-stage > :is(.studio-canvas, .studio-overlay) { transition: none; } }
 /* Signs over things in a place: a name and what goes on there. */
-.place-stage .studio-floor-sign { display: grid; position: absolute; top: 0; left: 0; max-width: 170px; gap: 1px; padding: 4px 9px; color: var(--text); font: 600 11px/1.3 var(--font-sans); text-align: left; border: 0; border-radius: 10px; background: rgba(255, 255, 255, .88); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .08), 0 4px 12px rgba(0, 0, 0, .16); will-change: transform; }
-.place-stage .studio-floor-title, .place-stage .studio-floor-summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.place-stage .studio-floor-summary { color: var(--text-2); font-weight: 500; }
-.place-stage .studio-floor-summary[hidden] { display: none; }
-[data-theme="dark"] .place-stage .studio-floor-sign { background: rgba(22, 28, 27, .86); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12), 0 4px 12px rgba(0, 0, 0, .3); }
-@media (prefers-color-scheme: dark) { [data-theme="system"] .place-stage .studio-floor-sign { background: rgba(22, 28, 27, .86); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12), 0 4px 12px rgba(0, 0, 0, .3); } }
-:root .place-stage .studio-floor-sign[data-tone="busy"] { box-shadow: inset 0 0 0 1.5px #38c98f, 0 4px 12px rgba(0, 0, 0, .16); }
-:root .place-stage .studio-floor-sign[data-tone="alert"] { box-shadow: inset 0 0 0 1.5px #e0a13a, 0 4px 12px rgba(0, 0, 0, .16); }
+.studio-overlay .studio-floor-sign { display: grid; position: absolute; top: 0; left: 0; max-width: 170px; gap: 1px; padding: 4px 9px; color: var(--text); font: 600 11px/1.3 var(--font-sans); text-align: left; border: 0; border-radius: 10px; background: rgba(255, 255, 255, .88); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .08), 0 4px 12px rgba(0, 0, 0, .16); will-change: transform; }
+.studio-overlay .studio-floor-title, .studio-overlay .studio-floor-summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.studio-overlay .studio-floor-summary { color: var(--text-2); font-weight: 500; }
+.studio-overlay .studio-floor-summary[hidden] { display: none; }
+[data-theme="dark"] .studio-overlay .studio-floor-sign { background: rgba(22, 28, 27, .86); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12), 0 4px 12px rgba(0, 0, 0, .3); }
+@media (prefers-color-scheme: dark) { [data-theme="system"] .studio-overlay .studio-floor-sign { background: rgba(22, 28, 27, .86); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12), 0 4px 12px rgba(0, 0, 0, .3); } }
+:root .studio-overlay .studio-floor-sign[data-tone="busy"] { box-shadow: inset 0 0 0 1.5px #38c98f, 0 4px 12px rgba(0, 0, 0, .16); }
+:root .studio-overlay .studio-floor-sign[data-tone="alert"] { box-shadow: inset 0 0 0 1.5px #e0a13a, 0 4px 12px rgba(0, 0, 0, .16); }
 .studio-roster li[data-busy="true"] button { border-color: rgba(56, 201, 143, .6); }
 .studio-roster button span:not(:first-child) { color: var(--text-2); }
 .studio-hint, .studio-unsupported { position: absolute; left: 10px; bottom: 8px; margin: 0; padding: 4px 9px; color: var(--text-2); font-size: 11px; border-radius: 8px; background: rgba(var(--accent-rgb), .08); pointer-events: none; }
@@ -2338,6 +2381,25 @@ body.elder-mode #appShell { display: none; }
 .studio-roster button { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 4px 10px; color: var(--text); font-size: 12.5px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); }
 .studio-roster button:disabled { opacity: 1; }
 .studio-roster button span:last-child { color: var(--text-2); }
+/* An expert's or a sub-agent's part over the studio (29-team.js showStudioPerson). */
+.studio-person { max-height: 42vh; overflow-y: auto; padding: 10px 12px; border-top: 1px solid var(--border); background: var(--bg); }
+.studio-person[hidden], .studio-person-steps[hidden], .studio-person-report[hidden], .studio-person p[hidden] { display: none; }
+.studio-person-head { display: flex; align-items: center; gap: 8px; }
+.studio-person-head strong { font-size: 14px; }
+.studio-person-head small { flex: 1 1 auto; min-width: 0; color: var(--text-2); font-size: 12px; }
+.studio-person p { margin: 6px 0 0; }
+.studio-person-steps { margin: 6px 0 0; padding-inline-start: 20px; color: var(--text-2); font-size: 12.5px; line-height: 1.5; }
+.studio-person-report { max-height: 18vh; overflow-y: auto; font-size: 13px; line-height: 1.55; white-space: pre-wrap; }
+.studio-person-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 8px; }
+.studio-person-actions .setting-hint { margin: 0; }
+/* A place's panel (34-campus.js): the library's search, a changed file's lines. */
+.place-search { display: flex; gap: 8px; margin-top: 8px; }
+.place-search[hidden], .place-results[hidden], .place-diff[hidden], .studio-person-actions:empty { display: none; }
+.place-search input { flex: 1 1 auto; min-width: 0; }
+.place-results { margin: 8px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; max-height: 24vh; overflow-y: auto; }
+.place-results li { display: grid; gap: 2px; font-size: 12.5px; line-height: 1.45; }
+.place-results li span { color: var(--text-2); }
+.place-diff { max-height: 24vh; margin: 8px 0 0; padding: 8px; overflow: auto; font: 11.5px/1.45 var(--font-mono, ui-monospace, monospace); white-space: pre; border-radius: 8px; background: var(--surface); }
 [data-theme="dark"] .studio-tag { background: rgba(22, 28, 27, .82); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12), 0 3px 10px rgba(0, 0, 0, .3); }
 @media (prefers-color-scheme: dark) { [data-theme="system"] .studio-tag { background: rgba(22, 28, 27, .82); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12), 0 3px 10px rgba(0, 0, 0, .3); } }
 @media (prefers-reduced-motion: reduce) { .studio-tag, .studio-bubble { will-change: auto; } }

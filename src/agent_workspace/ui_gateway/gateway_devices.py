@@ -332,9 +332,12 @@ class DeviceCommands(GatewayState):
                 raise DeviceLinkError("desktop_not_ready", 503)
             autonomy = self._device_session_autonomy(session)
             provider = self._provider
-        labels = self._check_device_autonomy(device, autonomy, options or TaskOptions())
+        options = options or TaskOptions()
+        labels = self._check_device_autonomy(device, autonomy, options)
         if handoff:
             labels.append("handoff")
+        if options.team is not None:
+            labels.append("team")
         task, created = tasks.create(
             device.device_id,
             request_id,
@@ -358,8 +361,11 @@ class DeviceCommands(GatewayState):
                 origins = self._device_turn_origins.setdefault(session.id, [])
                 origins.append(pending)
                 del origins[:-_DEVICE_PENDING_ORIGINS]
+            team = None if options.team is None else (options.team, options.team_review)
             try:
-                self._dispatch_prompt(f"device-{task.task_id}", session, task.prompt, pictures)
+                self._dispatch_prompt(
+                    f"device-{task.task_id}", session, task.prompt, pictures, team=team
+                )
             except GatewayError as error:
                 # Nothing ran: the phone may send the same request again.
                 tasks.discard(task.task_id)
@@ -597,12 +603,23 @@ class DeviceCommands(GatewayState):
         return pictures
 
     def _dispatch_prompt(
-        self, request_id: str, session: Session, prompt: str, pictures: Sequence[str] = ()
+        self,
+        request_id: str,
+        session: Session,
+        prompt: str,
+        pictures: Sequence[str] = (),
+        *,
+        team: tuple[object, bool] | None = None,
     ) -> None:
-        """Send a prompt to a conversation, starting a background runtime when it is closed."""
+        """Send a prompt to a conversation, starting a background runtime when it is closed.
+
+        With ``team`` (the members or "auto", and whether they review) the turn is an expert
+        team's; like one from the window it is not queued behind a busy conversation."""
         payload: dict[str, object] = {"prompt": prompt}
         if pictures:
             payload["attachmentPaths"] = list(pictures)
+        if team is not None:
+            payload["team"], payload["teamReview"] = team
         command = CommandEnvelope(
             PROTOCOL_VERSION,
             request_id,
@@ -647,6 +664,7 @@ class DeviceCommands(GatewayState):
             workspace = Path(session.workspace).resolve()
             host = self._host_factory(
                 RuntimeSettings(
+                    egress_trusted=self._provider_trust.trusts,
                     workspace=workspace,
                     database=self._database,
                     provider=provider,

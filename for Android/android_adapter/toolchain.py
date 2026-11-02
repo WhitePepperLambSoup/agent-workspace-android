@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import os
 import tempfile
 import threading
@@ -18,12 +19,23 @@ from agent_workspace.tools.lsp import LspDiagnosticsTool
 _ORIGINALS: dict[str, Any] = {}
 _WORKER_CANCEL = threading.local()
 _ANDROID_DIAGNOSTIC_WAIT_SECONDS = 20.0
+# The workspace of the diagnostics being run: the language server is started without being told.
+_LSP_WORKSPACE: contextvars.ContextVar[Path | None] = contextvars.ContextVar(
+    "android_lsp_workspace", default=None
+)
 
 
 class AndroidLspDiagnosticsTool(LspDiagnosticsTool):
     """Allow a bounded mobile CPU window for the first LSP diagnostic notification."""
 
     hard_cancellable = False
+
+    async def execute(self, arguments: dict[str, Any]) -> str:
+        token = _LSP_WORKSPACE.set(self.paths.root)
+        try:
+            return await super().execute(arguments)
+        finally:
+            _LSP_WORKSPACE.reset(token)
 
     async def _wait_for_diagnostics(self, client: Any, uri: str) -> bool:
         loop = asyncio.get_running_loop()
@@ -36,22 +48,31 @@ class AndroidLspDiagnosticsTool(LspDiagnosticsTool):
         return False
 
 
-def installed_toolchain(workspace: str | os.PathLike[str] | None = None) -> Any:
+def installed_toolchain() -> Any:
+    """The phone's one toolchain, for every workspace: wrap() is told which one a command is in."""
     if os.getenv("AGENT_WORKSPACE_EMBEDDED_PYTHON") != "chaquopy":
         return None
     from mobile_toolchain import get_toolchain_manager
 
-    manager = get_toolchain_manager(workspace=workspace)
+    manager = get_toolchain_manager()
     return manager if manager is not None and manager.snapshot()["available"] else None
 
 
-def command_transport(argv: list[str], cwd: Path) -> tuple[list[str], dict[str, str] | None, Any]:
+def command_transport(
+    argv: list[str], cwd: Path, workspace: Path | None = None
+) -> tuple[list[str], dict[str, str] | None, Any]:
+    """How a command the agent asked for starts: in the toolchain's Linux, else under the guard."""
     manager = installed_toolchain()
     if manager is None or not manager.owns_command(argv[0]):
-        return argv, None, None
+        from .command_guard import guard
+
+        guarded = guard(argv, cwd, workspace)
+        if guarded is None:
+            return argv, None, None
+        return guarded[0], guarded[1], None
     manager.begin_process()
     try:
-        transported, environment = manager.wrap(argv, cwd)
+        transported, environment = manager.wrap(argv, cwd, workspace)
     except Exception:
         manager.end_process()
         raise
@@ -84,7 +105,7 @@ async def _git_worker(function: Any, *arguments: Any, allow_children: bool = Fal
 
 
 def _git_executable(workspace: Path) -> Path:
-    manager = installed_toolchain(workspace)
+    manager = installed_toolchain()
     if manager is None:
         return _ORIGINALS["git_executable"](workspace)
     entry = manager.executables().get("git")
@@ -103,7 +124,7 @@ def _invoke_git(
     timeout_seconds: int = 60,
     index_file: Path | None = None,
 ) -> dict[str, Any]:
-    manager = installed_toolchain(workspace)
+    manager = installed_toolchain()
     if manager is None:
         return _ORIGINALS["invoke_git"](
             workspace,
@@ -131,7 +152,7 @@ def _invoke_git(
     cwd = WorkspacePaths(workspace).resolve(repository)
     manager.begin_process()
     try:
-        argv, environment = manager.wrap([executable, *arguments], cwd)
+        argv, environment = manager.wrap([executable, *arguments], cwd, workspace)
         with contextlib.ExitStack() as temporary_files:
             if index_file is not None:
                 index = index_file.resolve()
@@ -256,7 +277,8 @@ def install_toolchain_adapters() -> None:
                 if command and manager.owns_command(command[0]):
                     manager.begin_process()
                     try:
-                        command, _environment = manager.wrap(command, manager.workspace)
+                        root = _LSP_WORKSPACE.get() or manager.workspace
+                        command, _environment = manager.wrap(command, root, root)
                     except Exception:
                         manager.end_process()
                         raise

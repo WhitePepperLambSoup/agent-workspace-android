@@ -266,7 +266,7 @@ class TermuxDaemonService : Service() {
                 .getOrNull()
             if (!token.isNullOrEmpty()) {
                 val healthy = runCatching {
-                    val connection = URL("http://127.0.0.1:8080/health").openConnection() as HttpURLConnection
+                    val connection = URL("${EngineAddress.baseUrl(filesDir)}/health").openConnection() as HttpURLConnection
                     try {
                         connection.setRequestProperty("Authorization", "Bearer $token")
                         connection.connectTimeout = 1000

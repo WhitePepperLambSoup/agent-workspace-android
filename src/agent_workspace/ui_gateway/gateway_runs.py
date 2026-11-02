@@ -10,11 +10,13 @@ import hashlib
 import hmac
 import inspect
 import json
+import re
 import sqlite3
 import threading
 from collections.abc import Awaitable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import asdict, is_dataclass
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, cast
@@ -87,6 +89,9 @@ from agent_workspace.ui_gateway.protocol import (
     PROTOCOL_VERSION,
     CommandEnvelope,
 )
+from agent_workspace.ui_gateway.replay import REPLAY_EVENT_TYPES, build_replay, turns_of
+
+_RUN_IDS = re.compile(r'"run_id":\s*"([0-9a-f-]{36})"')
 
 
 def _accepts(function: Any, name: str) -> bool:
@@ -638,9 +643,16 @@ class RunCommands(GatewayState):
         provider = self._provider
         workspace = self._workspace
         autonomy = self._autonomy
+        delegation = self._delegations.get(run_id)
         worker = threading.Thread(
             target=self._prepare_agent_run,
             args=(run_id, workspace, provider, autonomy, service),
+            kwargs={
+                "delegated": delegation is not None,
+                "delegating_effort": (
+                    self._turn_efforts.get(delegation.parent_session_id) if delegation else None
+                ),
+            },
             name=f"agent-run-prepare-{run_id[:8]}",
             daemon=True,
         )
@@ -664,12 +676,20 @@ class RunCommands(GatewayState):
         provider: ProviderConfig,
         autonomy: Autonomy,
         service: AgentControlService,
+        *,
+        delegated: bool = False,
+        delegating_effort: str | None = None,
     ) -> None:
+        """Set up a run's checkout and session and start its host. A conversation's sub-agent runs
+        on the model and effort chosen for sub-agents."""
         run: AgentRun | None = None
         try:
             run = service.get_run(run_id)
             if run is None:
                 raise AgentControlError("unknown_run")
+            effort: str | None = None
+            if delegated:
+                provider, effort = self._subagent_provider(provider, delegating_effort)
             checkout = workspace
             branch: str | None = None
             base_sha: str | None = None
@@ -729,6 +749,7 @@ class RunCommands(GatewayState):
                     return
                 host = self._host_factory(
                     RuntimeSettings(
+                        egress_trusted=self._provider_trust.trusts,
                         workspace=checkout,
                         database=execution_database,
                         provider=provider,
@@ -746,6 +767,7 @@ class RunCommands(GatewayState):
                     session_id=session.id,
                     goal=run.goal,
                     host=host,
+                    reasoning_effort=effort,
                 )
                 self._run_hosts[run_id] = entry
                 host.start()
@@ -986,6 +1008,108 @@ class RunCommands(GatewayState):
                 )
             )
 
+    def _session_replay(self, command: CommandEnvelope) -> GatewayReply:
+        """A conversation's turns, and one of them (the newest finished by default) told again
+        step by step with its sub-agents and experts, for the studio's replay."""
+        self._require_payload(command, {"sessionId"}, optional={"turnId"})
+        if command.session_id is not None:
+            raise GatewayError("invalid_session")
+        session = self._workspace_session(command.payload.get("sessionId"))
+        wanted = command.payload.get("turnId")
+        if wanted is not None and not isinstance(wanted, str):
+            raise GatewayError("invalid_payload")
+        try:
+            events = SQLiteEventStore.list_session_events_of_types_read_only(
+                self._database, session.id, REPLAY_EVENT_TYPES
+            )
+        except (OSError, ValueError, sqlite3.DatabaseError):
+            raise GatewayError("storage_unavailable") from None
+        turns = turns_of(events)
+        finished = [turn for turn in turns if turn.end is not None]
+        turn = next((item for item in turns if item.turn_id == wanted), None) if wanted else None
+        turn = turn or (finished[-1] if finished else turns[-1] if turns else None)
+        replay: dict[str, object] | None = None
+        if turn is not None:
+            own = [event for event in events if event.correlation_id == turn.turn_id]
+            # Each delegate_tasks call lists its tasks (and their experts) when proposed and its
+            # runs, in the same order, when settled; runs still under way are known here.
+            experts: list[str | None] = []
+            goals: list[str] = []
+            ids: list[str] = []
+            for event in own:
+                if event.data.get("name") != "delegate_tasks":
+                    continue
+                arguments = event.data.get("arguments")
+                tasks = arguments.get("tasks") if isinstance(arguments, Mapping) else None
+                if event.type == "tool.proposed" and isinstance(tasks, list):
+                    for task in tasks:
+                        fields = task if isinstance(task, Mapping) else {}
+                        expert = fields.get("expert")
+                        experts.append(str(expert) if isinstance(expert, str) else None)
+                        goals.append(str(fields.get("goal") or "").strip())
+                elif event.type == "tool.settled":
+                    ids.extend(_RUN_IDS.findall(str(event.data.get("result") or "")))
+            # A call stopped with the turn has no result: its runs are those made during the
+            # turn whose goal holds the task's (an expert's goal wraps it in the brief).
+            if len(goals) > len(ids) and self._workspace is not None:
+                with suppress(AgentControlError, OSError, sqlite3.DatabaseError):
+                    made = [
+                        run
+                        for run in self._control_service().list_runs(self._workspace)
+                        if run.id not in ids
+                        and turn.start - 1
+                        <= datetime.fromisoformat(run.created_at).timestamp()
+                        <= (turn.end if turn.end is not None else float("inf")) + 1
+                    ]
+                    for goal in goals[len(ids) :]:
+                        match = next((run for run in made if goal and goal in run.goal), None)
+                        if match is None:
+                            break
+                        made.remove(match)
+                        ids.append(match.id)
+            named = [
+                (run_id, experts[index] if index < len(experts) else None)
+                for index, run_id in enumerate(ids)
+            ]
+            with self._lock:
+                named.extend(
+                    (run_id, delegation.expert)
+                    for run_id, delegation in self._delegations.items()
+                    if delegation.parent_session_id == session.id and run_id not in ids
+                )
+            runs: list[tuple[str, str, str | None, Sequence[Event]]] = []
+            service = self._control_service()
+            for run_id, expert in named:
+                run = service.get_run(run_id)
+                if run is None:
+                    continue
+                with suppress(OSError, ValueError, sqlite3.DatabaseError):
+                    run_events = SQLiteEventStore.list_session_events_of_types_read_only(
+                        self._agent_run_database(run_id, self._database),
+                        run.session_id,
+                        REPLAY_EVENT_TYPES,
+                    )
+                    runs.append((run_id, run.title, expert, run_events))
+            replay = build_replay(turn, own, runs)
+        return self._reply(
+            "session.replay.result",
+            {
+                "epoch": self.epoch,
+                "sessionId": session.id,
+                "turns": [
+                    {
+                        "turnId": item.turn_id,
+                        "prompt": item.prompt,
+                        "outcome": item.outcome,
+                        "finished": item.end is not None,
+                    }
+                    for item in turns[-50:]
+                ],
+                "replay": replay,
+            },
+            session_id=None,
+        )
+
     def _subagent_documents(self) -> list[dict[str, object]]:
         """The sub-agents conversations wait on now, for a window that resynchronises: events it
         dropped while it waited for a snapshot (a run queued for a free slot) are not sent again.
@@ -1173,7 +1297,9 @@ class RunCommands(GatewayState):
     def _cancel_delegated_runs(self, run_ids: Sequence[str], *, forget: bool = True) -> list[str]:
         """Stop the runs still working and return their ids.
 
-        ``forget`` also drops every run from the conversation, once its turn no longer waits.
+        ``forget`` also drops every run from the conversation, once its turn no longer waits;
+        a run stopped then is reported to the conversation as cancelled first, since its own
+        state comes later and would no longer reach it.
         """
         stopped: list[str] = []
         with self._lock:
@@ -1195,6 +1321,11 @@ class RunCommands(GatewayState):
                                 payload={"runId": run_id},
                                 session_id=run.session_id,
                             )
+                        )
+                    delegation = self._delegations.get(run_id)
+                    if forget and delegation is not None:
+                        self._emit_run_update(
+                            run_id, delegation.parent_session_id, AgentRunState.CANCELLED.value
                         )
                 if forget:
                     self._delegations.pop(run_id, None)
@@ -2148,6 +2279,8 @@ class RunCommands(GatewayState):
                 )
                 if tools is not None and _accepts(entry.host.submit_turn, "tools"):
                     kwargs["tools"] = tools
+                if entry.reasoning_effort is not None:
+                    kwargs["reasoning_effort"] = entry.reasoning_effort
                 entry.host.submit_turn(prompt, **kwargs)
                 entry.submitted = True
                 service.update_run(
@@ -2316,10 +2449,12 @@ class RunCommands(GatewayState):
                     )
                     try:
                         limits = self._task_limits()
+                        more: dict[str, Any] = {}
                         if limits is not None:
-                            entry.host.submit_turn(continuation, limits=limits)
-                        else:
-                            entry.host.submit_turn(continuation)
+                            more["limits"] = limits
+                        if entry.reasoning_effort is not None:
+                            more["reasoning_effort"] = entry.reasoning_effort
+                        entry.host.submit_turn(continuation, **more)
                         service.update_run(
                             run_id,
                             state=AgentRunState.RUNNING,

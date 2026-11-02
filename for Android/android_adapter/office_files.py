@@ -520,8 +520,11 @@ class _OfficeFileTool:
     _SPEC: ToolSpec
     _SUFFIX = ""
 
-    def __init__(self, workspace: WorkspacePaths | StrPath) -> None:
+    def __init__(self, workspace: WorkspacePaths | StrPath, versions: Any = None) -> None:
         self.paths = workspace if isinstance(workspace, WorkspacePaths) else WorkspacePaths(workspace)
+        # Where a replaced file is kept (<data>/file-versions, as write_file does), so undoing the
+        # task puts it back.
+        self.versions = versions
 
     @property
     def spec(self) -> ToolSpec:
@@ -568,6 +571,8 @@ class _OfficeFileTool:
         path, expected, preimage = await asyncio.to_thread(self._destination, arguments)
         data = await asyncio.to_thread(self._make, arguments)
         digest = hashlib.sha256(data).hexdigest()
+        if self.versions is not None and preimage is not None:
+            await asyncio.to_thread(self.versions.keep, preimage)
         await context.prepare_file_checkpoint(
             FileCheckpoint(
                 attempt_id=context.attempt_id,
@@ -586,7 +591,9 @@ class _OfficeFileTool:
             Event(
                 session_id=context.session_id,
                 type="file.version.recorded",
-                data={"attempt_id": context.attempt_id, "path": result["path"], "sha256": digest, "bytes": len(data)},
+                # What the file was before (None: it is new), so the task's file list can put it back.
+                data={"attempt_id": context.attempt_id, "path": result["path"], "sha256": digest, "bytes": len(data),
+                      "previous_sha256": expected},
                 causation_id=context.started_event_id,
                 correlation_id=context.correlation_id,
             )

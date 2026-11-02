@@ -475,10 +475,12 @@ class MobileConnections:
         now = time.time()
         with connection_database(self.path) as db:
             if existing is not None:
+                # Paired anew (the computer may have forgotten this phone): mobile_link tells it again
+                # whether this phone takes its requests.
                 db.execute(
-                    "UPDATE mobile_hosts SET url=?, name=?, api=?, fingerprint=?, certificate=?, desktop_id=?, "
-                    "addresses=?, runtime=?, runtime_at=?, last_ok_at=? WHERE host_id=?",
-                    (url, name.strip(), api, fingerprint, certificate, desktop_id, json.dumps(kept_addresses),
+                    "UPDATE mobile_hosts SET url=?, name=?, api=?, paired_at=?, fingerprint=?, certificate=?, "
+                    "desktop_id=?, addresses=?, runtime=?, runtime_at=?, last_ok_at=? WHERE host_id=?",
+                    (url, name.strip(), api, now, fingerprint, certificate, desktop_id, json.dumps(kept_addresses),
                      json.dumps(kept), now, now, host_id),
                 )
             else:
@@ -607,6 +609,18 @@ class MobileConnections:
                 )
             except sqlite3.IntegrityError:
                 db.execute("UPDATE mobile_hosts SET last_ok_at=? WHERE host_id=?", (time.time(), host_id))
+
+    async def answers_at(self, host_id: str, url: object) -> bool:
+        """Whether the paired computer answers at ``url`` with its pinned certificate and token.
+        Nothing is changed: an address found on the network is tried before the host moves to it."""
+        host = self._row(host_id)
+        token = self._credentials().get(self._key(host_id))
+        try:
+            address = endpoint_url(url, allow_lan=True)
+            await self._request(address, token, "GET", "/health", timeout=5, certificate=host["certificate"])
+        except Exception:
+            return False
+        return True
 
     def use_address(self, host_id: str, url: object) -> dict[str, Any]:
         """Move a host to an address the user confirmed (a desktop found at a new LAN address)."""

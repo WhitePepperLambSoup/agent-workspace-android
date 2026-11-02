@@ -263,7 +263,7 @@ internal data class WorkspaceDocument(val id: WorkspaceDocumentId, val name: Str
 internal data class WorkspaceDocumentListing(val documents: List<WorkspaceDocument>, val truncated: Boolean, val examinedEntries: Int)
 
 internal class WorkspaceDocumentsGateway(private val context: Context,
-    tokenFile: File = File(context.filesDir, "serve.token"), baseUrl: String = "http://127.0.0.1:8080") {
+    tokenFile: File = File(context.filesDir, "serve.token"), baseUrl: String? = null) {
     private val client = LocalEngineClient(context, tokenFile, baseUrl)
     private val downloads = WorkspaceFileDownloadStore(context, tokenFile, baseUrl)
 

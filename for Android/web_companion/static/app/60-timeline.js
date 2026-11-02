@@ -233,6 +233,8 @@
         ["btn-regenerate", "rotate-ccw", t("重新生成"), () => regenerateReply(card)],
         ["btn-fork", "git-branch", t("从这里分叉成新对话"), () => void forkFrom(card, true)],
         ["btn-compare", "cpu", t("换个模型对比"), () => void compareWithModel(card)],
+        ["btn-repeat", "calendar-clock", t("以后都这样做（设为定时任务）"), () => openRepeatSheet(card)],
+        ["btn-film", "clapperboard", t("任务回放（可存成视频）"), () => openTaskFilm(card)],
         ["btn-read", "play", t("朗读"), () => void readAloud(card)],
       ] : [
         ["btn-copy", "copy", t("复制"), () => copyText(card.dataset.displayText || card.dataset.messageText)],
@@ -247,12 +249,23 @@
         button.setAttribute("aria-label", title);
         button.innerHTML = icon(iconName);
         button.addEventListener("click", action);
+        // A replay only for a turn that took steps (its tool cards come before its answer).
+        if (name === "btn-film") button.hidden = !turnTookSteps();
         actions.appendChild(button);
       }
       card.appendChild(actions);
     }
     elements.timelineList.appendChild(card);
     return card;
+  }
+
+  /** Whether the turn so far, back to the user's message, has a tool step. */
+  function turnTookSteps() {
+    for (let item = elements.timelineList.lastElementChild; item; item = item.previousElementSibling) {
+      if (item.classList.contains("user") && !item.hidden) return false;
+      if (item.classList.contains("tool")) return true;
+    }
+    return false;
   }
 
   function appendReasoning(card, text) {
@@ -286,7 +299,7 @@
     set_alarm: t("设置闹钟"), set_timer: t("设置计时"), list_calendar_events: t("查看日程"), add_calendar_event: t("添加日程"),
     transcribe_audio: t("转写录音"),
     start_service: t("启动后台服务"), stop_service: t("停止后台服务"), list_services: t("查看后台服务"), service_logs: t("查看服务输出"),
-    browser: t("浏览器"), browser_view: t("查看网页"),
+    browser: t("浏览器"), browser_view: t("查看网页"), check_page: t("检查网页效果"),
     android_observe: t("查看屏幕"), android_screenshot: t("截图看屏幕"), android_verify: t("核对屏幕"),
     android_notify: t("发送通知"), android_clipboard: t("使用剪贴板"), android_battery: t("查看电量"),
     read_file: t("读取文件"), write_file: t("写入文件"), list_files: t("查看文件"), delete_path: t("删除文件"),
@@ -653,8 +666,33 @@
     } finally { syncControls(); }
   }
 
+  // After a failed recovery the page does not know whether a task runs here, so sending stays off.
+  // It keeps asking: one failed request must not leave the conversation stuck.
+  let recoveryRetry = null;
+  let recoveryRetrySession = null;
+  let recoveryFailures = 0;
+  function retryRecovery(sessionId, shown) {
+    window.clearTimeout(recoveryRetry);
+    if (recoveryRetrySession !== sessionId) { recoveryRetrySession = sessionId; recoveryFailures = 0; }
+    const delay = [2000, 5000, 10000, 20000][recoveryFailures++] ?? 30000;
+    recoveryRetry = window.setTimeout(async () => {
+      if (disposed || sessionId !== currentSessionId || historyReady) return;
+      if (isLoadingSession) { retryRecovery(sessionId, shown); return; }
+      isLoadingSession = true;
+      syncControls();
+      try {
+        if (await recoverSessionTask(sessionId) && sessionId === currentSessionId) {
+          recoveryFailures = 0;
+          historyReady = true;
+          setConnection(true);
+          if (elements.noticeText.textContent === shown) notice("");
+        }
+      } finally { isLoadingSession = false; syncControls(); }
+    }, delay);
+  }
+
   async function recoverSessionTask(sessionId) {
-    if (activeTask) return;
+    if (activeTask) return true;
     const adoptionGeneration = taskAdoptionGeneration;
     try {
       const data = await apiJson(`/mobile/tasks?session_id=${encodeURIComponent(sessionId)}`);
@@ -671,7 +709,7 @@
         updateTaskStatus(t("正在恢复任务..."));
         syncControls();
         void watchTask(activeTask);
-        return;
+        return true;
       }
       const latest = ordered[0];
       const historySequence = historyEvents.reduce((sequence, event) => Math.max(sequence, Number(event.sequence) || 0), 0);
@@ -691,13 +729,18 @@
         const reason = typeof latest.reason === "string" ? String(localizeError(latest.reason.trim())).slice(0, 300) : "";
         updateTaskStatus(reason ? t("任务失败：{0}", reason) : t("任务失败"), { retry: canRetry, idle: true });
       }
+      return true;
     } catch (error) {
-      if (disposed || adoptionGeneration !== taskAdoptionGeneration) return;
+      if (disposed || adoptionGeneration !== taskAdoptionGeneration) return false;
       if (sessionId === currentSessionId) {
         historyReady = false;
-        notice(t("恢复任务状态失败: {0}", error.message));
+        const shown = t("恢复任务状态失败: {0}", error.message);
+        notice(shown);
         setConnection(false);
+        // A 4xx answer (the conversation is gone) will not change by asking again.
+        if (!error.status || error.status >= 500) retryRecovery(sessionId, shown);
       }
+      return false;
     }
   }
 

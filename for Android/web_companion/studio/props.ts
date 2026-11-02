@@ -20,6 +20,7 @@ import {
   TABLE_PLACES,
   deskCenter,
 } from './layout'
+import { createAquariumKit, furnishAquarium, placeAquarium, type Aquarium, type AquariumKit } from './aquarium'
 import {
   Batch,
   boxShape,
@@ -58,6 +59,8 @@ export interface Room {
   sandbox: { door: THREE.Group; strip: THREE.MeshBasicMaterial }
   /** The room's door, on its hinge: turned about y to open. */
   entrance: THREE.Group
+  /** The fish tank's fish. */
+  aquarium: Aquarium
   dispose(): void
 }
 
@@ -78,6 +81,7 @@ export interface RoomKit {
   readonly sandbox: { door: ReturnType<Batch['build']>; strip: THREE.BufferGeometry }
   /** The room's door leaf, from its hinge along +z. */
   readonly entrance: ReturnType<Batch['build']>
+  readonly aquarium: AquariumKit
   dispose(): void
 }
 
@@ -363,6 +367,8 @@ function furnish(theme: RoomTheme): Batch {
   batch.add(boxShape(0.3, 0.012, 0.16, 0.004), '#5d6470', { x: printerX, y: 0.6, z: PRINTER.z1 + 0.04, rx: 0.12 }, 'satin', false)
   batch.add(boxShape(0.03, 0.03, 0.01), '#38d39f', { x: printerX + 0.22, y: 0.74, z: PRINTER.z1 - 0.03 }, 'glow', false)
 
+  furnishAquarium(batch, theme.dark)
+
   // Plants: a pot with soil and a full crown; two are tall plants on a stem.
   for (const [index, plant] of PLANTS.entries()) {
     batch.add(cylinderShape(0.21, 0.15, 0.38, 18), c.pot, { x: plant.x, y: 0.19, z: plant.z }, 'satin')
@@ -418,6 +424,7 @@ export function createRoomKit(theme: RoomTheme, finishes: Finishes): RoomKit {
   doorLeaf.add(boxShape(0.06, 0.6, entranceWidth - 0.3, 0.01), theme.dark ? '#4e3b2c' : '#a5784f', { y: 1.5, z: entranceWidth / 2 }, 'satin', false)
   doorLeaf.add(boxShape(0.1, 0.03, 0.12, 0.01), '#aeb5bf', { y: 1.0, z: entranceWidth - 0.12 }, 'metal', false)
   const entrance = doorLeaf.build()
+  const aquarium = createAquariumKit()
   return {
     theme,
     finishes,
@@ -428,7 +435,9 @@ export function createRoomKit(theme: RoomTheme, finishes: Finishes): RoomKit {
     printout,
     sandbox: { door, strip: stripGeometry },
     entrance,
+    aquarium,
     dispose() {
+      aquarium.dispose()
       for (const part of furniture) part.geometry.dispose()
       for (const part of entrance) part.geometry.dispose()
       for (const part of door) part.geometry.dispose()
@@ -530,6 +539,7 @@ export function buildRoom(kit: RoomKit): Room {
       lamps.push(lamp)
     }
   }
+  const aquarium = placeAquarium(kit.aquarium, finishes, group, theme.dark)
 
   return {
     group,
@@ -543,8 +553,10 @@ export function buildRoom(kit: RoomKit): Room {
     printout,
     sandbox: { door, strip },
     entrance,
+    aquarium,
     dispose() {
       group.removeFromParent()
+      aquarium.dispose()
       for (const note of notes.children) ((note as THREE.Mesh).material as THREE.Material).dispose()
       for (const material of owned) material.dispose()
       for (const lamp of lamps) lamp.dispose()

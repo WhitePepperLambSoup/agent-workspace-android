@@ -36,6 +36,7 @@ from typing import Any, Protocol
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 from uuid import uuid4
 
+from agent_workspace.core.experts import ExpertError, parse_team
 from agent_workspace.ui_gateway.device_store import DeviceStore
 from agent_workspace.ui_gateway.firewall import FirewallWatch
 from agent_workspace.ui_gateway.mdns import MdnsAnnouncer, txt_record
@@ -64,6 +65,7 @@ FEATURES = (
     "knowledge",
     "device",
     "code_review",
+    "expert_team",
 )
 DEFAULT_PORT = 8765
 _MAX_BODY_BYTES = 512 * 1024
@@ -717,12 +719,25 @@ class TaskOptions:
     private_accepted: bool = False
     # The phone's own AI handed this part of its task over (ask_computer), not its user.
     from_agent: bool = False
+    # Run it with this computer's expert team: "auto" (the lead picks the specialists) or the
+    # members, as the window's turn.start "team"; and whether the team reviews its findings.
+    team: str | list[Any] | None = None
+    team_review: bool = True
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> TaskOptions:
         accept = payload.get("accept_autonomy")
         if accept is not None and accept not in {"yolo", "full_access"}:
             raise DeviceLinkError("invalid_autonomy")
+        team = payload.get("team")
+        review = payload.get("team_review", True)
+        if team is not None:
+            if type(review) is not bool or not isinstance(team, str | list):
+                raise DeviceLinkError("invalid_team")
+            try:
+                parse_team(team)
+            except ExpertError:
+                raise DeviceLinkError("invalid_team") from None
         if payload.get("phone_control") is True:
             # Operating a phone is the phone's own work; this desktop asks a phone through jobs.
             raise DeviceLinkError("unsupported_task", 422)
@@ -735,6 +750,8 @@ class TaskOptions:
             on_device=on_device,
             private_accepted=private,
             from_agent=payload.get("from_agent") is True,
+            team=team,
+            team_review=review if team is not None else True,
         )
 
 

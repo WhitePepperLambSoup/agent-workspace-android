@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -743,6 +744,14 @@ _CHANGES_NOTE = (
     "Only ui_changes (new or different lines) and ui_gone (refs no longer shown) are listed; "
     "every other line, and its ref, is as in the previous result."
 )
+# A stopwatch's button and readout are drawn: the tap that stopped it changed no control's words, and
+# the agent tapped again, which started it.
+_DRAWN_CHANGE = (
+    "Little of this screen is text, so screen_changed false does not mean the tap did nothing: an "
+    "icon or a drawn number may have changed. Read the screen (android_observe with screen_text, "
+    "twice a few seconds apart for a number that may be running) before tapping again: a second "
+    "tap can undo the first."
+)
 
 
 # Actions that touch something on the screen; one that lands in another app may have hit an ad.
@@ -846,7 +855,7 @@ def _for_model(
         compact["blocking"] = blocking
     hint = _picture_hint(observation)
     if hint and not text:
-        compact["hint"] = hint
+        compact["hint"] = _DRAWN_CHANGE if compact.get("screen_changed") is False else hint
     result = {**response, "observation": compact}
     result.pop("screen_text", None)
     return result
@@ -879,6 +888,16 @@ def _ref(arguments: dict[str, Any]) -> str:
     return value
 
 
+# Reads of the phone may run beside other tools of the same step (parallel tool calls), but the
+# screen is looked at or worked by one call at a time.
+_SCREEN_LOCK = threading.Lock()
+
+
+def _on_screen(work: Any, *arguments: Any) -> Any:
+    with _SCREEN_LOCK:
+        return work(*arguments)
+
+
 class _BridgeTool:
     bridge: Any | None
 
@@ -890,14 +909,14 @@ class _BridgeTool:
         raise NotImplementedError
 
     async def execute(self, arguments: dict[str, Any]) -> str:
-        return json_result(_for_model(await asyncio.to_thread(self._run, arguments)))
+        return json_result(_for_model(await asyncio.to_thread(_on_screen, self._run, arguments)))
 
     async def execute_with_context(
         self, arguments: dict[str, Any], context: ToolExecutionContext
     ) -> str:
         await _wait_if_paused()
         # Looking at the screen gives it whole, and is what later actions report changes against.
-        response = await asyncio.to_thread(self._run, arguments)
+        response = await asyncio.to_thread(_on_screen, self._run, arguments)
         result = _for_model(response, memory_key=context.session_id)
         observation = result.get("observation")
         notes = _app_notes(context.session_id, observation if isinstance(observation, dict) else {})
@@ -1086,7 +1105,7 @@ class AndroidScreenshotTool(_BridgeTool):
     async def execute_with_context(
         self, arguments: dict[str, Any], context: ToolExecutionContext
     ) -> str:
-        response, data = await asyncio.to_thread(self._capture, arguments)
+        response, data = await asyncio.to_thread(_on_screen, self._capture, arguments)
         screenshot = response.get("screenshot")
         if isinstance(screenshot, dict) and data is not None:
             if context.record_artifact is None:
@@ -1385,7 +1404,8 @@ class AndroidActionTool(_BridgeTool):
             "back, home, recents, notifications). A snapshot stays valid while the same window is shown, even if "
             "content in it keeps moving; if the target changed, the result says target_changed "
             "with a fresh observation. Each result shows the screen once it settled; "
-            "screen_changed false means the action left it exactly as it was. Quickest: "
+            "screen_changed false means no control's words changed (a drawn icon or number may "
+            "have). Quickest: "
             "tap_text text (taps the control showing those words, on the screen as it is now; no "
             "snapshot needed; if several show them it lists them, then pass nth; words drawn in "
             "pictures are found too); scroll_to_text text (scrolls the list until the words show, "
@@ -1453,7 +1473,7 @@ class AndroidActionTool(_BridgeTool):
         self, arguments: dict[str, Any], context: ToolExecutionContext
     ) -> str:
         await _wait_if_paused()
-        response = await asyncio.to_thread(self._run, arguments)
+        response = await asyncio.to_thread(_on_screen, self._run, arguments)
         error = response.get("error")
         await context.record_event(
             Event(

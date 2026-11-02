@@ -1,7 +1,7 @@
 """Helper agents for independent parts of a task (the run_subagents tool).
 
 A task can hand up to four separate pieces of work (read these files, look up these sources,
-compare these options) to helpers that work side by side, at most three at a time, and hand back a
+compare these options) to helpers that work side by side, all at the same time, and hand back a
 short report each; the task that started them combines the reports and does the rest.
 
 Each helper works in a conversation of its own, titled 「子任务：…」 and archived, so it stays out of
@@ -38,7 +38,8 @@ from agent_workspace.core.models import Capability, ToolSpec
 from agent_workspace.tools.base import ToolArgumentError, ToolError, json_result
 
 MAX_TASKS = 4
-MAX_PARALLEL = 3
+# All parts at once: they wait on the model and the network, not on the phone.
+MAX_PARALLEL = 4
 MAX_PROMPT_CHARS = 6000
 MAX_CONTEXT_CHARS = 4000
 MAX_REPORT_CHARS = 6000
@@ -69,6 +70,8 @@ _NOT_FOR_HELPERS = frozenset(
         "android_battery",
         "android_clipboard",
         "memory_write",
+        # The phone's installed apps (the app check) are personal data like the rest.
+        "app_audit",
     }
 )
 
@@ -171,6 +174,18 @@ def _remember(helper_id: str, parent_id: str) -> None:
         os.replace(temporary, path)
 
 
+def forget_helpers(session_ids: Any) -> None:
+    """Deleted conversations leave the record, as helpers or as the conversation that started them."""
+    gone = set(session_ids)
+    with _registry_lock:
+        sessions = {helper: parent for helper, parent in helper_sessions().items() if helper not in gone and parent not in gone}
+        path = _registry_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(sessions), encoding="utf-8")
+        os.replace(temporary, path)
+
+
 _open_lock = threading.Lock()
 
 
@@ -265,7 +280,9 @@ async def _run_one(
         return {"title": title, **who, "status": "failed", "error": " ".join(str(exc).split())[:300]}
     host.started.append(session.id)
     if expert is not None:
-        _tell(host, {"session_id": session.id, "title": title, **who, "state": "working"})
+        # The model and effort they work with (the sub-task setting), for the studio's card.
+        _tell(host, {"session_id": session.id, "title": title, **who, "state": "working",
+                     "model": host.model, "effort": host.reasoning_effort or "auto"})
     outcome = await _helper_run(host, item, tools, session)
     if expert is not None:
         _tell(host, {"session_id": session.id, "title": title, **who, "state": outcome["status"]})
@@ -428,13 +445,40 @@ def team_progress(events: Any) -> dict[str, str] | None:
     return lines
 
 
+# Measured on the computer (the desktop app's team bench): a lead that picked a team first did the
+# work itself as well and its experts repeated it, at twice the tokens and no better score; a lead
+# that worked first scored the same with far fewer. A team also finishes sooner when a request
+# splits into parts that each need their own looking up: those go out together and run side by side.
+LEAD_WORKS_FIRST = (
+    "On this phone an automatic team is for two things: what you cannot do or check well alone, "
+    "and finishing sooner by working on independent parts at the same time. First see how the "
+    "request splits. When it holds parts that do not depend on each other and each needs its own "
+    "looking up or reading (several products, places, laws, papers, documents or sources to go "
+    "through), hand them all out in one run_subagents call: the experts work on them side by side, "
+    "which is faster than going through them one after another. Ask each for the same kind of "
+    "findings so you can set them side by side, and do not do those parts yourself as well. "
+    "Otherwise work on the request yourself first, with your own tools, as you would without a "
+    "team, and call experts only for: a part that needs a field you do not know well (law, "
+    "medicine, tax, a science beyond your depth); or a check of your draft when it rests on a "
+    "method, a premise the user gave, a threshold, or a source or figure that may not hold, or when "
+    "the user faces a consequential decision. A check is one expert of that field given your draft "
+    "and the points to verify, not a second attempt at the whole task. Facts the experts looked up "
+    "and cited (weather, prices, schedules, news, specifications) are not reviewed: their sources are "
+    "the check, and a review round only adds a minute; a review is for a judgement or a result worked "
+    "out. A calculation, a draft or a translation: do it yourself. When no expert was needed, say so "
+    "in one line."
+)
+
+
 def team_note(team: Team, review: bool) -> str:
-    """The lead's instructions for this task, in the words of the phone's helper tool."""
+    """The lead's instructions for this task, in the words of the phone's helper tool; on an
+    automatic team the lead works first and hands out independent parts together."""
     return (
         lead_instructions(team, review=review).replace("delegate_tasks", "run_subagents")
         + "\nOn this phone the experts can only look things up (files, documents, the knowledge "
         "base, the web); they cannot change files or run commands. Anything to compute, write or "
         "change, do yourself before you answer."
+        + (f"\n{LEAD_WORKS_FIRST}" if team.auto else "")
     )
 
 
@@ -550,6 +594,7 @@ __all__ = [
     "SubagentHost",
     "TaskTeam",
     "bind_host",
+    "forget_helpers",
     "helper_sessions",
     "helper_tools",
     "reset_host",

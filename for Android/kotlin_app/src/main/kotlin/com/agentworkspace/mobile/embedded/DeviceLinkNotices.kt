@@ -83,7 +83,9 @@ object DeviceLinkNotices {
         val hostId = request.optString("host_id")
         val id = request.optString("id").take(128)
         val title = request.optString("title").trim().take(120)
-        val text = request.optString("text").take(2000)
+        // Shown up to 2000 characters; Copy takes all of it (a text from the computer is at most 64 KiB).
+        val fullText = request.optString("text").take(65536)
+        val text = fullText.take(2000)
         val finished = request.optBoolean("finished")
         val link = request.optBoolean("link")
         // Finished turns and scheduled results from one computer replace each other (its page lists
@@ -151,7 +153,7 @@ object DeviceLinkNotices {
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
         if (action == "text" && text.isNotBlank()) {
             val copy = Intent(app, DeviceLinkActionReceiver::class.java).setAction(ACTION_COPY)
-                .putExtra(EXTRA_TEXT, text.take(65536)).putExtra(EXTRA_TAG, tag)
+                .putExtra(EXTRA_TEXT, fullText).putExtra(EXTRA_TAG, tag)
             builder.addAction(0, UiText.of(app, "复制", "Copy"),
                 PendingIntent.getBroadcast(app, code, copy, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
             val uri = runCatching { Uri.parse(text.trim()) }.getOrNull()

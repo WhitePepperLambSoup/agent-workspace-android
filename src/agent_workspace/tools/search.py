@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import glob
 import re
 from collections import deque
 from itertools import islice
@@ -300,6 +301,10 @@ class SearchFilesTool:
         )
 
         root = self.paths.resolve(raw_path)
+        if root.is_file():
+            # A file is searched alone: its folder, for just that file (models often pass one).
+            file_glob = glob.escape(self.paths.relative(root))
+            root = root.parent
         if not root.is_dir():
             raise ToolError(f"path is not a directory: {root}")
         result = _search_files(

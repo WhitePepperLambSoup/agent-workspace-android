@@ -74,9 +74,10 @@
       if (disposed || !studioBackdropWanted()) return;
       const look = studioLook();
       backdropLook = JSON.stringify(look);
-      backdropScene = studio.createStudioScene($("studioBackdropStage"), $("studioBackdropOverlay"), look, { pick: studioPick, pickFloor: () => {} }, "backdrop");
+      // Behind every conversation by default: only where the GPU draws it.
+      backdropScene = studio.createStudioScene($("studioBackdropStage"), $("studioBackdropOverlay"), { ...look, requireGpu: true }, { pick: studioPick, pickFloor: studioPickFloor }, "backdrop");
     } catch {
-      // No WebGL, or the scene failed: the colour field for this run.
+      // No WebGL, WebGL drawn in software, or the scene failed: the colour field for this run.
       backdropFailed = true;
       backdropScene = null;
     } finally {

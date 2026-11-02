@@ -414,6 +414,38 @@ object AndroidSystemBridge {
         outcome(false, error.message ?: "invalid shortcut").toString()
     }
 
+    /**
+     * 「演示一遍」 (DemonstrationRecorder): "start" records the user's own taps until the bar's Done or
+     * Cancel; "cancel" ends it without keeping anything; "state" says whether it records; "take" returns
+     * the finished recording ({app, steps}) once and forgets it.
+     */
+    @JvmStatic
+    fun demonstration(action: String): String {
+        val context = applicationContext ?: return outcome(false, "not initialized").toString()
+        return when (action) {
+            "start" -> {
+                val connected = service ?: return outcome(false,
+                    com.agentworkspace.mobile.UiText.of(context, "无障碍服务没开", "The accessibility service is off")).toString()
+                val started = java.util.concurrent.FutureTask { connected.startDemonstration() }
+                android.os.Handler(Looper.getMainLooper()).post(started)
+                outcome(started.get(5, java.util.concurrent.TimeUnit.SECONDS), null).toString()
+            }
+            "cancel" -> {
+                service?.let { running -> android.os.Handler(Looper.getMainLooper()).post { running.stopDemonstration(false) } }
+                outcome(true, null).toString()
+            }
+            "state" -> JSONObject().put("ok", true).put("recording", service?.demonstrating == true)
+                .put("ready", DemonstrationRecorder.resultFile(context).isFile).toString()
+            "take" -> {
+                val file = DemonstrationRecorder.resultFile(context)
+                val value = runCatching { JSONObject(file.readText()) }.getOrNull()
+                file.delete()
+                (value ?: JSONObject().put("steps", JSONArray())).put("ok", value != null).toString()
+            }
+            else -> outcome(false, "unknown action").toString()
+        }
+    }
+
     @JvmStatic
     fun deleteShortcut(id: String): String {
         val context = applicationContext ?: return outcome(false, "not initialized").toString()

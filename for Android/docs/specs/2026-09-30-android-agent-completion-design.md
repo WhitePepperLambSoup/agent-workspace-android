@@ -26,7 +26,7 @@ Keep changes under `for Android/` and Android documentation. Preserve the
 shared desktop runtime and existing dirty work. The APK keeps a loopback gateway
 and Chaquopy in the engine process. Android Accessibility and TTS bridges run
 in that same process. Android standard APIs provide system actions; no
-competitor source is copied.
+outside project's source is copied.
 
 Native foreground work is bounded by Android lifecycle constraints. Alarm
 receivers use WorkManager and report when user launch is required; reboot must

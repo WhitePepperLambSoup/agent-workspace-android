@@ -19,10 +19,12 @@ data class CachedWorkspaceFile(val file: File, val mimeType: String, val sha256:
 class WorkspaceFileDownloadStore @JvmOverloads constructor(
     context: Context,
     private val tokenFile: File = File(context.filesDir, "serve.token"),
-    private val baseUrl: String = "http://127.0.0.1:8080",
+    /** Null: the engine's address at each download (EngineAddress). */
+    private val fixedBaseUrl: String? = null,
 ) {
     private val context = context.applicationContext
     private val root: File get() = WorkspaceFileCache.root(context)
+    private val baseUrl: String get() = fixedBaseUrl ?: com.agentworkspace.mobile.embedded.EngineAddress.baseUrl(context)
 
     init {
         val gateway = runCatching { URI(baseUrl) }.getOrNull()

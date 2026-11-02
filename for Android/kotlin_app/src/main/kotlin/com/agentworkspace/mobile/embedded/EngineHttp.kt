@@ -33,7 +33,7 @@ object EngineHttp {
 
     fun request(context: Context, method: String, path: String, body: JSONObject? = null, readTimeoutMs: Int = 15000): Reply {
         require(path.startsWith("/") && !path.startsWith("//")) { "Invalid local route" }
-        val connection = URL("http://127.0.0.1:8080$path").openConnection() as HttpURLConnection
+        val connection = URL("${EngineAddress.baseUrl(context)}$path").openConnection() as HttpURLConnection
         try {
             connection.requestMethod = method
             connection.instanceFollowRedirects = false

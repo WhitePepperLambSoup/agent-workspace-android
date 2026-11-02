@@ -66,6 +66,8 @@ object AgentBrowser {
         when (val action = request.optString("action")) {
             "navigate" -> navigate(request.optString("url"), request.optLong("timeout_ms", PAGE_TIMEOUT_MS))
             "open_file" -> openFile(request.optString("root"), request.optString("path"))
+            // check_page: a workspace page drawn as the user's preview draws it, in a WebView of its own.
+            "check_html" -> PageCheck.run(context, request.optString("root"), request.optString("path"))
             "back" -> back()
             "evaluate" -> evaluate(request.optString("script"), request.optLong("timeout_ms", 10_000L))
             "settle" -> { settle(request.optLong("max_ms", 15_000L)); state() }
@@ -146,7 +148,7 @@ object AgentBrowser {
         val host = uri.host?.lowercase()?.trim('[', ']') ?: return false
         val port = if (uri.port != -1) uri.port else if (scheme == "https") 443 else 80
         val local = host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0"
-        return !(local && port == 8080)
+        return !(local && port == com.agentworkspace.mobile.embedded.EngineAddress.port(context))
     }
 
     @SuppressLint("SetJavaScriptEnabled")

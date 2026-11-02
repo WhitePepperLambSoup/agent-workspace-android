@@ -36,6 +36,24 @@ def acknowledgements(payload: dict) -> dict:
     return found
 
 
+def team_request(payload: dict) -> dict:
+    """The computer's expert team for a handed-over task (its feature expert_team): "auto" or the
+    members, and whether they review the draft; nothing when the phone did not ask for one."""
+    team = payload.get("team")
+    if team is None:
+        return {}
+    review = payload.get("team_review", True)
+    if not isinstance(review, bool):
+        raise ValueError("team_review must be true or false")
+    from agent_workspace.core.experts import ExpertError, parse_team
+
+    try:
+        parse_team(team)
+    except ExpertError as error:
+        raise ValueError(f"invalid team: {error}") from None
+    return {"team": team, "team_review": review}
+
+
 _REFUSALS = {
     "desktop_autonomy_too_broad": (
         "this conversation on the computer approves everything by itself; confirm on the phone to hand tasks to it"
@@ -132,7 +150,14 @@ class MobileOutbox:
 
     def enqueue(self, payload):
         host = self.connections.get(payload.get("host_id"))
+        if payload.get("team") is not None and "expert_team" not in (host.get("features") or []):
+            raise ValueError("the computer's app is older and cannot do this yet; update it there")
         request = parse_mobile_task_request(payload)
+        # ID and bank card numbers usually stay with the phone's own model (2.2): only as the user chose.
+        import mobile_private_numbers
+
+        if mobile_private_numbers.find(request.prompt) and acknowledgements(payload).get("private_accepted") is not True:
+            raise ValueError("the task holds ID or bank card numbers; confirm on the phone first")
         request_id = payload.get("request_id") or str(uuid4())
         if not isinstance(request_id, str) or not request_id or len(request_id) > 128:
             raise ValueError("invalid outgoing request id")
@@ -142,6 +167,7 @@ class MobileOutbox:
             "model": request.model,
             "reasoning_effort": request.reasoning_effort,
             **acknowledgements(payload),
+            **team_request(payload),
         }
         serialized = json.dumps(document, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256((host["host_id"] + serialized).encode()).hexdigest()
@@ -172,6 +198,7 @@ class MobileOutbox:
             "model": None,
             "reasoning_effort": None,
             **acknowledgements(payload),
+            **team_request(payload),
         }
         serialized = json.dumps(document, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256((host["host_id"] + serialized).encode()).hexdigest()

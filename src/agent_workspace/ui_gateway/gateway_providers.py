@@ -5,6 +5,7 @@ transcription with a saved profile.
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 from agent_workspace.config import (
     ProviderConfig,
@@ -38,6 +39,11 @@ from agent_workspace.ui_gateway.gateway_state import GatewayState
 from agent_workspace.ui_gateway.protocol import (
     CommandEnvelope,
 )
+from agent_workspace.ui_gateway.subagent_model import EFFORTS as SUBAGENT_EFFORTS
+from agent_workspace.ui_gateway.subagent_model import SubagentModel
+from agent_workspace.ui_gateway.subagent_model import effort_for as subagent_effort_for
+from agent_workspace.ui_gateway.subagent_model import load as load_subagent_model
+from agent_workspace.ui_gateway.subagent_model import save as save_subagent_model
 from agent_workspace.ui_gateway.transcription import decode_recording
 
 
@@ -323,6 +329,34 @@ class ProviderCommands(GatewayState):
             session_id=None,
         )
 
+    def _provider_trust_command(self, command: CommandEnvelope) -> GatewayReply:
+        trust = self._provider_trust
+        try:
+            if command.type == "provider.trust.add":
+                self._require_payload(command, {"endpoint"})
+                endpoint = command.payload.get("endpoint")
+                if not isinstance(endpoint, str) or len(endpoint) > _MAX_PROVIDER_BASE_URL_CHARS:
+                    raise GatewayError("invalid_provider")
+                try:
+                    trust.add(endpoint)
+                except ValueError:
+                    raise GatewayError("invalid_provider") from None
+            elif command.type == "provider.trust.remove":
+                self._require_payload(command, {"origin"})
+                origin = command.payload.get("origin")
+                if not isinstance(origin, str):
+                    raise GatewayError("invalid_provider")
+                trust.remove(origin)
+            else:
+                self._require_payload(command, set())
+        except OSError:
+            raise GatewayError("provider_settings_failed") from None
+        return self._reply(
+            f"{command.type}.result",
+            {"epoch": self.epoch, "origins": trust.origins()},
+            session_id=None,
+        )
+
     def _bootstrap_provider(self, command: CommandEnvelope) -> GatewayReply:
         self._require_payload(command, set(), optional={"providerId"})
         raw_provider_id = command.payload.get("providerId")
@@ -503,6 +537,110 @@ class ProviderCommands(GatewayState):
             "hasCredential": has_credential,
             "supportedReasoningEfforts": list(self._supported_turn_reasoning_efforts(profile)),
         }
+
+    def _subagent_model_path(self) -> Path:
+        return self._database.with_name("subagent-model.json")
+
+    def _subagent_efforts(
+        self, choice: SubagentModel, settings: ProviderSettings
+    ) -> tuple[str, ...]:
+        """The thinking efforts the sub-agents' model offers."""
+        profile = settings.profiles.get(choice.provider_id) if choice.provider_id else None
+        if profile is not None:
+            return self._supported_turn_reasoning_efforts(
+                replace(profile, model=choice.model or profile.model)
+            )
+        with self._lock:
+            provider = self._provider
+        return self._supported_turn_reasoning_efforts(provider) if provider is not None else ()
+
+    def _subagent_model_document(
+        self, choice: SubagentModel, settings: ProviderSettings
+    ) -> dict[str, object]:
+        if choice.provider_id is not None and choice.provider_id not in settings.profiles:
+            # A profile removed since: sub-agents run on the conversation's model.
+            choice = SubagentModel(effort=choice.effort)
+        efforts = self._subagent_efforts(choice, settings)
+        return {
+            "providerId": choice.provider_id,
+            "model": choice.model,
+            "effort": choice.effort if choice.effort in efforts else None,
+            "supportedReasoningEfforts": list(efforts),
+            "providers": [
+                {"id": profile.id, "name": profile.name, "model": profile.model}
+                for profile in settings.profiles.values()
+            ],
+        }
+
+    def _subagent_model_command(self, command: CommandEnvelope) -> GatewayReply:
+        """Read or set the model sub-agents run on and their thinking effort; null follows the
+        conversation. An effort the newly chosen model does not offer goes back to following."""
+        if command.session_id is not None:
+            raise GatewayError("invalid_session")
+        path = self._subagent_model_path()
+        if command.type == "subagents.model.get":
+            self._require_payload(command, set())
+            settings = self._load_provider_settings()
+            return self._reply(
+                "subagents.model.get.result",
+                {
+                    "epoch": self.epoch,
+                    **self._subagent_model_document(load_subagent_model(path), settings),
+                },
+                session_id=None,
+            )
+        self._require_payload(command, {"providerId", "model", "effort"})
+        provider_id = command.payload.get("providerId")
+        model = command.payload.get("model")
+        effort = command.payload.get("effort")
+        if provider_id is not None:
+            provider_id = self._provider_id(provider_id)
+        if model is not None:
+            if provider_id is None:
+                raise GatewayError("invalid_model")
+            model = self._turn_model_override(model)
+        if effort is not None and effort not in SUBAGENT_EFFORTS:
+            raise GatewayError("invalid_reasoning_effort")
+        settings = self._load_provider_settings()
+        if provider_id is not None and model == self._saved_provider(settings, provider_id).model:
+            model = None
+        choice = SubagentModel(provider_id, model, effort)
+        reset = effort is not None and effort not in self._subagent_efforts(choice, settings)
+        if reset:
+            choice = replace(choice, effort=None)
+        try:
+            save_subagent_model(path, choice)
+        except OSError:
+            raise GatewayError("storage_unavailable") from None
+        return self._reply(
+            "subagents.model.set.result",
+            {
+                "epoch": self.epoch,
+                **self._subagent_model_document(choice, settings),
+                "effortReset": reset,
+            },
+            session_id=None,
+        )
+
+    def _subagent_provider(
+        self, conversation: ProviderConfig, delegating_effort: str | None
+    ) -> tuple[ProviderConfig, str | None]:
+        """What a sub-agent runs on, and the effort its turns ask for (None: the model's own).
+
+        A profile that is gone or cannot be read leaves the sub-agent on the conversation's model.
+        """
+        choice = load_subagent_model(self._subagent_model_path())
+        provider = conversation
+        if choice.provider_id is not None:
+            try:
+                provider = self._settings_store().resolve_config(choice.provider_id)
+            except (KeyError, OSError, ProviderSettingsError, ValueError):
+                provider = conversation
+            else:
+                if choice.model is not None:
+                    provider = replace(provider, model=choice.model)
+        efforts = self._supported_turn_reasoning_efforts(provider)
+        return provider, subagent_effort_for(choice, delegating_effort, efforts)
 
     @staticmethod
     def _supported_turn_reasoning_efforts(

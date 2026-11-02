@@ -38,8 +38,9 @@ class WorkspaceHtmlPreviewActivity : ComponentActivity() {
         const val EXTRA_SHA256 = "workspace_html_sha256"
         const val EXTRA_SIZE = "workspace_html_size"
         private const val MAX_HTML_BYTES = 32L * 1024 * 1024
-        private const val BASE_ORIGIN = "https://workspace-html.invalid/"
-        private const val DOCUMENT_START_GUARD = """
+        // check_page (browser/PageCheck.kt) draws pages the same way, so it sees what the preview shows.
+        internal const val BASE_ORIGIN = "https://workspace-html.invalid/"
+        internal const val DOCUMENT_START_GUARD = """
             (() => {
               const blocked = [
                 'RTCPeerConnection', 'webkitRTCPeerConnection',
@@ -100,6 +101,26 @@ class WorkspaceHtmlPreviewActivity : ComponentActivity() {
               }
             })();
         """ /* storage-shim-end */
+
+        internal fun isolatedDocument(html: String): String {
+            // The opaque sandbox origin keeps generated scripts away from the parent
+            // and fresh child realms; the child policy is parsed before generated tags.
+            val policy = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' data: blob:; " +
+                "style-src 'unsafe-inline' data: blob:; img-src data: blob:; font-src data: blob:; " +
+                "media-src data: blob:; connect-src 'none'; object-src 'none'; " +
+                "worker-src 'none'; form-action 'none'; base-uri 'none'"
+            val isolation = "<meta http-equiv=\"Content-Security-Policy\" content=\"$policy; frame-src 'none'\">" +
+                "<script>for(const name of ['RTCPeerConnection','webkitRTCPeerConnection']){" +
+                "try{Object.defineProperty(window,name,{value:undefined,writable:false,configurable:false});}catch(e){}}" +
+                "</script><script>$STORAGE_SHIM</script>"
+            val document = TextUtils.htmlEncode("<!doctype html>$isolation$html")
+            return "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +
+                "<meta http-equiv=\"Content-Security-Policy\" content=\"$policy; frame-src 'self' about:\">" +
+                "<style>html,body{margin:0;width:100%;height:100%;overflow:hidden}" +
+                "iframe{display:block;border:0;width:100%;height:100%}</style></head><body>" +
+                "<iframe title=\"HTML preview\" sandbox=\"allow-scripts\" referrerpolicy=\"no-referrer\" srcdoc=\"$document\"></iframe>" +
+                "</body></html>"
+        }
     }
 
     private lateinit var webView: WebView
@@ -242,26 +263,6 @@ class WorkspaceHtmlPreviewActivity : ComponentActivity() {
         status.text = message
         status.visibility = View.VISIBLE
         if (::webView.isInitialized) webView.visibility = View.INVISIBLE
-    }
-
-    private fun isolatedDocument(html: String): String {
-        // The opaque sandbox origin keeps generated scripts away from the parent
-        // and fresh child realms; the child policy is parsed before generated tags.
-        val policy = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' data: blob:; " +
-            "style-src 'unsafe-inline' data: blob:; img-src data: blob:; font-src data: blob:; " +
-            "media-src data: blob:; connect-src 'none'; object-src 'none'; " +
-            "worker-src 'none'; form-action 'none'; base-uri 'none'"
-        val isolation = "<meta http-equiv=\"Content-Security-Policy\" content=\"$policy; frame-src 'none'\">" +
-            "<script>for(const name of ['RTCPeerConnection','webkitRTCPeerConnection']){" +
-            "try{Object.defineProperty(window,name,{value:undefined,writable:false,configurable:false});}catch(e){}}" +
-            "</script><script>$STORAGE_SHIM</script>"
-        val document = TextUtils.htmlEncode("<!doctype html>$isolation$html")
-        return "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +
-            "<meta http-equiv=\"Content-Security-Policy\" content=\"$policy; frame-src 'self' about:\">" +
-            "<style>html,body{margin:0;width:100%;height:100%;overflow:hidden}" +
-            "iframe{display:block;border:0;width:100%;height:100%}</style></head><body>" +
-            "<iframe title=\"HTML preview\" sandbox=\"allow-scripts\" referrerpolicy=\"no-referrer\" srcdoc=\"$document\"></iframe>" +
-            "</body></html>"
     }
 
     override fun onDestroy() {

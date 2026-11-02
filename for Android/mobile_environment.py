@@ -52,16 +52,32 @@ def environment_section(registry: Any | None) -> str:
         "probing with which, --version, ls of system folders or package lists):"
     ]
     if "run_terminal" in tools:
+        installs = (
+            "There is no system package manager: apt, pkg and apk do not work"
+            if "python" in executables
+            else "There is no package manager: apt, pkg, pip install and npm install do not work"
+        )
         lines.append(
             "- run_terminal runs Android's /system/bin/sh with toybox commands (ls, cat, grep, sed, "
-            "awk, find, tar, gzip, sha256sum). There is no package manager: apt, pkg, pip install "
-            "and npm install do not work."
+            f"awk, find, tar, gzip, sha256sum). {installs}."
         )
     installed = [label for key, label in _TOOLCHAIN_PROGRAMS if key in executables]
     if installed:
         lines.append(
             f"- The optional developer toolchain is installed: {', '.join(installed)}; run them "
             "with run_process (or run_terminal)."
+        )
+    if "python" in executables:
+        # Measured on a phone: these install as wheels in 20-90 s each; matplotlib has no wheel
+        # for ARM musl, so the toolchain brings Alpine's build.
+        lines.append(
+            "- pip install works for packages with a prebuilt musllinux wheel (numpy, pandas, "
+            "scipy, pillow, openpyxl, requests) and for pure-Python ones; there is no C compiler, "
+            "so a package that has to be built from C source fails. matplotlib, numpy and pillow "
+            "come with the toolchain. Give installs timeout_seconds 300. Chinese, Japanese and "
+            "Korean text in matplotlib charts shows without setting a font (do not set SimHei or "
+            "Microsoft YaHei: they are not installed); for Pillow use "
+            "/usr/share/fonts/droid-nonlatin/DroidSansFallbackFull.ttf."
         )
     else:
         lines.append(
@@ -89,6 +105,13 @@ def environment_section(registry: Any | None) -> str:
     lines.append(
         "- When something cannot be done here, say so at once and offer the closest way that works."
     )
+    if "todo" in tools:
+        # The app shows the plan's steps as the task's progress (第 2/5 步).
+        lines.append(
+            "- A task of four or more steps: first add its steps with todo (all in one reply), "
+            "then mark each one completed in the same reply as the next step's tool call. The "
+            "user sees them as the task's progress. Not for short tasks."
+        )
     return "\n".join(lines)
 
 
@@ -108,6 +131,11 @@ def _ways(tools: set[str]) -> list[str]:
             "needs no network and keeps its data in localStorage; the user can add it to the home "
             "screen from the file"
         )
+        if "check_page" in tools:
+            ways.append(
+                "after writing or changing an HTML file → check_page shows it as the user will "
+                "see it; fix what it reports before answering"
+            )
     if "transcribe_audio" in tools:
         ways.append("speech in an audio file → transcribe_audio (no audio or video converting)")
     else:

@@ -37,7 +37,7 @@ object ProviderSettingsChange {
                 if (summary != null) put("context_summary_enabled", summary)
             }
         val (code, reply) = try {
-            post(token, "/mobile/provider/apply", payload(protocol, baseUrl, model, effort, contextSummaryEnabled, lanHttp))
+            post(application, token, "/mobile/provider/apply", payload(protocol, baseUrl, model, effort, contextSummaryEnabled, lanHttp))
         } catch (_: java.io.IOException) {
             return false
         }
@@ -56,7 +56,7 @@ object ProviderSettingsChange {
                 contextSummaryEnabled = contextSummaryEnabled, allowLanHttp = lanHttp)
         } catch (failure: Exception) {
             // Keep the engine and the saved settings in agreement: put the engine back.
-            runCatching { post(token, "/mobile/provider/apply",
+            runCatching { post(application, token, "/mobile/provider/apply",
                 payload(current.protocol, current.baseUrl, current.model, current.reasoningEffort, current.contextSummaryEnabled,
                     current.allowLanHttp)) }
             throw failure
@@ -64,9 +64,9 @@ object ProviderSettingsChange {
         return true
     }
 
-    private fun post(token: String, path: String, body: JSONObject): Pair<Int, JSONObject> {
+    private fun post(context: Context, token: String, path: String, body: JSONObject): Pair<Int, JSONObject> {
         val bytes = body.toString().toByteArray(Charsets.UTF_8)
-        val connection = java.net.URL("http://127.0.0.1:8080$path").openConnection() as java.net.HttpURLConnection
+        val connection = java.net.URL("${EngineAddress.baseUrl(context)}$path").openConnection() as java.net.HttpURLConnection
         try {
             connection.requestMethod = "POST"
             connection.instanceFollowRedirects = false

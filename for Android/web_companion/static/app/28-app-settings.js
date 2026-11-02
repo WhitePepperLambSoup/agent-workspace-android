@@ -17,6 +17,8 @@
     offline_voice: () => { const value = nativeJson("getVoiceInputSettings"); return value ? onOff(!!value.prefer_offline) : null; },
     auto_update_check: () => { const value = nativeJson("getUpdateSettings"); return value ? onOff(!!value.autoCheck) : null; },
     expert_team: () => onOff(teamSettings.on),
+    subagent_model: () => (modelRoles ? modelRoles.roles.subagent || "main" : null),
+    subagent_effort: () => (modelRoles ? modelRoles.efforts.subagent || "task" : null),
   };
   // A setting control changed the way a tap on it does, so the page's own handler runs.
   function setControl(control, value) {
@@ -59,6 +61,8 @@
     floating_ball: [t("悬浮球"), onOffLabels], task_notifications: [t("任务完成通知"), onOffLabels],
     offline_voice: [t("语音输入用离线识别"), onOffLabels], auto_update_check: [t("自动检查更新"), onOffLabels],
     expert_team: [t("专家团"), onOffLabels],
+    subagent_model: [t("子任务和专家的模型"), { main: t("跟主模型一样") }],
+    subagent_effort: [t("子任务和专家的思考强度"), { task: t("跟主任务一样"), ...effortLabels }],
   };
   function settingValueLabel(key, value) { return settingLabels[key]?.[1]?.[value] || value; }
   // Applied only after the task: the engine restarts for these, which would stop the task.
@@ -83,6 +87,8 @@
       if (value === "on" && isLocalModel()) throw new Error(t("专家团需要云端模型：本机模型要跑三到五轮，太慢。"));
       saveTeam({ ...teamSettings, on: value === "on" });
     },
+    subagent_model: (value) => saveModelRolesChange({ roles: { subagent: value === "main" ? "" : value } }),
+    subagent_effort: (value) => saveModelRolesChange({ efforts: { subagent: value === "task" ? "" : value } }),
   };
   // Pages the agent can open (app_settings_tool.PAGES); "provider" is the app's own dialog.
   function openSettingsPage(page) {
@@ -101,6 +107,11 @@
 
   /** The current values, for the agent (sent before each task and after a change). */
   async function syncAppSettings() {
+    // The sub-task model and effort live in the engine: read once if the model page has not been opened.
+    if (!modelRoles) {
+      try { const value = await apiJson("/mobile/model-roles"); modelRoles = { roles: value.roles || {}, efforts: value.efforts || {} }; }
+      catch { /* those two are left out */ }
+    }
     const values = {};
     for (const [key, read] of Object.entries(settingReaders)) {
       try { const value = read(); if (typeof value === "string") values[key] = value; } catch { /* left out */ }
@@ -144,14 +155,19 @@
       const status = document.createElement("p");
       status.className = "setting-hint";
       status.setAttribute("role", "status");
+      const applied = () => {
+        button.disabled = later.disabled = true;
+        status.textContent = t("已应用");
+        haptic(16);
+        void syncAppSettings();
+      };
       button.addEventListener("click", () => {
         if (restartingSettings.has(args.setting) && activeTask) { status.textContent = t("任务结束后再点「应用更改」：这一项要重启引擎。"); return; }
         try {
-          settingAppliers[args.setting](args.value);
-          button.disabled = later.disabled = true;
-          status.textContent = t("已应用");
-          haptic(16);
-          void syncAppSettings();
+          // The sub-task settings are saved by the engine: applied once it answers.
+          const saving = settingAppliers[args.setting](args.value);
+          if (typeof saving?.then === "function") saving.then(applied, (error) => { status.textContent = localizeError(error.message); });
+          else applied();
         } catch (error) { status.textContent = error.message; }
       });
       later.addEventListener("click", () => box.remove());

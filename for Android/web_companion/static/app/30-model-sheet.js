@@ -4,7 +4,7 @@
     if (elderOn() && !$("elderScreen").hidden) { void stopReading(); return true; }
     if (closeAttachMenu()) return true;
     if (!$("sessionSheet").hidden) { closeSessionSheet(); return true; }
-    if (closeStudio()) return true;
+    if (hideStudioPerson() || hidePlacePanel() || closeStudio()) return true;
     if (closeSetup()) return true;
     if (closeModelSheet()) return true;
     if (closeDrawer()) return true;

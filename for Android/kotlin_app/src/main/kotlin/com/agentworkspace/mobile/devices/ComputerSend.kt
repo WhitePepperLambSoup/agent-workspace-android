@@ -37,6 +37,12 @@ object ComputerSend {
         return if (extension.isEmpty()) random else "$random.$extension"
     }
 
+    /** Swept when the app opens too: staged copies (up to 50 × 100 MB at a time) would otherwise wait
+     * for the next file to be staged, however long that takes. */
+    fun sweepStale(context: Context) {
+        File(context.filesDir, FOLDER).takeIf { it.isDirectory }?.let(::sweep)
+    }
+
     /** Staged files left by a send that never happened are removed after a day. */
     private fun sweep(folder: File) {
         val cutoff = System.currentTimeMillis() - KEEP_MILLIS

@@ -203,13 +203,18 @@
       if (typeof bridge?.shareText === "function") bridge.shareText(t("快捷操作{0}", shortcutQuote(shortcut.name)), code);
       $("shortcutsStatus").textContent = t("分享码已复制：对方在「可复用流程 → 导入分享码」里粘贴即可");
     });
+    // A demonstration not saved yet: nothing to delete.
+    remove.hidden = !shortcut.id;
     actions.append(remove, share, save);
     form.append(hint, list, actions);
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       if (!steps.length) { $("shortcutsStatus").textContent = t("至少要留一步"); return; }
+      // A demonstration keeps no typed text: each typing step needs it before saving.
+      const unfilled = steps.findIndex((step) => step.kind === "type" && !String(step.text || "").trim());
+      if (unfilled >= 0) { $("shortcutsStatus").textContent = t("第 {0} 步要输入的内容还没填（或删掉这一步）", unfilled + 1); return; }
       try {
-        await postShortcut("/mobile/shortcuts", { id: shortcut.id, name: name.value.trim(), steps });
+        await postShortcut("/mobile/shortcuts", { ...(shortcut.id ? { id: shortcut.id } : {}), name: name.value.trim(), ...(shortcut.app ? { app: shortcut.app } : {}), steps });
         if (disposed) return;
         $("shortcutsStatus").textContent = t("已保存");
         void loadShortcuts();
@@ -468,8 +473,61 @@
     task.card.appendChild(button);
   }
 
-  // Loaded whenever the workflows page opens.
-  new MutationObserver(() => { if (!disposed && !$("settingsWorkflows").hidden) void loadShortcuts(); })
+  // ---- 「演示一遍」 (2.8): the user's own taps in another app, recorded as a shortcut -----------------
+  // The accessibility service records them (DemonstrationRecorder) from the home screen until the bar's
+  // Done; back here the steps open in the editor as a new shortcut to name, check and save. Typed
+  // text is never recorded, so each typing step asks for what to type.
+  let demonstrationPending = false;
+
+  async function checkDemonstration() {
+    if (disposed) return;
+    try {
+      const state = await apiJson("/mobile/shortcuts/demonstration");
+      if (disposed) return;
+      if (state.recording) { $("shortcutsStatus").textContent = t("正在记录：做完点屏幕上方的「完成」"); return; }
+      if (!state.ready) {
+        if (demonstrationPending) $("shortcutsStatus").textContent = t("没有记录（已取消）");
+        demonstrationPending = false;
+        return;
+      }
+      const taken = await apiJson("/mobile/shortcuts/demonstration?take=1");
+      demonstrationPending = false;
+      if (disposed) return;
+      const steps = Array.isArray(taken.steps) ? taken.steps : [];
+      if (!steps.length) { $("shortcutsStatus").textContent = t("没有记下能重做的步骤：只记录其他应用里的点按、输入框和滑动"); return; }
+      if ($("settingsWorkflows").hidden) setSettingsPage("workflows");
+      const row = document.createElement("div");
+      row.className = "management-row shortcut-row";
+      const title = document.createElement("strong");
+      title.textContent = t("新的演示（还没保存）");
+      row.append(title);
+      $("shortcutsList").prepend(row);
+      const app = typeof taken.app === "string" ? taken.app : null;
+      editShortcut(row, { id: null, name: app ? t("在{0}里", appName(app)) : t("我的演示"), app, steps });
+      $("shortcutsStatus").textContent = t("记下了 {0} 步：检查一下，填好要输入的内容，取个名字保存", steps.length);
+    } catch (error) {
+      if (!disposed && demonstrationPending) $("shortcutsStatus").textContent = t("读取录制失败：{0}", error.message);
+    }
+  }
+
+  $("btnDemonstrate").addEventListener("click", async () => {
+    if (activeTask) { $("shortcutsStatus").textContent = t("请等待当前任务结束"); return; }
+    try {
+      await postShortcut("/mobile/shortcuts/demonstrate", { action: "start" });
+      demonstrationPending = true;
+      $("shortcutsStatus").textContent = t("正在记录：做完点屏幕上方的「完成」");
+    } catch (error) {
+      $("shortcutsStatus").textContent = t("没能开始记录：{0}", localizeError(error.message));
+    }
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (!disposed && document.visibilityState === "visible" && demonstrationPending) void checkDemonstration();
+  });
+
+  // Loaded whenever the workflows page opens (a demonstration finished while the page was away too).
+  new MutationObserver(() => {
+    if (!disposed && !$("settingsWorkflows").hidden) void loadShortcuts().then(() => { if (!disposed) return checkDemonstration(); });
+  })
     .observe($("settingsWorkflows"), { attributes: true, attributeFilter: ["hidden"] });
 
   // ---- Hosted limits (2.0): how far phone work nobody approves step by step may go -------------

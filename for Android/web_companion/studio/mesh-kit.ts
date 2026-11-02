@@ -68,6 +68,10 @@ export function torusShape(radius: number, tube: number, arc = Math.PI * 2, radi
   return cached(`torus:${radius}:${tube}:${arc}:${radial}:${tubular}`, () => new THREE.TorusGeometry(radius, tube, radial, tubular, arc))
 }
 
+export function capsuleShape(radius: number, length: number, radial = 16): THREE.BufferGeometry {
+  return cached(`capsule:${radius}:${length}:${radial}`, () => new THREE.CapsuleGeometry(radius, length, 6, radial))
+}
+
 export function dodecaShape(radius: number): THREE.BufferGeometry {
   return cached(`dodeca:${radius}`, () => new THREE.DodecahedronGeometry(radius, 0))
 }
@@ -115,6 +119,8 @@ function placed(shape: THREE.BufferGeometry, at: Placement, color: string): THRE
 /** Parts gathered for merging: by finish, and whether they cast shadows. */
 export class Batch {
   private readonly groups = new Map<string, THREE.BufferGeometry[]>()
+  /** Where the parts being added go, for a piece built in its own frame (see `within`). */
+  private frame: THREE.Matrix4 | null = null
 
   add(shape: THREE.BufferGeometry, color: string, at: Placement = {}, finish: Finish = 'matte', shadow = true): void {
     const key = `${finish}|${shadow ? 1 : 0}`
@@ -123,7 +129,25 @@ export class Batch {
       list = []
       this.groups.set(key, list)
     }
-    list.push(placed(shape, at, color))
+    const part = placed(shape, at, color)
+    if (this.frame) part.applyMatrix4(this.frame)
+    list.push(part)
+  }
+
+  /** Builds a piece in its own frame (its origin and facing), then sets it where `at` says. */
+  within(at: Placement, build: () => void): void {
+    const outer = this.frame
+    const local = new THREE.Matrix4().compose(
+      new THREE.Vector3(at.x ?? 0, at.y ?? 0, at.z ?? 0),
+      new THREE.Quaternion().setFromEuler(new THREE.Euler(at.rx ?? 0, at.ry ?? 0, at.rz ?? 0)),
+      new THREE.Vector3(at.sx ?? 1, at.sy ?? 1, at.sz ?? 1),
+    )
+    this.frame = outer ? outer.clone().multiply(local) : local
+    try {
+      build()
+    } finally {
+      this.frame = outer
+    }
   }
 
   /** One geometry per finish and shadow flag; the parts' own buffers are freed. */

@@ -56,6 +56,7 @@ import com.agentworkspace.mobile.localmodels.TrainedLocalModel
 import com.agentworkspace.mobile.workspace.WorkspaceFileActionController
 import com.agentworkspace.mobile.workspace.WorkspaceStorageAccess
 import com.agentworkspace.mobile.sharing.ShareInboxController
+import com.agentworkspace.mobile.embedded.EngineAddress
 import com.agentworkspace.mobile.embedded.EngineStartupLog
 import com.agentworkspace.mobile.update.AppSupportController
 import androidx.core.content.ContextCompat
@@ -82,7 +83,6 @@ import kotlin.math.roundToInt
 class WebUiActivity : ComponentActivity() {
 
     companion object {
-        private const val BASE_URL = "http://127.0.0.1:8080"
         /** Start-up help (logs, updates, model settings) shows after this long on the loading screen. */
         private const val STARTUP_HELP_DELAY_MS = 8000L
         private val IDENTITY_CONTEXT = "agent-workspace-mobile-identity-v1\n".toByteArray(Charsets.US_ASCII)
@@ -96,6 +96,9 @@ class WebUiActivity : ComponentActivity() {
         private const val ENGINE_START_IDLE_ATTEMPTS = 120
         private const val ENGINE_START_MAX_ATTEMPTS = 720
     }
+
+    /** Where the engine listens now (8080, or the next free port when another app holds it). */
+    private val baseUrl: String get() = EngineAddress.baseUrl(filesDir)
 
     /** The token the loaded console page uses; a different serve.token means the engine was restarted. */
     private var loadedEngineToken: String? = null
@@ -122,9 +125,29 @@ class WebUiActivity : ComponentActivity() {
 
     /** Deliver a CustomEvent with JSON detail to the trusted console page. */
     private fun dispatchPageEvent(name: String, detail: JSONObject) {
-        if (!::webView.isInitialized || isDestroyed || !trustedWorkspacePage ||
-            !isTrustedConsoleUrl(webView.url ?: return)) return
+        if (!::webView.isInitialized || isDestroyed) return
+        val url = webView.url
+        if (!trustedWorkspacePage || url == null || !isTrustedConsoleUrl(url)) {
+            // A result the user waits for (a pairing code read, files staged for a computer, a backup)
+            // can come while the page loads again: after Android rebuilt this screen behind the camera
+            // or the picker. Kept, and given once the console is there.
+            if (name in keptPageEvents) {
+                pendingPageEvents.addLast(name to detail)
+                while (pendingPageEvents.size > 8) pendingPageEvents.removeFirst()
+            }
+            return
+        }
         webView.evaluateJavascript("window.dispatchEvent(new CustomEvent(${JSONObject.quote(name)}, { detail: $detail }));", null)
+    }
+    private val keptPageEvents = setOf("agent-pairing-scan", "agent-computer-files", "agent-backup")
+    private val pendingPageEvents = ArrayDeque<Pair<String, JSONObject>>()
+
+    private fun deliverPageEvents() {
+        if (!::webView.isInitialized || !trustedWorkspacePage) return
+        while (pendingPageEvents.isNotEmpty()) {
+            val (name, detail) = pendingPageEvents.removeFirst()
+            dispatchPageEvent(name, detail)
+        }
     }
     private var initializationJob: Job? = null
     private val sharedTexts = ArrayDeque<String>()
@@ -815,6 +838,10 @@ class WebUiActivity : ComponentActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Copies staged for a computer and never sent go after a day, not only when the next is staged.
+        if (savedInstanceState == null) {
+            activityScope.launch(Dispatchers.IO) { runCatching { com.agentworkspace.mobile.devices.ComputerSend.sweepStale(applicationContext) } }
+        }
         shareInbox = ShareInboxController.get(this)
         shareInbox.addListener(shareInboxListener)
         incomingShareBatchId = savedInstanceState?.getString("incoming-share-batch-id") ?: UUID.randomUUID().toString()
@@ -1058,6 +1085,7 @@ class WebUiActivity : ComponentActivity() {
                             deliverComputerShare()
                             deliverTeamShare()
                             deliverComputer()
+                            deliverPageEvents()
                             if (voicePending) { voicePending = false; launchVoiceInput() }
                             requestTaskNotificationPermissionOnce()
                         }
@@ -1415,6 +1443,7 @@ class WebUiActivity : ComponentActivity() {
             deliverComputerShare()
             deliverTeamShare()
             deliverComputer()
+            deliverPageEvents()
             checkEngineOnResume()
             // Back from the overlay permission screen: show the ball now that it may draw.
             FloatingBallService.onAppResumed(this)
@@ -1998,11 +2027,11 @@ class WebUiActivity : ComponentActivity() {
                                 continue
                             }
                             val step = EngineStartupLog.lastStep(this@WebUiActivity)?.let { "\n$it" }.orEmpty()
-                            // The engine listens on 127.0.0.1:8080; another app's server there (a web
-                            // server in Termux, a proxy) keeps it from starting. Say so, not errno 98.
+                            // The engine takes 127.0.0.1:8080 or the next free port up to 8089; other apps' servers
+                            // on all of them (web servers in Termux, proxies) keep it from starting. Say so, not errno 98.
                             if ("Address already in use" in step) throw IllegalStateException(UiText.of(this@WebUiActivity,
-                                "手机上另一个应用占用了端口 8080（例如 Termux 里运行的网页服务或代理），引擎无法启动。关掉那个应用或服务后点「重试连接」。",
-                                "Another app on this phone is using port 8080 (a web server in Termux or a proxy, for example), so the engine cannot start. Close it, then tap Retry."))
+                                "手机上其他应用占用了端口 8080 到 8089（例如 Termux 里运行的网页服务或代理），引擎无法启动。关掉那些应用或服务后点「重试连接」。",
+                                "Other apps on this phone are using ports 8080 to 8089 (web servers in Termux or proxies, for example), so the engine cannot start. Close them, then tap Retry."))
                             throw IllegalStateException(UiText.of(this@WebUiActivity, "本地 Python 服务启动失败，可点右上角“导出日志”$step", "The local Python service failed to start; use Export logs$step"))
                         }
                         token = readServeToken()
@@ -2041,7 +2070,7 @@ class WebUiActivity : ComponentActivity() {
                             }
                         } else {
                             unanswered = 0
-                            val conn = URL("$BASE_URL/health").openConnection() as HttpURLConnection
+                            val conn = URL("$baseUrl/health").openConnection() as HttpURLConnection
                             try {
                                 conn.setRequestProperty("Authorization", "Bearer $token")
                                 conn.connectTimeout = 1000
@@ -2058,7 +2087,7 @@ class WebUiActivity : ComponentActivity() {
                         }
                     }
                     if (ready && !token.isNullOrEmpty()) {
-                        "$BASE_URL/console?token=${Uri.encode(token)}"
+                        "$baseUrl/console?token=${Uri.encode(token)}"
                     } else {
                         null
                     }
@@ -2142,12 +2171,12 @@ class WebUiActivity : ComponentActivity() {
 
     /**
      * Challenge-response with the engine before the token leaves the app: another process holding
-     * 127.0.0.1:8080 cannot compute the HMAC because it never sees the private serve.token.
+     * the engine's port cannot compute the HMAC because it never sees the private serve.token.
      */
     private fun verifyEngineIdentity(token: String): Boolean {
         val challenge = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
             .let { android.util.Base64.encodeToString(it, android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING) }
-        val conn = URL("$BASE_URL/mobile/identity?challenge=$challenge").openConnection() as HttpURLConnection
+        val conn = URL("$baseUrl/mobile/identity?challenge=$challenge").openConnection() as HttpURLConnection
         return try {
             conn.connectTimeout = 1000
             conn.readTimeout = 1000
@@ -2229,7 +2258,7 @@ class WebUiActivity : ComponentActivity() {
 
     private fun isLocalConsoleUrl(url: String): Boolean = runCatching {
         val uri = URI(url)
-        uri.scheme == "http" && uri.host == "127.0.0.1" && uri.port == 8080 && uri.userInfo == null
+        uri.scheme == "http" && uri.host == "127.0.0.1" && uri.port == EngineAddress.port(filesDir) && uri.userInfo == null
     }.getOrDefault(false)
 
     private fun handleNavigation(url: String): Boolean {

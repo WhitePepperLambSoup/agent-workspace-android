@@ -24,6 +24,8 @@
 
   function updateTaskStatus(text = "", { resume = false, retry = false, reconnect = false, idle = false } = {}) {
     elements.taskStatusBar.hidden = !text;
+    // The plan's bar shows only while a running task's line is up (renderProgress in 70-tasks.js).
+    $("taskProgress").hidden = true;
     // Terminal states say so explicitly; the label text is translated and must not drive logic.
     elements.taskStatusBar.dataset.busy = String(!!text && !resume && !retry && !reconnect && !idle);
     elements.taskStateLabel.textContent = text;
@@ -452,6 +454,8 @@
     saveDraft();
     detachSessionTask();
     currentWorkspaceId = id;
+    // The campus's places read the new workspace's files afresh (a tap opened the old one's).
+    forgetPlaceData();
     writeStorage(workspaceKey, id);
     resetFilePreview();
     fileEditor = null;

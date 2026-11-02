@@ -650,5 +650,5 @@ class MobileEvaluations:
             "running": len(records) - len(finished),
             "verified_successes": success,
             "success_rate": success / len(finished) if finished else None,
-            "scope": "recorded tasks only; not a competitor benchmark",
+            "scope": "recorded tasks only; not a general benchmark",
         }

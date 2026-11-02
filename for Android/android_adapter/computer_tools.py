@@ -45,6 +45,13 @@ class AskComputerTool:
                     "description": "Title of an existing conversation on the computer to continue instead "
                     "of starting a new one.",
                 },
+                "team": {
+                    "type": "boolean",
+                    "description": "Have the computer's expert team do it: its lead works on it and "
+                    "calls specialists for other fields or for independent parts side by side. For a "
+                    "large part that needs several fields or splits into independent pieces; slower "
+                    "and costlier for anything else. Only if the computer offers its team.",
+                },
             },
             "required": ["task"],
             "additionalProperties": False,
@@ -53,6 +60,10 @@ class AskComputerTool:
         side_effect="network",
         capability=Capability.NETWORK_READ,
     )
+
+    def __init__(self) -> None:
+        # How often each task was asked in its turn (by turn and task).
+        self._asked: dict[str, int] = {}
 
     @property
     def spec(self) -> ToolSpec:
@@ -70,14 +81,28 @@ class AskComputerTool:
         task = arguments.get("task")
         if not isinstance(task, str) or not task.strip() or len(task) > MAX_TASK_CHARS:
             raise ToolArgumentError(f"'task' must be 1 to {MAX_TASK_CHARS} characters")
+        import mobile_private_numbers
+
+        if mobile_private_numbers.find(task):
+            raise ToolArgumentError(
+                "the task holds an ID card or bank card number; those stay on this phone. Leave it out or "
+                "mask it (keep the first and last four digits) and ask again"
+            )
         computer = arguments.get("computer") if isinstance(arguments.get("computer"), str) else None
         conversation = arguments.get("conversation") if isinstance(arguments.get("conversation"), str) else None
-        # The same call (an interrupted task resumed) reuses its request, so the computer runs it once.
-        digest = hashlib.sha256(f"{task}\0{computer}\0{conversation}".encode()).hexdigest()[:16]
-        request_id = f"ask:{getattr(context, 'correlation_id', '')}:{digest}"[:128]
+        team = arguments.get("team") is True
+        # The same call (an interrupted task resumed) reuses its request, so the computer runs it once;
+        # the same task asked again later in the turn (run the tests again after a fix) is a new request.
+        digest = hashlib.sha256(f"{task}\0{computer}\0{conversation}{chr(0) + 'team' if team else ''}".encode()).hexdigest()[:16]
+        key = f"{getattr(context, 'correlation_id', '')}:{digest}"
+        repeat = self._asked.get(key, 0)
+        self._asked[key] = repeat + 1
+        while len(self._asked) > 200:
+            self._asked.pop(next(iter(self._asked)))
+        request_id = f"ask:{key}{f':{repeat}' if repeat else ''}"[:128]
         try:
             outcome = await link.ask_computer(task.strip(), computer=computer, conversation=conversation,
-                                              request_id=request_id)
+                                              request_id=request_id, team=team)
         except ValueError as error:
             raise ToolError(str(error)) from None
         if outcome["state"] != "completed":

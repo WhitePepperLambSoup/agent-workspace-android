@@ -364,8 +364,13 @@ class _Handler(BaseHTTPRequestHandler):
             if self._response_started:
                 return  # part of a response is already sent; the client sees it end early
             code = "engine_busy" if busy else "internal_error"
+            message = (
+                "The engine is busy; try again shortly"
+                if busy
+                else "The engine hit an internal error; details are in the diagnostics log"
+            )
             with suppress(OSError):
-                self._reply(503 if busy else 500, {"error": code, "code": code, "retryable": True})
+                self._reply(503 if busy else 500, {"error": message, "code": code, "retryable": True})
 
     def _handle_get(self) -> None:
         if not self._validate_host():
@@ -896,6 +901,9 @@ class _Handler(BaseHTTPRequestHandler):
                 self._reject_request(401, {"error": "approval scope is required"})
                 return
             self._upload_skills()
+            return
+        if parts == ["mobile", "replays", "upload"]:
+            self._upload_replay()
             return
         payload = self._read_json(
             _MAX_ATTACHMENT_JSON_BYTES if parts == ["mobile", "attachments"] else _MAX_BODY_BYTES
@@ -1437,6 +1445,37 @@ class _Handler(BaseHTTPRequestHandler):
             if not consumed:
                 self.close_connection = True
 
+    def _upload_replay(self) -> None:
+        """A task's replay film the console recorded (raw body), kept in the conversation's exports/."""
+        from mobile_task_replay import save_replay
+
+        query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+        consumed = False
+        previous_timeout = self.connection.gettimeout()
+        self.connection.settimeout(60)
+        try:
+            if any(len(values) != 1 for values in query.values()):
+                raise ValueError("upload parameters may not repeat")
+            session = self._api.runtime.service.get_session(query.get("session_id", [""])[0])
+            body, length = self._upload_body()
+            result = save_replay(session.workspace, query.get("title", [""])[0][:120], query.get("format", [""])[0],
+                                 body, content_length=length)
+            consumed = True
+        except KeyError:
+            self._reject_request(404, {"error": "unknown session"})
+        except (ValueError, TypeError) as error:
+            self._reject_request(400, {"error": " ".join(str(error).split())[:2000]})
+        except TimeoutError:
+            self._reply(408, {"error": "upload timed out; save the film again"})
+        except OSError:
+            self._reject_request(500, {"error": "could not save the film"})
+        else:
+            self._reply(201, result)
+        finally:
+            self.connection.settimeout(previous_timeout)
+            if not consumed:
+                self.close_connection = True
+
     def _upload_attachment(self) -> None:
         query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
         consumed = False
@@ -1857,6 +1896,12 @@ class MobileGateway:
         for session_id in session_ids:
             if not self.session_exists(session_id):
                 raise KeyError(session_id)
+        # Its experts' and sub-tasks' conversations hold the question and their reports: they go too.
+        from mobile_subagents import forget_helpers, helper_sessions
+
+        helpers = [helper for helper, parent in helper_sessions().items()
+                   if parent in session_ids and helper not in session_ids and self.session_exists(helper)]
+        session_ids = [*session_ids, *helpers]
         if any(
             str(task.state) in _ACTIVE_TASK_STATES
             for session_id in session_ids
@@ -1908,6 +1953,8 @@ class MobileGateway:
                 removed_schedules = schedules.forget_sessions(gone)
                 if removed_schedules:
                     management.mirror_schedules()
+        with contextlib.suppress(Exception):
+            forget_helpers(gone)
         return {"deleted": session_ids, "count": deleted, "schedules_removed": removed_schedules}
 
     def discard_empty_session(self, session_id: str) -> dict[str, Any]:

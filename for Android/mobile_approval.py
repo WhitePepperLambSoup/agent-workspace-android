@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import os
+import threading
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
@@ -97,6 +98,10 @@ def provider_origin(endpoint: Any) -> str:
     return f"{parts.scheme}://{host}" + (f":{port}" if port else "")
 
 
+# One change at a time to the trusted providers' file, whichever broker makes it.
+_TRUSTED_LOCK = threading.Lock()
+
+
 def _trusted_file() -> Path | None:
     data = os.getenv("AGENT_WORKSPACE_DATA_DIR")
     return Path(data) / "trusted-providers.json" if data else None
@@ -118,40 +123,44 @@ class MobileApprovalBroker:
         # A task that read instructions in outside content (mobile_injection): nothing is covered.
         self._distrusted: tuple[str, str] | None = None
         self._pending: dict[str, _PendingApproval] = {}
-        self._trusted_providers: set[str] | None = None
 
     # ---- Model providers the user trusts -----------------------------------------------------------
     # Sending a conversation to the model provider asked in every conversation, before every first
     # answer; a new user cannot judge it. A provider set up on the first-use sheet, or approved with
     # "always", is sent to without asking. Only that origin: another address still asks.
 
+    # Read from the file each time (a few bytes): every conversation's broker (one per workspace)
+    # sees a provider another one trusted or the user removed at once, and a change is made on what
+    # the file holds now, so a removed provider is not written back from an older copy.
     def trusted_providers(self) -> set[str]:
-        if self._trusted_providers is None:
-            path = _trusted_file()
-            try:
-                value = json.loads(path.read_text(encoding="utf-8")) if path and path.is_file() else []
-            except (OSError, ValueError):
-                value = []
-            self._trusted_providers = {item for item in value if isinstance(item, str) and provider_origin(item) == item}
-        return self._trusted_providers
+        path = _trusted_file()
+        try:
+            value = json.loads(path.read_text(encoding="utf-8")) if path and path.is_file() else []
+        except (OSError, ValueError):
+            value = []
+        if not isinstance(value, list):
+            value = []
+        return {item for item in value if isinstance(item, str) and provider_origin(item) == item}
 
     def trust_provider(self, endpoint: str) -> str:
         origin = provider_origin(endpoint)
         if not origin:
             raise ValueError("endpoint must be an http(s) address")
-        trusted = self.trusted_providers()
-        if origin not in trusted:
-            trusted.add(origin)
-            self._save_trusted(trusted)
+        with _TRUSTED_LOCK:
+            trusted = self.trusted_providers()
+            if origin not in trusted:
+                trusted.add(origin)
+                self._save_trusted(trusted)
         return origin
 
     def distrust_provider(self, origin: str) -> bool:
         """Asks again before sending to this provider (Execution mode page)."""
-        trusted = self.trusted_providers()
-        if origin not in trusted:
-            return False
-        trusted.discard(origin)
-        self._save_trusted(trusted)
+        with _TRUSTED_LOCK:
+            trusted = self.trusted_providers()
+            if origin not in trusted:
+                return False
+            trusted.discard(origin)
+            self._save_trusted(trusted)
         return True
 
     @staticmethod

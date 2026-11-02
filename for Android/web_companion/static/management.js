@@ -393,7 +393,7 @@
     $("btnCheckUpdates").disabled = !supported;
     $("autoUpdateToggle").disabled = typeof native?.setAutoUpdateCheck !== "function";
     $("autoUpdateToggle").checked = value.autoCheck !== false;
-    const checked = value.lastCheckedMs ? new Date(value.lastCheckedMs).toLocaleString() : t("尚未检查");
+    const checked = value.lastCheckedMs ? new Date(value.lastCheckedMs).toLocaleString(i18n?.locale) : t("尚未检查");
     status("updateStatus", supported ? t("当前版本 {0} · 上次检查 {1}", value.version || "?", checked) : t("当前版本不支持应用内更新"));
     $("menuAboutSummary").textContent = value.version
       ? t("版本 {0} · 检查更新、导出诊断日志", value.version)
@@ -405,7 +405,8 @@
     catch (error) { if (isCurrent()) status("toolchainStatus", error.message, true); return; }
     if (!isCurrent()) return;
     const tools = value.executables || value.tools || {};
-    terms("toolchainSummary", [[t("状态"), value.available ? t("已验证可用") : value.state || t("未安装")], [t("下载进度"), `${bytes(value.downloaded_bytes || 0)} / ${bytes(value.total_bytes || value.download_size)}`], [t("已验证工具"), Object.keys(tools).join(t("、")) || t("尚未探测")]]);
+    const states = { not_installed: t("未安装"), downloading: t("下载中"), extracting: t("解压中"), probing: t("验证中"), cancelling: t("正在取消"), paused: t("已暂停"), failed: t("安装失败"), probe_failed: t("验证失败"), needs_probe: t("需要验证"), outdated: t("有新版本") };
+    terms("toolchainSummary", [[t("状态"), value.available ? t("已验证可用") : states[value.state] || value.state || t("未安装")], [t("下载进度"), `${bytes(value.downloaded_bytes || 0)} / ${bytes(value.total_bytes || value.download_size)}`], [t("已验证工具"), Object.keys(tools).join(t("、")) || t("尚未探测")]]);
     const active = ["downloading", "extracting", "probing", "cancelling"].includes(value.state);
     $("btnToolchainInstall").disabled = active || value.available || ui.context().activeTask;
     $("btnToolchainProbe").disabled = active || !value.installed;
@@ -414,7 +415,9 @@
     $("btnToolchainRemove").disabled = active || ui.context().activeTask;
     $("btnToolchainRestart").hidden = !value.installed;
     $("btnToolchainRestart").disabled = typeof native?.restartEngine !== "function" || ui.context().activeTask;
-    status("toolchainStatus", localizeError(value.reason || value.error) || "");
+    const outdated = value.state === "outdated" && !value.reason;
+    const waiting = value.state === "downloading" && value.network_retry;
+    status("toolchainStatus", waiting ? t("网络中断，正在重试（第 {0} 次）", value.network_retry) : outdated ? t("工具链有新版本，重新安装后才能使用：点「安装工具链」。") : localizeError(value.reason || value.error) || "");
     window.clearTimeout(toolchainPoll);
     if (active) toolchainPoll = window.setTimeout(() => { if (!closed && !$("settingsDoctor").hidden && !$("settingsOverlay").hidden) toolchain(isCurrent); }, 2500);
   }
@@ -717,7 +720,7 @@
     const shown = items.filter((item) => (!memoryFilter.topic || item.topic === memoryFilter.topic) && memoryMatches(item, memoryFilter.query));
     $("memoryList").replaceChildren();
     for (const item of shown) {
-      const when = item.updated_at ? new Date(item.updated_at).toLocaleString() : "";
+      const when = item.updated_at ? new Date(item.updated_at).toLocaleString(i18n?.locale) : "";
       const element = row(item.content, `${memoryTopicLabel(item.topic)} · ${item.source === "auto" ? t("AI 记的") : t("你添加的")}${when ? ` · ${when}` : ""}`);
       element.classList.add("memory-row");
       action(element, "pencil", t("编辑"), () => {
@@ -767,7 +770,7 @@
       });
       $("appNotesList").append(element);
       for (const note of app.notes || []) {
-        const child = row(note.text, note.saved_ms ? new Date(note.saved_ms).toLocaleString() : "");
+        const child = row(note.text, note.saved_ms ? new Date(note.saved_ms).toLocaleString(i18n?.locale) : "");
         child.classList.add("management-row-child");
         action(child, "trash-2", t("删除"), async () => {
           await appNotes(undefined, await post("/mobile/app-notes", { action: "delete_note", package_name: app.package_name, id: note.id }));
@@ -1312,7 +1315,7 @@
     const log = $("notificationRuleLog");
     log.replaceChildren();
     for (const entry of (value.log || []).slice(0, 20)) {
-      log.append(row(entry.rule_name, `${new Date(entry.at).toLocaleString()} · ${ruleLogStates[entry.status] || entry.status}`));
+      log.append(row(entry.rule_name, `${new Date(entry.at).toLocaleString(i18n?.locale)} · ${ruleLogStates[entry.status] || entry.status}`));
     }
     if (!(value.log || []).length) log.append(row(t("还没有触发记录")));
     status("notificationRulesStatus", value.enabled && !access.granted ? t("还没有通知使用权，规则不会触发") : "", value.enabled && !access.granted);
@@ -1330,6 +1333,7 @@
     $("floatingBallToggle").checked = on;
     $("btnAddQuickTile").hidden = value.tile_request !== true;
     $("widgetPinSection").hidden = value.widget_pin !== true;
+    try { $("studioWidgetMotionToggle").checked = JSON.parse(native?.studioWidgetState?.() || "{}").motion !== false; } catch { /* keeps its default */ }
     const declined = ballPermissionAsked && !on;
     ballPermissionAsked = false;
     status("globalEntryStatus", declined ? t("没有获得“显示在其他应用上层”权限，悬浮球未开启") : "");
@@ -1500,6 +1504,16 @@
     job_sent: t("电脑发来请求"), job_received: t("收到电脑的请求"), job_accepted: t("接受了电脑的请求"), job_rejected: t("拒绝了电脑的请求"), job_finished: t("完成了电脑的请求"),
     job_failed: t("电脑的请求没有完成"), job_cancelled: t("电脑取消了请求"), knowledge_synced: t("同步了知识库"), wake_sent: t("发送了唤醒"), address_changed: t("换到新地址"),
     review_comment: t("评论了代码改动"), review_followup: t("把评论交给电脑上的 AI") };
+  /** What an activity entry says beside its name: the engine writes a few of them in English or as an id. */
+  function activityDetail(entry) {
+    const detail = String(entry.detail || "");
+    const decided = /^(allowed|refused): (.*)$/s.exec(detail);
+    if (entry.action === "approval_decided" && decided) return decided[1] === "allowed" ? t("允许：{0}", decided[2]) : t("拒绝：{0}", decided[2]);
+    const synced = /^to phone (\d+), to computer (\d+)$/.exec(detail);
+    if (entry.action === "knowledge_synced" && synced) return t("到手机 {0} 份，到电脑 {1} 份", synced[1], synced[2]);
+    if (entry.action === "turn_stopped") return remoteSessionTitles.get(detail) || "";
+    return detail;
+  }
   const jobStates = { waiting: t("等你决定"), accepted: t("已接受"), running: t("正在做"), succeeded: t("已完成"), failed: t("没有完成"), rejected: t("已拒绝"), expired: t("已过期"), cancelled: t("电脑已取消") };
   let computerPoll = null;
   let connectionsPoll = null;
@@ -1513,7 +1527,7 @@
   function allowed(host, scope) { return !(host?.scopes || []).length || host.scopes.includes(scope); }
   function when(value) {
     const time = typeof value === "number" ? new Date(value * 1000) : new Date(value || "");
-    return Number.isFinite(time.getTime()) ? time.toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
+    return Number.isFinite(time.getTime()) ? time.toLocaleString(i18n?.locale, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
   }
   function textButton(parent, symbol, label, handler, primary = false) {
     const button = namedAction(parent, symbol, label, handler);
@@ -1665,9 +1679,43 @@
     if ([...selector.options].some((option) => option.value === previous)) selector.value = previous;
     updateRemoteWorkspace();
     $("btnQueueHandoff").disabled = !data || !selector.options.length;
+    // The computer's expert team, when its app offers it (feature expert_team).
+    $("handoffTeamRow").hidden = !(host.api === "mobile" && has(host, "expert_team"));
+    if ($("handoffTeamRow").hidden) $("handoffTeam").checked = false;
     renderRunning();
   }
   function selectedRemote() { const id = $("remoteSessionSelector").value; return id ? remoteSessions.find((item) => item.id === id) || null : null; }
+  /**
+   * What the user accepts before something goes to a computer, for a task, a whole conversation or
+   * files with a request: a conversation there that approves everything by itself (2.1), and ID or
+   * bank card numbers, which usually stay with the phone's own model (2.2). [found]: the numbers
+   * ({kind, masked}; kind as the page names it, or the engine's id_card / bank_card). Returns what to
+   * send along ({mask: true} to mask the numbers), or null when the user stops.
+   */
+  async function acceptHandoff(host, autonomy, found) {
+    const confirmed = {};
+    if (broadAutonomy.has(autonomy)) {
+      if (!has(host, "autonomy_ack")) throw new Error(t("电脑上的版本还不接受交到这类对话的任务，请先更新电脑上的 Agent Workspace"));
+      if (!allowed(host, "broad_autonomy")) throw new Error(t("电脑还没允许这台手机往自动批准的对话交任务；在电脑的「手机连接」里给这台手机勾上这项权限"));
+      const choice = await choose(t("电脑会直接执行"),
+        t("电脑上这个对话设为「{0}」：交过去的任务里，运行命令、修改和删除文件、联网等操作都会直接在电脑上执行，不会再询问任何人。拿到这台手机配对令牌的人也能这样做。\n确定要交给它吗？", autonomyNames[autonomy]),
+        [["send", t("我了解风险，交给电脑"), "send", true], ["x", t("取消"), "cancel"]]);
+      if (choice !== "send") return null;
+      confirmed.accept_autonomy = autonomy;
+    }
+    if (found.length) {
+      const kindName = (kind) => (kind === "id_card" ? t("身份证号") : kind === "bank_card" ? t("银行卡号") : kind);
+      const numbers = found.map((item) => `${kindName(item.kind)} ${item.masked}`).join(t("、"));
+      const model = host.model ? t("{0}，{1}", host.model.name, host.model.location === "computer" ? t("在这台电脑上运行") : t("云端服务")) : t("电脑当前的模型");
+      const choice = await choose(t("这段内容里有个人信息"),
+        t("要交给电脑的内容里有：{0}。平时这类内容只交给手机上的模型。交给电脑后，内容会发到电脑，由电脑当前的模型（{1}）处理。", numbers, model),
+        [...(has(host, "private_ack") ? [["send", t("交给电脑"), "send"]] : []), ["shield", t("打码后交给电脑"), "mask", true], ["x", t("取消"), "cancel"]]);
+      if (choice === "cancel" || !choice) return null;
+      if (choice === "mask") confirmed.mask = true;
+      else { confirmed.on_device = true; confirmed.private_accepted = true; }
+    }
+    return confirmed;
+  }
   /** The settings the task would run under on the computer: the conversation's, or a new one's. */
   function targetAutonomy() {
     const session = selectedRemote();
@@ -1944,7 +1992,7 @@
       addresses.append(row(address.url, [address.kind === "tailscale" ? "Tailscale" : t("局域网"), address.usable ? t("连不上当前地址时会试它") : t("需要电脑开启 HTTPS")].join(" · ")));
     }
     const activity = $("computerActivity"); activity.replaceChildren();
-    for (const entry of value.activity || []) activity.append(row(activityNames[entry.action] || entry.action, `${when(entry.at)} · ${entry.detail}`));
+    for (const entry of value.activity || []) activity.append(row(activityNames[entry.action] || entry.action, `${when(entry.at)} · ${activityDetail(entry)}`));
     if (!(value.activity || []).length) activity.append(row(t("还没有记录"), ""));
     $("computerRemoteActivity").hidden = !has(host, "device");
   }
@@ -2897,13 +2945,17 @@
     } else await globalEntry();
   }, "globalEntryStatus");
   on("btnAddQuickTile", "click", () => { nativeResult("requestQuickSettingsTile"); }, "globalEntryStatus");
-  for (const id of ["btnPinWidgetAsk", "btnPinWidgetTasks", "btnPinWidgetQuickTasks"]) {
+  for (const id of ["btnPinWidgetAsk", "btnPinWidgetTasks", "btnPinWidgetQuickTasks", "btnPinWidgetStudio"]) {
     on(id, "click", () => {
       const asked = JSON.parse(native.requestPinWidget($(id).dataset.widget) || "{}").ok === true;
+      // The studio widget's pictures are drawn once it is placed (app/36-studio-widget.js).
+      if (asked && id === "btnPinWidgetStudio") window.dispatchEvent(new CustomEvent("agent-studio-widget-pinned"));
       // The launcher shows its own confirmation; a launcher without pinning needs the manual route.
       status("globalEntryStatus", asked ? t("请在弹出的窗口里确认添加") : t("无法自动添加，请长按桌面空白处，从“小组件”里添加"), !asked);
     }, "globalEntryStatus");
   }
+  // The studio widget's pictures move while a task runs (a little more power), or stay still.
+  on("studioWidgetMotionToggle", "change", () => { native?.setStudioWidgetMotion?.($("studioWidgetMotionToggle").checked); }, "globalEntryStatus");
   on("servicesKeepAwakeToggle", "change", async () => {
     try { await services(undefined, await post("/mobile/services/settings", { keep_awake: $("servicesKeepAwakeToggle").checked })); }
     catch (error) { $("servicesKeepAwakeToggle").checked = !$("servicesKeepAwakeToggle").checked; throw error; }
@@ -3123,30 +3175,12 @@
     if (!host) throw new Error(t("请先选择配对设备"));
     const context = ui.context(); let prompt = $("handoffPrompt").value.trim(); if (!prompt) throw new Error(t("请输入接力指令"));
     if ($("handoffContext").checked) prompt += t("\n\n用户选择附带的对话上下文：\n{0}", context.recentText);
-    const confirmed = {};
-    // Conversations that approve everything by themselves: told plainly, then the user's choice (2.1).
-    const autonomy = targetAutonomy();
-    if (broadAutonomy.has(autonomy)) {
-      if (!has(host, "autonomy_ack")) throw new Error(t("电脑上的版本还不接受交到这类对话的任务，请先更新电脑上的 Agent Workspace"));
-      if (!allowed(host, "broad_autonomy")) throw new Error(t("电脑还没允许这台手机往自动批准的对话交任务；在电脑的「手机连接」里给这台手机勾上这项权限"));
-      const choice = await choose(t("电脑会直接执行"),
-        t("电脑上这个对话设为「{0}」：交过去的任务里，运行命令、修改和删除文件、联网等操作都会直接在电脑上执行，不会再询问任何人。拿到这台手机配对令牌的人也能这样做。\n确定要交给它吗？", autonomyNames[autonomy]),
-        [["send", t("我了解风险，交给电脑"), "send", true], ["x", t("取消"), "cancel"]]);
-      if (choice !== "send") return;
-      confirmed.accept_autonomy = autonomy;
-    }
-    // ID and bank card numbers usually stay with the phone's own model (2.2): mask, send, or stop.
     const found = typeof ui.privateParts === "function" ? ui.privateParts(prompt) : [];
-    if (found.length) {
-      const numbers = found.map((item) => `${item.kind} ${item.masked}`).join(t("、"));
-      const model = host.model ? t("{0}，{1}", host.model.name, host.model.location === "computer" ? t("在这台电脑上运行") : t("云端服务")) : t("电脑当前的模型");
-      const choice = await choose(t("这段内容里有个人信息"),
-        t("要交给电脑的内容里有：{0}。平时这类内容只交给手机上的模型。交给电脑后，内容会发到电脑，由电脑当前的模型（{1}）处理。", numbers, model),
-        [...(has(host, "private_ack") ? [["send", t("交给电脑"), "send"]] : []), ["shield", t("打码后交给电脑"), "mask", true], ["x", t("取消"), "cancel"]]);
-      if (choice === "cancel") return;
-      if (choice === "mask") for (const item of found) prompt = prompt.split(item.value).join(item.masked);
-      else { confirmed.on_device = true; confirmed.private_accepted = true; }
-    }
+    const confirmed = await acceptHandoff(host, targetAutonomy(), found);
+    if (!confirmed) return;
+    if (confirmed.mask) { for (const item of found) prompt = prompt.split(item.value).join(item.masked); delete confirmed.mask; }
+    // The computer's lead picks the specialists from its library, and has the draft reviewed.
+    if ($("handoffTeam").checked && has(host, "expert_team")) Object.assign(confirmed, { team: "auto", team_review: true });
     if (!$("remoteSessionSelector").value && host.api === "mobile") {
       const created = await waitOperation(await post("/mobile/link/new-task", { host_id: host.host_id, prompt, confirmed }), "computerStatus", t("正在交给电脑..."));
       status("computerStatus", t("已在 {0} 上新建对话「{1}」并开始，结果会出现在「待发送与接力」", host.name, created?.title || ""));
@@ -3205,8 +3239,16 @@
     const host = selectedHost;
     if (!outgoing.length) throw new Error(t("先选要发送的文件"));
     const files = outgoing.map((file) => ({ staged: file.staged, name: file.name }));
-    const instruction = $("computerInstruction").value.trim();
-    const result = await waitOperation(await post("/mobile/link/send-files", { host_id: host.host_id, files, instruction: instruction || null,
+    let instruction = $("computerInstruction").value.trim();
+    // A request with the files starts a task in a new conversation there: confirmed as a handed-over task.
+    let confirmed = {};
+    if (instruction) {
+      const found = typeof ui.privateParts === "function" ? ui.privateParts(instruction) : [];
+      confirmed = await acceptHandoff(host, host.new_conversation_autonomy || null, found);
+      if (!confirmed) return;
+      if (confirmed.mask) { for (const item of found) instruction = instruction.split(item.value).join(item.masked); delete confirmed.mask; }
+    }
+    const result = await waitOperation(await post("/mobile/link/send-files", { host_id: host.host_id, files, instruction: instruction || null, confirmed,
       knowledge: $("computerToKnowledge").checked ? t("来自手机") : null }), "computerStatus", t("正在发送 {0} 个文件...", files.length));
     // What went is no longer on the phone; what did not stays here to send again.
     const went = new Set(result.sent.map((item) => item.staged));
@@ -3254,7 +3296,7 @@
     const list = $("computerRemoteActivityList"); list.replaceChildren(row(t("读取中..."), ""));
     try {
       const device = await ui.apiJson(`/mobile/link/device?host_id=${encodeURIComponent(selectedHost.host_id)}`);
-      list.replaceChildren(...(device.activity || []).map((entry) => row(activityNames[entry.action] || entry.action, `${when(entry.at)} · ${entry.detail || ""}`)));
+      list.replaceChildren(...(device.activity || []).map((entry) => row(activityNames[entry.action] || entry.action, `${when(entry.at)} · ${activityDetail(entry)}`)));
       if (!(device.activity || []).length) list.replaceChildren(row(t("还没有记录"), ""));
     } catch (error) { list.replaceChildren(row(error.message, "")); }
   });
@@ -3284,7 +3326,13 @@
     const hostId = $("relayComputer").value;
     const sessionId = ui.context().sessionId;
     if (!hostId || !sessionId) throw new Error(t("先选一台电脑"));
-    const created = await waitOperation(await post("/mobile/link/relay", { host_id: hostId, session_id: sessionId, prompt: $("relayPrompt").value.trim() || null }), "relayStatus", t("正在发到电脑..."));
+    const prompt = $("relayPrompt").value.trim() || null;
+    // The whole conversation goes: the engine reads it for personal numbers, and the user decides.
+    const check = await post("/mobile/link/relay-check", { host_id: hostId, session_id: sessionId, prompt });
+    const host = (await ui.apiJson("/mobile/connections")).hosts?.find((item) => item.host_id === hostId) || { host_id: hostId, features: check.private_ack ? ["private_ack"] : [] };
+    const confirmed = await acceptHandoff(host, check.autonomy, check.private || []);
+    if (!confirmed) return;
+    const created = await waitOperation(await post("/mobile/link/relay", { host_id: hostId, session_id: sessionId, prompt, confirmed }), "relayStatus", t("正在发到电脑..."));
     $("relayPrompt").value = "";
     status("relayStatus", t("已在电脑上新建对话「{0}」{1}", created?.title || "", created?.delivery ? t("，结果会出现在「待发送与接力」") : ""));
   }, "relayStatus");

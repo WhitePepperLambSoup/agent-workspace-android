@@ -119,6 +119,7 @@
   function renderTaskEvent(task, event) {
     if (event.task_id !== task.id || event.sequence <= task.sequence) return;
     task.sequence = event.sequence;
+    task.lastEventAt = Date.now();
     // The studio behind the conversation follows the task's steps.
     queueStudioRefresh();
     const envelope = event.payload || {};
@@ -126,7 +127,7 @@
     if (event.event_type === "assistant.delta") {
       if (task.messageFinal) { task.card = null; task.text = ""; task.reasoning = ""; task.messageFinal = false; }
       if (payload.kind === "reasoning") task.reasoning += payload.text || "";
-      else task.text += payload.text || "";
+      else { task.text += payload.text || ""; task.textSequence = event.sequence; }
       task.dirty = true;
     } else if (event.event_type === "task.completed") {
       if (typeof payload.text === "string") task.text = payload.text;
@@ -170,7 +171,7 @@
         if (task.card && task.card !== existing) task.card.remove();
         task.card = existing;
       }
-      if (typeof payload.content === "string") task.text = payload.content;
+      if (typeof payload.content === "string") { task.text = payload.content; task.textSequence = event.sequence; }
       if (typeof payload.reasoning === "string") task.reasoning = payload.reasoning;
       updateAssistantCard(task);
       task.dirty = false;
@@ -201,6 +202,13 @@
     } else if (event.event_type === "runtime.tool.started") {
       if (task.dirty) { updateAssistantCard(task); task.dirty = false; }
       renderTool(payload);
+      // The studio goes by the turn's newest tool, and the text before it is no longer being written.
+      task.lastToolId = toolCardId(payload);
+      task.toolSequence = event.sequence;
+      // The first tool tells what kind of task this is: how long such tasks took on this phone.
+      if (!task.estimateAsked) { task.estimateAsked = true; void loadEstimate(task, payload.name || payload.tool_name || ""); }
+    } else if (event.event_type === "runtime.todo.upserted" || event.event_type === "runtime.todo.deleted") {
+      notePlan(task, event.event_type, payload);
     } else if (typeof event.event_type === "string" && event.event_type.startsWith("runtime.") && toolOutcomeEvents[event.event_type.slice(8)]) {
       renderTool(payload, toolOutcomeEvents[event.event_type.slice(8)]);
       // The model switched this conversation's knowledge bases; the composer chip follows.
@@ -212,6 +220,65 @@
     notice(t("连接中断: {0}", error.message));
     updateTaskStatus(t("任务状态待确认"), { reconnect: true });
     setConnection(false);
+  }
+
+  // ---- Progress (2.8) -------------------------------------------------------------------------------
+  // How far a running task is, said without guessing: the steps of the plan the agent wrote for it
+  // (the todo tool; the bar under the status line), the time it has taken, and how long tasks of its
+  // kind (by their first tool) took on this phone, as a range once five of them were seen
+  // (mobile_task_timing). An agent decides its next step as it goes, so there is no countdown.
+  function notePlan(task, type, payload) {
+    const id = payload?.todo_id;
+    if (typeof id !== "string" || !id) return;
+    task.plan = task.plan || new Map();
+    if (type === "runtime.todo.deleted") task.plan.delete(id);
+    else task.plan.set(id, { status: String(payload.status || "pending"), position: Number(payload.position) || 0 });
+  }
+
+  async function loadEstimate(task, tool) {
+    try {
+      const value = await apiJson(`/mobile/task-estimate?tool=${encodeURIComponent(tool)}`);
+      if (Number(value?.low) > 0 && Number(value?.high) > 0) task.estimate = { low: Number(value.low), high: Number(value.high) };
+    } catch { /* no range then */ }
+  }
+
+  const quietMs = 5 * 60_000;
+
+  function planSteps(task) {
+    const items = task.plan ? [...task.plan.values()] : [];
+    return { total: items.length, done: items.filter((item) => item.status === "completed").length };
+  }
+
+  function progressText(task) {
+    const parts = [];
+    const { total, done } = planSteps(task);
+    if (total >= 2) parts.push(t("第 {0}/{1} 步", Math.min(done + 1, total), total));
+    task.startedAt = task.startedAt || Date.now();
+    // A short task says nothing of its time.
+    const seconds = Math.max(0, Math.round((Date.now() - task.startedAt) / 1000));
+    if (seconds >= 10) parts.push(t("已用 {0}", `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`));
+    // Nothing new for five minutes (not while paused): said, as the notification does.
+    const quiet = Date.now() - (task.lastEventAt || task.startedAt);
+    if (!task.paused && quiet >= quietMs) parts.push(t("{0} 分钟没有新进展", Math.floor(quiet / 60_000)));
+    const estimate = task.estimate;
+    if (estimate) {
+      const low = Math.max(1, Math.round(estimate.low / 60)), high = Math.max(low, Math.round(estimate.high / 60));
+      parts.push(estimate.high < 60 ? t("类似任务通常 {0}–{1} 秒", estimate.low, estimate.high)
+        : low === high ? t("类似任务通常约 {0} 分钟", low) : t("类似任务通常 {0}–{1} 分钟", low, high));
+    }
+    return parts.length ? ` · ${parts.join(" · ")}` : "";
+  }
+
+  /** The plan's bar: done steps out of all, the step at work half filled; none without a plan. */
+  function renderProgress(task, running) {
+    const bar = $("taskProgress");
+    const { total, done } = planSteps(task);
+    bar.hidden = !running || total < 2;
+    if (!bar.hidden) {
+      bar.firstElementChild.style.width = `${Math.round(Math.min(total, done + 0.5) / total * 100)}%`;
+      bar.setAttribute("aria-valuenow", String(done));
+      bar.setAttribute("aria-valuemax", String(total));
+    }
   }
 
   async function watchTask(task) {
@@ -250,6 +317,7 @@
         const state = snapshot.task?.state;
         const previousState = task.state;
         task.state = state || task.state;
+        task.paused = snapshot.task?.paused === true;
         if (task.state !== previousState) syncControls(); // steering opens once the turn is running
         if (state === "succeeded") {
           task.artifacts = taskArtifacts(snapshot.task.artifacts);
@@ -258,9 +326,11 @@
         }
         // Long tasks show how full the context is; older history is compacted near 100%.
         const context = task.contextPercent >= 30 ? t(" · 上下文 {0}%", task.contextPercent) : "";
+        if (!task.startedAt && snapshot.task?.created_at) task.startedAt = Date.parse(snapshot.task.created_at) || Date.now();
         const local = ["running", "queued"].includes(state) && (task.onDevice || isLocalModel()) ? await localProgress(task) : "";
         updateTaskStatus(task.stopping ? t("正在停止任务...") : (state === "waiting_approval" ? t("等待审批")
-          : (state === "queued" ? (task.waitingNetwork ? t("没有网络：联网后自动开始") : local || t("任务排队中")) : local || t("任务执行中") + context)));
+          : (state === "queued" ? (task.waitingNetwork ? t("没有网络：联网后自动开始") : local || t("任务排队中")) : local || t("任务执行中") + progressText(task) + context)));
+        renderProgress(task, state === "running" && !task.stopping);
         if (["failed", "cancelled", "interrupted"].includes(state)) {
           task.error = state === "failed" ? (localizeError(snapshot.task.reason) || t("任务失败")) : null;
           task.errorReason = state === "failed" ? String(snapshot.task.reason || "") : "";
@@ -293,7 +363,9 @@
       if (!task.done) await new Promise((resolve) => setTimeout(resolve, failures ? Math.min(500 * 2 ** Math.min(failures, 4), 8000) : 500));
     }
     task.watching = false;
-    if (disposed || activeTask !== task) return;
+    if (disposed) return;
+    // Finished while another conversation was open: its experts are no longer at work in the studio.
+    if (activeTask !== task) { if (task.done) endTeamTask(task); return; }
     finishTask(task);
   }
 

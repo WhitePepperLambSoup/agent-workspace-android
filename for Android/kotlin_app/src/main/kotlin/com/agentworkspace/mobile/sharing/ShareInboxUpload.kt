@@ -14,8 +14,13 @@ import java.security.MessageDigest
 internal class InboxTransferFailure(message: String, val uncertain: Boolean = false, cause: Throwable? = null) :
     IOException(message, cause)
 
-internal class ShareInboxUpload(private val tokenFile: File, private val baseUrl: String = "http://127.0.0.1:8080",
+internal class ShareInboxUpload(private val tokenFile: File,
+    /** Null: the engine's address at each request (EngineAddress), beside the token file. */
+    private val fixedBaseUrl: String? = null,
     private val fixedToken: String? = null) {
+    private val baseUrl: String get() = fixedBaseUrl
+        ?: com.agentworkspace.mobile.embedded.EngineAddress.baseUrl(tokenFile.absoluteFile.parentFile ?: File("."))
+
     init {
         val uri = URI(baseUrl)
         require(uri.scheme == "http" && uri.host == "127.0.0.1" && uri.port in 1..65535 &&

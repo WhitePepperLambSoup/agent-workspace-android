@@ -15,7 +15,7 @@ AccessibilityService, TTS, AlarmManager, WorkManager, trusted WebView.
 
 - Preserve existing data, credentials, certificate and unrelated dirty files.
 - New management controls belong in secondary menus.
-- No shared desktop/source edits or competitor source copying.
+- No shared desktop/source edits or copying of outside projects' source.
 - Tests first for new execution/persistence/security behavior.
 - No commits requested. Deploy only using `adb install -r`.
 

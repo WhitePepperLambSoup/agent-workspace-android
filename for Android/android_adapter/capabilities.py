@@ -68,7 +68,7 @@ def discover_runnable_executables(
     embedded = os.getenv("AGENT_WORKSPACE_EMBEDDED_PYTHON") == "chaquopy"
     from .toolchain import installed_toolchain
 
-    toolchain = installed_toolchain(workspace)
+    toolchain = installed_toolchain()
     toolchain_executables = toolchain.executables() if toolchain is not None else {}
     cache_key = (
         sys.executable,
@@ -286,6 +286,11 @@ def configure_android_registry(
         # The phone's own WebView replaces the desktop Chrome DevTools browser.
         factories["browser"] = lambda: AndroidBrowserTool(workspace=workspace)
         factories["browser_view"] = lambda: AndroidBrowserViewTool(workspace=workspace)
+        if workspace is not None:
+            from .page_check import AndroidCheckPageTool
+
+            # The pages and small tools the agent writes, as the app's preview will show them.
+            factories["check_page"] = lambda: AndroidCheckPageTool(workspace)
     if os.getenv("AGENT_WORKSPACE_DATA_DIR"):
         # Phone-wide memory (Memory page) replaces the per-workspace core memory tools.
         factories["memory_search"] = lambda: _memory_tools()[0]
@@ -320,15 +325,21 @@ def configure_android_registry(
     documents = document_status()
     native_pdf = bool(documents.get("available"))
     if workspace is not None:
+        from agent_workspace.storage.file_versions import FileVersions
+
         from .documents import AndroidCreatePdfTool, AndroidReadDocumentTool, AndroidRenderPdfTool
         from .toolchain import AndroidLspDiagnosticsTool
+
+        # Files the Word, Excel and PDF tools replace are kept like write_file's, for undoing a task.
+        data_dir = os.getenv("AGENT_WORKSPACE_DATA_DIR")
+        versions = FileVersions(Path(data_dir) / "file-versions") if data_dir else None
 
         if native_pdf and documents.get("render_pdf") and documents.get("ocr"):
             factories["read_document"] = lambda: AndroidReadDocumentTool(workspace)
         elif "read_document" in originals:
             tools["read_document"] = originals["read_document"]
         if native_pdf and documents.get("create_pdf"):
-            factories["create_pdf"] = lambda: AndroidCreatePdfTool(workspace)
+            factories["create_pdf"] = lambda: AndroidCreatePdfTool(workspace, versions=versions)
         if native_pdf and documents.get("render_pdf"):
             factories["render_pdf"] = lambda: AndroidRenderPdfTool(workspace)
         for name in ("create_pdf", "render_pdf"):
@@ -339,8 +350,8 @@ def configure_android_registry(
         # Word and Excel files without Office: plain Office Open XML written in Python.
         from .office_files import CreateDocxTool, CreateXlsxTool
 
-        factories["create_docx"] = lambda: CreateDocxTool(workspace)
-        factories["create_xlsx"] = lambda: CreateXlsxTool(workspace)
+        factories["create_docx"] = lambda: CreateDocxTool(workspace, versions)
+        factories["create_xlsx"] = lambda: CreateXlsxTool(workspace, versions)
         # The desktop app's literature and office tools (shared core): papers, references, Word
         # revisions, workbooks with formulas, PDF pages, documents from templates.
         if os.getenv("AGENT_WORKSPACE_DATA_DIR"):

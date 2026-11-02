@@ -280,7 +280,7 @@ async def run_bounded_command(
     cancelled = threading.Event()
     from .toolchain import command_transport
 
-    transported, environment, lease = command_transport(argv, cwd)
+    transported, environment, lease = command_transport(argv, cwd, paths.root)
     argv = transported
     worker = asyncio.create_task(
         asyncio.to_thread(

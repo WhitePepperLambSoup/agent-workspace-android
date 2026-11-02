@@ -154,6 +154,31 @@ class NativeJsBridge(
     fun requestPinWidget(kind: String): String =
         JSONObject().put("ok", AgentWidgets.requestPin(context, kind)).toString()
 
+    /** The studio widget (app/36-studio-widget.js): placed?, which drawing of its frames is kept, moving? */
+    @JavascriptInterface
+    fun studioWidgetState(): String = AgentWidgets.studioState(context).toString()
+
+    /** One place's frames drawn by the page, as data URLs (image/webp or image/png). */
+    @JavascriptInterface
+    fun saveStudioWidgetFrames(pose: String, framesJson: String): String {
+        if (framesJson.length > 8_000_000) return JSONObject().put("ok", false).toString()
+        val frames = runCatching {
+            val list = org.json.JSONArray(framesJson)
+            (0 until list.length()).map { index ->
+                val url = list.getString(index)
+                require(url.startsWith("data:image/webp;base64,") || url.startsWith("data:image/png;base64,"))
+                android.util.Base64.decode(url.substringAfter(","), android.util.Base64.DEFAULT)
+            }
+        }.getOrNull() ?: return JSONObject().put("ok", false).toString()
+        return JSONObject().put("ok", AgentWidgets.saveStudioFrames(context, pose, frames)).toString()
+    }
+
+    @JavascriptInterface
+    fun studioWidgetDrawn(version: String) = AgentWidgets.studioDrawn(context, version)
+
+    @JavascriptInterface
+    fun setStudioWidgetMotion(on: Boolean) = AgentWidgets.setStudioMotion(context, on)
+
     /** Turning the ball on without "display over other apps" opens that system setting first. */
     @JavascriptInterface
     fun setFloatingBall(enabled: Boolean): String {
@@ -386,6 +411,28 @@ class NativeJsBridge(
         val action = exportLogsAction ?: return shareDiagnostics()
         Handler(Looper.getMainLooper()).post { action() }
         return "{\"ok\":true}"
+    }
+
+    /**
+     * The page's own storage as it last saved it (storage-carry.js). The page's storage belongs to its
+     * address, and the engine takes another port when another app holds 8080: the page there starts
+     * from this copy instead of from nothing.
+     */
+    @JavascriptInterface
+    fun pageStorage(): String = runCatching { java.io.File(context.filesDir, PAGE_STORAGE_FILE).readText() }.getOrDefault("")
+
+    @JavascriptInterface
+    fun savePageStorage(snapshot: String): String {
+        if (snapshot.length > 4 * 1024 * 1024) return JSONObject().put("ok", false).put("error", "too large").toString()
+        val valid = runCatching { JSONObject(snapshot).getJSONObject("items") }.isSuccess
+        if (!valid) return JSONObject().put("ok", false).put("error", "invalid").toString()
+        return runCatching {
+            val target = java.io.File(context.filesDir, PAGE_STORAGE_FILE)
+            val staging = java.io.File(context.filesDir, "$PAGE_STORAGE_FILE.tmp")
+            staging.writeText(snapshot)
+            check(staging.renameTo(target)) { "rename failed" }
+            JSONObject().put("ok", true).toString()
+        }.getOrElse { JSONObject().put("ok", false).put("error", it.message ?: "write failed").toString() }
     }
 
     /** Back up conversations, workspace and settings; progress arrives as `agent-backup` events. */
@@ -916,6 +963,9 @@ class NativeJsBridge(
 }
 
 private val SYSTEM_BAR_COLOR = Regex("^#[0-9a-fA-F]{6}$")
+
+/** The console page's storage copy (NativeJsBridge.pageStorage). */
+internal const val PAGE_STORAGE_FILE = "page-storage.json"
 
 private fun unavailableShareInbox(): String =
     JSONObject().put("ok", false).put("error", "请从工作区页面打开分享收件箱").toString()

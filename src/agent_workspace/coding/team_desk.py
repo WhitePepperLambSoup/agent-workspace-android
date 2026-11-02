@@ -93,15 +93,34 @@ def team_goal(expert: Expert, goal: str) -> str:
     return expert_goal(expert, goal)
 
 
-def team_lead_note(note: str) -> str:
-    """The lead's note for a team turn here."""
-    return f"{note}\n{LEAD_CODE_NOTE}"
+# Measured on this computer (scripts/team_e2e_bench.py, frontier set): a lead that picked a
+# team first did the work itself as well and its experts repeated it, at twice the tokens and
+# no better score. So on an automatic team the lead works first and calls experts only where
+# they add something it cannot.
+LEAD_SOLO_FIRST = (
+    "On this computer an automatic team is for what you cannot do or check well alone. Work on "
+    "the request yourself first, with your own tools, as you would without a team. Call experts "
+    "only for: a part that needs a field you do not know well (law, medicine, tax, a science "
+    "beyond your depth); parts that are independent and large enough to be worked at the same "
+    "time; or a check of your draft when it rests on a choice of method, a premise the user "
+    "gave, a threshold, or a source or figure that may not hold, or when the user faces a "
+    "consequential decision. A check is one expert of that field given your draft and the "
+    "points to verify, not a second attempt at the whole task. A change to one codebase, a "
+    "calculation or a data analysis you can run and verify yourself, a draft or a translation: "
+    "do them yourself. When no expert was needed, say so in one line."
+)
+
+
+def team_lead_note(note: str, *, auto: bool = False) -> str:
+    """The lead's note for a team turn here; on an automatic team the lead works first."""
+    return f"{note}\n{LEAD_CODE_NOTE}" + (f"\n{LEAD_SOLO_FIRST}" if auto else "")
 
 
 __all__ = [
     "CODE_METHOD",
     "DESK_TOOLS",
     "LEAD_CODE_NOTE",
+    "LEAD_SOLO_FIRST",
     "SANDBOX_TOOLS",
     "team_goal",
     "team_lead_note",

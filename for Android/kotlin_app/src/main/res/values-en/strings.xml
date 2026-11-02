@@ -23,6 +23,9 @@
     <string name="widget_card_label">AI card</string>
     <string name="widget_card_description">The latest result of a scheduled task, such as the morning briefing</string>
     <string name="widget_card_empty">In Scheduled tasks, tap Show on a home screen card for a task; its latest result appears here.</string>
+    <string name="widget_studio_label">Studio</string>
+    <string name="widget_studio_description">What the AI is doing in its 3D studio; the picture moves while a task runs</string>
+    <string name="widget_studio_empty">Open the app once to draw the studio</string>
     <!-- The share menu entry that sends files and text to a paired computer (device link). -->
     <string name="send_to_computer_label">Send to computer</string>
     <string name="ask_expert_team_label">Ask the expert team</string>

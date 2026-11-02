@@ -114,7 +114,8 @@
     const provider = setupProviders.find((item) => item.id === $("setupProvider").value);
     const key = $("setupApiKey").value.trim();
     const status = $("setupStatus");
-    if (!provider) return;
+    // Enter in the key box while the key is being checked: once is enough.
+    if (!provider || $("btnSetupSave").disabled) return;
     if (!key) { pageStatus(status, t("先把 API 密钥粘贴到上面的框里"), true); $("setupApiKey").focus(); return; }
     let started;
     try {

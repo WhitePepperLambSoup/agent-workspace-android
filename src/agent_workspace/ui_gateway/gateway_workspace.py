@@ -5,6 +5,7 @@ terminals.
 from __future__ import annotations
 
 import base64
+import fnmatch
 import os
 import re
 import sqlite3
@@ -50,6 +51,43 @@ from agent_workspace.ui_gateway.gateway_state import GatewayState
 from agent_workspace.ui_gateway.protocol import (
     CommandEnvelope,
 )
+
+# (pattern, anchored at the root, folders only, re-includes)
+_IgnoreRule = tuple[str, bool, bool, bool]
+
+
+def _gitignore_rules(root: Path) -> list[_IgnoreRule]:
+    """The common part of the root .gitignore: names, globs, paths, trailing / and !. A file that
+    cannot be read hides nothing."""
+    try:
+        text = (root / ".gitignore").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    rules: list[_IgnoreRule] = []
+    for line in text.splitlines():
+        pattern = line.strip()
+        if not pattern or pattern.startswith("#"):
+            continue
+        negated = pattern.startswith("!")
+        pattern = pattern.removeprefix("!")
+        folders_only = pattern.endswith("/")
+        pattern = pattern.rstrip("/")
+        anchored = "/" in pattern
+        pattern = pattern.lstrip("/")
+        if pattern:
+            rules.append((pattern, anchored, folders_only, negated))
+    return rules
+
+
+def _git_ignored(path: str, name: str, is_dir: bool, rules: list[_IgnoreRule]) -> bool:
+    """Whether a workspace-relative path is ignored; as in Git, the last matching rule wins."""
+    ignored = False
+    for pattern, anchored, folders_only, negated in rules:
+        if folders_only and not is_dir:
+            continue
+        if fnmatch.fnmatch(path if anchored else name, pattern):
+            ignored = not negated
+    return ignored
 
 
 class WorkspaceCommands(GatewayState):
@@ -637,7 +675,10 @@ class WorkspaceCommands(GatewayState):
         if type(max_depth) is not int or max_depth < 1:
             max_depth = 6
         raw_limit = command.payload.get("limit", 1000)
-        limit = min(raw_limit if type(raw_limit) is int and raw_limit > 0 else 1000, 3000)
+        # No more than one reply can carry: a big repository gets a cut list, not an error.
+        limit = min(
+            raw_limit if type(raw_limit) is int and raw_limit > 0 else 1000, _MAX_COLLECTION_ITEMS
+        )
 
         try:
             target_dir = paths.resolve(rel_sub) if rel_sub.strip() else root_path
@@ -665,12 +706,18 @@ class WorkspaceCommands(GatewayState):
 
         items: list[dict[str, object]] = []
         target_depth = len(target_dir.parts)
+        rules = _gitignore_rules(root_path)
         try:
             for current_root, dirnames, filenames in os.walk(target_dir):
-                dirnames[:] = [
-                    d for d in dirnames if d not in ignore_dirs and not d.startswith(".")
-                ]
                 curr_path = Path(current_root)
+                rel_root = paths.relative(curr_path) if curr_path != root_path else ""
+                dirnames[:] = [
+                    d
+                    for d in dirnames
+                    if d not in ignore_dirs
+                    and not d.startswith(".")
+                    and not _git_ignored(f"{rel_root}/{d}".lstrip("/"), d, True, rules)
+                ]
                 curr_depth = len(curr_path.parts) - target_depth
                 if curr_depth >= max_depth:
                     dirnames.clear()
@@ -695,7 +742,9 @@ class WorkspaceCommands(GatewayState):
                         break
 
                 for f in sorted(filenames):
-                    if f.startswith("."):
+                    if f.startswith(".") or _git_ignored(
+                        f"{rel_root}/{f}".lstrip("/"), f, False, rules
+                    ):
                         continue
                     file_path = curr_path / f
                     try:

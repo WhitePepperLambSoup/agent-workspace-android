@@ -54,7 +54,7 @@
     <div id="quickChipsBar" role="group" aria-label="快捷任务"></div>
     <footer id="inputFooter">
       <div id="noticeText" role="status" hidden></div>
-      <div id="taskStatusBar" hidden><span id="taskStateLabel"></span><button id="btnResumeTask" class="text-action" type="button" hidden><span data-icon="play"></span>恢复任务</button><button id="btnRetryTask" class="text-action" type="button" hidden><span data-icon="refresh-cw"></span>重试任务</button><button id="btnReconnect" class="text-action" type="button" hidden><span data-icon="refresh-cw"></span>重新连接</button></div>
+      <div id="taskStatusBar" hidden><span id="taskStateLabel"></span><span id="taskProgress" class="task-progress" role="progressbar" aria-label="计划进度" aria-valuemin="0" hidden><span></span></span><button id="btnResumeTask" class="text-action" type="button" hidden><span data-icon="play"></span>恢复任务</button><button id="btnRetryTask" class="text-action" type="button" hidden><span data-icon="refresh-cw"></span>重试任务</button><button id="btnReconnect" class="text-action" type="button" hidden><span data-icon="refresh-cw"></span>重新连接</button></div>
       <div id="editBanner" class="edit-banner" role="status" hidden><span data-icon="pencil"></span><span>正在编辑之前的消息：发送后会替换它和之后的对话（已改动的文件不会撤销）</span><button id="btnCancelEdit" class="text-action" type="button">取消</button></div>
       <button id="btnImportNotice" class="text-action import-notice" type="button" hidden><span data-icon="paperclip"></span><span id="importNoticeText"></span></button>
       <div id="backgroundNotice" class="link-clip background-notice" role="status" hidden><span data-icon="battery-medium"></span><span id="backgroundNoticeText"></span><button id="btnBackgroundFix" class="text-action" type="button">允许后台运行</button><button id="btnBackgroundDismiss" class="icon-button" type="button" title="关闭" aria-label="关闭"><span data-icon="x"></span></button></div>
@@ -130,6 +130,8 @@
       <button type="button" role="radio" data-place="duty" aria-checked="false"><span data-icon="clock"></span>值班室</button>
       <button type="button" role="radio" data-place="desk" aria-checked="false"><span data-icon="monitor-smartphone"></span>前台</button>
     </div>
+    <!-- The building (app/29-team.js): when other conversations have a task at work, each is a floor. -->
+    <div id="studioFloors" class="studio-places studio-floors" role="radiogroup" aria-label="看哪一层" hidden></div>
     <div id="studioStage" class="studio-stage" data-ready="false">
       <div id="studioOverlay" class="studio-overlay" aria-hidden="true"></div>
       <p id="studioUnsupported" class="studio-unsupported" role="status" hidden>这台手机无法显示 3D 工作室（WebGL 不可用）。</p>
@@ -139,6 +141,24 @@
       <div id="placeOverlay" class="studio-overlay" aria-hidden="true"></div>
       <p id="placeHint" class="studio-hint" hidden></p>
     </div>
+    <!-- An expert's or a sub-agent's part (app/29-team.js): shown over the studio, the team stays in view. -->
+    <section id="studioPerson" class="studio-person" aria-labelledby="studioPersonName" aria-live="polite" hidden>
+      <div class="studio-person-head"><span class="team-swatch" aria-hidden="true"></span><strong id="studioPersonName"></strong><small id="studioPersonState"></small><button id="btnStudioPersonClose" class="icon-button" type="button" title="关闭" aria-label="关闭"><span data-icon="x"></span></button></div>
+      <p id="studioPersonPart" class="setting-hint" hidden></p>
+      <p id="studioPersonModel" class="setting-hint" hidden></p>
+      <ol id="studioPersonSteps" class="studio-person-steps" hidden></ol>
+      <div class="studio-person-actions"><button id="btnStudioPersonOpen" class="button-secondary" type="button">打开完整记录</button><span id="studioPersonHint" class="setting-hint"></span></div>
+      <p id="studioPersonReport" class="studio-person-report" hidden></p>
+    </section>
+    <!-- What is done in a place (app/34-campus.js): the library searched, a changed file's change at the site. -->
+    <section id="placePanel" class="studio-person place-panel" aria-labelledby="placePanelTitle" hidden>
+      <div class="studio-person-head"><strong id="placePanelTitle"></strong><small id="placePanelDetail"></small><button id="btnPlacePanelClose" class="icon-button" type="button" title="关闭" aria-label="关闭"><span data-icon="x"></span></button></div>
+      <form id="placeSearchForm" class="place-search" hidden><input id="placeSearchInput" type="search" autocomplete="off" spellcheck="false" placeholder="搜索知识库" aria-label="搜索知识库"><button class="button-secondary" type="submit">搜索</button></form>
+      <ol id="placeResults" class="place-results" hidden></ol>
+      <pre id="placeDiff" class="place-diff" hidden></pre>
+      <div id="placeActions" class="studio-person-actions"></div>
+      <p id="placePanelStatus" class="setting-hint" role="status"></p>
+    </section>
     <ul id="studioRoster" class="studio-roster" aria-label="在场人员"></ul>
   </div>
   <div id="setupSheet" hidden>
@@ -263,7 +283,7 @@
         <section class="menu-section" aria-labelledby="menuSectionModel">
           <h3 id="menuSectionModel" class="menu-section-title">模型与执行</h3>
           <div class="menu-group">
-            <button id="btnModelPage" class="menu-row" type="button" data-keywords="API 密钥 服务商 云端 思考 推理 deepseek openai provider key reasoning model cloud"><span data-icon="cpu"></span><span>模型与思考<small id="menuModelSummary"></small></span><span data-icon="chevron-right"></span></button>
+            <button id="btnModelPage" class="menu-row" type="button" data-keywords="API 密钥 服务商 云端 思考 推理 子任务 专家 deepseek openai provider key reasoning model cloud subagent sub-task expert"><span data-icon="cpu"></span><span>模型与思考<small id="menuModelSummary"></small></span><span data-icon="chevron-right"></span></button>
             <button id="btnPermissionPage" class="menu-row" type="button" data-keywords="审批 批准 授权 自动执行 完全访问 approval autonomy"><span data-icon="shield"></span><span>执行权限<small id="menuPermissionSummary"></small></span><span data-icon="chevron-right"></span></button>
             <button id="btnTeamPage" class="menu-row" type="button" data-keywords="专家 团队 多个 工作室 3D 审阅 expert team studio review"><span data-icon="users"></span><span>专家团<small>几位专家分工研究，再汇总回答</small></span><span data-icon="chevron-right"></span></button>
             <button id="btnLocalModelsPage" class="menu-row" type="button" data-keywords="离线 下载模型 下载来源 魔搭 视觉 上下文 线程 内存 性能测试 语音识别 语音输入 麦克风 录音 转写 听写 qwen gguf sensevoice local model offline download modelscope hugging face vision context threads benchmark speech voice microphone dictation transcribe"><span data-icon="hard-drive"></span><span>本地模型</span><span data-icon="chevron-right"></span></button>
@@ -326,7 +346,9 @@
           <p class="setting-hint">手机操控、摘要压缩和子任务可以用同一服务商下更便宜的模型，普通对话仍用上面的主模型。留空就跟主模型一样；在对话或操控小窗里临时选的模型优先。使用本机模型时不适用。</p>
           <label for="phoneModelInput">手机操控</label><input id="phoneModelInput" type="text" list="modelOptions" autocomplete="off" spellcheck="false" placeholder="跟主模型一样">
           <label for="summaryModelInput">摘要压缩</label><input id="summaryModelInput" type="text" list="modelOptions" autocomplete="off" spellcheck="false" placeholder="跟主模型一样">
-          <label for="subagentModelInput">子任务</label><input id="subagentModelInput" type="text" list="modelOptions" autocomplete="off" spellcheck="false" placeholder="跟主模型一样">
+          <label for="subagentModelInput">子任务和专家</label><input id="subagentModelInput" type="text" list="modelOptions" autocomplete="off" spellcheck="false" placeholder="跟主模型一样">
+          <label for="subagentEffortSelector">子任务和专家的思考强度</label><select id="subagentEffortSelector"></select>
+          <p class="setting-hint">「跟主任务一样」时，和发起它们的任务用同样的思考强度。子任务的模型不支持某个强度时，按「自动」。</p>
           <div class="page-toolbar"><button id="btnSaveModelRoles" class="button-secondary" type="button"><span data-icon="save"></span>保存用途分配</button></div>
           <p id="modelRolesStatus" class="page-status" role="status"></p>
         </div>
@@ -388,6 +410,7 @@
         </div>
         <label class="toggle-row" for="teamReviewToggle"><span>审阅成稿</span><input id="teamReviewToggle" type="checkbox"></label>
         <p class="setting-hint">答案数字多、结论有分歧或事关重大决定时，队长先写成稿，请一位专家逐个复算、挑错，再给你最终答案。关掉会更快、更省。</p>
+        <div class="management-row team-model-row"><span id="teamModelSummary"></span><button id="btnTeamModel" class="button-secondary" type="button">更改</button></div>
         <label for="teamKnowledgeMode">专家查哪个知识库</label>
         <select id="teamKnowledgeMode"><option value="shared">都用这个对话的知识库</option><option value="separate">给某些专家单独指定</option></select>
         <p class="setting-hint">共用时，每位专家查这个对话选用的知识库。单独指定后，那位专家只查你给他的知识库，其他专家照旧。</p>
@@ -546,6 +569,8 @@
           <button id="btnPinWidgetAsk" class="menu-row" type="button" data-widget="ask"><span data-icon="plus"></span><span>添加“快捷提问”小组件<small>像搜索框一样随时提问，也能语音或拍照</small></span><span data-icon="chevron-right"></span></button>
           <button id="btnPinWidgetTasks" class="menu-row" type="button" data-widget="tasks"><span data-icon="plus"></span><span>添加“任务动态”小组件<small>正在执行和等待批准的任务</small></span><span data-icon="chevron-right"></span></button>
           <button id="btnPinWidgetQuickTasks" class="menu-row" type="button" data-widget="quick_tasks"><span data-icon="plus"></span><span>添加“常用任务”小组件<small>一键开始你的常用任务</small></span><span data-icon="chevron-right"></span></button>
+            <button id="btnPinWidgetStudio" class="menu-row" type="button" data-widget="studio"><span data-icon="plus"></span><span>添加“工作室”小组件<small>在桌面上看 3D 工作室里 AI 正在做什么</small></span><span data-icon="chevron-right"></span></button>
+            <label class="toggle-row" for="studioWidgetMotionToggle"><span>工作室小组件动态画面<small id="studioWidgetMotionHint">任务进行时，小组件里的画面循环播放，会多用一点电；关掉后只显示静止画面。没有任务时总是静止的。</small></span><input id="studioWidgetMotionToggle" type="checkbox"></label>
         </div>
         <p class="setting-hint">也可以长按桌面空白处，在“小组件”里找到 Agent Workspace。</p>
         <div id="externalEntrySection" class="management-section" hidden>
@@ -821,7 +846,7 @@
         </div>
         <div class="management-section">
           <strong>可选开发工具链</strong><p id="toolchainStatus" class="page-status" role="status"></p><dl id="toolchainSummary" class="usage-summary"></dl>
-          <p class="setting-hint">安装 Git、Python、Node 和 Python 语言服务。下载约 70 MB，安装后需重启引擎。</p>
+          <p class="setting-hint">安装 Git、Python（带 pip、numpy、matplotlib）、Node 和 Python 语言服务，图表里可以写中文。下载约 100 MB，安装后需重启引擎。</p>
           <div class="page-toolbar"><button id="btnToolchainInstall" class="button-secondary" type="button">安装工具链</button><button id="btnToolchainProbe" class="button-secondary" type="button">验证工具</button><button id="btnToolchainCancel" class="button-secondary" type="button" hidden>取消下载</button><button id="btnToolchainRemove" class="button-secondary" type="button" hidden>移除工具链</button></div>
           <button id="btnToolchainRestart" class="button-primary apply-button" type="button">重启引擎并应用</button>
         </div>
@@ -989,6 +1014,10 @@
           <p id="remoteWorkspace" class="page-status"></p><p id="remoteAutonomy" class="setting-hint" hidden></p>
           <label for="handoffPrompt">接力指令</label><textarea id="handoffPrompt" rows="3" maxlength="65536"></textarea>
           <label class="toggle-row" for="handoffContext"><span>附带当前会话最近对话</span><input id="handoffContext" type="checkbox"></label>
+          <div id="handoffTeamRow" hidden>
+            <label class="toggle-row" for="handoffTeam"><span>交给电脑的专家团</span><input id="handoffTeam" type="checkbox"></label>
+            <p class="setting-hint">电脑上的 AI 当队长，需要时请几位专家分头做、一起核对。比普通任务慢，也更费 Token。</p>
+          </div>
           <div class="page-toolbar"><button id="btnUseDraft" class="button-secondary" type="button">使用当前草稿</button><button id="btnQueueHandoff" class="button-primary" type="button"><span data-icon="send"></span>发送到此设备</button></div>
           <button id="btnReadRemote" class="menu-row" type="button"><span data-icon="file-text"></span><span>查看远程对话</span><span data-icon="chevron-right"></span></button><pre id="remoteHistory" class="management-output" hidden></pre>
         </div>
@@ -1073,6 +1102,9 @@
           <strong>快捷操作</strong>
           <p class="setting-hint">AI 操作手机做完的事可以存成快捷操作：以后不用 AI，按记下的步骤直接做。可以改步骤、定时运行，或在「定时任务」里设成自动触发。</p>
           <div id="shortcutsList" class="management-list"></div>
+          <!-- 「演示一遍」 (app/87-shortcuts.js): the user's own taps in another app, recorded as a shortcut. -->
+          <button id="btnDemonstrate" class="button-secondary" type="button"><span data-icon="hand"></span>演示一遍</button>
+          <p class="setting-hint">点「演示一遍」后回到桌面，你自己在别的应用里做一遍（比如打开某个应用查东西），手机记下你点了哪些按钮、往哪滑动，做完点屏幕上方的「完成」。你输入的文字和密码框不会记录，保存前可以改每一步。</p>
           <button id="btnImportShortcut" class="button-secondary" type="button"><span data-icon="download"></span>导入分享码</button>
           <p id="shortcutsStatus" class="page-status" role="status"></p>
           <p id="shareFingerprint" class="setting-hint" hidden></p>
@@ -1152,6 +1184,7 @@
       <p id="sessionSheetStatus" class="page-status" role="status"></p>
     </div>
   </div>
+  <script src="/static/storage-carry.js"></script>
   <script src="/static/compat.js"></script>
   <script src="/static/mobile-vendor.js"></script>
   <script src="/static/i18n-zh-hant.js"></script>

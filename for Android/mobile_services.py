@@ -227,7 +227,9 @@ class ServiceManager:
         transport = self._transport
         if transport is None:
             from android_adapter.toolchain import command_transport as transport
-        argv, environment, lease = transport(list(record["argv"]), Path(record["cwd"]))
+        argv, environment, lease = transport(
+            list(record["argv"]), Path(record["cwd"]), Path(record.get("workspace") or record["cwd"])
+        )
         try:
             process = subprocess.Popen(
                 argv,

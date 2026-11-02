@@ -117,10 +117,12 @@ def _pricing(model: str, custom: Mapping[str, Any]) -> dict[str, Any] | None:
 def _usage_rows(
     runtime: Any,
     workspace: Path,
-    session_id: str | None,
+    session_ids: list[str] | None,
     cutoff: datetime | None,
     end: datetime,
 ) -> Iterator[sqlite3.Row]:
+    """Usage records of the workspace, or of the conversations given (None: all of them)."""
+    sessions = None if session_ids is None else json.dumps(session_ids)
     connection: sqlite3.Connection | None = None
     try:
         connection = SQLiteEventStore._open_read_only(Path(runtime.database))
@@ -151,7 +153,7 @@ def _usage_rows(
              AND request.type = 'model.requested' AND request.sequence < u.sequence
              AND json_type(request.data_json, '$.model') = 'text'
             WHERE u.type = 'usage.updated' AND session.workspace = ?
-              AND (? IS NULL OR u.session_id = ?)
+              AND (? IS NULL OR u.session_id IN (SELECT value FROM json_each(?)))
               AND (? IS NULL OR julianday(u.created_at) BETWEEN julianday(?) AND julianday(?))
               AND json_type(u.data_json, '$.input_tokens') = 'integer'
               AND json_type(u.data_json, '$.output_tokens') = 'integer'
@@ -162,7 +164,7 @@ def _usage_rows(
             ORDER BY u.session_id, u.sequence
             """,
             (
-                str(workspace), session_id, session_id,
+                str(workspace), sessions, sessions,
                 cutoff.isoformat() if cutoff else None,
                 cutoff.isoformat() if cutoff else None, end.isoformat(),
             ),
@@ -214,8 +216,10 @@ def usage_summary(
     from mobile_subagents import helper_sessions
 
     helpers = helper_sessions()
+    # A conversation's cost includes the sub-tasks and experts its tasks handed work to.
+    sessions = None if session_id is None else [session_id, *(helper for helper, parent in helpers.items() if parent == session_id)]
     purposes: dict[str, dict[str, Any]] = {}
-    for usage in _usage_rows(runtime, workspace, session_id, cutoff, end):
+    for usage in _usage_rows(runtime, workspace, sessions, cutoff, end):
         inputs, outputs, cached = (usage[field] for field in (
             "input_tokens", "output_tokens", "cached_tokens"
         ))

@@ -23,6 +23,9 @@
     <string name="widget_card_label">AI 카드</string>
     <string name="widget_card_description">예약 작업의 최신 결과(예: 아침 브리핑)</string>
     <string name="widget_card_empty">‘예약 작업’에서 작업의 ‘홈 화면 카드에 표시’를 누르면 그 최신 결과가 여기에 표시됩니다.</string>
+    <string name="widget_studio_label">스튜디오</string>
+    <string name="widget_studio_description">3D 스튜디오에서 AI가 지금 하는 일. 작업 중에는 그림이 움직입니다</string>
+    <string name="widget_studio_empty">앱을 한 번 열면 스튜디오 그림이 만들어집니다</string>
     <!-- The share menu entry that sends files and text to a paired computer (device link). -->
     <string name="send_to_computer_label">컴퓨터로 보내기</string>
     <string name="ask_expert_team_label">전문가 팀에 묻기</string>

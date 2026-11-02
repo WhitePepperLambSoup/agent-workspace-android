@@ -7,8 +7,10 @@ private root filesystem. This supplies app-level tooling, not an OS sandbox.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -17,13 +19,31 @@ import tarfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 _MAX_EXTRACTED_BYTES = 700 * 1024 * 1024
 _MAX_MEMBERS = 60000
+_MAX_INDEX_BYTES = 32 * 1024 * 1024
 _ACTIVE = {"downloading", "extracting", "probing", "cancelling"}
+# Waits between rounds over every mirror while the network is gone: the install stops after about
+# three minutes without a byte of progress.
+_RETRY_DELAYS = (3, 5, 10, 20, 30, 30, 30, 30, 30)
+# An APK's control segment: signature, metadata and install scripts, none of them guest files.
+_CONTROL_FILES = (
+    ".SIGN.",
+    ".PKGINFO",
+    ".INSTALL",
+    ".trigger",
+    ".pre-install",
+    ".post-install",
+    ".pre-upgrade",
+    ".post-upgrade",
+    ".pre-deinstall",
+    ".post-deinstall",
+)
 # How each executable shows that it runs: arguments, accepted exit codes, words its output must hold.
 # Others run with --version and must exit 0. scp, sftp and ssh-keygen have no version flag: their
 # usage message (exit code 1) proves they start.
@@ -42,6 +62,20 @@ class ToolchainError(RuntimeError):
 
 class _Cancelled(ToolchainError):
     pass
+
+
+class _Incomplete(ToolchainError):
+    """The connection ended early; what arrived is kept for the next try."""
+
+
+def _network_trouble(error: BaseException) -> bool:
+    """Whether trying again later may help: no connection, a timeout, a cut, a busy server."""
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code >= 500 or error.code in {408, 429}
+    return isinstance(
+        error,
+        (_Incomplete, urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException),
+    )
 
 
 def native_toolchain_status() -> dict[str, Any]:
@@ -115,11 +149,7 @@ def extract_verified_archive(
             if count > _MAX_MEMBERS or total > _MAX_EXTRACTED_BYTES:
                 raise ToolchainError("The archive exceeds its extraction limit")
             name = member.name.removeprefix("./")
-            if (
-                not name
-                or name == "."
-                or name.startswith((".SIGN.", ".PKGINFO", ".INSTALL", ".trigger"))
-            ):
+            if not name or name == "." or name.startswith(_CONTROL_FILES):
                 continue
             if strip_prefix:
                 if name == strip_prefix:
@@ -166,6 +196,8 @@ def extract_verified_archive(
 
 
 class MobileToolchainManager:
+    retry_delays: tuple[float, ...] = _RETRY_DELAYS
+
     def __init__(
         self,
         data_dir: str | Path,
@@ -246,8 +278,14 @@ class MobileToolchainManager:
             state = self._state.get("state", "not_installed")
             if installed and not available and state == "ready":
                 state = "needs_probe"
+            if not installed and state in {"ready", "needs_probe", "probe_failed"}:
+                # Installed from an older catalog: installing again downloads what changed.
+                earlier = (self.rootfs / ".agent-toolchain.json").is_file()
+                state = "outdated" if earlier else "not_installed"
             return {
                 **self._state,
+                # The progress kept from installing the older revision is not this one's.
+                **({"downloaded_bytes": 0, "total_bytes": None} if state == "outdated" else {}),
                 "state": state,
                 "installed": installed,
                 "available": available,
@@ -256,6 +294,7 @@ class MobileToolchainManager:
                 "revision": self.catalog.get("revision") if self.catalog else None,
                 "architecture": native.get("architecture"),
                 "download_size": sum(item["size"] for item in self.catalog["artifacts"])
+                + (self.catalog.get("alpine") or {}).get("estimated_bytes", 0)
                 if self.catalog
                 else 0,
                 "minimum_free_bytes": self.catalog.get("minimum_free_bytes", 0)
@@ -286,7 +325,14 @@ class MobileToolchainManager:
             if self._processes:
                 raise ToolchainError("Stop active toolchain processes before installing")
             self._cancelled.clear()
-            self._update(state="downloading", reason=None)
+            self._update(
+                state="downloading",
+                reason=None,
+                failure_details=None,
+                network_retry=None,
+                downloaded_bytes=0,
+                total_bytes=None,
+            )
             if wait:
                 self._install()
             else:
@@ -324,6 +370,19 @@ class MobileToolchainManager:
                 archives.append((item, self._download(item)))
                 self._completed_bytes += item["size"]
                 self._update(downloaded_bytes=self._completed_bytes)
+            packages = []
+            if self.catalog.get("alpine"):
+                position = next(
+                    index for index, (item, _) in enumerate(archives) if item["kind"] == "rootfs"
+                )
+                packages = self._alpine_packages(archives[position][1])
+                # Extracted over the rootfs, before artifacts with their own prefix (Pyright).
+                archives[position + 1 : position + 1] = packages
+            # Archives of earlier revisions or older package builds are not needed again.
+            keep = {path.name for _, path in archives}
+            for stale in self.download_dir.iterdir():
+                if stale.is_file() and stale.suffix in {".archive", ".part"} and stale.name not in keep:
+                    stale.unlink(missing_ok=True)
             self._update(state="extracting", reason=None)
             self._remove_private_tree(staging)
             for item, path in archives:
@@ -360,6 +419,10 @@ class MobileToolchainManager:
                         "revision": self.catalog["revision"],
                         "executables": executables,
                         "components": components,
+                        "packages": {
+                            item["package"]: {"version": item["version"], "license": item["license"]}
+                            for item, _ in packages
+                        },
                     }
                 ),
                 "utf-8",
@@ -376,6 +439,18 @@ class MobileToolchainManager:
                 if previous.exists():
                     _atomic_replace(previous, self.rootfs)
                 raise
+            # The guest's home (SSH keys the agent made, for one) outlives a reinstall.
+            home = previous / "home/agent"
+            if home.is_dir() and not home.is_symlink():
+                with contextlib.suppress(OSError):
+                    shutil.rmtree(self.rootfs / "home/agent")
+                    _atomic_replace(home, self.rootfs / "home/agent")
+                # Font lists of the previous tree: matplotlib would not look for the new fonts.
+                for name in ("matplotlib", "fontconfig"):
+                    cache = self.rootfs / "home/agent/.cache" / name
+                    if cache.resolve().is_relative_to(self.rootfs.resolve()):
+                        with contextlib.suppress(OSError):
+                            shutil.rmtree(cache)
             self._remove_private_tree(previous)
             self._probed = False
             self.probe()
@@ -398,30 +473,81 @@ class MobileToolchainManager:
         finally:
             self._remove_private_tree(staging)
 
-    def _download(self, item: dict[str, Any]) -> Path:
+    def _download(self, item: dict[str, Any], verify: Any = None) -> Path:
+        """The artifact, checked by its pinned SHA-256 or by `verify` (which raises AlpineError).
+
+        Each of the item's URLs is tried in turn (mirrors); a partial file resumes on the next one.
+        When the network was what failed them all, the round is tried again after a wait.
+        """
         if not re.fullmatch(r"[a-zA-Z0-9_-]{1,120}", item["id"]):
             raise ToolchainError("Invalid toolchain artifact ID")
         archive = self.download_dir / (item["id"] + ".archive")
         partial = self.download_dir / (item["id"] + ".part")
-        if (
-            archive.is_file()
-            and archive.stat().st_size == item["size"]
-            and _sha256(archive) == item["sha256"]
-        ):
+
+        def verified(path: Path) -> bool:
+            if path.stat().st_size != item["size"]:
+                return False
+            if verify is None:
+                return _sha256(path) == item["sha256"]
+            from mobile_alpine import AlpineError
+
+            try:
+                verify(path)
+            except AlpineError:
+                return False
+            return True
+
+        if archive.is_file() and verified(archive):
             return archive
         if self._cancelled.is_set():
             raise _Cancelled("Toolchain installation was cancelled")
-        start = partial.stat().st_size if partial.exists() else 0
-        if start >= item["size"]:
-            if start == item["size"] and _sha256(partial) == item["sha256"]:
+        if partial.exists() and partial.stat().st_size >= item["size"]:
+            if verified(partial):
                 _atomic_replace(partial, archive)
                 return archive
             partial.unlink()
-            start = 0
+        urls = item.get("urls") or [item["url"]]
+        attempt = 0
+        while True:
+            before = partial.stat().st_size if partial.exists() else 0
+            failure: Exception | None = None
+            retry = False
+            for url in urls:
+                try:
+                    self._fetch(item, url, partial)
+                except _Cancelled:
+                    raise
+                except (OSError, ToolchainError, http.client.HTTPException) as error:
+                    failure, retry = error, retry or _network_trouble(error)
+                    continue
+                if verified(partial):
+                    _atomic_replace(partial, archive)
+                    return archive
+                partial.unlink(missing_ok=True)
+                failure = None
+            if partial.exists() and partial.stat().st_size > before:
+                attempt = 0  # Bytes came through: the wait starts over.
+            if not retry or not self._wait_for_network(attempt):
+                raise failure or ToolchainError(
+                    "The downloaded artifact failed its pinned size or SHA-256 check"
+                )
+            attempt += 1
+
+    def _wait_for_network(self, attempt: int) -> bool:
+        """Before another round over the mirrors; False once the network has been gone too long."""
+        if attempt >= len(self.retry_delays):
+            return False
+        self._update(network_retry=attempt + 1)
+        if self._cancelled.wait(self.retry_delays[attempt]):
+            raise _Cancelled("Toolchain installation was cancelled")
+        return True
+
+    def _fetch(self, item: dict[str, Any], url: str, partial: Path) -> None:
+        start = partial.stat().st_size if partial.exists() else 0
         headers = {"Accept-Encoding": "identity", "User-Agent": "AgentWorkspace-AndroidToolchain/1"}
         if start:
             headers["Range"] = f"bytes={start}-"
-        request = urllib.request.Request(item["url"], headers=headers)
+        request = urllib.request.Request(url, headers=headers)
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(request, timeout=8) as response:
             if response.status == 206:
@@ -455,13 +581,164 @@ class MobileToolchainManager:
                             downloaded_bytes=self._completed_bytes + received,
                             artifact_downloaded_bytes=received,
                             artifact_size=item["size"],
+                            network_retry=None,
                         )
                         last_update = now
-        if received != item["size"] or _sha256(partial) != item["sha256"]:
-            partial.unlink(missing_ok=True)
-            raise ToolchainError("The downloaded artifact failed its pinned size or SHA-256 check")
-        _atomic_replace(partial, archive)
-        return archive
+        if received != item["size"]:
+            # Kept: the next mirror, or the next attempt, resumes from here.
+            raise _Incomplete("The download ended before the artifact was complete")
+
+    def _fetch_index(self, url: str, path: Path, settled: threading.Event) -> None:
+        """An APKINDEX.tar.gz, fetched afresh each time (its signature is checked by the caller).
+
+        Stops when `settled` is set: another mirror has already given a usable index."""
+        request = urllib.request.Request(
+            url, headers={"Accept-Encoding": "identity", "User-Agent": "AgentWorkspace-AndroidToolchain/1"}
+        )
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        data = bytearray()
+        with opener.open(request, timeout=15) as response:
+            expected = response.headers.get("Content-Length")
+            while chunk := response.read(64 * 1024):
+                if self._cancelled.is_set():
+                    raise _Cancelled("Toolchain installation was cancelled")
+                if settled.is_set():
+                    raise ToolchainError("Another mirror answered first")
+                data += chunk
+                if len(data) > _MAX_INDEX_BYTES:
+                    raise ToolchainError("The Alpine package index is larger than expected")
+        if expected is not None and expected.isdigit() and len(data) != int(expected):
+            raise _Incomplete("The download ended before the index was complete")
+        temporary = path.with_suffix(".tmp")
+        temporary.write_bytes(data)
+        _atomic_replace(temporary, path)
+
+    def _race_indexes(self, keys: dict[str, bytes], present: set[str]) -> tuple[str | None, Any]:
+        """(mirror, its choice of packages) from the first mirror whose index verifies and resolves,
+        or (None, [(mirror, error)]) when none does. All mirrors are read at once; the fastest one
+        here wins and the others stop reading."""
+        import mobile_alpine as alpine
+
+        assert self.catalog is not None
+        config = self.catalog["alpine"]
+        architecture = self.catalog["architecture"]
+        settled = threading.Event()
+        changed = threading.Condition()
+        results: list[tuple[str, Any]] = []  # In the order the mirrors finished.
+
+        def read(number: int, mirror: str) -> None:
+            index = alpine.Index()
+            outcome: Any
+            try:
+                for repository in config["repositories"]:
+                    path = self.download_dir / f"index-{number}-{repository}.tar.gz"
+                    try:
+                        self._fetch_index(
+                            alpine.index_url(mirror, config["branch"], repository, architecture),
+                            path,
+                            settled,
+                        )
+                        alpine.parse_index(alpine.verify_index(path, keys), repository, index)
+                    finally:
+                        path.unlink(missing_ok=True)
+                outcome = alpine.resolve(index, config["packages"], present)
+            except Exception as error:  # Handed to the installer's thread.
+                outcome = error
+            with changed:
+                if not isinstance(outcome, Exception):
+                    settled.set()
+                results.append((mirror, outcome))
+                changed.notify_all()
+
+        for number, mirror in enumerate(config["mirrors"]):
+            threading.Thread(
+                target=read, args=(number, mirror), daemon=True, name=f"android-toolchain-index-{number}"
+            ).start()
+        with changed:
+            while True:
+                winner = next(
+                    ((mirror, outcome) for mirror, outcome in results if not isinstance(outcome, Exception)),
+                    None,
+                )
+                if winner is not None:
+                    return winner
+                if self._cancelled.is_set():
+                    settled.set()
+                    raise _Cancelled("Toolchain installation was cancelled")
+                if len(results) == len(config["mirrors"]):
+                    return None, list(results)
+                changed.wait(0.25)
+
+    def _alpine_packages(self, rootfs_archive: Path) -> list[tuple[dict[str, Any], Path]]:
+        """The catalog's Alpine packages at the branch's current versions, downloaded and checked.
+
+        The index comes from the mirror that is first to serve both repositories with a valid
+        signature, all of them asked at once; packages come from that mirror first, then the others.
+        """
+        import mobile_alpine as alpine
+
+        assert self.catalog is not None
+        config = self.catalog["alpine"]
+        architecture = self.catalog["architecture"]
+        try:
+            keys, database = alpine.rootfs_trust(rootfs_archive)
+        except (alpine.AlpineError, tarfile.TarError, OSError) as error:
+            raise ToolchainError(f"The rootfs cannot check Alpine packages: {error}") from error
+        present = alpine.installed_provides(database)
+        attempt = 0
+        while True:
+            mirror, outcome = self._race_indexes(keys, present)
+            if mirror is not None:
+                chosen = outcome
+                break
+            if not any(_network_trouble(error) for _, error in outcome) or not self._wait_for_network(
+                attempt
+            ):
+                # The page shows the reason as it is (translated); what each mirror said is kept apart.
+                self._update(
+                    failure_details=[
+                        f"{urllib.parse.urlsplit(other).hostname}: {str(error)[:120]}"
+                        for other, error in outcome
+                    ]
+                )
+                raise ToolchainError(
+                    "Could not read Alpine's package index; check the network and try again"
+                )
+            attempt += 1
+        self._update(network_retry=None, mirror=urllib.parse.urlsplit(mirror).hostname)
+        mirrors = [mirror, *(other for other in config["mirrors"] if other != mirror)]
+        self._update(total_bytes=self._completed_bytes + sum(package.size for package in chosen))
+        downloaded = []
+        for package in chosen:
+            if not re.fullmatch(r"Q1[A-Za-z0-9+/]{27}=", package.checksum):
+                raise ToolchainError(f"Alpine's index gives {package.name} no checksum")
+            item = {
+                # The index checksum names exactly this build of the package.
+                "id": "apk-" + base64.b64decode(package.checksum[2:]).hex(),
+                "size": package.size,
+                "urls": [
+                    alpine.package_url(other, config["branch"], architecture, package)
+                    for other in mirrors
+                ],
+            }
+            def check(path: Path, package: Any = package) -> None:
+                alpine.verify_package(path, package)
+
+            try:
+                path = self._download(item, verify=check)
+            except (OSError, ToolchainError, http.client.HTTPException) as error:
+                if isinstance(error, _Cancelled):
+                    raise
+                self._update(failure_details=[f"{package.name} {package.version}: {str(error)[:200]}"])
+                raise ToolchainError(
+                    "A toolchain package could not be downloaded or did not match Alpine's index; "
+                    "try again"
+                ) from error
+            self._completed_bytes += package.size
+            self._update(downloaded_bytes=self._completed_bytes)
+            record = {"id": item["id"], "package": package.name, "version": package.version}
+            downloaded.append(({**record, "license": package.license}, path))
+        return downloaded
 
     def _prepare_guest(self, root: Path) -> None:
         for name in (
@@ -483,6 +760,11 @@ class MobileToolchainManager:
             "".join(f"nameserver {value}\n" for value in (dns or ["1.1.1.1"])), "utf-8"
         )
         (root / "etc/passwd").write_text("root:x:0:0:Agent:/home/agent:/bin/sh\n", "utf-8")
+        # Charts with Chinese, Japanese or Korean labels: glyphs DejaVu lacks come from the fallback.
+        if next(root.glob("usr/share/fonts/*/DroidSansFallbackFull.ttf"), None):
+            (root / "etc/matplotlibrc").write_text(
+                "font.family: DejaVu Sans, Droid Sans Fallback\n", "utf-8"
+            )
 
     def _remove_private_tree(self, path: Path) -> None:
         if not path.exists() and not path.is_symlink():
@@ -503,6 +785,8 @@ class MobileToolchainManager:
                 "shell": ["/bin/sh"],
                 "python": ["/usr/bin/python3"],
                 "python3": ["/usr/bin/python3"],
+                "pip": ["/usr/bin/python3", "-m", "pip"],
+                "pip3": ["/usr/bin/python3", "-m", "pip"],
                 "pyright": ["/usr/bin/node", "/opt/pyright/index.js"],
                 "pyright-langserver": ["/usr/bin/node", "/opt/pyright/langserver.index.js"],
                 "npm": ["/usr/bin/node", "/usr/lib/node_modules/npm/bin/npm-cli.js"],
@@ -510,10 +794,17 @@ class MobileToolchainManager:
             return [*aliases.get(argv[0], ["/usr/bin/" + argv[0]]), *argv[1:]]
         return [guest, *argv[1:]]
 
-    def _wrap(self, argv: list[str], cwd: Path) -> tuple[list[str], dict[str, str]]:
+    def _wrap(
+        self, argv: list[str], cwd: Path, workspace: str | Path | None = None
+    ) -> tuple[list[str], dict[str, str]]:
+        """`workspace` is the one the command belongs to (a conversation's own), and the only one
+        the guest sees; the toolchain itself is shared by all of them."""
         native = self._require_native()
+        bound = self.workspace if workspace is None else Path(workspace).resolve()
+        if self.root.is_relative_to(bound) or bound.is_relative_to(self.root):
+            raise ToolchainError("The toolchain must be installed outside the selected workspace")
         cwd = Path(cwd).resolve()
-        if not cwd.is_relative_to(self.workspace):
+        if not cwd.is_relative_to(bound):
             raise ToolchainError("The command working directory escapes the workspace")
         if not argv or any(not isinstance(value, str) or "\x00" in value for value in argv):
             raise ToolchainError("The guest command arguments are invalid")
@@ -530,11 +821,26 @@ class MobileToolchainManager:
             "LANG": "C.UTF-8",
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": "/dev/null",
-            "GIT_CEILING_DIRECTORIES": str(self.workspace),
+            "GIT_CEILING_DIRECTORIES": str(bound),
             "GIT_TERMINAL_PROMPT": "0",
             "PYTHONNOUSERSITE": "1",
+            # pip installs into the toolchain's own Python (a reinstalled toolchain starts without
+            # them). Alpine marks that Python as managed by apk, which nothing runs here.
+            "PIP_BREAK_SYSTEM_PACKAGES": "1",
+            "PIP_ROOT_USER_ACTION": "ignore",
+            "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+            "PIP_NO_CACHE_DIR": "1",
+            # No C compiler: an older wheel beats a newer source release that cannot build.
+            "PIP_PREFER_BINARY": "1",
+            "PIP_PROGRESS_BAR": "off",
+            # Below a matplotlibrc of the working folder, above the user's own.
+            "MATPLOTLIBRC": "/etc/matplotlibrc",
         }
         (self.root / "temporary").mkdir(exist_ok=True)
+        with contextlib.suppress(OSError):  # Otherwise PRoot makes up the mount point on its own.
+            (self.rootfs / str(bound).lstrip("/").replace(":", "")).mkdir(parents=True, exist_ok=True)
+        from android_adapter.command_guard import binder_covers
+
         command = [
             launcher,
             "--kill-on-exit",
@@ -543,17 +849,21 @@ class MobileToolchainManager:
             str(self.rootfs),
             "-b",
             "/dev",
+            # Not Binder, through which a guest program could ask Android for what the app may do.
+            *binder_covers(self.root.parent),
             "-b",
             "/proc",
             "-b",
-            f"{self.workspace}:{self.workspace}",
+            f"{bound}:{bound}",
             "-w",
             str(cwd),
             *guest_command,
         ]
         return command, environment
 
-    def wrap(self, argv: list[str], cwd: str | Path) -> tuple[list[str], dict[str, str]]:
+    def wrap(
+        self, argv: list[str], cwd: str | Path, workspace: str | Path | None = None
+    ) -> tuple[list[str], dict[str, str]]:
         if not self._probed:
             raise ToolchainError("The toolchain has not passed its execution probes")
         if argv:
@@ -571,7 +881,7 @@ class MobileToolchainManager:
                 component = self.rootfs / _safe_relative(relative)
                 if str(component.resolve()) in used and _sha256(component) != digest:
                     raise ToolchainError("The discovered command script changed after probing")
-        return self._wrap(argv, Path(cwd))
+        return self._wrap(argv, Path(cwd), workspace)
 
     def owns_command(self, executable: str) -> bool:
         return bool(
@@ -583,6 +893,8 @@ class MobileToolchainManager:
                     "git",
                     "python",
                     "python3",
+                    "pip",
+                    "pip3",
                     "node",
                     "npm",
                     "sh",

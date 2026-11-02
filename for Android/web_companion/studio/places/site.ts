@@ -246,7 +246,8 @@ export const buildSite: PlaceBuilder<PlaceInput<SiteModel>> = (context) => {
         stateLabel: t(`places.site.worker.${model.worker.state}`),
         look: { ...lookFor('lead'), accessory: 'helmet' },
         place: worker,
-        action: model.worker.state === 'editing' ? 'operate' : model.worker.state === 'testing' ? 'operate' : model.worker.state === 'reading' ? 'paper' : 'rest',
+        action: model.worker.state === 'editing' ? 'operate' : model.worker.state === 'testing' ? 'operate' : model.worker.state === 'reading' ? 'paper'
+          : model.worker.state === 'thinking' ? 'think' : 'rest',
         pick: 'agent',
       }]
       // Experts of any team writing code or running checks: each at a building of the site.

@@ -872,7 +872,10 @@ class RunSandboxTool:
 
     def prepare_for_approval(self, arguments: dict[str, Any]) -> dict[str, Any]:
         prepared = dict(arguments)
-        sensitive_count, sensitive_sha256 = _validate_workspace_mount(self.paths.root)
+        # A backend that runs in a staged copy says what it leaves out of the copy (.git): what
+        # the command cannot see does not make it ask.
+        excluded: frozenset[str] = getattr(self.backend, "staging_exclusions", frozenset())
+        sensitive_count, sensitive_sha256 = _validate_workspace_mount(self.paths.root, excluded)
         prepared["_sandbox_sensitive_count"] = sensitive_count
         prepared["_sandbox_sensitive_sha256"] = sensitive_sha256
         return prepared
@@ -1558,8 +1561,14 @@ def _docker_arguments(
     ]
 
 
-def _validate_workspace_mount(root: Path) -> tuple[int, str]:
-    """Reject host filesystem objects whose identity or target is not workspace-local."""
+def _validate_workspace_mount(
+    root: Path, excluded: frozenset[str] = frozenset()
+) -> tuple[int, str]:
+    """Reject host filesystem objects whose identity or target is not workspace-local.
+
+    ``excluded`` names (case-insensitive, at any depth) are left out of a staged copy, so they
+    are neither checked nor counted as sensitive paths the sandbox would see.
+    """
     entries = 0
     sensitive_count = 0
     sensitive_digest = hashlib.sha256()
@@ -1576,6 +1585,9 @@ def _validate_workspace_mount(root: Path) -> tuple[int, str]:
             followlinks=False,
             onerror=reject_walk_error,
         ):
+            if excluded:
+                directory_names[:] = [n for n in directory_names if n.casefold() not in excluded]
+                file_names[:] = [n for n in file_names if n.casefold() not in excluded]
             directory_names.sort()
             file_names.sort()
             names = (*directory_names, *file_names)

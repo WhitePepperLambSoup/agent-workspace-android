@@ -334,6 +334,11 @@
             <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
             <meta-data android:name="android.appwidget.provider" android:resource="@xml/agent_task_widget_info" />
         </receiver>
+        <receiver android:name=".embedded.AgentStudioWidgetProvider" android:exported="true"
+            android:label="@string/widget_studio_label">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/agent_studio_widget_info" />
+        </receiver>
         <receiver android:name=".embedded.AgentCardWidgetProvider" android:exported="true"
             android:label="@string/widget_card_label">
             <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>

@@ -41,6 +41,7 @@
     "places.library.empty": () => t("还没有知识库"), "places.library.off": () => t("知识库已关闭"),
     "places.site.worker.idle": () => t("空闲"), "places.site.worker.editing": () => t("改文件"),
     "places.site.worker.testing": () => t("运行命令"), "places.site.worker.reading": () => t("看文件"),
+    "places.site.worker.thinking": () => t("思考中"),
     "places.site.noGit": () => t("本机工作区"), "places.site.checking": () => "", "places.site.checksFailed": () => "",
     "places.site.changed": (v) => t("这个对话改过 {0} 个文件", v.count), "places.site.clean": () => t("这个对话没有改过文件"),
     "places.site.unpushed": () => "", "places.site.empty": () => t("工作区是空的"), "places.site.uncommitted": () => t("这个对话改过"),
@@ -83,8 +84,13 @@
     const args = toolArguments.get(String(card?.dataset.toolId || "").replace(/^tool-/, ""));
     return typeof args?.path === "string" ? args.path : "";
   }
+  /** The turn's newest tool, running or just done: a file is written in milliseconds, too soon to follow. */
+  function latestToolCard() {
+    const id = placeTaskRunning() ? activeTask.lastToolId : "";
+    return id ? [...elements.timelineList.querySelectorAll(".message-card.tool")].find((card) => card.dataset.toolId === id) || null : null;
+  }
   function agentPlace() {
-    const card = runningToolCard();
+    const card = latestToolCard();
     return card ? placeOfTool(card.dataset.tool || "", cardPath(card)) : "studio";
   }
 
@@ -203,15 +209,19 @@
       const name = item.path.includes("/") ? item.path.split("/")[0] : ".";
       groups.set(name, [...(groups.get(name) || []), item]);
     }
-    const shown = [...groups.entries()].sort((a, b) => b[1].length - a[1].length).slice(0, 8);
+    // Folders holding what this conversation changed or edits now come first, however small: on the
+    // phone a new folder with one written file was left out among bigger ones.
+    const touched = (items) => items.some((item) => written.has(item.path) || item.path === editPath);
+    const shown = [...groups.entries()].sort((a, b) => Number(touched(b[1])) - Number(touched(a[1])) || b[1].length - a[1].length).slice(0, 8);
     const share = Math.max(8, Math.floor(180 / Math.max(1, shown.length)));
     const districts = shown.map(([name, items]) => ({
       name, total: items.length,
       // Edited and written files always stand; then the largest.
       buildings: items.map(building).sort((a, b) => Number(b.editing) - Number(a.editing) || Number(b.changed) - Number(a.changed) || b.height - a.height).slice(0, share),
     }));
+    // Between two steps of its work here, the agent the view follows to the site thinks at the office.
     const worker = !placeTaskRunning() ? "idle" : editPath ? "editing" : /^(run_|start_service|stop_service)/.test(tool) ? "testing"
-      : /^(read_file|list_files|search_files|read_document|office_read)/.test(tool) ? "reading" : "idle";
+      : /^(read_file|list_files|search_files|read_document|office_read)/.test(tool) ? "reading" : agentPlace() === "site" ? "thinking" : "idle";
     const folder = elements.workspaceTitleText.textContent || t("本机工作区");
     return {
       folder, districts, files: files.length, changed: [...written].filter((path) => files.some((item) => item.path === path)).length,
@@ -384,9 +394,9 @@
       return;
     }
     if (id.startsWith("file:")) {
-      closeStudio();
-      openMenu();
-      if (setSettingsPage("files") !== false) void openWorkspaceFile(id.slice(5));
+      // At the building site a file this conversation changed shows its change in the studio.
+      if (placeShownName === "site") { void showFileChange(id.slice(5)); return; }
+      openFileFromStudio(id.slice(5));
       return;
     }
     const page = { "route:knowledge": "btnKnowledgePage", "route:schedules": "btnSchedulesPage", "route:settings": "btnConnectionsPage", "route:changes": "btnFilesPage", "route:workspace": "btnFilesPage" }[id];
@@ -414,6 +424,7 @@
   function dropPlaceScene() {
     window.clearInterval(placeTimer);
     placeTimer = 0;
+    hidePlacePanel();
     placeScene?.dispose();
     placeScene = null;
     placeSignature = "";
@@ -449,6 +460,8 @@
       return;
     }
     $("studioRoster").replaceChildren();
+    // The building's floors are the studio's: not shown over a place.
+    renderStudioFloors([], null);
     let studio;
     try { studio = await loadStudio(); }
     catch { $("studioUnsupported").hidden = false; return; }
@@ -462,11 +475,14 @@
     }
     placeScene.setPaused(studioPaused);
     $("placeStage").dataset.ready = "true";
-    $("placeHint").textContent = place === "campus" ? t("点一栋楼进去看。") : t("拖动旋转，双指缩放，点东西打开对应的页面。");
+    $("placeHint").textContent = place === "campus" ? t("点一栋楼进去看。") : place === "site" ? t("拖动旋转，双指缩放，点改过的楼看改了什么。")
+      : t("拖动旋转，双指缩放，点东西打开对应的页面。");
     $("placeHint").hidden = false;
+    // The library is searched right here.
+    if (place === "library") showLibrarySearch();
     updatePlace();
     void loadPlace(place, true);
-    placeTimer = window.setInterval(() => void loadPlace(place, false), placeEvery[place]);
+    placeTimer = window.setInterval(() => { if (!document.hidden) void loadPlace(place, false); }, placeEvery[place]);
   }
 
   /** Asks the engine for what the place shows, one question at a time; a failure keeps what was there. */
@@ -535,3 +551,164 @@
   for (const button of $("studioPlaces").querySelectorAll("[data-place]")) {
     button.addEventListener("click", () => choosePlace(button.dataset.place));
   }
+
+  // ---- Things done in a place (2.8) ----------------------------------------------------------------
+  // As on the desktop: the library is searched in the studio, and at the building site a file this
+  // conversation changed shows its change and can be put back as it was (what it holds now is kept
+  // in the file's history). Opening a file still leads to the Files page.
+  let placePanelGeneration = 0;
+
+  /** Another workspace: what the places showed of the last one goes. */
+  function forgetPlaceData() {
+    placeData = {};
+    placeSignature = "";
+  }
+
+  function openFileFromStudio(path) {
+    closeStudio();
+    openMenu();
+    if (setSettingsPage("files") !== false) void openWorkspaceFile(path);
+  }
+
+  function showPlacePanel(title, detail) {
+    placePanelGeneration += 1;
+    $("placePanel").hidden = false;
+    $("placePanelTitle").textContent = title;
+    $("placePanelDetail").textContent = detail;
+    for (const id of ["placeSearchForm", "placeResults", "placeDiff"]) $(id).hidden = true;
+    $("placeActions").replaceChildren();
+    pageStatus($("placePanelStatus"), "");
+    return placePanelGeneration;
+  }
+
+  function hidePlacePanel() {
+    if ($("placePanel").hidden) return false;
+    placePanelGeneration += 1;
+    $("placePanel").hidden = true;
+    return true;
+  }
+
+  function showLibrarySearch() {
+    showPlacePanel(t("搜索知识库"), "");
+    $("placeSearchForm").hidden = false;
+    $("placeResults").replaceChildren();
+  }
+
+  $("placeSearchForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const query = $("placeSearchInput").value.trim();
+    if (!query) return;
+    const generation = placePanelGeneration;
+    pageStatus($("placePanelStatus"), t("搜索中..."));
+    try {
+      const value = await apiJson("/mobile/knowledge/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query }) });
+      if (generation !== placePanelGeneration) return;
+      const results = (Array.isArray(value.results) ? value.results : []).slice(0, 8);
+      $("placeResults").replaceChildren(...results.map((result) => {
+        const item = document.createElement("li");
+        const where = document.createElement("strong");
+        where.textContent = [result.document, result.page ? t("第 {0} 页", result.page) : "", result.section || ""].filter(Boolean).join(" · ");
+        const passage = document.createElement("span");
+        passage.textContent = speechLine(result.passage, 160);
+        item.append(where, passage);
+        return item;
+      }));
+      $("placeResults").hidden = !results.length;
+      pageStatus($("placePanelStatus"), results.length ? "" : t("没有找到相关内容"));
+    } catch (error) {
+      if (generation === placePanelGeneration) pageStatus($("placePanelStatus"), localizeError(error.message), true);
+    }
+  });
+
+  /** A changed file at the building site: its lines before the AI's latest change against now. */
+  async function showFileChange(path) {
+    const generation = showPlacePanel(path.split("/").pop(), path);
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "button-secondary";
+    open.textContent = t("打开文件");
+    open.addEventListener("click", () => openFileFromStudio(path));
+    $("placeActions").append(open);
+    pageStatus($("placePanelStatus"), t("读取中..."));
+    try {
+      const history = await apiJson(scopedUrl(`/mobile/file-history?path=${encodeURIComponent(path)}`, currentWorkspaceId));
+      // The version kept before the AI's latest change (not one the user saved or restored).
+      const before = (Array.isArray(history.versions) ? history.versions : [])
+        .filter((version) => !["edit", "delete", "restore"].includes(version.source))
+        .sort((a, b) => String(b.at).localeCompare(String(a.at)))[0];
+      const [old, now] = await Promise.all([
+        before ? apiJson(scopedUrl(`/mobile/file-history/content?id=${encodeURIComponent(before.id)}`, currentWorkspaceId)) : Promise.resolve({ text: "" }),
+        apiJson(scopedUrl(`/mobile/workspace/file?path=${encodeURIComponent(path)}`, currentWorkspaceId)).catch(() => ({ content: "" })),
+      ]);
+      if (generation !== placePanelGeneration) return;
+      const current = typeof now.content === "string" && !now.is_binary ? now.content : null;
+      const earlier = typeof old.text === "string" ? old.text : null;
+      if (current === null || earlier === null) {
+        pageStatus($("placePanelStatus"), t("这个文件不是文本，或者太大，不能在这里显示改动"));
+      } else {
+        $("placeDiff").textContent = lineChanges(earlier, current) || t("和改动前相同");
+        $("placeDiff").hidden = false;
+        pageStatus($("placePanelStatus"), before ? t("{0} 改动前 → 现在", new Date(before.at).toLocaleString(locale)) : t("这个对话新建的文件"));
+      }
+      if (!before) return;
+      const restore = document.createElement("button");
+      restore.type = "button";
+      restore.className = "button-secondary";
+      restore.textContent = t("还原到改动前");
+      restore.addEventListener("click", async () => {
+        if (!window.confirm(t("把「{0}」还原到 {1} 的版本？现在的内容会先存一份，还能再还原回来。", path, new Date(before.at).toLocaleString(locale)))) return;
+        restore.disabled = true;
+        try {
+          await apiJson("/mobile/workspace/restore", { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: before.id, ...(currentWorkspaceId ? { workspace_id: currentWorkspaceId } : {}) }) });
+          pageStatus($("placePanelStatus"), t("已还原「{0}」", path));
+          haptic(16);
+          void loadWorkspaceTree().then((files) => { placeData.files = files; updatePlace(); }).catch(() => {});
+        } catch (error) {
+          restore.disabled = false;
+          pageStatus($("placePanelStatus"), t("还原失败：{0}", localizeError(error.message)), true);
+        }
+      });
+      $("placeActions").append(restore);
+    } catch (error) {
+      if (generation === placePanelGeneration) pageStatus($("placePanelStatus"), t("读取历史失败：{0}", localizeError(error.message)), true);
+    }
+  }
+
+  /** The changed lines of two texts, with two lines around each change ("-" before, "+" now); "" when
+   * equal. A long file is compared line by line where an exact comparison would be too slow. */
+  function lineChanges(before, after, limit = 160) {
+    const a = before.split("\n"), b = after.split("\n");
+    let start = 0;
+    while (start < a.length && start < b.length && a[start] === b[start]) start += 1;
+    let endA = a.length, endB = b.length;
+    while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) { endA -= 1; endB -= 1; }
+    if (start === endA && start === endB) return "";
+    const midA = a.slice(start, endA), midB = b.slice(start, endB);
+    const ops = [];
+    if (midA.length * midB.length <= 250_000) {
+      // Longest common subsequence of the changed middle, then its edit script.
+      const rows = midA.length + 1, cols = midB.length + 1;
+      const table = new Uint32Array(rows * cols);
+      for (let i = midA.length - 1; i >= 0; i -= 1) {
+        for (let j = midB.length - 1; j >= 0; j -= 1) {
+          table[i * cols + j] = midA[i] === midB[j] ? table[(i + 1) * cols + j + 1] + 1 : Math.max(table[(i + 1) * cols + j], table[i * cols + j + 1]);
+        }
+      }
+      let i = 0, j = 0;
+      while (i < midA.length || j < midB.length) {
+        if (i < midA.length && j < midB.length && midA[i] === midB[j]) { ops.push(["  ", midA[i]]); i += 1; j += 1; }
+        else if (j < midB.length && (i === midA.length || table[i * cols + j + 1] >= table[(i + 1) * cols + j])) { ops.push(["+ ", midB[j]]); j += 1; }
+        else { ops.push(["- ", midA[i]]); i += 1; }
+      }
+    } else {
+      for (const line of midA) ops.push(["- ", line]);
+      for (const line of midB) ops.push(["+ ", line]);
+    }
+    const context = [...a.slice(Math.max(0, start - 2), start).map((line) => ["  ", line]), ...ops, ...a.slice(endA, endA + 2).map((line) => ["  ", line])];
+    const shown = context.slice(0, limit).map(([mark, line]) => mark + line);
+    if (context.length > limit) shown.push(t("…还有 {0} 行，打开文件查看", context.length - limit));
+    return (start > 2 ? `@@ ${t("第 {0} 行", start - 1)}\n` : "") + shown.join("\n");
+  }
+
+  $("btnPlacePanelClose").addEventListener("click", () => hidePlacePanel());

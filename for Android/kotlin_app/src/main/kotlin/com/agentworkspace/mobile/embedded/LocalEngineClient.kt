@@ -8,7 +8,8 @@ import java.net.URL
 
 class LocalEngineClient @JvmOverloads constructor(context: Context,
     private val tokenFile: File = File(context.filesDir, "serve.token"),
-    private val baseUrl: String = "http://127.0.0.1:8080",
+    /** Null: the engine's address at each request (EngineAddress), beside the token file. */
+    private val baseUrl: String? = null,
     private val fixedToken: String? = null) {
     class RequestOutcomeUnknown(message: String, cause: Throwable? = null) :
         IllegalStateException(message, cause)
@@ -18,7 +19,8 @@ class LocalEngineClient @JvmOverloads constructor(context: Context,
         val token = fixedToken ?: tokenFile.readText().trim()
         require(token.isNotEmpty()) { "The engine token is unavailable" }
         val body = payload?.toString()?.toByteArray(Charsets.UTF_8)
-        val connection = URL(baseUrl + path).openConnection() as HttpURLConnection
+        val base = baseUrl ?: EngineAddress.baseUrl(tokenFile.absoluteFile.parentFile ?: File("."))
+        val connection = URL(base + path).openConnection() as HttpURLConnection
         var mayHaveSubmitted = false
         var rejected = false
         try {

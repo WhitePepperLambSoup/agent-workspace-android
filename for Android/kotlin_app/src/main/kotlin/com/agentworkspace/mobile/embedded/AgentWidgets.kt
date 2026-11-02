@@ -89,6 +89,7 @@ object AgentWidgets {
         if (current?.toString() == next.toString()) return
         runCatching { file.update { JSONObject().put("summary", next) } }
         refresh(context, AgentTaskWidgetProvider::class.java)
+        refresh(context, AgentStudioWidgetProvider::class.java)
     }
 
     /** The engine started, stopped or failed: task widgets show it (and stop claiming a task runs). */
@@ -100,6 +101,7 @@ object AgentWidgets {
             value.put("task", JSONObject()
                 .put("task_id", task.taskId).put("session_id", task.sessionId).put("state", task.state)
                 .put("preview", task.preview)
+                .put("pose", task.pose ?: JSONObject.NULL)
                 .put("at_ms", task.updatedAtMillis ?: task.createdAtMillis ?: 0L))
         }
         return value
@@ -197,13 +199,118 @@ object AgentWidgets {
         refresh(context, AgentTaskWidgetProvider::class.java)
         refresh(context, AgentQuickTasksWidgetProvider::class.java)
         refresh(context, AgentCardWidgetProvider::class.java)
+        refresh(context, AgentStudioWidgetProvider::class.java)
     }
 
     fun views(context: Context, provider: Class<out AppWidgetProvider>, id: Int): RemoteViews = when (provider) {
         AgentTaskWidgetProvider::class.java -> taskViews(context, id)
         AgentQuickTasksWidgetProvider::class.java -> quickTaskViews(context, id)
         AgentCardWidgetProvider::class.java -> cardViews(context, id)
+        AgentStudioWidgetProvider::class.java -> studioViews(context, id)
         else -> quickAskViews(context, id)
+    }
+
+    // ---- The studio (2.8): the 3D studio's agent where the running task has it ---------------------
+    // A widget cannot draw 3D, so the page draws a few frames of each place the agent works at, from
+    // the real scene (app/36-studio-widget.js), and the launcher plays them in a loop (a ViewFlipper)
+    // while a task runs: a little more power then. Idle, or with a still picture chosen, one frame.
+    private const val STUDIO_DIR = "widget-studio"
+    private const val STUDIO_FRAMES = 4
+    private val studioFrameIds = listOf(R.id.studio_frame_1, R.id.studio_frame_2, R.id.studio_frame_3, R.id.studio_frame_4)
+
+    private fun studioMeta(context: Context): JSONObject =
+        runCatching { JSONObject(File(context.filesDir, "$STUDIO_DIR/meta.json").readText()) }.getOrNull() ?: JSONObject()
+
+    private fun writeStudioMeta(context: Context, change: (JSONObject) -> Unit) {
+        val folder = File(context.filesDir, STUDIO_DIR).apply { mkdirs() }
+        val meta = studioMeta(context).also(change)
+        File(folder, "meta.json.tmp").apply { writeText(meta.toString()) }.renameTo(File(folder, "meta.json"))
+    }
+
+    private fun studioFrames(context: Context, pose: String): List<File> =
+        (1..STUDIO_FRAMES).map { File(context.filesDir, "$STUDIO_DIR/$pose-$it.img") }.filter { it.isFile && it.length() > 0 }
+
+    /** Whether a studio widget is placed, which drawing of the frames is kept, and whether it moves. */
+    fun studioState(context: Context): JSONObject {
+        val placed = runCatching {
+            AppWidgetManager.getInstance(context)?.getAppWidgetIds(ComponentName(context, AgentStudioWidgetProvider::class.java))?.isNotEmpty() == true
+        }.getOrDefault(false)
+        val meta = studioMeta(context)
+        return JSONObject().put("placed", placed).put("version", meta.optString("version")).put("motion", meta.optBoolean("motion", true))
+    }
+
+    /** One place's frames from the page, as image data (WebP or PNG), replacing what was kept. */
+    fun saveStudioFrames(context: Context, pose: String, frames: List<ByteArray>): Boolean {
+        if (pose !in TaskNotificationSnapshot.poses || frames.isEmpty() || frames.size > STUDIO_FRAMES || frames.any { it.size > 1_500_000 }) return false
+        val folder = File(context.filesDir, STUDIO_DIR).apply { mkdirs() }
+        (1..STUDIO_FRAMES).forEach { index ->
+            val target = File(folder, "$pose-$index.img")
+            val data = frames.getOrNull(index - 1)
+            if (data == null) target.delete() else File(folder, "$pose-$index.tmp").apply { writeBytes(data) }.renameTo(target)
+        }
+        return true
+    }
+
+    /** All places drawn for this look ([version]): the widget shows them from now on. */
+    fun studioDrawn(context: Context, version: String) {
+        writeStudioMeta(context) { it.put("version", version.take(200)) }
+        refresh(context, AgentStudioWidgetProvider::class.java)
+    }
+
+    fun setStudioMotion(context: Context, on: Boolean) {
+        writeStudioMeta(context) { it.put("motion", on) }
+        refresh(context, AgentStudioWidgetProvider::class.java)
+    }
+
+    /** A frame small enough for the launcher (the widget is about half the screen's width). */
+    private fun studioBitmap(file: File): android.graphics.Bitmap? = runCatching {
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeFile(file.path, bounds)
+        var sample = 1
+        while (bounds.outWidth / (sample * 2) >= 640) sample *= 2
+        // No transparency in the pictures: half the memory the launcher is sent.
+        android.graphics.BitmapFactory.decodeFile(file.path, android.graphics.BitmapFactory.Options().apply {
+            inSampleSize = sample
+            inPreferredConfig = android.graphics.Bitmap.Config.RGB_565
+        })
+    }.getOrNull()
+
+    private fun studioViews(context: Context, id: Int): RemoteViews {
+        val task = readSummary(context).optJSONObject("task")
+        val engine = runCatching { JSONObject(EngineLifecycleState(context).statusJson()).optString("state") }.getOrDefault("")
+        val state = task?.optString("state").orEmpty()
+        val working = engine in engineAlive && state in setOf("running", "waiting_approval")
+        val pose = if (!working) "idle" else if (state == "waiting_approval") "door"
+            else task?.optString("pose")?.takeIf { it in TaskNotificationSnapshot.poses } ?: "desk"
+        val frames = studioFrames(context, pose).ifEmpty { studioFrames(context, "idle") }
+        val moving = working && frames.size > 1 && studioMeta(context).optBoolean("motion", true)
+        val view = RemoteViews(context.packageName, if (moving) R.layout.agent_studio_widget else R.layout.agent_studio_widget_still)
+        if (moving) {
+            studioFrameIds.forEachIndexed { index, frame ->
+                studioBitmap(frames[index % frames.size])?.let { view.setImageViewBitmap(frame, it) }
+            }
+        } else {
+            val picture = frames.firstOrNull()?.let(::studioBitmap)
+            if (picture != null) view.setImageViewBitmap(R.id.studio_still, picture)
+            view.setViewVisibility(R.id.studio_empty, if (picture == null) View.VISIBLE else View.GONE)
+        }
+        val words = when (pose) {
+            "window" -> UiText.of(context, "AI 在窗前想事", "The AI is thinking at the window")
+            "desk" -> UiText.of(context, "AI 在工位上忙", "The AI is busy at its desk")
+            "shelf" -> UiText.of(context, "AI 在书架查资料", "The AI is looking things up at the shelves")
+            "sandbox" -> UiText.of(context, "AI 在沙箱里运行命令", "The AI is running commands in the sandbox")
+            "console" -> UiText.of(context, "AI 在操作手机", "The AI is working the phone")
+            "board" -> UiText.of(context, "AI 在白板前分派任务", "The AI is handing out parts at the board")
+            "door" -> UiText.of(context, "AI 在门外等你批准", "The AI is waiting for your approval at the door")
+            else -> UiText.of(context, "AI 空闲", "The AI is free")
+        }
+        view.setTextViewText(R.id.studio_state, words)
+        view.setTextViewText(R.id.studio_title, if (working) task?.optString("preview").orEmpty() else UiText.of(context, "工作室", "Studio"))
+        val open = if (task == null) QuickEntry.intent(context, "text") else TaskNotificationPublisher.navigationIntent(context,
+            TaskNotificationSnapshot(task.optString("task_id"), task.optString("session_id"), state, "", null, null, 0))
+        view.setOnClickPendingIntent(android.R.id.background, PendingIntent.getActivity(context, id * 16 + 6, open,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
+        return view
     }
 
     private fun activity(context: Context, id: Int, slot: Int, intent: Intent): PendingIntent =
@@ -414,6 +521,7 @@ object AgentWidgets {
             "quick_tasks" -> AgentQuickTasksWidgetProvider::class.java
             "ask" -> AgentWidgetProvider::class.java
             "card" -> AgentCardWidgetProvider::class.java
+            "studio" -> AgentStudioWidgetProvider::class.java
             else -> return false
         }
         val manager = AppWidgetManager.getInstance(context) ?: return false
@@ -453,6 +561,13 @@ class AgentTaskWidgetProvider : AppWidgetProvider() {
 class AgentCardWidgetProvider : AppWidgetProvider() {
     override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) {
         ids.forEach { manager.updateAppWidget(it, AgentWidgets.views(context, AgentCardWidgetProvider::class.java, it)) }
+    }
+}
+
+/** The studio: what the AI does in its 3D studio, moving while a task runs (frames the app drew). */
+class AgentStudioWidgetProvider : AppWidgetProvider() {
+    override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) {
+        ids.forEach { manager.updateAppWidget(it, AgentWidgets.views(context, AgentStudioWidgetProvider::class.java, it)) }
     }
 }
 

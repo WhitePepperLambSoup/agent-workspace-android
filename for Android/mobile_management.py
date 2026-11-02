@@ -88,6 +88,18 @@ class MobileManagement:
         with suppress(Exception):
             jclass("com.agentworkspace.mobile.embedded.DeviceLinkNotices").execute(json.dumps(notice, ensure_ascii=False))
 
+    def _model_efforts(self):
+        """A model's thinking efforts at the current provider ("" for the main model)."""
+        from agent_workspace.providers.reasoning import supported_reasoning_efforts
+
+        protocol, base_url = self.controller.protocol, self.controller.base_url
+
+        def efforts(model):
+            model = model or self.controller.default_model or ""
+            return supported_reasoning_efforts(protocol, base_url, model) if protocol and base_url and model else ("auto",)
+
+        return efforts
+
     @staticmethod
     def _discover_computers(seconds):
         """Computers announcing the phone connection on this network (ComputerDiscovery, NSD)."""
@@ -118,12 +130,15 @@ class MobileManagement:
             return 202, link.start(host_id, action, lambda: link.send_files(
                 host_id, payload.get("files"), knowledge=payload.get("knowledge"),
                 instruction=payload.get("instruction"), session_id=payload.get("session_id"),
+                confirmed=payload.get("confirmed"),
             ))
         if action == "send-text":
             return 200, await link.send_text(host_id, payload.get("text"), payload.get("kind", "text"))
+        if action == "relay-check":
+            return 200, link.relay_check(host_id, payload.get("session_id"), payload.get("prompt"))
         if action == "relay":
             return 202, link.start(host_id, action, lambda: link.relay(
-                host_id, payload.get("session_id"), payload.get("prompt")))
+                host_id, payload.get("session_id"), payload.get("prompt"), payload.get("confirmed")))
         if action == "new-task":
             return 202, link.start(host_id, action, lambda: link.new_task(
                 host_id, payload.get("prompt"), payload.get("confirmed")))
@@ -524,6 +539,9 @@ class MobileManagement:
             if path == "/mobile/shortcuts/stop":
                 await asyncio.to_thread(mobile_shortcuts.stop)
                 return 200, {"ok": True}
+            if path == "/mobile/shortcuts/demonstrate":
+                # 「演示一遍」: start or cancel recording the user's own taps in other apps.
+                return 200, await asyncio.to_thread(mobile_shortcuts.demonstration, str(payload.get("action") or ""))
         except KeyError:
             return 404, {"error": "no such shortcut or recorded task"}
         except ValueError as error:
@@ -747,6 +765,12 @@ class MobileManagement:
             import mobile_shortcuts
 
             return 200, {"steps": mobile_shortcuts.pending(query.get("task_id", [""])[0])}
+        if path == "/mobile/shortcuts/demonstration":
+            # Whether a demonstration is being recorded; with take=1 the finished one, once.
+            import mobile_shortcuts
+
+            action = "take" if query.get("take", [""])[0] == "1" else "state"
+            return 200, await asyncio.to_thread(mobile_shortcuts.demonstration, action)
         if path == "/mobile/speech/status":
             import json as _json
 
@@ -759,9 +783,13 @@ class MobileManagement:
 
             return 200, await asyncio.to_thread(describe, os.getenv("AGENT_WORKSPACE_BASE_URL") or "")
         if path == "/mobile/model-roles":
-            from mobile_model_roles import get_roles
+            from mobile_model_roles import get_efforts, get_roles
 
-            return 200, {"roles": get_roles()}
+            # The efforts the sub-task model offers (?model=, else the saved one, else the main model).
+            roles = get_roles()
+            model = (query.get("model") or [""])[0].strip()[:128] or roles["subagent"]
+            return 200, {"roles": roles, "efforts": get_efforts(),
+                         "subagent_efforts": list(self._model_efforts()(model))}
         if path == "/mobile/task-limits":
             from mobile_task_limits import get_limits
 
@@ -808,6 +836,13 @@ class MobileManagement:
             return 200, backup_jobs.status(query.get("job_id", [""])[0])
         if path == "/mobile/notification-rules":
             return 200, self.notification_rules().snapshot()
+        if path == "/mobile/task-estimate":
+            # How long tasks like the running one (by its first tool) took on this phone.
+            import mobile_task_timing
+
+            return 200, await asyncio.to_thread(
+                mobile_task_timing.estimate, mobile_task_timing.kind_of(query.get("tool", [""])[0])
+            )
         if path == "/mobile/services":
             return 200, await asyncio.to_thread(self.services().snapshot, probe=True)
         if path == "/mobile/services/logs":
@@ -1215,12 +1250,15 @@ class MobileManagement:
             except ValueError as error:
                 return 400, {"error": str(error)}
         if path == "/mobile/model-roles":
-            from mobile_model_roles import set_roles
+            from mobile_model_roles import get_efforts, set_roles
 
+            efforts = payload.get("efforts")
             try:
-                return 200, {"roles": set_roles(payload.get("roles") or {})}
+                roles = set_roles(payload.get("roles") or {}, efforts if isinstance(efforts, dict) else None,
+                                  supported=self._model_efforts())
             except ValueError as error:
                 return 400, {"error": str(error)}
+            return 200, {"roles": roles, "efforts": get_efforts()}
         if path == "/mobile/task-limits":
             from mobile_task_limits import set_limits
 
@@ -1401,6 +1439,7 @@ class MobileManagement:
             # The computer forgets this phone too when it can be told; otherwise the user is told to.
             told = await self.connections.unpair_remote(host_id)
             self.outbox.abandon(host_id)
+            await self.link.stop_jobs(host_id)
             removed = self.connections.remove(host_id)
             self.link.forget(host_id)
             return 200, {"ok": removed, "computer_told": told}

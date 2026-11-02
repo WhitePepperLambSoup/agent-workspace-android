@@ -41,6 +41,8 @@ private const val LONG_PRESS_MS = 650L
  * Words on a control that deletes, clears, uninstalls or stops an app (spaces removed). Pressing one
  * needs the user's yes for that very control. Paying is not asked about at all: see PaymentFirewall.
  */
+private val GOES_ON_SWIPE = Regex("上滑或点击|上滑跳转|向上滑动|滑动查看详情|(?i)swipe up")
+
 private val CONSEQUENTIAL = Regex(
     "删除|清除|清空|卸载|强行停止|强制停止|恢复出厂|格式化|注销账号|注销账户|" +
         "(?i)(delete|clearcache|cleardata|clearstorage|uninstall|forcestop|factoryreset|erase)"
@@ -96,15 +98,22 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         /** What a finger can do with it: the screenshot marks these, scroll looks for [scrollable]. */
         val clickable: Boolean = false, val editable: Boolean = false, val scrollable: Boolean = false,
         val longClickable: Boolean = false,
+        /** In or on a view that rotates what it shows by itself (a search box's hot searches). */
+        val rotating: Boolean = false,
     ) {
         val actionable: Boolean get() = clickable || editable || scrollable || longClickable
 
-        // Counting numbers ("重新发送(59)", a timer) keep a control the same while it stays in place.
+        // Counting numbers ("重新发送(59)", a timer) and the words a switcher rotates through keep a
+        // control the same while it stays in place.
         fun sameControl(other: Target?): Boolean = other != null && className == other.className &&
-            viewId == other.viewId && (label == other.label ||
-                bounds == other.bounds && label?.replace(digits, "#") == other.label?.replace(digits, "#"))
+            viewId == other.viewId && (label == other.label || bounds == other.bounds &&
+                (rotating || label?.replace(digits, "#") == other.label?.replace(digits, "#")))
 
-        companion object { private val digits = Regex("[0-9]+") }
+        companion object {
+            private val digits = Regex("[0-9]+")
+            private val rotators = setOf("TextSwitcher", "ImageSwitcher", "ViewSwitcher", "ViewFlipper", "AdapterViewFlipper", "ViewAnimator")
+            fun rotates(className: String?): Boolean = className?.substringAfterLast('.') in rotators
+        }
     }
 
     private data class Snapshot(
@@ -153,10 +162,33 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
     @Volatile private var agentActedAt = 0L
     @Volatile private var overlayCheckPending = false
 
+    /** 「演示一遍」: the user's own taps being recorded as a shortcut (main thread). */
+    private var demonstration: DemonstrationRecorder? = null
+    val demonstrating: Boolean get() = demonstration != null
+
+    /** Starts recording the user's taps (main thread); false while the agent works the phone. */
+    fun startDemonstration(): Boolean {
+        if (demonstration != null) return true
+        // Not while the agent is working the phone: its taps are not the user's.
+        if (SystemClock.uptimeMillis() - agentActedAt < 3000) return false
+        DemonstrationRecorder.resultFile(this).delete()
+        demonstration = DemonstrationRecorder(this) {
+            demonstration = null
+            // Back to the app, where the Shortcuts page shows the steps to check and save.
+            packageManager.getLaunchIntentForPackage(packageName)?.let { intent ->
+                runCatching { startActivity(intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)) }
+            }
+        }.also { it.start() }
+        return true
+    }
+
+    fun stopDemonstration(keep: Boolean) { demonstration?.stop(keep) }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         // Window events arrive late or for windows that end up where they were, so they only count as
         // content; whether the windows changed is decided by comparing them (windowSignature).
         contentEpoch.incrementAndGet()
+        if (event != null && SystemClock.uptimeMillis() - agentActedAt > 1500) demonstration?.onEvent(event)
         when (event?.eventType) {
             AccessibilityEvent.TYPE_VIEW_SCROLLED -> lastScrollAt = SystemClock.uptimeMillis()
             AccessibilityEvent.TYPE_VIEW_CLICKED, AccessibilityEvent.TYPE_VIEW_LONG_CLICKED,
@@ -208,6 +240,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
     }
 
     override fun onDestroy() {
+        demonstration?.stop(false)
         stopRepeat("the accessibility service stopped")
         panel?.close()
         panel = null
@@ -526,8 +559,10 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
                 var problem: String? = null
                 val label = step.optString("label").takeUnless { step.isNull("label") || it.isBlank() }
                 // When its control is missing: close what is in the way (an ad, a splash screen, a
-                // popup), then scroll the page to it; look again after each that did something.
+                // popup), give a splash time to end, then scroll the page to it; look again after each
+                // that did something.
                 val recoveries = listOf(null, { dismissPopup() },
+                    { label != null && !step.optBoolean("optional") && waitForLabel(label) },
                     { label != null && !step.optBoolean("optional") && scrollToLabel(label) })
                 for (recovery in recoveries) {
                     if (recovery != null && !recovery()) continue
@@ -567,8 +602,26 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         return response.optBoolean("ok", true)
     }
 
+    /** A splash screen with no close control yet, or a page still loading: up to 6 s for these words to show. */
+    private fun waitForLabel(label: String): Boolean {
+        repeat(12) {
+            if (replayStop) return false
+            Thread.sleep(500)
+            dismissPopup()
+            if (textMatches(capture(), label).any { it.value.visible }) return true
+        }
+        return false
+    }
+
+    /** An ad that opens another app on a swipe says so ("上滑或点击 跳转详情或第三方应用"). */
+    private fun goesOnSwipe(observed: Snapshot): Boolean =
+        observed.targets.values.any { it.visible && it.label?.let(GOES_ON_SWIPE::containsMatchIn) == true }
+
     /** Scrolls the page until a control with these words is on screen; true when one is. */
     private fun scrollToLabel(label: String): Boolean {
+        val before = capture()
+        if (goesOnSwipe(before)) return false
+        val app = before.observation.optString("package_name")
         val answer = executeRequest(JSONObject().put("action", "scroll_to_text").put("text", label.take(200)).put("max_scrolls", 10))
         if (answer.optBoolean("ok", false)) return true
         val code = answer.optJSONObject("error")?.optString("code")
@@ -578,6 +631,8 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         // A list the accessibility tree does not mark as scrollable: swipe up a screen at a time.
         repeat(8) {
             val observed = capture()
+            // A swipe that left the app is no longer looking through its page.
+            if (observed.observation.optString("package_name") != app || goesOnSwipe(observed)) return false
             val width = observed.screen.width
             val height = observed.screen.height
             val swiped = executeRequest(JSONObject().put("action", "swipe").put("snapshot_version", observed.version)
@@ -1137,7 +1192,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         var sensitive = false
         var activePackage: String? = null
 
-        fun visit(node: AccessibilityNodeInfo, windowId: Int, path: List<Int>, parent: String?, depth: Int, parentSensitive: Boolean) {
+        fun visit(node: AccessibilityNodeInfo, windowId: Int, path: List<Int>, parent: String?, depth: Int, parentSensitive: Boolean, parentRotating: Boolean = false) {
             if (targets.size >= maxNodes || depth > maxDepth) {
                 truncated = true
                 return
@@ -1150,8 +1205,9 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             val className = bounded(node.className, 160)
             val viewId = bounded(node.viewIdResourceName, 255)
             val label = if (protected) null else ownLabel(node)
+            val rotating = parentRotating || Target.rotates(className)
             targets[ref] = Target(windowId, path, Rect(bounds), className, viewId, protected, label, node.isVisibleToUser,
-                node.isClickable, node.isEditable, node.isScrollable, node.isLongClickable)
+                node.isClickable, node.isEditable, node.isScrollable, node.isLongClickable, rotating)
             ownLabels[ref] = label
             val firstInside = targets.size
             nodes.put(JSONObject()
@@ -1177,7 +1233,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
                 // Android 13+ fetches a node's descendants in one round trip instead of one per node.
                 val child = (if (Build.VERSION.SDK_INT >= 33) node.getChild(index, AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_HYBRID)
                     else node.getChild(index)) ?: continue
-                try { visit(child, windowId, path + index, ref, depth + 1, protected) }
+                try { visit(child, windowId, path + index, ref, depth + 1, protected, rotating) }
                 finally { recycle(child) }
             }
             // A row or button without words of its own is known by the words inside it (as
@@ -1936,7 +1992,8 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
                     "The control is off screen and could not be scrolled into view; swipe to it, then observe again")
                 when (operation) {
                     "type_text" -> {
-                        if (!current.isEditable) throw AutomationFailure("not_editable", "The referenced control does not accept text")
+                        if (!current.isEditable) throw AutomationFailure("not_editable", "The referenced control does not " +
+                            "accept text. If it looks like a search box, tap it first: that often opens the real field")
                         return@onReader current.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
                             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, request.getString("text"))
                         })

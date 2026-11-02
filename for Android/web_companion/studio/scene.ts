@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 
+import { fishFor, type TankFish } from './aquarium'
 import type { StudioActor } from './cast'
 import {
   BOARD_PLACE,
@@ -30,6 +31,14 @@ export interface StudioOptions {
   dark: boolean
   reducedMotion: boolean
   accent: string
+  /** No scene without the GPU: drawn in software it would slow the whole app. */
+  requireGpu?: boolean
+  /** Pixels per CSS pixel instead of the mode's own: the home-screen widget's frames are drawn sharper. */
+  pixelRatio?: number
+  /** Behind the conversation, the agent in the middle of the picture (the home-screen widget's frames). */
+  centered?: boolean
+  /** How many times faster than life people walk and the camera follows (a task's replay film). */
+  speed?: number
 }
 
 /** An actor with the words the window shows for them. */
@@ -71,10 +80,16 @@ export interface StudioScene {
   /** Up close on a floor, or (null) out to the whole building. */
   focus(floorId: string | null): void
   setPaused(paused: boolean): void
+  /** The model at work: it decides what swims in the fish tank. */
+  setModel(model: string | null): void
   resetView(): void
   /** Draws for this long as while someone walks, whatever the room does: the page times the frames
    * to find a phone too slow for the studio behind the conversation. */
   exercise(ms: number): void
+  /** Draws now and returns the canvas holding that picture until the page next yields (the widget's frames). */
+  frame(): HTMLCanvasElement
+  /** Nobody walks and the camera has arrived (as of the last picture drawn). */
+  calm(): boolean
   dispose(): void
 }
 
@@ -270,8 +285,9 @@ function actionFor(member: Member, place: Place): Action {
 export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, options: StudioOptions, handlers: StudioHandlers, initialMode: StudioMode = 'room'): StudioScene {
   let mode = initialMode
   // A phone's screens have 2.5-3.5 pixels per CSS pixel; 1.25 with antialiasing still reads well.
-  const pixelRatio = (): number => (mode === 'backdrop' ? BACKDROP_PIXELS : Math.min(window.devicePixelRatio || 1, 1.25))
-  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'low-power' })
+  const pixelRatio = (): number => options.pixelRatio ?? (mode === 'backdrop' ? BACKDROP_PIXELS : Math.min(window.devicePixelRatio || 1, 1.25))
+  const speed = Math.min(Math.max(options.speed ?? 1, 0.25), 4)
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'low-power', failIfMajorPerformanceCaveat: options.requireGpu === true })
   renderer.setPixelRatio(pixelRatio())
   renderer.shadowMap.enabled = true
   renderer.shadowMap.type = THREE.PCFShadowMap
@@ -312,6 +328,8 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
   // One set of finishes and one room kit for every floor: the floors share their buffers.
   const finishes = createFinishes()
   const roomKit = createRoomKit({ dark: options.dark, accent: options.accent }, finishes)
+  /** What swims in every floor's fish tank (setModel). */
+  let fish: TankFish = 'small'
 
   // What turns a stack of rooms into a building: corner posts on every floor, a roof, a plinth.
   const trim = options.dark ? '#3b4252' : '#d8d2c8'
@@ -451,9 +469,14 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
       return { ...view, target: view.target.clone().setY(view.target.y - (2 * share * half) / Math.sin(view.polar)) }
     }
     if (team) return raise({ target: TARGET.clone().addScaledVector(right, upright ? 0 : -0.9), radius: fitRadius(ROOM_RADIUS) * 0.52, ...BACKDROP_ANGLES }, 0.08)
-    const target = TARGET.clone().lerp(new THREE.Vector3(at.x, 0.75, at.z), upright ? 0.85 : 0.7).addScaledVector(right, upright ? 0 : -1.1)
-    // Close enough that the room fills the window: walls, floor and window behind every pane.
-    return raise({ target, radius: fitRadius(ROOM_RADIUS) * (working ? 0.31 : 0.38), ...BACKDROP_ANGLES }, 0.18)
+    // The widget's frames (options.centered): the agent in the middle of the picture.
+    const centered = options.centered === true
+    const target = TARGET.clone().lerp(new THREE.Vector3(at.x, 0.75, at.z), centered ? 1 : upright ? 0.85 : 0.7)
+      .addScaledVector(right, centered || upright ? 0 : -1.1)
+    // Close enough that the room fills the window: walls, floor and window behind every pane. Centred
+    // upright (a replay film), the agent just above the middle, clear of the caption below.
+    return raise({ target, radius: fitRadius(ROOM_RADIUS) * (working ? 0.31 : 0.38) * (centered && upright ? 0.85 : 1), ...BACKDROP_ANGLES },
+      centered ? 0.06 : 0.18)
   }
   const destination = (): View => {
     if (mode === 'backdrop') return backdropView()
@@ -622,6 +645,7 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
     const group = new THREE.Group()
     group.userData.floorId = view.id
     const room = buildRoom(roomKit)
+    room.aquarium.setFish(fish)
     group.add(room.group)
     const posts = new THREE.Group()
     for (const mesh of meshesOf(postParts, finishes)) posts.add(mesh)
@@ -1082,6 +1106,9 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
   renderer.domElement.addEventListener('wheel', handled, { passive: true })
   const onLost = (event: Event): void => event.preventDefault()
   renderer.domElement.addEventListener('webglcontextlost', onLost)
+  // The GPU gave the context back (three.js sets itself up again): drawn again, shadows too.
+  const onRestored = (): void => wake()
+  renderer.domElement.addEventListener('webglcontextrestored', onRestored)
 
   /** The next frame asked for, 0 while drawing has stopped (calm, hidden or disposed). */
   let frame = 0
@@ -1148,7 +1175,7 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
     }
     drawn = time
     const began = performance.now()
-    const dt = Math.min(0.05, (time - last) / 1000)
+    const dt = Math.min(0.05, (time - last) / 1000) * speed
     last = time
     const now = time / 1000
     let walking = false
@@ -1160,6 +1187,7 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
           walking ||= member.person.walking
         }
         dress(floor, now)
+        floor.room.aquarium.tick(now, dt, still)
       }
     }
     lively = stack(now) === false || walking || move !== null
@@ -1208,6 +1236,13 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
       paused = next
       wake()
     },
+    setModel(model) {
+      const next = fishFor(model)
+      if (next === fish) return
+      fish = next
+      for (const floor of floors.values()) floor.room.aquarium.setFish(fish)
+      wake()
+    },
     setMode(next) {
       if (disposed || next === mode) return
       mode = next
@@ -1233,6 +1268,14 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
       exercising = performance.now() + ms
       wake()
     },
+    frame() {
+      renderer.shadowMap.needsUpdate = true
+      renderer.render(scene, camera)
+      return renderer.domElement
+    },
+    calm() {
+      return !lively
+    },
     dispose() {
       disposed = true
       halt()
@@ -1244,6 +1287,7 @@ export function createStudioScene(stage: HTMLElement, overlay: HTMLElement, opti
       renderer.domElement.removeEventListener('pointerleave', onLeave)
       renderer.domElement.removeEventListener('wheel', handled)
       renderer.domElement.removeEventListener('webglcontextlost', onLost)
+      renderer.domElement.removeEventListener('webglcontextrestored', onRestored)
       controls.dispose()
       for (const floor of floors.values()) removeFloor(floor)
       floors.clear()

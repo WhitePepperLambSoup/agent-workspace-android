@@ -48,6 +48,7 @@ def _state_name(task: Any) -> str:
 
 async def _prepare(api: Any, controller: Any, poll: float) -> None:
     session_id = None
+    task_id = None
     try:
         document = await asyncio.to_thread(api.create_session, _TITLE)
         session_id = document["id"]
@@ -55,6 +56,7 @@ async def _prepare(api: Any, controller: Any, poll: float) -> None:
         await api._archive_session(session_id, True)
         started = time.time()
         task = await controller.submit(MobileTaskRequest(session_id=session_id, prompt=_PROMPT))
+        task_id = task.task_id
         deadline = time.monotonic() + _LIMIT_SECONDS
         while time.monotonic() < deadline:
             current = controller.tasks.get(task.task_id)
@@ -79,6 +81,13 @@ async def _prepare(api: Any, controller: Any, poll: float) -> None:
     except Exception:
         logging.getLogger(__name__).exception("preparing the on-device model failed")
     finally:
+        # Stopped part way (the time limit, the engine closing, this job cancelled): its hidden task
+        # stops too, or it would stay queued or running and refuse every later change of model.
+        if task_id is not None:
+            with contextlib.suppress(Exception):
+                if _state_name(controller.tasks.get(task_id)) not in _FINISHED:
+                    await controller.cancel(task_id)
+                    await asyncio.wait_for(controller.wait(task_id), 30)
         if session_id is not None:
             with contextlib.suppress(Exception):
                 await api._delete_sessions([session_id])

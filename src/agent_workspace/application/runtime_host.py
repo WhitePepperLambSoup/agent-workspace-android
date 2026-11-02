@@ -215,6 +215,8 @@ class RuntimeSettings:
     writer_lock_group: ProcessWriteLockGroup | None = None
     # Starts sub-agents for the delegate_tasks tool; None leaves the tool out.
     subagents: SubagentLauncher | None = None
+    # Model services the user chose: requests go to them without asking, unless sensitive.
+    egress_trusted: Callable[[str], bool] | None = None
     # Sends requests to paired phones for the phone_task tool; None leaves the tool out.
     phone_jobs: PhoneJobLauncher | None = None
     # More tools for the runtime (the desktop's use_skill), and a section added to the system
@@ -1055,12 +1057,15 @@ class RuntimeHost(threading.Thread):
     ) -> ApprovalResult:
         if self._closing:
             return ApprovalResult(False, "runtime is stopping")
-        request_id = str(uuid4())
-        future: asyncio.Future[ApprovalResult] = asyncio.get_running_loop().create_future()
-        self._approvals[request_id] = future
         supports_session_scope = not any(
             category.startswith("sensitive_") for category in request.data_categories
         )
+        trusted = self.settings.egress_trusted
+        if supports_session_scope and trusted is not None and trusted(request.endpoint):
+            return ApprovalResult(True, "the user chose this provider", ApprovalScope.SESSION)
+        request_id = str(uuid4())
+        future: asyncio.Future[ApprovalResult] = asyncio.get_running_loop().create_future()
+        self._approvals[request_id] = future
         self._approval_session_scopes[request_id] = supports_session_scope
         emitted = self._emit(
             "approval.requested",

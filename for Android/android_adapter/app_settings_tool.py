@@ -31,6 +31,10 @@ SETTINGS: dict[str, dict[str, Any]] = {
     "haptics": {"title": "触感反馈", "choices": _ON_OFF, "page": "appearance"},
     "model": {"title": "模型", "choices": None, "page": "model"},
     "reasoning_effort": {"title": "思考程度", "choices": {"auto": "自动", "none": "不思考", "low": "低", "medium": "中", "high": "高", "xhigh": "极高", "max": "最高"}, "page": "model"},
+    # Sub-tasks (run_subagents) and the expert team's experts.
+    "subagent_model": {"title": "子任务和专家的模型", "choices": None, "page": "model",
+                       "values": "a model name the provider offers, or main (the same as the main model)"},
+    "subagent_effort": {"title": "子任务和专家的思考强度", "choices": {"task": "跟主任务一样", "auto": "自动", "none": "不思考", "low": "低", "medium": "中", "high": "高", "xhigh": "极高", "max": "最高"}, "page": "model"},
     "execution_mode": {
         "title": "执行模式",
         "choices": {"workspace": "仅工作区（改文件、联网等先问你）", "yolo": "YOLO（大部分操作不再询问）", "full_access": "完全访问（几乎不再询问）"},
@@ -118,7 +122,7 @@ class AppSettingsTool:
                         "setting": key,
                         "title": entry["title"],
                         "current": _current(key),
-                        "values": entry["choices"] or "a model name the provider offers",
+                        "values": entry["choices"] or entry.get("values") or "a model name the provider offers",
                         "page": entry["page"],
                     }
                     for key, entry in SETTINGS.items()

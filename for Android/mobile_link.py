@@ -32,7 +32,8 @@ from urllib.parse import quote, urlencode
 
 import httpx
 from mobile_connections import MobileConnections, RemoteHTTPError, connection_database, unavailable_reason
-from mobile_delivery import MobileOutbox, acknowledgements, refusal_reason, refused
+import mobile_private_numbers
+from mobile_delivery import MobileOutbox, acknowledgements, refusal_reason, refused, team_request
 
 MAX_FILE_BYTES = 100 * 1024 * 1024
 MAX_TEXT_BYTES = 64 * 1024
@@ -161,9 +162,13 @@ class MobileLink:
         self._next: dict[str, float] = {}
         self._failures: dict[str, int] = {}
         self._transfer_attempts: dict[tuple[str, str], int] = {}
+        # Files from each computer waiting for its receiver (one at a time, beside the rounds).
+        self._file_queue: dict[str, dict[str, dict[str, Any]]] = {}
+        self._file_receivers: dict[str, asyncio.Task] = {}
         self._waiters: dict[str, asyncio.Task] = {}
         self._waking: dict[str, float] = {}
-        self._told_jobs: set[str] = set()
+        # The pairing each computer was told for whether this phone takes its requests.
+        self._told_jobs: dict[str, Any] = {}
         self._operations: dict[str, dict[str, Any]] = {}
         self._tasks: set[asyncio.Task] = set()
         # One per computer: a read of one never waits for another's.
@@ -273,6 +278,15 @@ class MobileLink:
             for key, value in values.items():
                 db.execute(f"UPDATE link_settings SET {key}=? WHERE host_id=?", (value, host_id))
 
+    async def stop_jobs(self, host_id: str) -> None:
+        """A computer being removed: the tasks it asked this phone to do stop (nobody would see the result)."""
+        if self.controller is None:
+            return
+        for job in self.jobs(host_id):
+            if job["state"] in {"accepted", "running"} and job["task_id"]:
+                with contextlib.suppress(Exception):
+                    await self.controller.cancel(job["task_id"])
+
     def forget(self, host_id: str) -> None:
         """A removed computer: what was kept about it goes too (received files stay in the workspace),
         and so do its notifications that wait for an answer or open its page."""
@@ -355,11 +369,13 @@ class MobileLink:
                 host = self._host(host_id)
                 if host.get("runtime_at") is None or self.clock() - float(host["runtime_at"] or 0) > _RUNTIME_SECONDS:
                     host = await self.connections.refresh_runtime(host_id)
-                    if "device" in host["features"] and host_id not in self._told_jobs:
-                        # The desktop offers its phone_task tool only for phones that take requests.
-                        choice = self.settings(host_id)["jobs"]
-                        await self.connections.request(host_id, "POST", "/mobile/device", {"accepts_jobs": choice != "off"})
-                        self._told_jobs.add(host_id)
+                # The desktop offers its phone_task tool only for phones that take requests: told at the
+                # first round after pairing (pairing reads the computer's details itself, which kept this
+                # waiting ten minutes), and again after pairing it anew.
+                if "device" in host["features"] and self._told_jobs.get(host_id) != host.get("paired_at"):
+                    choice = self.settings(host_id)["jobs"]
+                    await self.connections.request(host_id, "POST", "/mobile/device", {"accepts_jobs": choice != "off"})
+                    self._told_jobs[host_id] = host.get("paired_at")
                 inbox: dict[str, Any] = {}
                 if "inbox" in host["features"]:
                     _, inbox = await self.connections.request(host_id, "GET", "/mobile/inbox")
@@ -428,7 +444,12 @@ class MobileLink:
 
         for item in inbox.get("transfers") or []:
             if isinstance(item, dict) and isinstance(item.get("transfer_id"), str):
-                await self._receive(host, item)
+                if item.get("kind") == "file":
+                    # A large file over a slow link takes longer than a round: fetched on the side,
+                    # so the computer's tasks and approvals are still read meanwhile.
+                    self._receive_later(host, item)
+                else:
+                    await self._receive(host, item)
 
         await self._jobs(host, [item for item in inbox.get("phone_jobs") or [] if isinstance(item, dict)])
         if not primed:
@@ -455,12 +476,39 @@ class MobileLink:
                  values.get("sha256")),
             )
 
+    def _receive_later(self, host: dict[str, Any], item: dict[str, Any]) -> None:
+        """Queue a file from the computer for the host's receiver, which fetches one at a time."""
+        host_id = host["host_id"]
+        queue = self._file_queue.setdefault(host_id, {})
+        queue.setdefault(item["transfer_id"], item)
+        running = self._file_receivers.get(host_id)
+        if running is None or running.done():
+            self._file_receivers[host_id] = asyncio.get_running_loop().create_task(
+                self._receive_files(host), name=f"link-files-{host_id}")
+
+    async def _receive_files(self, host: dict[str, Any]) -> None:
+        host_id = host["host_id"]
+        queue = self._file_queue.setdefault(host_id, {})
+        while queue:
+            transfer_id, item = next(iter(queue.items()))
+            try:
+                await self._receive(host, item)
+            except Exception:
+                pass  # recorded by _receive where it can be; asked again at the next round
+            finally:
+                queue.pop(transfer_id, None)
+
     async def _receive(self, host: dict[str, Any], item: dict[str, Any]) -> None:
         host_id, name = host["host_id"], host["name"]
         transfer_id = item["transfer_id"]
         if not _ID.fullmatch(transfer_id):
             return
-        if self._received(host_id, transfer_id) is not None:
+        received = self._received(host_id, transfer_id)
+        if received is not None:
+            # Failed five times: left on the computer until the user asks for it again (retry_transfer);
+            # saying "done" would make the computer drop it.
+            if received["state"] == "failed":
+                return
             # Kept already: tell the desktop again in case the first "done" was lost.
             with contextlib.suppress(httpx.HTTPError, ValueError):
                 await self.connections.request(host_id, "POST", f"/mobile/transfers/{quote(transfer_id, safe='')}/done", {})
@@ -481,8 +529,9 @@ class MobileLink:
                     raise ValueError("the text from the computer is empty or too long")
                 self._record(host_id, transfer_id, kind, text=text)
                 self.activity(host_id, "text_received", text[:80])
+                # All of it: the notification shows the start, and its Copy button takes the whole text.
                 self.notify({"action": "text", "id": transfer_id, "host": name, "host_id": host_id,
-                             "text": text[:2000], "link": kind == "link"})
+                             "text": text, "link": kind == "link"})
             elif kind == "conversation":
                 _, document = await self.connections.request(
                     host_id, "GET", f"/mobile/transfers/{quote(transfer_id, safe='')}/content",
@@ -516,8 +565,11 @@ class MobileLink:
         folder = self.workspace / RECEIVED_FOLDER
         folder.mkdir(parents=True, exist_ok=True)
         target = unique_path(folder, safe_filename(item.get("name")))
+        # Room for a slow link (about 1 Mbit/s): ten minutes at least, an hour at most.
+        seconds = min(3600.0, max(600.0, (size if isinstance(size, int) and size > 0 else 0) / 125_000))
         received = await self.connections.download(
-            host_id, f"/mobile/transfers/{quote(transfer_id, safe='')}/content", target, max_bytes=MAX_FILE_BYTES
+            host_id, f"/mobile/transfers/{quote(transfer_id, safe='')}/content", target, max_bytes=MAX_FILE_BYTES,
+            timeout=seconds,
         )
         expected = item.get("sha256")
         if isinstance(expected, str) and expected and expected.lower() != received["sha256"]:
@@ -667,15 +719,18 @@ class MobileLink:
                          int(item.get("operate_phone") is True), now, now),
                     )
                 self.activity(host_id, "job_received", prompt[:80])
-                choice = self.settings(host_id)["jobs"]
-                if choice == "off":
-                    await self.decide_job(host_id, job_id, "reject")
-                elif choice == "auto":
-                    await self.decide_job(host_id, job_id, "accept")
-                else:
+                local = self._job(host_id, job_id)
+                if self.settings(host_id)["jobs"] == "ask":
                     self.notify({"action": "job", "id": job_id, "host": name, "host_id": host_id,
                                  "title": str(item.get("title") or "")[:120], "text": prompt[:300],
                                  "operate_phone": item.get("operate_phone") is True})
+            if state == "waiting" and local is not None and local["state"] == "waiting":
+                choice = self.settings(host_id)["jobs"]
+                if choice in {"off", "auto"}:
+                    # Answered without asking; an answer that did not reach the computer is given again
+                    # at the next round instead of the request quietly expiring there.
+                    with contextlib.suppress(httpx.HTTPError, ValueError):
+                        await self.decide_job(host_id, job_id, "reject" if choice == "off" else "accept")
             elif state == "cancelled" and local is not None and local["state"] in {"waiting", "accepted", "running"}:
                 if local["task_id"] and self.controller is not None:
                     with contextlib.suppress(Exception):
@@ -820,10 +875,10 @@ class MobileLink:
             raise ValueError("choose ask, auto or off")
         self._set(host_id, jobs=choice)
         if "device" in host["features"]:
-            self._told_jobs.discard(host_id)
+            self._told_jobs.pop(host_id, None)
             with contextlib.suppress(httpx.HTTPError, ValueError):
                 await self.connections.request(host_id, "POST", "/mobile/device", {"accepts_jobs": choice != "off"})
-                self._told_jobs.add(host_id)
+                self._told_jobs[host_id] = host.get("paired_at")
         return self.settings(host_id)
 
     # ---- the user's requests ---------------------------------------------------------------------
@@ -1114,8 +1169,10 @@ class MobileLink:
         knowledge: object = None,
         instruction: object = None,
         session_id: object = None,
+        confirmed: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Files to the computer's open folder (from-phone folder); with an instruction, a task too."""
+        """Files to the computer's open folder (from-phone folder); with an instruction, a task too.
+        ``confirmed``: what the user accepted for that task (as for a handed-over one)."""
         host = self._host(host_id)
         self._needs(host, "files")
         if not isinstance(files, list) or not files or len(files) > 50:
@@ -1124,6 +1181,9 @@ class MobileLink:
         if knowledge not in (None, ""):
             base = " ".join(str(knowledge).split())[:100]
         task_text = " ".join(str(instruction or "").split()).strip()[:20000]
+        # Checked before anything is sent: personal numbers in the request go only as the user chose.
+        if task_text and mobile_private_numbers.find(task_text) and (confirmed or {}).get("private_accepted") is not True:
+            raise ValueError("the request holds ID or bank card numbers; confirm on the phone first")
         sources = [self._staged(entry) for entry in files]
         sent: list[dict[str, Any]] = []
         failed: list[dict[str, str]] = []
@@ -1152,7 +1212,7 @@ class MobileLink:
             prompt = f"{task_text}\n\nFiles sent from my phone, in the open folder:\n{listing}"
             try:
                 task = await self._hand_over(host, prompt, session_id=session_id, title=task_text[:40],
-                                             files=[item["transfer_id"] for item in sent])
+                                             files=[item["transfer_id"] for item in sent], confirmed=confirmed)
             except (httpx.HTTPError, ValueError) as error:
                 task_error = self._reason(error)
         return {"sent": sent, "failed": failed, "task": task, "task_error": task_error}
@@ -1223,10 +1283,16 @@ class MobileLink:
         confirmed: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """A task in an existing computer conversation (through the outbox), or in a new one.
-        ``confirmed``: what the user accepted on the phone (accept_autonomy, private content)."""
+        ``confirmed``: what the user accepted on the phone (accept_autonomy, private content) and the
+        computer's expert team asked for (team, team_review)."""
         host_id = host["host_id"]
         request_id = request_id or str(uuid.uuid4())
-        confirmed = acknowledgements(confirmed or {})
+        if (confirmed or {}).get("team") is not None:
+            self._needs(host, "expert_team")
+        confirmed = {**acknowledgements(confirmed or {}), **team_request(confirmed or {})}
+        # ID and bank card numbers usually stay with the phone's own model (2.2): only as the user chose.
+        if prompt and mobile_private_numbers.find(prompt) and confirmed.get("private_accepted") is not True:
+            raise ValueError("the task holds ID or bank card numbers; confirm on the phone first")
         if session_id:
             delivery = self.outbox.enqueue({"host_id": host_id, "session_id": _checked_id(session_id, "conversation"),
                                             "prompt": prompt, "request_id": request_id, **confirmed})
@@ -1266,18 +1332,54 @@ class MobileLink:
             raise ValueError("write what the computer should do")
         return await self._hand_over(host, text, title=" ".join(text.split())[:40], confirmed=confirmed)
 
-    async def relay(self, host_id: str, session_id: object, prompt: object = None) -> dict[str, Any]:
-        """Continue a phone conversation on the computer: its messages, pictures and an optional prompt."""
+    def relay_check(self, host_id: str, session_id: object, prompt: object = None) -> dict[str, Any]:
+        """What the user must accept before a conversation goes on on the computer: the ID and bank
+        card numbers in it (which usually stay with the phone's own model), and whether a new
+        conversation there approves everything by itself."""
+        host = self._host(host_id)
+        if self.runtime is None:
+            raise ValueError("the engine is not ready")
+        _, messages, _ = self._conversation_messages(_checked_id(session_id, "conversation"))
+        texts = [str(message.get("content") or "") for message in messages] + [str(prompt or "")]
+        found = mobile_private_numbers.find_all(texts)
+        return {
+            "private": [{"kind": item["kind"], "masked": item["masked"]} for item in found],
+            "autonomy": host.get("new_conversation_autonomy"),
+            "private_ack": "private_ack" in host["features"],
+        }
+
+    async def relay(
+        self, host_id: str, session_id: object, prompt: object = None, confirmed: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Continue a phone conversation on the computer: its messages, pictures and an optional prompt.
+        ``confirmed``: what the user accepted (accept_autonomy; on_device and private_accepted to send
+        ID or bank card numbers as they are, or mask to send them masked)."""
         host = self._host(host_id)
         self._needs(host, "conversations")
         if self.runtime is None:
             raise ValueError("the engine is not ready")
+        confirmed = dict(confirmed or {})
         title, messages, images = self._conversation_messages(_checked_id(session_id, "conversation"))
         if not messages:
             raise ValueError("this conversation has no messages to continue")
-        files = await self._upload_images(host_id, images) if images and "files" in host["features"] else []
         text = " ".join(str(prompt or "").split())[:20000]
-        created = await self._hand_over(host, text, title=title or "From phone", files=files, messages=messages)
+        # Personal numbers leave the phone only as the user chose (as for one handed-over task, 2.2).
+        if mobile_private_numbers.find_all([str(message.get("content") or "") for message in messages] + [text]):
+            if confirmed.pop("mask", None) is True:
+                messages = [{**message, "content": mobile_private_numbers.mask(str(message.get("content") or ""))}
+                            for message in messages]
+                text = mobile_private_numbers.mask(text)
+                title = mobile_private_numbers.mask(title)
+            elif confirmed.get("private_accepted") is not True:
+                raise ValueError("the conversation holds ID or bank card numbers; confirm on the phone first")
+            elif not text:
+                # Without a prompt nothing runs there; the computer's flags go with a task only.
+                confirmed.pop("on_device", None)
+                confirmed.pop("private_accepted", None)
+        confirmed.pop("mask", None)
+        files = await self._upload_images(host_id, images) if images and "files" in host["features"] else []
+        created = await self._hand_over(host, text, title=title or "From phone", files=files, messages=messages,
+                                        confirmed=confirmed)
         self.activity(host_id, "conversation_sent", title or str(session_id))
         return created
 
@@ -1363,11 +1465,13 @@ class MobileLink:
             if service.get("id") != host["desktop_id"] or not isinstance(service.get("url"), str):
                 continue
             if host.get("fingerprint") and service["url"].startswith("https://"):
-                with contextlib.suppress(Exception):
-                    self.connections.use_address(host_id, service["url"])
-                    await self.connections.request(host_id, "GET", "/health", timeout=5)
-                    self.activity(host_id, "address_changed", service["url"])
-                    self._next[host_id] = 0.0
+                # Tried there first with the pinned certificate: an address that does not answer as
+                # this computer (forged, or another one) is left alone, the pairing kept as it was.
+                if await self.connections.answers_at(host_id, service["url"]):
+                    with contextlib.suppress(Exception):
+                        self.connections.use_address(host_id, service["url"])
+                        self.activity(host_id, "address_changed", service["url"])
+                        self._next[host_id] = 0.0
                 return
             if not host.get("fingerprint") and service["url"].startswith("http://"):
                 self.notify({"action": "moved", "id": host_id, "host": host["name"], "host_id": host_id,
@@ -1499,9 +1603,10 @@ class MobileLink:
 
     async def ask_computer(
         self, task: str, *, computer: str | None = None, conversation: str | None = None, request_id: str,
-        timeout: float = _ASK_SECONDS,
+        timeout: float = _ASK_SECONDS, team: bool = False,
     ) -> dict[str, Any]:
-        """Hand one part of a task to a paired computer and wait for its answer (ask_computer)."""
+        """Hand one part of a task to a paired computer and wait for its answer (ask_computer);
+        ``team``: its expert team does it, the lead picking the specialists."""
         hosts = self.computers_for_tasks()
         if not hosts:
             raise ValueError("no computer is paired with this phone")
@@ -1532,7 +1637,8 @@ class MobileLink:
             session_id = matches[0].get("id")
         elif "conversations" not in host["features"]:
             raise ValueError("the computer's app is older: name one of its conversations (conversation=...)")
-        handed = await self._hand_over(host, task, session_id=session_id, title=task[:40], request_id=request_id)
+        handed = await self._hand_over(host, task, session_id=session_id, title=task[:40], request_id=request_id,
+                                       confirmed={"team": "auto"} if team else None)
         delivery = handed if session_id else handed.get("delivery")
         if not delivery:
             raise ValueError("the computer did not start the task")

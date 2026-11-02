@@ -584,6 +584,8 @@ class _RunHostEntry:
     continuation_count: int = 0
     last_result_digest: str | None = None
     no_progress_count: int = 0
+    # The thinking effort each of its turns asks for (a sub-agent's); None: the model's own.
+    reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

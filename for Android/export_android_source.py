@@ -35,6 +35,7 @@ _EXCLUDED_DIRS = {
 }
 _SOURCE_SUFFIXES = {
     ".py",
+    ".woff2",
     ".kt",
     ".java",
     ".kts",

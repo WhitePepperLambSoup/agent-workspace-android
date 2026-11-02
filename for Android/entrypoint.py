@@ -9,10 +9,12 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import html
 import os
 import secrets
+import socket
 import sys
 import threading
 import time
@@ -70,6 +72,9 @@ def _load_mobile_assets(token: str) -> tuple[str, dict[str, tuple[str, bytes]]]:
         'src="/static/app.js"', f'src="/static/app.js?token={encoded_token}"'
     )
     console_html = console_html.replace(
+        'src="/static/storage-carry.js"', f'src="/static/storage-carry.js?token={encoded_token}"'
+    )
+    console_html = console_html.replace(
         'src="/static/compat.js"', f'src="/static/compat.js?token={encoded_token}"'
     )
     console_html = console_html.replace(
@@ -109,6 +114,10 @@ def _load_mobile_assets(token: str) -> tuple[str, dict[str, tuple[str, bytes]]]:
         "/static/app.js": (
             "application/javascript; charset=utf-8",
             app_script(web_root),
+        ),
+        "/static/storage-carry.js": (
+            "application/javascript; charset=utf-8",
+            (web_root / "static" / "storage-carry.js").read_bytes(),
         ),
         "/static/compat.js": (
             "application/javascript; charset=utf-8",
@@ -220,6 +229,9 @@ async def _build_mobile_workspace_runtime(
             extension_consents=extension_consents,
             event_listener=runtime_event_listener,
             writer_lock_group=writer_locks,
+            # Reads of one step (files, documents, the knowledge base) run side by side, as on the
+            # computer; the phone's screen still takes one at a time (android_system._SCREEN_LOCK).
+            parallel_tool_calls=True,
         )
         try:
             extension_consents.bind_runtime(runtime)
@@ -350,6 +362,42 @@ def _publish_serve_token(token: str) -> None:
     with suppress(OSError):
         staging.chmod(0o600)
     os.replace(staging, token_path)
+
+
+# On the phone the engine takes the first free one of these ports.
+ENGINE_PORT_TRIES = 10
+
+
+def _engine_port(host: str, preferred: int, tries: int) -> int:
+    """The preferred port, or the next free one: another app's server on 8080 (a web server in
+    Termux, a proxy) would otherwise keep the engine from starting. A port held for another
+    reason is left for the gateway to report."""
+    for candidate in range(preferred, preferred + max(1, tries)):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            # As the gateway's server binds (allow_reuse_address): a closed predecessor's port is
+            # free. (On Windows the option would let the probe share a port in use.)
+            if os.name != "nt":
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind((host, candidate))
+            except OSError as error:
+                if error.errno != errno.EADDRINUSE:
+                    return candidate
+                continue
+            return candidate
+    return preferred
+
+
+def _publish_serve_port(port: int) -> None:
+    """serve.port beside serve.token, written before it: the app reads the port once the token is there."""
+    token_file = os.getenv("AGENT_WORKSPACE_SERVE_TOKEN_FILE")
+    if not token_file:
+        return
+    port_path = Path(token_file).expanduser().with_name("serve.port")
+    port_path.parent.mkdir(parents=True, exist_ok=True)
+    staging = port_path.with_name(f".{port_path.name}.tmp")
+    staging.write_text(str(port), encoding="utf-8")
+    os.replace(staging, port_path)
 
 
 _STALL_LOG_BYTES = 256 * 1024
@@ -494,6 +542,8 @@ async def _run_mobile_web_server(
     )
     token = os.getenv("AGENT_WORKSPACE_SERVE_TOKEN") or secrets.token_urlsafe(32)
     console_html, assets = _load_mobile_assets(token)
+    if os.getenv("AGENT_WORKSPACE_EMBEDDED_PYTHON") == "chaquopy":
+        port = _engine_port(host, port, ENGINE_PORT_TRIES)
     api = MobileGateway(
         runtime,
         controller,
@@ -519,6 +569,7 @@ async def _run_mobile_web_server(
     # Publish the token only once this engine owns the port. Writing it earlier let a new engine
     # that failed to bind (a stalled predecessor still listening) advertise a token that nothing
     # on the port could prove, and the app waited on the identity check forever.
+    _publish_serve_port(port)
     _publish_serve_token(token)
     _startup_phase("gateway listening; token published")
     console_url = f"{api.address}/console"

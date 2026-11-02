@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sqlite3
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -43,6 +44,9 @@ from agent_workspace.ui_gateway.protocol import (
     CommandEnvelope,
 )
 from agent_workspace.ui_gateway.skills import SkillError as SkillLibraryError
+
+_MAX_USAGE_CONVERSATIONS = 24
+_RUN_ID = re.compile(r'"run_id":\s*"([0-9a-f-]{36})"')
 
 
 class UsageCommands(GatewayState):
@@ -210,6 +214,84 @@ class UsageCommands(GatewayState):
         return self._reply(
             "limits.set.result",
             {"epoch": self.epoch, **self._task_limits_document(self._task_limits())},
+            session_id=None,
+        )
+
+    def _conversations_usage(self, command: CommandEnvelope) -> GatewayReply:
+        """What each of a few conversations has cost: its own model calls, and those of the
+        sub-agents and experts it delegated to (each run keeps its own store). Runs still under
+        way are known from this window's delegations, finished ones from delegate_tasks results.
+        Conversations that no longer exist are left out."""
+        self._require_payload(command, {"sessionIds"})
+        if command.session_id is not None:
+            raise GatewayError("invalid_session")
+        ids = command.payload.get("sessionIds")
+        if (
+            not isinstance(ids, list)
+            or len(ids) > _MAX_USAGE_CONVERSATIONS
+            or not all(isinstance(item, str) and item for item in ids)
+        ):
+            raise GatewayError("invalid_payload")
+        kinds = frozenset({"model.requested", "usage.updated", "session.forked"})
+        conversations: list[dict[str, object]] = []
+        for session_id in dict.fromkeys(ids):
+            try:
+                session = self._workspace_session(session_id)
+            except GatewayError:
+                continue
+            try:
+                events = SQLiteEventStore.list_session_events_of_types_read_only(
+                    self._database, session.id, kinds | {"tool.settled"}
+                )
+            except (OSError, ValueError, sqlite3.DatabaseError):
+                raise GatewayError("storage_unavailable") from None
+            marker = fork_marker(events)
+            if marker is not None:
+                events = events[marker[0] + 1 :]
+            with self._lock:
+                runs = {
+                    run_id
+                    for run_id, delegation in self._delegations.items()
+                    if delegation.parent_session_id == session.id
+                }
+            for event in events:
+                if event.type == "tool.settled" and event.data.get("name") == "delegate_tasks":
+                    # The result may be cut short; the ids are found in what is left of it.
+                    runs.update(_RUN_ID.findall(str(event.data.get("result") or "")))
+            own = session_cost([event for event in events if event.type in kinds])
+            team_cost = 0.0
+            estimated = own.estimated
+            models = set(own.models)
+            service = self._control_service()
+            for run_id in sorted(runs):
+                run = service.get_run(run_id)
+                if run is None:
+                    continue
+                with suppress(OSError, ValueError, sqlite3.DatabaseError):
+                    cost = session_cost(
+                        SQLiteEventStore.list_session_events_of_types_read_only(
+                            self._agent_run_database(run_id, self._database), run.session_id, kinds
+                        )
+                    )
+                    team_cost += cost.cost_usd
+                    estimated = estimated or cost.estimated
+                    models.update(cost.models)
+            conversations.append(
+                {
+                    "sessionId": session.id,
+                    "costUsd": round(own.cost_usd + team_cost, 6),
+                    "teamCostUsd": round(team_cost, 6),
+                    "runs": len(runs),
+                    "estimated": estimated,
+                    # Unpriced models count as free; the UI must not present $0 as a price.
+                    "priced": any(
+                        resolve_pricing(model) is not UNKNOWN_PRICING for model in models
+                    ),
+                }
+            )
+        return self._reply(
+            "usage.conversations.result",
+            {"epoch": self.epoch, "conversations": conversations},
             session_id=None,
         )
 

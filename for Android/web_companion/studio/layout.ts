@@ -67,6 +67,8 @@ export const COFFEE_PLACE: Place = { x: -2.6, z: 3.35, face: { x: -2.6, z: 6 }, 
 export const COOLER: Point = { x: 5.1, z: 3.3 }
 export const COOLER_PLACE: Place = { x: 4.5, z: 3.3, face: { x: 7, z: 3.3 }, sit: false }
 export const PLANTS: readonly Point[] = [{ x: -5.5, z: -4.0 }, { x: 5.45, z: 4.05 }, { x: -0.6, z: 4.1 }, { x: 4.05, z: -4.05 }]
+/** A fish tank on a low cabinet by the front edge, between the meeting table and the cooler. */
+export const AQUARIUM: Box = { x0: 0.7, x1: 2.3, z0: 3.9, z1: 4.42 }
 
 /** Behind the desks, looking out of the back window: where the agent thinks things over. */
 export const WINDOW_PLACES: readonly Place[] = [-0.9, 0.9].map((x) => ({ x, z: -3.85, face: { x, z: -7 }, sit: false }))
@@ -105,6 +107,7 @@ export function obstacles(): Box[] {
     COUNTER,
     PRINTER,
     { x0: COOLER.x - 0.2, x1: COOLER.x + 0.2, z0: COOLER.z - 0.2, z1: COOLER.z + 0.2 },
+    AQUARIUM,
     ...plants,
   ]
 }

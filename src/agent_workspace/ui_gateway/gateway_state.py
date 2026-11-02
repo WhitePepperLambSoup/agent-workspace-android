@@ -70,6 +70,7 @@ from agent_workspace.ui_gateway.latex_desk import LatexDesk
 from agent_workspace.ui_gateway.protocol import (
     CommandEnvelope,
 )
+from agent_workspace.ui_gateway.provider_trust import TrustedProviders
 from agent_workspace.ui_gateway.research import ResearchTools
 from agent_workspace.ui_gateway.schedules import (
     ScheduleBook,
@@ -105,6 +106,7 @@ class GatewayState:
     _database: Path
     _delegations: dict[str, _Delegation]
     _team_turns: dict[str, _TeamTurn]
+    _turn_efforts: dict[str, str | None]
     _device_host_starting: set[str]
     _device_hosted_sessions: dict[str, float]
     _device_hub: DeviceHub
@@ -137,6 +139,7 @@ class GatewayState:
     _pending_workspace_activation: tuple[Path, ProviderConfig] | None
     _phone_jobs: _GatewayPhoneJobs
     _projecting_background_session: bool
+    _provider_trust: TrustedProviders
     _provider: ProviderConfig | None
     _provider_health_checker: Callable[[ProviderConfig], ProviderHealthResult]
     _provider_resolver: Callable[[], ProviderConfig] | None
@@ -192,7 +195,13 @@ class GatewayState:
         def _workspace_session(self, session_id: object) -> Session: ...
 
         def _dispatch_prompt(
-            self, request_id: str, session: Session, prompt: str, pictures: Sequence[str] = ()
+            self,
+            request_id: str,
+            session: Session,
+            prompt: str,
+            pictures: Sequence[str] = (),
+            *,
+            team: tuple[object, bool] | None = None,
         ) -> None: ...
 
         def _task_limits(self) -> TaskLimits | None: ...
@@ -230,9 +239,16 @@ class GatewayState:
         def _control_service(self) -> AgentControlService: ...
 
         @staticmethod
+        def _agent_run_database(run_id: str, control_database: Path) -> Path: ...
+
+        @staticmethod
         def _run_document(run: AgentRun) -> dict[str, object]: ...
 
         def _start_agent_run(self, command: CommandEnvelope) -> GatewayReply: ...
+
+        def _subagent_provider(
+            self, conversation: ProviderConfig, delegating_effort: str | None
+        ) -> tuple[ProviderConfig, str | None]: ...
 
         def _check_monthly_cap(self) -> None: ...
 

@@ -1,5 +1,101 @@
 # Changelog
 
+## 2.8.0 — 2026-11-02
+
+2.8.0 新增任务回放短片、桌面工作室小组件、「演示一遍」录快捷操作和「以后都这样做」；运行中的任务显示计划步骤和用时；AI 运行的命令碰不到应用自己的数据。Agent Workspace 2.8.0 adds task replay films, a studio widget for the home screen, recording a shortcut by showing it once, and turning an answer into a scheduled task; a running task shows its plan and the time taken, and the commands the AI runs can no longer reach the app's own data.
+
+电脑版 / Desktop app: https://github.com/WhitePepperLambSoup/agent-workspace-desktop
+
+### 中文
+
+- 新增：任务回放。用过工具的回答下面有「任务回放」按钮：工作室把这一轮的步骤快放一遍（AI 在窗边想、在桌前查资料、在沙盒里运行命令、到白板前分配任务），每一步下面写着做了什么。手机能录制时可以存成视频（多数手机是 MP4，竖屏 720×1280），存在工作区的 exports 文件夹，可以直接分享。
+- 新增：桌面「工作室」小组件。在 设置 → 全局入口 里添加。任务进行时，小组件里的 AI 在当前步骤对应的位置活动，画面循环播放，会多用一点电；同一页可以关掉动态画面，只显示静止画面。点小组件打开任务所在的对话。小组件不能实时绘制 3D，画面是应用在前台空闲时按你的主题画好的，换主题后会重画。
+- 新增：「演示一遍」。在 可复用流程 → 快捷操作 里点「演示一遍」，回到桌面自己在别的应用里做一遍，手机记下点了哪些按钮、往哪滑动，做完点屏幕上方的「完成」，存成快捷操作。输入的文字和密码框不记录，保存前可以改每一步。个别不向系统报告点击的控件记不下来（例如部分手机设置里的搜索框）。需要开着本应用的无障碍服务。
+- 新增：「以后都这样做」。回答下面的日历按钮把这次的请求设成定时任务，在这个对话里运行。请求里写了时间和频率（「每天早上 8 点」「每周」「8pm」）就照着填，否则默认每天、从几分钟后开始；确认后才创建。这一轮操作过手机的，定时任务也会操作手机（到时间需要手机解锁）。
+- 新增：任务进度。AI 列了计划时，运行中的任务显示计划的步骤和做到第几步；超过 10 秒显示已用时间；同类任务在这台手机上做过 5 次以后，显示这类任务通常要多久（一个范围，不是精确的预计时间）。
+- 新增：子任务和专家的思考强度。在 模型与思考 → 按用途分配模型 里，「子任务和专家」除了模型，还可以单独设思考强度；默认跟主任务一样。选项按子任务用的模型列出，模型不支持某个强度时按「自动」。专家团页会显示专家现在用的模型和强度。也可以让 AI 帮你改，点「应用更改」后生效。
+- 改进：任务进行中点工作室里的专家或子任务，不再跳到他的对话（那里的工作室只有他一个人），而是在工作室下方显示一张卡片：他负责哪一部分、用的模型和思考强度、最近几步，做完后显示他的结论。任务结束后可以从卡片打开他的完整记录。
+- 安全：AI 运行的命令和程序看不到应用自己的文件（对话记录、设置、引擎的连接令牌和程序文件），也不能借应用的身份调用安卓系统服务（例如读联系人、操作手机、让应用执行内部指令）。工作区和临时文件夹照常可以读写。以前在「本任务内允许」、YOLO 或完全权限下，网页里夹带的指令有可能借命令拿到这些。每条命令启动慢约 0.1 秒。
+- 新增：网页自检。AI 做完网页或小工具后，会先按你手机上预览的方式在后台打开一遍，检查脚本报错、被拦下的外部资源（预览不联网，也不能引用其他文件）和页面有没有内容，有问题先修好再交给你。
+- 新增：工作室里的整栋楼。全屏查看工作室时，如果其他对话也有任务在运行（比如定时任务），工作室会变成一栋楼，每个对话一层；上方可以切换看整栋楼或某一层，点其他楼层的 AI 会打开那个对话。
+- 改进：工作室里，AI 两步之间显示「思考中」，不再显示「写回答」；写完代码文件后，「跟随 AI」会切到工地。只能用软件绘制 3D 的手机不再显示工作室背景。
+- 改进：手机上其他应用（例如 Termux 里的网页服务）占用 8080 端口时，引擎会换用 8081 到 8089 中空闲的端口，界面设置和草稿会一起带过去，不再启动失败。
+- 修复：在工作室里点专家或子任务时，对话已经在切换，却提示「任务进行中，结束后再打开」，工作室也没有关闭。
+- 改进：自动组队的专家团由队长先做。几个互不依赖、各要查资料的部分同时交给专家，队长不再自己重查一遍；其他情况队长自己做，只在需要别的领域或复核结论时请专家。专家查到并注明来源的事实不再另做复核。最多 4 位专家同时工作；同一步里的只读操作（读文件、查知识库等）同时进行。你自己选定的专家团照常分工。
+- 新增：交给电脑的专家团。电脑版提供专家团时，「交给电脑」页可以勾选「交给电脑的专家团」；手机上的 AI 请电脑帮忙时，也可以请电脑的专家团来做。
+- 改进：对话的用量和费用包括它的子任务和专家。
+- 新增：任务 5 分钟没有新进展时发一条通知，有了进展通知自动消失，任务状态行也会写明。暂停时和使用本机模型时不提醒（本机模型第一次读长提示可能要几分钟）。
+- 改进：工作室里切换地点更顺：画好第一帧才淡入，进楼时镜头先推近；第二次起切换地点约 0.15 秒出画面。
+- 新增：在地点里直接做事。图书馆里可以搜索知识库；工地上点改过的文件，显示这一轮改了哪些行，可以打开文件或还原到改动前（还原前的内容留在文件历史里）。
+- 新增：使用 DeepSeek 时的彩蛋。
+- 安全：在电脑上接着做整个对话时，手机先检查整个对话（不只是新写的要求）里有没有身份证号和银行卡号，有的话先问你：打码后交给电脑、照原样交给电脑（电脑版支持时），或者取消。连同文件交给电脑的要求、手机上的 AI 请电脑帮忙的内容也一样检查；AI 请电脑帮忙时不会带上这些号码。
+- 修复：电脑发来大文件时，手机在后台接收，不再挡住同时到的审批和任务结果；接收失败 5 次的文件留在电脑上，不会被当作已收到而删掉。下载时限按文件大小放宽，最长 1 小时。
+- 修复：移除一台电脑时，它请这台手机做、还在进行的任务会停下。
+- 修复：设为「自动接受」或「不接受」时，答复没送到电脑（比如网络断了一下）会在下一轮再送，请求不会在电脑上一直等到过期。重新配对同一台电脑后，会再告诉电脑这台手机是否接受它的请求。
+- 安全：在网络上找到 HTTPS 电脑的新地址时，先用配对时记下的证书在新地址上验证，是同一台电脑才换过去，否则保留原来的地址。
+- 修复：电脑发来的文字，通知里的「复制」复制全文（最多 64 KiB），不再只复制显示出来的前 2000 字。从通知打开配对扫码、电脑文件或备份时，页面还没加载好也不会丢掉这一步。分享到「发给电脑」又没发出的文件副本，一天后在打开应用时清理。
+- 修复：删除对话时，它的专家和子任务的对话一起删除。
+- 修复：撤销一轮任务的文件改动时，AI 新建或改写的 Word、Excel 和 PDF 文件也能还原。
+- 修复：准备本机模型中途被打断（超时、引擎关闭）时，后台的准备任务一起停下，不再挡住之后的换模型。
+- 修复：工作室在加载时被关掉，或关掉又马上打开，不再在后台多画一份；应用在后台时，工作室、整栋楼和园区不再读取任务。动态效果设为「关闭」时工作室也静止；图形驱动重置后工作室接着画。
+- 修复：设备连接里的操作记录按界面语言显示，日期按系统语言格式显示。在一处信任的模型服务商，其他对话和专家马上生效。切换工作区后，园区的地点读新工作区的文件。在别的对话里结束的专家团任务，工作室里不再显示专家仍在工作。首次设置时检查密钥期间再按回车不会提交两次。
+- 修复：在默认以外的工作区里，任务运行时切换对话再切回来，会显示「恢复任务状态失败: internal_error」，对话变成断开、不能发消息，只能重启引擎。
+- 修复：读取任务状态偶尔失败时，对话不再一直卡住：页面会自动重试，成功后恢复连接和发送。错误提示不再显示 internal_error 这样的代码。
+- 修复：装了工具链时，在默认以外的工作区里运行命令（Python、Git、npm 等）都会报「工作目录超出工作区」。现在命令在它所在的工作区里运行，也只看得到这个工作区。
+- 修复：可选开发工具链装不上。Alpine 的软件源只保留每个软件包的最新版本，原来写死的版本被删掉后，下载会失败。现在安装时先读取软件源当时的索引、验证 Alpine 的签名，再下载索引里的当前版本，每个包都和索引核对。官方源、清华和阿里云镜像同时读索引，先读完的用来下载，其余的作备用。下载时断网会等网络恢复后接着下载，约 3 分钟一直连不上才停下，页面显示「网络中断，正在重试」。
+- 新增：工具链里可以用 pip 安装 Python 包。有预编译 wheel 的包（numpy、pandas、scipy、pillow、openpyxl、requests 等）和纯 Python 包可以直接装；手机上没有编译器，需要从 C 源码编译的包装不了。工具链自带 matplotlib、numpy 和 pillow，matplotlib 图表里的中文、日文、韩文不用设置字体就能显示。下载量从约 70 MB 变成约 100 MB。
+- 已经装了工具链的，在 设置 → 设备与工具 → 可选开发工具链 会显示「有新版本」，点「安装工具链」重新装一次后才能继续用。/home/agent 里的文件会保留，用 pip 装的包要重新装。
+- 修复：工具链的取消、中断、空间不足、下载断开等提示，在中文、日文、韩文界面里显示成英文。
+- 修复：安装包缺少 AI 生成 PDF 时公式用的字体，公式会退回系统字体显示。
+- 修复：运行快捷操作时，如果应用还在放开屏广告，会等广告结束或点「跳过」再继续。不再在写着「上滑跳转」的广告上滑动（有的广告一滑就打开别的应用）；滑动中跳到了别的应用会立刻停下并报告失败。
+- 修复：操作手机时，搜索框里轮播热搜词不再让点击失败。
+- 覆盖安装即可，数据会保留。
+
+### English
+
+- New: task replay. Under an answer whose turn used tools, "Replay the task" plays the turn's steps again in the studio, faster than they happened (the AI thinks at the window, looks things up at its desk, runs commands in the sandbox, hands out work at the board), with what each step did written below. Where the phone can record it, the replay can be saved as a video (MP4 on most phones, upright 720×1280) in the workspace's exports folder and shared from there.
+- New: a "Studio" widget for the home screen, added under Settings → Global entry. While a task runs, the AI in the widget works at the place of its current step, the picture playing in a loop, which uses a little more power; the same page has a switch for a still picture. Tapping the widget opens the task's conversation. A widget cannot draw 3D as it goes, so its pictures are drawn by the app in your theme while it is open and idle, and drawn again when the theme changes.
+- New: "Show it once". Under Workflows → Shortcuts, tap "Show it once", go to the home screen and do the task yourself in another app; the phone notes which buttons you tap and where you scroll, and when you tap "Done" at the top of the screen it becomes a shortcut. Text you type and password fields are not recorded, and every step can be changed before saving. A control that does not report its taps to the system cannot be recorded (the search bar in some phones' Settings, for example). Needs this app's accessibility service on.
+- New: "Do this regularly". The calendar button under an answer makes its request a scheduled task that runs in this conversation. A time and rhythm in the request ("every morning at 8", "weekly", "8pm") are filled in; otherwise every day, starting a few minutes from now. Nothing is created until you confirm. If the turn worked the phone, the scheduled task does too (the phone has to be unlocked then).
+- New: task progress. When the AI makes a plan, a running task shows the plan's steps and which one it is on; after 10 seconds, the time taken; and once this phone has done five tasks of the same kind, how long such tasks usually take (a range, not an exact estimate).
+- New: a thinking effort for sub-tasks and experts. Under Models & thinking → Models by purpose, "Sub-tasks and experts" now has a thinking effort besides the model, the same as the main task unless you change it. The choices are the sub-task model's own levels; where that model lacks one, it thinks automatically. The expert team page shows the model and effort its experts use. The AI can also propose the change for you to apply.
+- Improved: tapping an expert or a sub-task in the studio while the task runs no longer takes you to their conversation (where the studio had them alone). A card below the studio shows their part, the model and effort they use, their latest steps and, once done, their findings; the full record opens from the card after the task.
+- Security: commands and programs the AI runs no longer see the app's own files (conversations, settings, the engine's connection token and program files), and cannot use Android's services as the app (read contacts, work the phone, make the app run its internal actions). The workspace and the temporary folder can be read and written as before. Before, under "allow for this task", YOLO or full access, instructions hidden in a web page could have used a command to reach them. Each command starts about 0.1 s later.
+- New: page self-check. When the AI makes a web page or a small tool, it first opens it in the background the way your phone's preview shows it, looks for script errors, outside resources the preview blocks (the preview is offline and cannot load other files) and whether the page shows anything, and fixes what it finds before handing it to you.
+- New: the studio as a building. With the studio open in full, when other conversations have a task running too (a scheduled task, for example), the studio is a building with a floor for each conversation; buttons at the top show the whole building or one floor, and tapping another floor's AI opens that conversation.
+- Improved: in the studio, the AI shows "thinking" between two steps instead of "writing the answer", and following the AI goes to the building site after it writes a code file. Phones that can only draw 3D in software no longer show the studio behind the conversation.
+- Improved: when another app holds port 8080 (a web server in Termux, for example), the engine takes a free port from 8081 to 8089 and your interface settings and drafts come along, instead of failing to start.
+- Fixed: tapping an expert or a sub-task in the studio said "the task is running, open it later" and left the studio open, although the conversation was already opening.
+- Improved: an automatic expert team's lead works first. Parts that do not depend on each other and each need their own looking up go to experts at the same time, and the lead does not look them up again; otherwise the lead does the work and calls an expert for another field or a check of its conclusion. Facts the experts looked up and cited are not reviewed again. Up to four experts work at once, and a step's read-only actions (reading files, searching knowledge bases) run side by side. A team you picked yourself still splits the work.
+- New: the computer's expert team. When the desktop app offers its team, the "Hand to computer" page has "Hand to the computer's expert team", and the phone's AI can ask for the computer's team when it asks the computer for help.
+- Improved: a conversation's usage and cost include its sub-tasks and experts.
+- New: a task with no progress for five minutes sends one notification, which goes away when it moves on; the task's status line says so too. Not while paused, nor on the phone's own model (its first reading of a long prompt can take minutes).
+- Improved: smoother place switches in the studio: a place fades in once its first frame is drawn, the camera moves in before entering a building, and from the second switch on a place shows in about 0.15 s.
+- New: things done in places. The library searches the knowledge bases; at the building site, tapping a changed file shows the lines this turn changed, with buttons to open the file or put it back as it was before (what it held is kept in the file's history).
+- New: an easter egg for when you use a DeepSeek model.
+- Security: before a whole conversation goes on on the computer, the phone checks all of it (not only the new request) for ID card and bank card numbers and, if it finds any, asks first: send them masked, send them as they are (where the desktop app supports it), or cancel. A request sent with files, and what the phone's AI asks the computer, are checked the same way; the AI does not send those numbers to the computer.
+- Fixed: a large file from the computer is received in the background and no longer holds up the approvals and results that arrive meanwhile; a file that failed five times stays on the computer instead of being taken as received and dropped there. The download time limit grows with the file's size, up to an hour.
+- Fixed: removing a computer stops the tasks it asked this phone to do that are still running.
+- Fixed: with requests set to accept or refuse automatically, an answer that did not reach the computer (a dropped connection) is sent again at the next round, so the request does not wait there until it expires. After pairing the same computer again, it is told again whether this phone takes its requests.
+- Security: a new address found on the network for an HTTPS computer is first checked with the certificate kept at pairing; the phone moves there only when it is the same computer, and keeps the old address otherwise.
+- Fixed: Copy on a notification of text from the computer copies all of it (up to 64 KiB), not only the first 2,000 characters shown. Opening the pairing scan, the computer's files or a backup from a notification before the page has loaded no longer loses that step. Copies of files shared to "Send to computer" and never sent are removed after a day when the app opens.
+- Fixed: deleting a conversation also deletes its experts' and sub-tasks' conversations.
+- Fixed: undoing a task's file changes also puts back the Word, Excel and PDF files the AI created or rewrote.
+- Fixed: when preparing the on-device model is cut short (time limit, the engine closing), its background task stops too and no longer blocks a later change of model.
+- Fixed: the studio closed while loading, or closed and opened again at once, no longer draws a second copy in the background; with the app in the background, the studio, the building and the campus stop reading tasks. With motion set to off the studio is still, and it draws again after the graphics driver resets.
+- Fixed: the activity list under Device connections follows the interface language, and dates the system's format. A model provider trusted in one place applies at once to other conversations and experts. After switching workspaces, the campus's places read the new workspace's files. An expert team's task that finished while another conversation was open no longer shows its experts at work. Pressing Enter again while the first-use setup checks the key no longer submits twice.
+- Fixed: in a workspace other than the default one, leaving a conversation while its task ran and coming back showed "internal_error", the conversation went offline and could not send until the engine restarted.
+- Fixed: when reading a task's state fails once, the conversation no longer stays stuck: the page tries again and connection and sending come back. Error messages no longer show codes like internal_error.
+- Fixed: with the toolchain installed, every command (Python, Git, npm and others) in a workspace other than the default one failed, saying its working directory was outside the workspace. Commands now run in their own workspace and see only that one.
+- Fixed: the optional developer toolchain could not be installed. Alpine's repositories keep only the latest build of each package, so the versions the app had pinned disappeared and their downloads failed. Installing now reads the repository's current index, checks Alpine's signature, downloads the versions it lists and checks each package against it. The official repository and the Tsinghua and Aliyun mirrors are read at once; the first to finish gives the downloads and the others stand by. If the network drops, the download waits and goes on when it is back, stopping only after about three minutes without a connection; the page says it is trying again.
+- New: pip in the toolchain. Packages with a prebuilt wheel (numpy, pandas, scipy, pillow, openpyxl, requests and others) and pure-Python packages install directly; there is no compiler on the phone, so a package that has to be built from C source fails. matplotlib, numpy and pillow come with the toolchain, and Chinese, Japanese and Korean text shows in matplotlib charts without setting a font. The download grows from about 70 MB to about 100 MB.
+- If the toolchain is already installed, Settings → Device & tools → Developer toolchain shows that an update is available, and it works again once you tap Install toolchain. Files in /home/agent are kept; packages installed with pip have to be installed again.
+- Fixed: the toolchain's messages about cancelling, interruptions, free space and cut downloads were in English on the Chinese, Japanese and Korean interfaces.
+- Fixed: the app was missing the fonts for formulas in PDFs the AI makes, so formulas fell back to system fonts.
+- Fixed: when a shortcut runs and the app is still showing an opening ad, it waits for the ad to end or taps "Skip" before going on. It no longer swipes on an ad that says a swipe opens something (some open another app); if a swipe does land in another app, it stops and reports the failure.
+- Fixed: when the AI works the phone, a search box with rotating hot searches no longer makes its taps fail.
+- Install over the existing app; your data is kept.
+
 ## 2.7.2 — 2026-10-31
 
 2.7.2 修复工作室全屏查看时不能拖动旋转和双指缩放的问题。Agent Workspace 2.7.2 fixes turning and zooming the studio shown in full.

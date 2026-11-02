@@ -1,8 +1,8 @@
 """Answers commands that look for or run what a phone does not have, instead of running them.
 
 The environment section of the system prompt already names what is missing; a model that probes
-anyway (``which pdflatex``, ``pip install python-docx``, ``apt install ffmpeg``) gets the answer at
-once, with what to use instead, and no time goes into a command that cannot work.
+anyway (``which pdflatex``, ``apt install ffmpeg``, ``pip install`` without the developer toolchain)
+gets the answer at once, with what to use instead, and no time goes into a command that cannot work.
 """
 
 from __future__ import annotations
@@ -85,8 +85,13 @@ def missing_program_answer(argv: Any, available: Iterable[str] = ()) -> dict[str
         if program in _PACKAGE_MANAGERS:
             return _answer(program, "There is no package manager on this phone: nothing can be installed.")
         if program in ("pip", "pip3") or (program.startswith("python") and rest[:2] == ["-m", "pip"]):
-            if "install" in rest:
-                return _answer("pip install", "Python packages cannot be installed on this phone; use what is there.")
+            # The developer toolchain's Python installs wheels; without it there is no Python.
+            if "install" in rest and not present & {"python", "python3"}:
+                return _answer(
+                    "pip install",
+                    "Python and pip come with the developer toolchain, which is not installed "
+                    "(Device & tools → Developer toolchain).",
+                )
         if program == "npm" and rest[:1] in (["install"], ["i"]) and "-g" in rest:
             return _answer("npm install -g", "Global npm packages cannot be installed on this phone.")
         targets = rest if program in _PROBES else [program]

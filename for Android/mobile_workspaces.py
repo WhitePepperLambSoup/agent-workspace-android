@@ -554,6 +554,18 @@ class MobileWorkspaceController:
         task = self.get(task_id)
         return MobileTaskStore(self.store, session_id=task.session_id).events(task_id, after)
 
+    def task_summary(self, task: MobileTask) -> dict[str, Any]:
+        """A task for the list, from its conversation's own controller: that one ran it and knows
+        its step, and the base controller's store holds only its own workspace's tasks."""
+        controller = self._controllers.get(task.session_id, self.base_controller)
+        summarize = getattr(controller, "task_summary", None)
+        if not callable(summarize):
+            return task.to_dict()
+        try:
+            return summarize(task)
+        except KeyError:  # Not loaded yet after a restart, or deleted since the list was read.
+            return task.to_dict()
+
     def pending_approvals(self, task_id: str | None = None) -> list[dict[str, object]]:
         if task_id is not None:
             task = self.get(task_id)

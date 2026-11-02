@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Studio widget (4x2) while a task runs: the 3D studio's agent where its task has it, a few frames
+     the app drew played in a loop by the launcher (AgentWidgets.studioViews). -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@android:id/background"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_background"
+    android:clipToOutline="true">
+
+    <ViewFlipper
+        android:id="@+id/studio_frames"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:autoStart="true"
+        android:flipInterval="240">
+
+        <ImageView android:id="@+id/studio_frame_1" android:layout_width="match_parent" android:layout_height="match_parent"
+            android:scaleType="centerCrop" android:importantForAccessibility="no" />
+        <ImageView android:id="@+id/studio_frame_2" android:layout_width="match_parent" android:layout_height="match_parent"
+            android:scaleType="centerCrop" android:importantForAccessibility="no" />
+        <ImageView android:id="@+id/studio_frame_3" android:layout_width="match_parent" android:layout_height="match_parent"
+            android:scaleType="centerCrop" android:importantForAccessibility="no" />
+        <ImageView android:id="@+id/studio_frame_4" android:layout_width="match_parent" android:layout_height="match_parent"
+            android:scaleType="centerCrop" android:importantForAccessibility="no" />
+    </ViewFlipper>
+
+    <include layout="@layout/agent_studio_widget_caption" />
+</FrameLayout>

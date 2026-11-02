@@ -110,6 +110,34 @@ def clean_steps(steps: Any) -> list[dict[str, Any]]:
     return result
 
 
+def demonstration(action: str) -> dict[str, Any]:
+    """「演示一遍」 (DemonstrationRecorder): start, cancel, state, or take the finished recording.
+
+    A taken recording's steps are checked as a shortcut's; its typing steps come without their
+    text (the user fills it in before saving), so they are checked with a stand-in.
+    """
+    if action not in {"start", "cancel", "state", "take"}:
+        raise ValueError("unknown demonstration action")
+    try:
+        result = json.loads(str(_bridge().demonstration(action)))
+    except Exception as error:
+        raise ValueError("recording needs the Android app's accessibility service") from error
+    if action == "start" and not result.get("ok"):
+        raise ValueError(result.get("reason") or "the phone is busy; try again when the agent has finished")
+    if action == "take" and result.get("ok"):
+        steps = [step for step in result.get("steps") or [] if isinstance(step, dict)][:MAX_STEPS]
+        checked = []
+        for step in steps:
+            filled = {**step, "text": step.get("text") or "…"} if step.get("kind") == "type" else step
+            try:
+                clean = clean_steps([filled])[0]
+            except ValueError:
+                continue  # a step the app could not do again is left out
+            checked.append({**clean, "text": ""} if clean["kind"] == "type" else clean)
+        result["steps"] = checked
+    return result
+
+
 def list_shortcuts() -> list[dict[str, Any]]:
     try:
         return json.loads(str(_bridge().shortcuts()))

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Under the studio widget's caption: the picture darkens toward the bottom so white words read on it. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <gradient android:angle="90" android:startColor="#B3000000" android:endColor="#00000000" />
+</shape>

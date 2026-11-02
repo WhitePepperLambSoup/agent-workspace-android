@@ -411,11 +411,14 @@ class _NativeTool:
     hard_cancellable = False
     _SPEC: ToolSpec
 
-    def __init__(self, workspace: WorkspacePaths | StrPath, *, bridge: Any = None):
+    def __init__(self, workspace: WorkspacePaths | StrPath, *, bridge: Any = None, versions: Any = None):
         self.paths = (
             workspace if isinstance(workspace, WorkspacePaths) else WorkspacePaths(workspace)
         )
         self._bridge = bridge
+        # Where a replaced file is kept (<data>/file-versions, as write_file does), so undoing the
+        # task puts it back.
+        self.versions = versions
 
     @property
     def bridge(self) -> Any:
@@ -796,6 +799,8 @@ class AndroidCreatePdfTool(_NativeTool):
             export = await _settled(asyncio.to_thread(self._build, arguments, job))
 
             async def commit() -> str:
+                if self.versions is not None and preimage is not None:
+                    await asyncio.to_thread(self.versions.keep, preimage)
                 await context.prepare_file_checkpoint(
                     FileCheckpoint(
                         attempt_id=context.attempt_id,
@@ -819,6 +824,8 @@ class AndroidCreatePdfTool(_NativeTool):
                             "path": self.paths.relative(path),
                             "sha256": export.sha256,
                             "bytes": export.byte_count,
+                            # What the file was before (None: it is new), so it can be put back.
+                            "previous_sha256": expected,
                         },
                         causation_id=context.started_event_id,
                         correlation_id=context.correlation_id,

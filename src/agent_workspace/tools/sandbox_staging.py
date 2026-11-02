@@ -29,6 +29,13 @@ _MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 _MAX_ARTIFACT_BATCH_BYTES = 64 * 1024 * 1024
 _MAX_STALE_STAGING_ROOTS = 128
 _STAGING_NAME_PREFIX = "agent-stage-"
+# Left out of every staged copy, at any depth: a repository's history and hooks are not the
+# command's to read or change, and copying them is slow. The changes manifest ignores them too.
+STAGING_EXCLUSIONS = frozenset({".git"})
+
+
+def _staged(names: list[str]) -> list[str]:
+    return [name for name in names if name.casefold() not in STAGING_EXCLUSIONS]
 
 
 @dataclass(frozen=True, slots=True)
@@ -429,7 +436,7 @@ def _copy_workspace(
 ) -> tuple[dict[str, dict[str, Any]], int]:
     from .sandbox import _validate_workspace_mount
 
-    _validate_workspace_mount(source.root)
+    _validate_workspace_mount(source.root, STAGING_EXCLUSIONS)
     entries: dict[str, dict[str, Any]] = {}
     total_bytes = 0
     entry_count = 0
@@ -442,6 +449,8 @@ def _copy_workspace(
         topdown=True,
         onerror=reject_walk_error,
     ):
+        directory_names[:] = _staged(directory_names)
+        file_names[:] = _staged(file_names)
         directory_names.sort()
         file_names.sort()
         relative_directory = Path(directory).relative_to(source.root)
@@ -571,6 +580,8 @@ def _scan_tree(
         followlinks=False,
         onerror=reject_walk_error,
     ):
+        directory_names[:] = _staged(directory_names)
+        file_names[:] = _staged(file_names)
         directory_names.sort()
         file_names.sort()
         relative_directory = Path(directory).relative_to(root)

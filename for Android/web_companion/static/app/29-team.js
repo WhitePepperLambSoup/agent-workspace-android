@@ -129,9 +129,25 @@
     knowledgeBaseNames = null;
     setSettingsPage("team");
     renderTeamPage();
+    void loadTeamModel();
     try { await loadExpertCatalog(); } catch (error) { pageStatus($("teamStatus"), error.message, true); return; }
     if (!disposed && settingsPage === "team") renderTeamPage();
   }
+
+  /** The experts' model and thinking effort (the sub-task role on the model page). */
+  async function loadTeamModel() {
+    const summary = $("teamModelSummary");
+    try {
+      const value = await apiJson("/mobile/model-roles");
+      modelRoles = { roles: value.roles || {}, efforts: value.efforts || {} };
+      summary.textContent = t("专家的模型：{0} · 思考强度：{1}", modelRoles.roles.subagent || t("跟主模型一样"),
+        effortLabels[modelRoles.efforts.subagent] || t("跟主任务一样"));
+    } catch (error) { summary.textContent = t("读取失败：{0}", error.message); }
+  }
+  $("btnTeamModel").addEventListener("click", () => {
+    setSettingsPage("model");
+    $("modelRolesSection").scrollIntoView?.({ block: "start" });
+  });
 
   function renderTeamPage() {
     $("teamOnToggle").checked = teamSettings.on;
@@ -579,23 +595,36 @@
     const running = !!task;
     const runningCard = running ? [...elements.timelineList.querySelectorAll('.message-card.tool[data-state="running"]')].pop() : null;
     const tool = runningCard?.dataset.tool || "";
-    const approval = running && pendingApproval ? pendingApproval : null;
+    // The newest document made in the conversation: fetched from the printer once (the scene remembers).
+    const printed = running && !pendingApproval
+      ? [...elements.timelineList.querySelectorAll('.message-card.tool[data-state="done"]')].reverse().find((card) => printedTools.test(card.dataset.tool || ""))
+      : null;
+    return castFor({
+      running, tool, approval: running && pendingApproval ? pendingApproval : null,
+      // What it says is the answer it writes only when no tool came after it; between two steps it
+      // thinks of the next one at its desk.
+      answer: running && !tool && (task.textSequence || 0) > (task.toolSequence || 0) ? task.text : "",
+      started: !!task?.lastToolId, printed: printed?.dataset.toolId || null, fixed: teamSettings.mode === "fixed",
+      runs: teamLive.sessionId === currentSessionId ? [...teamLive.experts.entries()] : [],
+      helpers: helperLive.sessionId === currentSessionId ? [...helperLive.helpers.entries()] : [],
+    });
+  }
+
+  /**
+   * A floor's people from its conversation's task (the one on screen, or another's): whether it runs,
+   * its running tool, an approval it waits for, the answer it is writing, whether a tool came yet in
+   * the turn, a document to fetch from the printer, its experts' runs and its sub-agents.
+   */
+  function castFor({ running, tool, approval, answer, started, printed, fixed, runs, helpers }) {
     // Asked to run something or change files: the agent waits outside the glass door.
     const approvalKind = approval?.kind === "tool" ? activityKind(approval.details?.tool || "") : "";
     const atDoor = approvalKind === "code" || approvalKind === "write";
-    const runs = teamLive.sessionId === currentSessionId ? [...teamLive.experts.entries()] : [];
-    const helpers = helperLive.sessionId === currentSessionId ? [...helperLive.helpers.entries()] : [];
     const unfinished = runs.filter(([, run]) => run.state === "working");
     const delegating = unfinished.length > 0 || helpers.some(([, helper]) => !helper.done);
     const reviewing = unfinished.some(([, run]) => run.phase === "review");
     const leadActivity = running ? activityKind(tool) : null;
-    const answer = running && !tool ? task.text : "";
-    // Thinking before it writes or uses anything, the agent stands at the window.
-    const pondering = running && !tool && !answer.trim() && !delegating && !approval;
-    // The newest document made in the conversation: fetched from the printer once (the scene remembers).
-    const printed = running && !approval
-      ? [...elements.timelineList.querySelectorAll('.message-card.tool[data-state="done"]')].reverse().find((card) => printedTools.test(card.dataset.tool || ""))
-      : null;
+    // Thinking before it writes or uses anything in the turn, the agent stands at the window.
+    const pondering = running && !tool && !answer.trim() && !delegating && !approval && !started;
     const labels = activityLabels();
     const states = stateLabels();
     const leadState = approval ? "waiting" : !running ? "idle" : answer ? "answering" : "working";
@@ -606,16 +635,17 @@
         : pondering ? "window" : spotFor(leadActivity, tool),
       look: lookFor("lead"),
     };
-    if (printed?.dataset.toolId) lead.errand = printed.dataset.toolId;
+    if (printed) lead.errand = printed;
     lead.stateLabel = leadState === "working" ? labels[lead.activity || "thinking"] : states[leadState];
     if (answer && !approval) lead.bubble = speechLine(answer);
     else if (approval) lead.bubble = "?";
     // The experts come in once the conversation calls its team: a fixed team's members, or on auto
     // the experts the lead picked for this task (newest first).
     const picked = runs.map(([id]) => id).reverse();
-    const members = !runs.length ? [] : teamSettings.mode === "fixed" ? teamSettings.members : picked.slice(0, studioDesks);
+    const members = !runs.length ? [] : fixed ? teamSettings.members : picked.slice(0, studioDesks);
+    const byExpert = new Map(runs);
     const experts = members.map((id) => {
-      const run = teamLive.experts.get(id);
+      const run = byExpert.get(id);
       const state = !run ? "idle" : run.state === "working" ? "working" : run.state === "done" ? "done" : run.state === "failed" ? "failed" : "stopped";
       const activity = state === "working" ? activityKind(run.tool) : null;
       const actor = {
@@ -651,6 +681,12 @@
   let studioPaused = false;
   let studioSignature = "";
   let studioTimer = 0;
+  // Other conversations' floors while the studio is open (see "Other conversations' floors" below).
+  const buildingPollMs = 3000;
+  const buildingTracks = new Map(); // session id → what its task does, as far as its events tell
+  let floorChoice; // undefined: this conversation's floor; null: the whole building; else a session id
+  let buildingTimer = 0;
+  let buildingPolling = false;
 
   function loadStudio() {
     if (window.AgentStudio) return Promise.resolve(window.AgentStudio);
@@ -667,57 +703,365 @@
   function studioLook() {
     const dark = preferences.theme === "dark" || (preferences.theme === "system" && darkSchemeQuery?.matches === true);
     const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
-    const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true || document.documentElement.dataset.motion === "reduced";
+    // Motion "off" stills the studio as "reduced" does (as the live backdrop reads it); "full" moves it
+    // whatever the system says.
+    const motion = document.documentElement.dataset.motion;
+    const reduced = motion === "off" || motion === "reduced"
+      || (motion !== "full" && window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true);
     return { dark, reducedMotion: reduced, accent: /^#[0-9a-f]{6}$/i.test(accent) ? accent : "#2f7d6d" };
   }
 
-  function renderStudioRoster(cast) {
+  // The roster changes every few seconds while people work: the same people keep their buttons and
+  // only their words change, so a tap in progress is not lost to a rebuilt list.
+  let rosterItems = [];
+  function renderStudioRoster(cast, floorId = "room") {
     const roster = $("studioRoster");
-    roster.replaceChildren(...cast.map((actor) => {
-      const item = document.createElement("li");
+    const key = JSON.stringify([floorId, cast.map((actor) => actor.id)]);
+    // A place of the campus fills the roster with its own rows (34-campus.js): built again after.
+    const ours = rosterItems.length === roster.children.length && rosterItems.every((item, index) => roster.children[index] === item);
+    if (roster.dataset.key !== key || !ours) {
+      roster.dataset.key = key;
+      roster.replaceChildren(...(rosterItems = cast.map((actor) => {
+        const item = document.createElement("li");
+        const button = document.createElement("button");
+        button.type = "button";
+        const swatch = document.createElement("span");
+        swatch.className = "team-swatch";
+        button.append(swatch, document.createElement("strong"), document.createElement("span"));
+        button.addEventListener("click", () => studioPick(floorId, actor.id));
+        item.append(button);
+        return item;
+      })));
+    }
+    cast.forEach((actor, index) => {
+      const item = roster.children[index];
+      const button = item.firstElementChild;
+      const [swatch, name, state] = button.children;
       item.dataset.state = actor.state;
-      const button = document.createElement("button");
-      button.type = "button";
       button.disabled = !actor.lead && !actor.sessionId;
-      button.setAttribute("aria-label", actor.lead ? t("队长") : t("打开 {0} 的任务", actor.name));
-      const swatch = document.createElement("span");
-      swatch.className = "team-swatch";
+      button.setAttribute("aria-label", actor.lead ? (floorId === "room" ? t("队长") : t("打开这个对话")) : t("打开 {0} 的任务", actor.name));
       swatch.style.setProperty("--swatch", actor.look.shirt);
-      const name = document.createElement("strong");
       name.textContent = actor.name;
-      const state = document.createElement("span");
       state.textContent = actor.stateLabel;
-      button.append(swatch, name, state);
-      button.addEventListener("click", () => studioPick("room", actor.id));
-      item.append(button);
-      return item;
-    }));
+    });
   }
 
-  /** A tap on someone: the agent goes back to the conversation, an expert or a sub-agent opens theirs. */
+  /**
+   * A tap on someone: the agent goes back to the conversation; an expert or a sub-agent shows their
+   * part in the studio (the card below), so the team stays in view; on another conversation's floor
+   * anyone opens that conversation.
+   */
   let studioShownCast = [];
-  function studioPick(_floor, actorId) {
+  let studioShownFloors = [];
+  function studioPick(floorId, actorId) {
     if (!studioViewing && $("studioSheet").hidden) return;
+    if (floorId && floorId !== "room") {
+      // Seen on the phone: a tap on an expert at work opened their own conversation, where the studio
+      // had them alone. Another floor's people take the user to that floor's conversation.
+      if (studioShownFloors.some((floor) => floor.id === floorId)) openFromStudio(floorId);
+      return;
+    }
     if (actorId === "lead") { closeStudio(); return; }
-    const sessionId = studioShownCast.find((actor) => actor.id === actorId)?.sessionId;
-    if (!sessionId) return;
-    if (openSession(sessionId)) closeStudio();
+    const actor = studioShownCast.find((item) => item.id === actorId);
+    if (actor?.sessionId) showStudioPerson(actor);
+  }
+
+  // ---- An expert's or a sub-agent's part, over the studio ----------------------------------------
+  // Their part, what they do now, the steps they took and, once done, their report, read from their
+  // conversation; the full record opens there once this conversation's task is over (until then the
+  // studio and the task stay in view).
+  const studioPersonPollMs = 3000;
+  let studioPerson = null; // { actor, sessionId, timer, generation }
+  let studioPersonGeneration = 0;
+
+  function conversationTaskRunning() {
+    return !!activeTask && !activeTask.done && activeTask.sessionId === currentSessionId;
+  }
+
+  function showStudioPerson(actor) {
+    hideStudioPerson();
+    studioPerson = { actor, sessionId: actor.sessionId, timer: 0, generation: ++studioPersonGeneration };
+    const box = $("studioPerson");
+    box.hidden = false;
+    box.querySelector(".team-swatch").style.setProperty("--swatch", actor.look.shirt);
+    $("studioPersonName").textContent = actor.name;
+    $("studioPersonSteps").replaceChildren();
+    $("studioPersonReport").hidden = true;
+    renderStudioPerson();
+    void loadStudioPerson();
+  }
+
+  function hideStudioPerson() {
+    if (!studioPerson) return false;
+    window.clearTimeout(studioPerson.timer);
+    studioPerson = null;
+    studioPersonGeneration += 1;
+    $("studioPerson").hidden = true;
+    return true;
+  }
+
+  /** The card's lines that follow the task: their state and part, and whether their record can open. */
+  function renderStudioPerson() {
+    if (!studioPerson) return;
+    const actor = studioShownCast.find((item) => item.sessionId === studioPerson.sessionId) || studioPerson.actor;
+    // Just done: their report is read once more.
+    const finished = studioPerson.actor.state === "working" && actor.state !== "working";
+    studioPerson.actor = actor;
+    if (finished) { window.clearTimeout(studioPerson.timer); void loadStudioPerson(); }
+    const run = expertRuns.get(studioPerson.sessionId);
+    $("studioPersonState").textContent = actor.stateLabel || "";
+    $("studioPersonPart").textContent = run?.title ? t("负责：{0}", run.title) + (run.phase ? ` · ${phaseLabel(run.phase)}` : "") : "";
+    $("studioPersonPart").hidden = !run?.title;
+    // The model and effort they work with (the sub-task setting on the model page).
+    $("studioPersonModel").textContent = run?.model ? t("{0} · 思考强度：{1}", run.model, effortLabels[run.effort] || effortLabels.auto) : "";
+    $("studioPersonModel").hidden = !run?.model;
+    const running = conversationTaskRunning();
+    $("btnStudioPersonOpen").disabled = running;
+    $("studioPersonHint").textContent = running ? t("任务结束后可以打开完整记录。") : "";
+  }
+
+  /** Their steps and report from their conversation; read again while they work. */
+  async function loadStudioPerson() {
+    const shown = studioPerson;
+    if (!shown) return;
+    try {
+      const data = await apiJson(`/sessions/${encodeURIComponent(shown.sessionId)}/events`);
+      if (studioPerson !== shown || shown.generation !== studioPersonGeneration) return;
+      const proposed = new Map();
+      const steps = [];
+      let report = "";
+      for (const event of Array.isArray(data.events) ? data.events : []) {
+        const payload = event.data || event.payload || {};
+        if (event.type === "tool.proposed" && payload.tool_call_id) proposed.set(payload.tool_call_id, payload.arguments);
+        else if (event.type === "tool.started") steps.push(toolLabel(payload.name || payload.tool_name, proposed.get(payload.tool_call_id)));
+        else if (event.type === "message.assistant" || (event.type === "message.created" && payload.role === "assistant")) report = payload.text || payload.content || report;
+      }
+      const list = $("studioPersonSteps");
+      list.replaceChildren(...steps.slice(-6).map((step) => { const item = document.createElement("li"); item.textContent = step; return item; }));
+      list.hidden = !steps.length;
+      const working = shown.actor.state === "working";
+      // Plain words: the report's Markdown marks (bold, code, headings) would show as they are.
+      const plain = report.replace(/```[^\n]*\n?/g, "").replace(/\*\*|__|`/g, "").replace(/^#{1,6}\s+/gm, "").trim();
+      $("studioPersonReport").hidden = working || !plain;
+      $("studioPersonReport").textContent = working ? "" : plain;
+      if (!steps.length && working) {
+        const item = document.createElement("li");
+        item.textContent = t("思考中");
+        list.replaceChildren(item);
+        list.hidden = false;
+      }
+    } catch { /* the card keeps what it showed; tried again while they work */ }
+    renderStudioPerson();
+    if (studioPerson === shown && shown.actor.state === "working") shown.timer = window.setTimeout(() => void loadStudioPerson(), studioPersonPollMs);
+  }
+
+  $("btnStudioPersonClose").addEventListener("click", () => hideStudioPerson());
+  $("btnStudioPersonOpen").addEventListener("click", () => {
+    if (!studioPerson || conversationTaskRunning()) return;
+    const sessionId = studioPerson.sessionId;
+    hideStudioPerson();
+    openFromStudio(sessionId);
+  });
+
+  /** Opens a conversation and closes the studio; says so when the open one cannot be left now. */
+  function openFromStudio(sessionId) {
+    // openSession is true when nothing had to load, and false while a switch starts (or is refused).
+    if (openSession(sessionId) || sessionOpening === sessionId || currentSessionId === sessionId) closeStudio();
     else notice(t("任务进行中，结束后再打开"));
+  }
+
+  /** A floor's sign tapped in the building: that floor is looked at. */
+  function studioPickFloor(floorId) {
+    floorChoice = floorId;
+    refreshStudio();
+  }
+
+  /** The model at work in this conversation: a DeepSeek model keeps a big fat fish in the studio's
+   * tank, other models small ones (studio/aquarium.ts, as on the desktop). */
+  function studioModel() {
+    return (activeTask && !activeTask.done && activeTask.sessionId === currentSessionId && activeTask.model) || settings.model || null;
   }
 
   function refreshStudio() {
     const sheetOpen = !$("studioSheet").hidden;
     if (!backdropScene && !(studioScene && sheetOpen)) return;
+    const model = studioModel();
+    studioScene?.setModel?.(model);
+    backdropScene?.setModel?.(model);
     const cast = studioCast();
-    const signature = JSON.stringify(cast);
+    // Shown in full, the studio may be a floor of the building; behind the conversation it is its room.
+    const full = sheetOpen && (studioViewing || !!studioScene);
+    const floors = full ? studioFloors(cast) : [{ id: "room", number: "", title: "", summary: "", busy: false, cast }];
+    const building = floors.length > 1;
+    const focus = !building ? null
+      : floorChoice === undefined || (floorChoice !== null && !floors.some((floor) => floor.id === floorChoice)) ? "room" : floorChoice;
+    const signature = JSON.stringify({ floors, focus });
     if (signature === studioSignature) return;
     studioSignature = signature;
     studioShownCast = cast;
-    const floors = [{ id: "room", number: "", title: "", summary: "", busy: false, cast }];
+    studioShownFloors = floors;
+    renderStudioPerson();
     if (sheetOpen) studioScene?.update(floors);
-    backdropScene?.update(floors);
+    backdropScene?.update(studioViewing ? floors : floors.slice(0, 1));
+    // The floors first, then where to look: the scene flies to the floor (or out to the building).
+    if (building) (studioViewing ? backdropScene : studioScene)?.focus(focus);
     // A place of the campus shown instead lists its own contents (34-campus.js).
-    if (sheetOpen && !placeShownName) renderStudioRoster(cast);
+    if (sheetOpen && !placeShownName) {
+      const shown = floors.find((floor) => floor.id === focus);
+      renderStudioRoster(shown ? shown.cast : cast, shown ? shown.id : "room");
+    }
+    renderStudioFloors(building && !placeShownName ? floors : [], focus);
+  }
+
+  // ---- Other conversations' floors (2.8) ----------------------------------------------------------
+  // Shown in full, the studio is a floor of a building whenever another conversation has a task at
+  // work too (a scheduled task, one left running there): this conversation is the first floor, each
+  // other one keeps a floor while the studio stays open, and any floor or the whole building can be
+  // looked at; tapping another floor's agent opens its conversation. Behind the conversation it stays
+  // this conversation's room. While the studio is open their tasks are read every few seconds: the
+  // task list, then each one's new events (the desktop app's building, from the phone's task API).
+  function newTrack(task) {
+    return { sessionId: task.session_id, taskId: task.task_id, state: task.state, sequence: 0, done: false, tool: "", toolId: "",
+      proposed: "", toolSequence: 0, text: "", textSequence: 0, messageFinal: false, started: false, experts: new Map(), helpers: new Map() };
+  }
+
+  /** One event of another conversation's task, read as renderTaskEvent reads the open one's. */
+  function trackTaskEvent(track, event) {
+    if (!(event.sequence > track.sequence)) return;
+    track.sequence = event.sequence;
+    const envelope = event.payload || {};
+    const payload = envelope.data && typeof envelope.data === "object" ? envelope.data : envelope;
+    const type = String(event.event_type || "");
+    if (type === "assistant.delta" && payload.kind !== "reasoning") {
+      track.text = ((track.messageFinal ? "" : track.text) + (payload.text || "")).slice(-400);
+      track.messageFinal = false;
+      track.textSequence = event.sequence;
+    } else if (type === "runtime.message.created" && payload.role === "assistant" && typeof payload.content === "string") {
+      track.text = payload.content.slice(-400);
+      track.textSequence = event.sequence;
+      track.messageFinal = true;
+    } else if (type === "runtime.tool.proposed") {
+      track.proposed = String(payload.name || payload.tool_name || "");
+    } else if (type === "runtime.tool.started") {
+      track.tool = String(payload.name || payload.tool_name || "");
+      track.toolId = toolCardId(payload);
+      track.toolSequence = event.sequence;
+      track.started = true;
+    } else if (type.startsWith("runtime.") && toolOutcomeEvents[type.slice(8)]) {
+      if (toolCardId(payload) === track.toolId) track.tool = "";
+      if ((payload.name || payload.tool_name) === "run_subagents") for (const helper of track.helpers.values()) helper.done = true;
+    } else if (type === "task.team.expert" && payload.expert && payload.session_id) {
+      track.experts.set(payload.expert, { ...(track.experts.get(payload.expert) || {}), ...payload });
+    } else if (type === "task.subagent.step" && payload.session_id) {
+      const expert = [...track.experts.values()].find((run) => run.session_id === payload.session_id);
+      if (expert) expert.tool = payload.tool || "";
+      else {
+        const known = track.helpers.get(payload.session_id);
+        track.helpers.set(payload.session_id, { index: known?.index || track.helpers.size + 1, tool: payload.tool || "", done: false });
+      }
+    } else if (["task.completed", "task.failed", "mobile.task.failed"].includes(type)) {
+      track.done = true;
+    }
+  }
+
+  async function pollBuilding() {
+    // Not while the app is away: nobody looks at the building then.
+    if (buildingPolling || disposed || document.visibilityState === "hidden") return;
+    buildingPolling = true;
+    try {
+      const listed = await apiJson("/mobile/tasks");
+      const at = (listed.tasks || []).filter((task) => ["running", "waiting_approval", "queued"].includes(task.state)
+        && task.session_id !== currentSessionId && sessions.some((session) => session.id === task.session_id));
+      for (const task of at) {
+        let track = buildingTracks.get(task.session_id);
+        if (!track || track.taskId !== task.task_id) buildingTracks.set(task.session_id, track = newTrack(task));
+        track.state = task.state;
+        track.done = false;
+        const updates = await apiJson(`/mobile/tasks/${encodeURIComponent(task.task_id)}/events?after=${track.sequence}`);
+        for (const event of updates.events || []) trackTaskEvent(track, event);
+      }
+      // A floor whose task finished stays, finished, while the studio is open.
+      for (const track of buildingTracks.values()) if (!at.some((task) => task.session_id === track.sessionId)) track.done = true;
+    } catch { /* the next look tries again */ }
+    finally { buildingPolling = false; }
+    if (!disposed) refreshStudio();
+  }
+
+  function startBuilding() {
+    window.clearInterval(buildingTimer);
+    void pollBuilding();
+    buildingTimer = window.setInterval(() => { if (!document.hidden) void pollBuilding(); }, buildingPollMs);
+  }
+
+  function stopBuilding() {
+    window.clearInterval(buildingTimer);
+    buildingTimer = 0;
+    buildingTracks.clear();
+    floorChoice = undefined;
+  }
+
+  /** What another conversation's floor shows, for castFor. */
+  function trackFloor(track) {
+    const running = !track.done && track.state !== "queued";
+    return {
+      running, tool: running ? track.tool : "",
+      approval: running && track.state === "waiting_approval" ? { kind: "tool", details: { tool: track.proposed } } : null,
+      answer: running && !track.tool && track.textSequence > track.toolSequence ? track.text : "",
+      started: track.started, printed: null, fixed: false, runs: [...track.experts.entries()], helpers: [...track.helpers.entries()],
+    };
+  }
+
+  /** The floors shown in full: this conversation first, then the others with a task at work. */
+  function studioFloors(cast) {
+    const others = [...buildingTracks.values()].filter((track) => track.sessionId !== currentSessionId);
+    const room = { id: "room", number: "", title: "", summary: "", busy: false, cast };
+    if (!others.length) return [room];
+    const states = stateLabels();
+    const summary = (actors, track) => track?.state === "queued" && !track.done ? t("任务排队中") : actors[0]?.stateLabel || states.idle;
+    return [
+      { ...room, number: t("{0} 楼", 1), title: elements.sessionTitleText.textContent || t("这个对话"), summary: summary(cast), busy: cast[0]?.state !== "idle" },
+      ...others.map((track, index) => {
+        const actors = castFor(trackFloor(track));
+        return { id: track.sessionId, number: t("{0} 楼", index + 2), title: sessionTitle(track.sessionId), summary: summary(actors, track), busy: !track.done, cast: actors };
+      }),
+    ];
+  }
+
+  /** The lift: the whole building and each floor, the top floor first, when there are two or more. */
+  // Like the roster, the same floors keep their buttons while their state changes.
+  function renderStudioFloors(floors, focus) {
+    const list = $("studioFloors");
+    list.hidden = floors.length < 2;
+    if (list.hidden) { list.replaceChildren(); delete list.dataset.key; return; }
+    const shown = [...floors].reverse();
+    const key = JSON.stringify(shown.map((floor) => floor.id));
+    if (list.dataset.key !== key) {
+      list.dataset.key = key;
+      const choice = (value) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.setAttribute("role", "radio");
+        button.addEventListener("click", () => studioPickFloor(value));
+        return button;
+      };
+      const whole = choice(null);
+      whole.innerHTML = icon("building-2");
+      whole.append(t("整栋楼"));
+      list.replaceChildren(whole, ...shown.map((floor) => {
+        const button = choice(floor.id);
+        button.append(document.createElement("strong"), " ", document.createElement("span"));
+        return button;
+      }));
+    }
+    const [whole, ...rest] = list.children;
+    whole.setAttribute("aria-checked", String(focus === null));
+    shown.forEach((floor, index) => {
+      const button = rest[index];
+      button.setAttribute("aria-checked", String(focus === floor.id));
+      button.dataset.busy = String(floor.busy);
+      button.querySelector("strong").textContent = floor.number;
+      button.querySelector("span").textContent = floor.id === "room" ? t("这个对话") : floor.title;
+    });
   }
 
   // Task events, approvals and session changes move people: one look a little later, not one per event.
@@ -731,6 +1075,7 @@
     }, 250);
   }
 
+  let studioOpenings = 0;
   async function openStudio() {
     const sheet = $("studioSheet");
     if (disposed || layerOpen(sheet)) return;
@@ -745,6 +1090,8 @@
     const cast = studioCast();
     studioShownCast = cast;
     renderStudioRoster(cast);
+    // Other conversations at work make it a floor of a building.
+    startBuilding();
     // By default the view follows the agent to wherever its work is (34-campus.js).
     if (over) {
       viewStudioBackdrop(true);
@@ -762,11 +1109,14 @@
       if (/^\d+ \d+ \d+$/.test(value)) sheet.style.setProperty(name, `rgb(${value} / ${look.dark ? 0.2 : 0.32})`);
       else sheet.style.removeProperty(name);
     }
+    // Closed while the studio loaded (the sheet stays on screen for its closing animation, so only
+    // layerOpen tells), or closed and opened again: this opening draws nothing.
+    const opening = ++studioOpenings;
     try {
       await loadExpertCatalog().catch(() => null);
       const studio = await loadStudio();
-      if (disposed || sheet.hidden) return;
-      studioScene = studio.createStudioScene($("studioStage"), $("studioOverlay"), studioLook(), { pick: studioPick, pickFloor: () => {} });
+      if (disposed || !layerOpen(sheet) || opening !== studioOpenings || studioScene) return;
+      studioScene = studio.createStudioScene($("studioStage"), $("studioOverlay"), studioLook(), { pick: studioPick, pickFloor: studioPickFloor });
     } catch {
       $("studioUnsupported").hidden = false;
       return;
@@ -780,6 +1130,8 @@
     refreshStudio();
     // The agent's own steps and its answer change without an expert event: look again now and then.
     studioTimer = window.setInterval(() => {
+      // Nothing to draw while the app is in the background (the scene sleeps; the campus is not read).
+      if (document.hidden) return;
       refreshStudio();
       refreshPlaces();
     }, 1000);
@@ -789,16 +1141,22 @@
     const sheet = $("studioSheet");
     if (!layerOpen(sheet)) return false;
     window.clearInterval(studioTimer);
+    hideStudioPerson();
+    stopBuilding();
+    renderStudioFloors([], null);
     leavePlaces();
     studioScene?.dispose();
     studioScene = null;
     $("studioStage").dataset.ready = "false";
     $("studioOverlay").replaceChildren();
-    // Back behind the conversation: drawing again (a place may have stopped it), never left paused.
+    // Back behind the conversation: drawing again (a place may have stopped it), never left paused,
+    // and this conversation's room again (the building's other floors go).
     if (studioViewing) {
       viewStudioBackdrop(false);
       backdropScene?.setPaused(false);
       backdropScene?.setActive(true);
+      studioSignature = "";
+      refreshStudio();
     }
     elements.appShell.inert = false;
     hideLayer(sheet, (motion) => [motion.play(sheet, [{ opacity: 1 }, { opacity: 0 }], { duration: 180, easing: "ease-out", fill: "forwards" })]);

@@ -40,6 +40,7 @@ from .sandbox import (
     sandbox_status,
 )
 from .sandbox_staging import (
+    STAGING_EXCLUSIONS,
     StagingWorkspace,
     capture_staging_artifacts_sync,
     create_staging_workspace_sync,
@@ -96,6 +97,9 @@ class HostStagedSandboxBackend:
 
     backend_id = "host-staged"
     requires_explicit_approval = True
+    # Every run works in a copy without these (.git), so they do not count as sensitive paths
+    # it would see.
+    staging_exclusions = STAGING_EXCLUSIONS
 
     def __init__(
         self,
