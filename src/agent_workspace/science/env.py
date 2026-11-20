@@ -1,7 +1,11 @@
-"""Install and describe the scientific Python environment: uv (pinned, checked) installs a managed
-Python and NumPy, pandas, SciPy, Matplotlib, seaborn, statsmodels, scikit-learn and the figure
-helpers into the app's data folder. Nothing goes on PATH or into the system Python; removing the
-folder removes it all. Package and Python downloads use a mirror when the default is unreachable.
+"""Install and describe the scientific Python environment: uv installs a managed Python and NumPy,
+pandas, SciPy, Matplotlib, seaborn, statsmodels, scikit-learn and the figure helpers into the
+app's data folder. Nothing goes on PATH or into the system Python; removing the folder removes it
+all. Package and Python downloads use a mirror when the default is unreachable.
+
+Only uv itself is pinned and checked against a hash. The packages are the newest the index has
+when the install (or a repair) runs, without hashes; requirements.lock.txt records what was
+installed, and nothing installs from it yet.
 """
 
 from __future__ import annotations
@@ -68,7 +72,9 @@ STARTUP_FILE = "aw_science_defaults.pth"
 STARTUP = (
     "import os, sys; "
     "os.environ.setdefault('OPENBLAS_NUM_THREADS', '4'); "
-    "os.environ.setdefault('MPLCONFIGDIR', os.path.join(sys.prefix, 'mplconfig'))\n"
+    "os.environ.setdefault('MPLCONFIGDIR', os.path.join(sys.prefix, 'mplconfig')); "
+    "os.environ.setdefault('MATPLOTLIBRC', os.path.join(sys.prefix, 'Lib', 'site-packages', "
+    "'aw_sciplot', 'matplotlibrc'))\n"
 )
 
 

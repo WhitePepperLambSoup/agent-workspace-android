@@ -10,6 +10,7 @@ import hmac
 import json
 import os
 import sqlite3
+import time
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import replace
@@ -38,11 +39,10 @@ from agent_workspace.ui_gateway.gateway_common import (
     _HISTORY_MAX_EVENTS,
     _HISTORY_MINIMUM_USER_TURNS,
     _HISTORY_TOTAL_BYTES,
-    _MAX_COLLECTION_ITEMS,
     _MAX_PROVIDER_MODEL_CHARS,
     _MAX_SEARCH_RESULTS,
     _MAX_SESSIONS,
-    _MAX_STRING_CHARS,
+    _REPLY_PIECE_BYTES,
     _SAFE_HISTORY_TOOL_ARGUMENTS,
     _TERMINAL_TURN_EVENTS,
     GatewayError,
@@ -51,6 +51,8 @@ from agent_workspace.ui_gateway.gateway_common import (
     _bounded_text,
     _camel_case,
     _json_safe,
+    _reply_piece,
+    _utf16_units,
 )
 from agent_workspace.ui_gateway.gateway_state import GatewayState
 from agent_workspace.ui_gateway.protocol import (
@@ -66,6 +68,10 @@ from agent_workspace.ui_gateway.turn_files import (
     undo_turn_files,
 )
 
+# Far above what names and pins of real use reach (a record is about 200 bytes); only a file
+# that is not ours or is broken comes near it.
+_MAX_PRESENTATION_FILE_BYTES = 8 * 1024 * 1024
+
 
 class SessionCommands(GatewayState):
     """Conversations: lists, history pages and cursors, names and pins, search, export and import,
@@ -78,18 +84,28 @@ class SessionCommands(GatewayState):
 
     def _load_session_presentation(self) -> None:
         path = self._presentation_path
+        # Names, pins and archive marks were dropped whole past 256 KiB (about a thousand edits,
+        # since every reset kept its record), and the next change wrote over the file. Only
+        # records that differ from the default are written now; a file that still cannot be used
+        # is set aside before anything is written over it.
         try:
-            if not path.is_file() or path.stat().st_size > 256 * 1024:
+            if not path.is_file():
                 return
+            if path.stat().st_size > _MAX_PRESENTATION_FILE_BYTES:
+                raise ValueError("session presentation file is too large")
             document = json.loads(path.read_text("utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
+            if not isinstance(document, Mapping) or document.get("version") != 1:
+                raise ValueError("not a session presentation file")
+            records = document.get("records")
+            if not isinstance(records, Mapping):
+                raise ValueError("not a session presentation file")
+        except OSError:
             return
-        if not isinstance(document, Mapping) or document.get("version") != 1:
+        except ValueError:  # also a file that is not JSON or not UTF-8
+            with suppress(OSError):
+                path.replace(path.with_name(f"{path.name}.bad-{int(time.time())}"))
             return
-        records = document.get("records")
-        if not isinstance(records, Mapping):
-            return
-        for key, raw in list(records.items())[:_MAX_COLLECTION_ITEMS]:
+        for key, raw in records.items():
             if not isinstance(key, str) or not isinstance(raw, Mapping):
                 continue
             session_id = raw.get("sessionId")
@@ -111,14 +127,20 @@ class SessionCommands(GatewayState):
                     "version": 1,
                 }
 
-    def _persist_session_presentation(self) -> None:
+    def _persist_session_presentation(self, records: Mapping[str, Mapping[str, object]]) -> None:
         path = self._presentation_path
+        # A conversation set back to no name, unpinned and not archived needs no record.
+        kept = {
+            key: record
+            for key, record in records.items()
+            if record.get("alias") is not None or record.get("pinned") or record.get("archived")
+        }
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             temporary = path.with_suffix(path.suffix + ".tmp")
             temporary.write_text(
                 json.dumps(
-                    {"version": 1, "records": self._session_presentation},
+                    {"version": 1, "records": kept},
                     ensure_ascii=True,
                     separators=(",", ":"),
                     sort_keys=True,
@@ -134,7 +156,7 @@ class SessionCommands(GatewayState):
         try:
             catalog = self._workspace_catalog
             if catalog is None:
-                catalog = WorkspaceCatalog(self._workspace_catalog_path)
+                catalog = WorkspaceCatalog(self._workspace_catalog_path, set_aside_unreadable=True)
                 self._workspace_catalog = catalog
             catalog.touch(workspace)
         except (OSError, RuntimeError, ValueError, WorkspaceCatalogError):
@@ -325,6 +347,49 @@ class SessionCommands(GatewayState):
         with self._lock:
             return self._reply("session.history.result", page, session_id=session_id)
 
+    def _session_reply_read(self, command: CommandEnvelope) -> GatewayReply:
+        """One piece of a long reply, from an offset in UTF-16 units: its history entry holds only
+        the start. Stored events do not change, so the pieces need no cursor to stay consistent."""
+        with self._lock:
+            self._require_configured()
+            self._require_payload(command, {"eventId", "from"})
+            if command.session_id is None or command.session_id != self._selected_session_id:
+                raise GatewayError("invalid_session")
+            session_id = command.session_id
+        event_id = command.payload.get("eventId")
+        start = command.payload.get("from")
+        if not isinstance(event_id, str) or type(start) is not int or start < 0:
+            raise GatewayError("invalid_payload")
+        try:
+            content = SQLiteEventStore.get_reply_text_read_only(
+                self._database, session_id, event_id
+            )
+        except (OSError, ValueError, sqlite3.DatabaseError):
+            raise GatewayError("storage_unavailable") from None
+        if content is None:
+            raise GatewayError("invalid_payload")
+        units = _utf16_units(content)
+        total = len(units) // 2
+        if start > total:
+            raise GatewayError("invalid_payload")
+        # A character takes at least one byte on the wire, so no more than this many can fit.
+        text = units[start * 2 : (start + _REPLY_PIECE_BYTES) * 2].decode(
+            "utf-16-le", "surrogatepass"
+        )
+        piece = _reply_piece(text)
+        if start + len(_utf16_units(piece)) // 2 < total and "\ud800" <= piece[-1:] <= "\udbff":
+            # The bytes ended halfway through a character: all of it goes in the next piece.
+            piece = piece[:-1]
+        page = {
+            "epoch": self.epoch,
+            "eventId": event_id,
+            "from": start,
+            "text": piece,
+            "total": total,
+        }
+        with self._lock:
+            return self._reply("session.reply.read.result", page, session_id=session_id)
+
     def _events_replay(self, command: CommandEnvelope) -> GatewayReply:
         """Return durable domain events for reconnecting clients.
 
@@ -426,8 +491,11 @@ class SessionCommands(GatewayState):
             "archived": archived,
             "version": 1,
         }
-        self._session_presentation[key] = record
-        self._persist_session_presentation()
+        updated = {**self._session_presentation, key: record}
+        # Kept in memory only once it is on disk; otherwise the window would show the change
+        # until the next start and then lose it.
+        self._persist_session_presentation(updated)
+        self._session_presentation = updated
         self._pending_host_events.append(
             Event(session_id=session_id, type="session.presentation.changed", data=record)
         )
@@ -613,6 +681,27 @@ class SessionCommands(GatewayState):
             session_id=None,
         )
 
+    def _session_running(self, session_id: str) -> bool:
+        """Whether an agent may still be changing a conversation's files: its turn in the
+        window, its turn while parked in the background, or a sub-agent it started."""
+        with self._lock:
+            if session_id == self._host_session_id and (
+                self._active_turn is not None or self._turn_requested
+            ):
+                return True
+            context = self._session_hosts.get(session_id)
+            if context is not None and (
+                context.active_turn is not None or context.turn_requested or context.queued_turns
+            ):
+                return True
+            for run_id, delegation in self._delegations.items():
+                if delegation.parent_session_id != session_id:
+                    continue
+                entry = self._run_hosts.get(run_id)
+                if run_id in self._run_preparing or (entry is not None and not entry.terminal):
+                    return True
+            return False
+
     def _rewind_session(self, command: CommandEnvelope) -> GatewayReply:
         """Files the agent changed after a message, and putting them back as they were."""
         self._require_payload(command, {"sessionId", "messageId"}, optional={"apply"})
@@ -623,11 +712,7 @@ class SessionCommands(GatewayState):
         apply = command.payload.get("apply", False)
         if not isinstance(message_id, str) or not message_id or type(apply) is not bool:
             raise GatewayError("invalid_payload")
-        with self._lock:
-            running = session.id == self._host_session_id and (
-                self._active_turn is not None or self._turn_requested
-            )
-        if apply and running:
+        if apply and self._session_running(session.id):
             raise GatewayError("runtime_busy")  # the agent may still be changing these files
         try:
             events = SQLiteEventStore.list_events_read_only(self._database, session.id)
@@ -700,11 +785,7 @@ class SessionCommands(GatewayState):
             entry = changed_file(record, path)
         except KeyError:
             raise GatewayError("unknown_path") from None
-        with self._lock:
-            running = session.id == self._host_session_id and (
-                self._active_turn is not None or self._turn_requested
-            )
-        if running:
+        if self._session_running(session.id):
             raise GatewayError("runtime_busy")  # the agent may still be changing the file
         try:
             current = undo_hunk(Path(session.workspace), self._file_versions, entry, hunk, sha256)
@@ -739,11 +820,7 @@ class SessionCommands(GatewayState):
             ):
                 raise GatewayError("invalid_payload")
             paths = cast(list[str], raw_paths)
-        with self._lock:
-            running = session.id == self._host_session_id and (
-                self._active_turn is not None or self._turn_requested
-            )
-        if apply and running:
+        if apply and self._session_running(session.id):
             raise GatewayError("runtime_busy")  # the agent may still be changing these files
         try:
             report = undo_turn_files(
@@ -870,6 +947,7 @@ class SessionCommands(GatewayState):
                     before=before,
                     minimum_user_turns=_HISTORY_MINIMUM_USER_TURNS,
                     max_events=_HISTORY_MAX_EVENTS,
+                    collapse_streams=True,
                 )
             )
             inferred_requests = SQLiteEventStore.model_request_ids_read_only(self._database, events)
@@ -1057,23 +1135,24 @@ class SessionCommands(GatewayState):
                 and event.type == "message.created"
                 and event.data.get("role") == "assistant"
             )
-            # Bound complete assistant entries in _history_page. Cutting their
-            # content midway through a Markdown fence corrupts restored code.
-            if (
-                key in {"text", "content", "error", "reason", "reasoning", "result"}
-                and isinstance(value, str)
-                and not canonical_content
+            # A reply is bound below, as a whole entry. One that fits stays whole: cut
+            # midway through a Markdown fence, the code it restores would be corrupt.
+            if canonical_content and isinstance(value, str):
+                data["content"] = value
+                continue
+            if key in {"text", "content", "error", "reason", "reasoning", "result"} and isinstance(
+                value, str
             ):
                 value = value[:12_000]
             try:
-                data[_camel_case(key)] = _json_safe(
-                    value,
-                    max_string_chars=(
-                        _HISTORY_ASSISTANT_ENTRY_BYTES if canonical_content else _MAX_STRING_CHARS
-                    ),
-                )
+                data[_camel_case(key)] = _json_safe(value)
             except GatewayError:
                 continue
+        if event.type == "message.created":
+            metadata = event.data.get("provider_metadata")
+            if isinstance(metadata, Mapping) and metadata.get("agent_workspace.stream_interrupted"):
+                # The window hides such a prefix: the rows still show it, then the finished reply.
+                data["providerMetadata"] = {"agent_workspace.stream_interrupted": True}
         if event.type == "tool.proposed":
             tool_name = event.data.get("name")
             arguments = event.data.get("arguments")
@@ -1105,6 +1184,9 @@ class SessionCommands(GatewayState):
             message = event.data.get("message")
             if isinstance(message, str):
                 data["message"] = Redactor().redact(message[:600])
+        elif event.type == "turn.completed" and event.data.get("budget_exhausted") is True:
+            # The reply is complete, but the turn ended because its budget ran out (a quiet note).
+            data["budgetExhausted"] = True
         event_type = event.type
         input_id = event.data.get("input_id")
         if event_type == "turn.input.received":
@@ -1131,4 +1213,14 @@ class SessionCommands(GatewayState):
             document["correlationId"] = event.correlation_id
         if event.causation_id is not None:
             document["causationId"] = event.causation_id
+        content = data.get("content")
+        if (
+            event.type == "message.created"
+            and event.data.get("role") == "assistant"
+            and isinstance(content, str)
+            and len(json.dumps(document, ensure_ascii=True)) > _HISTORY_ASSISTANT_ENTRY_BYTES
+        ):
+            # Too long for a snapshot: the start, and what the window needs to read the rest.
+            data["content"] = _reply_piece(content)
+            data["contentTotal"] = len(_utf16_units(content)) // 2
         return document

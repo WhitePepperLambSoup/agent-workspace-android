@@ -4,7 +4,9 @@ only in one, cells that differ), and split into 工资条 (each row under its ow
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
 from agent_workspace.office.ooxml import OfficeError
@@ -12,20 +14,24 @@ from agent_workspace.office.tables import Sheet, column_letter, display
 
 DIFFERENT = "FFC7CE"
 ONLY = "FFEB9C"
+# A number as people write it, up to 15 digits before the point: not 001 (a code), not an ID or
+# card number, and not 1E5, 1_000 or inf, which float() takes too.
+_NUMBER = re.compile(r"[+-]?(0|[1-9][0-9]{0,14}|[1-9][0-9]{0,2}(,[0-9]{3}){1,4})(\.[0-9]+)?")
 
 
 def _normal(value: Any) -> Any:
+    """What two cells must share to count as the same: a number its value however it is written
+    (1.0 and 1, 1234.5 and "1,234.50"), an ID, a card number or a code its exact text."""
     if value is None:
         return ""
     if isinstance(value, bool):
         return value
-    if isinstance(value, int | float):
-        return round(float(value), 9)
+    if isinstance(value, float):
+        if not value.is_integer():
+            return round(value, 9)
+        value = int(Decimal(repr(value)))  # the digits it was saved with: 1E+15 has 16
     text = str(value).strip()
-    try:
-        return round(float(text.replace(",", "")), 9)
-    except ValueError:
-        return text
+    return round(float(text.replace(",", "")), 9) if _NUMBER.fullmatch(text) else text
 
 
 def _key(record: dict[str, Any], columns: list[str]) -> tuple[Any, ...]:
@@ -81,6 +87,7 @@ def join(
     added: list[str] = []
     lookups: list[tuple[dict[tuple[Any, ...], dict[str, Any]], list[tuple[str, str]]]] = []
     unmatched: dict[str, int] = {}
+    duplicates: dict[str, int] = {}
     for other_label, other in others:
         _require(other, keys, other_label)
         wanted = [
@@ -94,10 +101,12 @@ def join(
             renamed.append((name, title))
             added.append(title)
         index: dict[tuple[Any, ...], dict[str, Any]] = {}
-        for record in other.records():
+        other_records = other.records()
+        for record in other_records:
             index.setdefault(_key(record, keys), record)
         lookups.append((index, renamed))
         unmatched[other_label] = 0
+        duplicates[other_label] = len(other_records) - len(index)
     rows: list[list[Any]] = [header + added]
     highlight = []
     for row_number, record in enumerate(records, start=2):
@@ -121,7 +130,12 @@ def join(
         rows.append(row)
     return Result(
         {"sheets": [{"name": "合并", "rows": rows, "highlight": highlight}]},
-        {"rows": len(records), "added_columns": added, "not_found": unmatched},
+        {
+            "rows": len(records),
+            "added_columns": added,
+            "not_found": unmatched,
+            "duplicate_keys": duplicates,
+        },
     )
 
 
@@ -196,6 +210,8 @@ def compare(
         "cells_different": changed_cells,
         f"only_in_{label_a}": len(only_a) - 1,
         f"only_in_{label_b}": len(only_b) - 1,
+        f"duplicate_keys_in_{label_a}": len(records_a) - len(index_a),
+        f"duplicate_keys_in_{label_b}": len(records_b) - len(index_b),
         "compared_columns": shared,
     }
     overview = [

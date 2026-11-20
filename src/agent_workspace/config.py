@@ -44,7 +44,12 @@ def is_private_lan_address(hostname: str) -> bool:
     return any(address in network for network in _PRIVATE_NETWORKS)
 
 
-def provider_origin(base_url: str) -> tuple[str, str, int]:
+def provider_origin(base_url: str, *, check_transport: bool = True) -> tuple[str, str, int]:
+    """Scheme, host and port of a provider endpoint.
+
+    With ``check_transport`` off, plain HTTP beyond loopback is not refused: reading back a saved
+    profile must not depend on the environment of the process that reads it.
+    """
     try:
         parsed = urlparse(base_url)
         hostname = parsed.hostname
@@ -63,7 +68,8 @@ def provider_origin(base_url: str) -> tuple[str, str, int]:
     # A local server on the home or office network (Ollama on a computer, say) may be reached
     # over plain HTTP only when the user turned that on; public addresses always need HTTPS.
     if (
-        parsed.scheme == "http"
+        check_transport
+        and parsed.scheme == "http"
         and hostname not in {"127.0.0.1", "localhost", "::1"}
         and not (lan_http_allowed() and is_private_lan_address(hostname))
     ):
@@ -76,6 +82,23 @@ def provider_origin(base_url: str) -> tuple[str, str, int]:
 def is_loopback_endpoint(base_url: str, *, allow_localhost_name: bool = True) -> bool:
     _, hostname, _ = provider_origin(base_url)
     if allow_localhost_name and hostname.rstrip(".").lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def self_hosted_endpoint(base_url: str, protocol: ProviderProtocol | str | None = None) -> bool:
+    """A model served on this computer or the local network (Ollama, llama.cpp, LM Studio, vLLM),
+    which has no per-token price."""
+    if protocol == ProviderProtocol.OLLAMA:
+        return True
+    try:
+        _, hostname, _ = provider_origin(base_url, check_transport=False)
+    except ValueError:
+        return False
+    if hostname.rstrip(".").lower() == "localhost" or is_private_lan_address(hostname):
         return True
     try:
         return ipaddress.ip_address(hostname).is_loopback

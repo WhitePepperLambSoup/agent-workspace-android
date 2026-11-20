@@ -46,6 +46,17 @@ def set_source(payload: Any) -> dict[str, Any]:
     return {"source": source()}
 
 
+def forget_sessions(session_ids: set[str]) -> bool:
+    """The card's conversation was deleted: stop following it and empty the card, so tapping it
+    no longer opens a conversation that is gone. True when the card was cleared."""
+    chosen = source()
+    if chosen is None or chosen["session_id"] not in session_ids:
+        return False
+    _path().unlink(missing_ok=True)
+    publish("", "", "")
+    return True
+
+
 def plain_text(markdown: str, limit: int = 400) -> str:
     """A reply as the widget shows it: no card or code blocks, no markdown marks, short."""
     text = re.sub(r"```card\s.*?```", "", markdown or "", flags=re.DOTALL)

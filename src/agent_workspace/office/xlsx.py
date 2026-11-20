@@ -304,7 +304,22 @@ def build(spec: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
         ("xl/styles.xml", styles.xml()),
         *parts,
     ]
-    return zip_parts(parts), {"formulas_left_to_excel": unresolved}
+    details: dict[str, Any] = {"formulas_left_to_excel": unresolved}
+    spilling = {
+        sheet.name: [
+            f"{column_letter(c)}{r + 1}"
+            for (r, c), text in sheet.formulas.items()
+            if formula.spills(text)
+        ]
+        for sheet in data
+    }
+    if any(spilling.values()):
+        # FILTER, UNIQUE, SORT … would show only their first value: the agent should know so it
+        # can use classic functions instead.
+        details["spilling_formulas_show_one_value"] = {
+            name: cells for name, cells in spilling.items() if cells
+        }
+    return zip_parts(parts), details
 
 
 def _compute(
@@ -347,12 +362,22 @@ def _compute(
         for row, column in sheet.formulas:
             try:
                 get(sheet.name, row, column, sheet.name)
-            except (formula.Unsupported, RecursionError, ValueError, TypeError, OverflowError):
+            except (
+                formula.Unsupported,
+                RecursionError,
+                ValueError,
+                TypeError,
+                OverflowError,
+                IndexError,
+            ):
                 unresolved.setdefault(sheet.name, []).append(f"{column_letter(column)}{row + 1}")
     return values, unresolved
 
 
 def _normalize(value: Any) -> Any:
+    if value == "":
+        # Written as an empty cell, so formulas see it the way Excel does (A1=0 is TRUE).
+        return None
     if isinstance(value, str):
         match = _ISO_DATE.fullmatch(value.strip())
         if match:
@@ -424,7 +449,7 @@ def _sheet_xml(
             style_attribute = f' s="{style}"' if style else ""
             if formula_text is not None:
                 result = computed.get((sheet.name, r, c))
-                body = f"<f>{escape_text(formula_text[1:])}</f>"
+                body = f"<f>{escape_text(formula.stored(formula_text))}</f>"
                 if isinstance(result, bool):
                     cells.append(
                         f'<c r="{reference}"{style_attribute} t="b">{body}<v>{int(result)}</v></c>'
@@ -535,7 +560,7 @@ def _conditional_xml(rules: list[dict[str, Any]], styles: _Styles) -> str:
                 f'<cfRule type="duplicateValues" dxfId="{styles.dxf(fill)}" priority="{priority}"/>'
             )
         elif kind == "formula":
-            body = f'<cfRule type="expression" dxfId="{styles.dxf(fill)}" priority="{priority}"><formula>{escape_text(str(rule.get("formula", "")).lstrip("="))}</formula></cfRule>'
+            body = f'<cfRule type="expression" dxfId="{styles.dxf(fill)}" priority="{priority}"><formula>{escape_text(formula.stored(str(rule.get("formula", "")).lstrip("=")))}</formula></cfRule>'
         elif kind == "color_scale":
             low, high = (
                 _rgb(str(rule.get("low") or "F8696B")),

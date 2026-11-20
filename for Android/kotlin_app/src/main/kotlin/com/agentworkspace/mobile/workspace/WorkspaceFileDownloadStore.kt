@@ -36,10 +36,13 @@ class WorkspaceFileDownloadStore @JvmOverloads constructor(
 
     @Synchronized
     fun download(request: WorkspaceFileRequest): CachedWorkspaceFile {
-        val token = runCatching { tokenFile.readText(Charsets.UTF_8).trim() }.getOrNull()
-        check(!token.isNullOrEmpty() && token.length <= 4096 && token.none { it.isISOControl() }) {
+        val token = runCatching { tokenFile.readText(Charsets.UTF_8).trim() }.getOrNull().orEmpty()
+        check(token.isNotEmpty() && token.length <= 4096 && token.none { it.isISOControl() }) {
             "The local engine is not ready; try again when it is running"
         }
+        // The token goes only to the engine that proves it holds it; another app on the port would
+        // otherwise get it and choose the bytes of the file the user exports.
+        com.agentworkspace.mobile.embedded.EngineIdentity.require(baseUrl, token, 5000)
         val url = Uri.parse(baseUrl).buildUpon().appendPath("mobile").appendPath("workspace").appendPath("download")
             .appendQueryParameter("path", request.path).apply {
                 request.sha256?.let { appendQueryParameter("sha256", it) }

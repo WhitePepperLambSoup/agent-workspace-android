@@ -341,33 +341,51 @@ def _bing_headers(query: str) -> dict[str, str]:
 
 
 # Engines that failed to connect recently go last, so a network that cannot reach one (DuckDuckGo
-# from mainland China, for one) does not spend every search's time budget on it first.
+# from mainland China, for one) does not spend every search's time budget on it first. Kept in the
+# tool's own process: the desktop runs each search in a new worker process (_web_search_worker).
 _UNREACHABLE_SECONDS = 600.0
 _unreachable_since: dict[str, float] = {}
+# An engine that is not the last may use this share of the time left, so one that cannot be
+# reached (a connection that only times out) leaves the next engine time to answer.
+_FIRST_ENGINE_SHARE = 0.6
+_WORKER_GRACE_SECONDS = 3
 
 
-def _engine_order(engines: tuple[tuple[str, str], ...]) -> list[tuple[str, str]]:
+def _engine_order(
+    engines: tuple[tuple[str, str], ...], unreachable_since: dict[str, float] | None = None
+) -> list[tuple[str, str]]:
+    record = _unreachable_since if unreachable_since is None else unreachable_since
     now = time.monotonic()
     return sorted(
         engines,
-        key=lambda engine: (
-            now - _unreachable_since.get(engine[0], -math.inf) < _UNREACHABLE_SECONDS
-        ),
+        key=lambda engine: now - record.get(engine[0], -math.inf) < _UNREACHABLE_SECONDS,
     )
 
 
-def _web_search_sync(query: str, maximum: int, timeout_seconds: int) -> str:
+def _web_search_sync(
+    query: str,
+    maximum: int,
+    timeout_seconds: int,
+    *,
+    unreachable_since: dict[str, float] | None = None,
+    reached: dict[str, bool] | None = None,
+) -> str:
+    """Search; ``reached`` collects, by engine, whether it could be connected to."""
+    record = _unreachable_since if unreachable_since is None else unreachable_since
     deadline = time.monotonic() + timeout_seconds
     engines = (
         ("duckduckgo_lite", "https://lite.duckduckgo.com/lite/?" + urlencode({"q": query})),
         ("bing", "https://www.bing.com/search?" + urlencode({"q": query})),
     )
     errors: list[str] = []
-    for engine, url in _engine_order(engines):
+    ordered = _engine_order(engines, record)
+    for position, (engine, url) in enumerate(ordered):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             errors.append("search deadline exceeded")
             break
+        if position < len(ordered) - 1:
+            remaining *= _FIRST_ENGINE_SHARE
         try:
             try:
                 bing = engine == "bing"
@@ -381,9 +399,13 @@ def _web_search_sync(query: str, maximum: int, timeout_seconds: int) -> str:
                 )
             except ToolError as exc:
                 if "transport failed" in str(exc) or "DNS resolution failed" in str(exc):
-                    _unreachable_since[engine] = time.monotonic()
+                    record[engine] = time.monotonic()
+                    if reached is not None:
+                        reached[engine] = False
                 raise
-            _unreachable_since.pop(engine, None)
+            record.pop(engine, None)
+            if reached is not None:
+                reached[engine] = True
             if engine == "bing":
                 results, parser_truncated = _parse_bing_html(response["content"], maximum)
             else:
@@ -407,6 +429,24 @@ def _web_search_sync(query: str, maximum: int, timeout_seconds: int) -> str:
         except ToolError as exc:
             errors.append(f"{engine}: {exc}")
     raise ToolError("web_search unavailable; " + "; ".join(errors))
+
+
+def _web_search_worker(
+    query: str, maximum: int, timeout_seconds: int, unreachable_ages: dict[str, float]
+) -> dict[str, Any]:
+    """One search in the tool worker, from the caller's record of unreachable engines (as ages:
+    a new process has its own clock start and none of the caller's memory). Which engines could
+    be reached comes back with the answer or the error, for the caller to remember."""
+    now = time.monotonic()
+    record = {engine: now - age for engine, age in unreachable_ages.items()}
+    reached: dict[str, bool] = {}
+    try:
+        result = _web_search_sync(
+            query, maximum, timeout_seconds, unreachable_since=record, reached=reached
+        )
+    except ToolError as exc:
+        return {"result": None, "error": str(exc), "reached": reached}
+    return {"result": result, "error": None, "reached": reached}
 
 
 class WebSearchTool:
@@ -450,13 +490,25 @@ class WebSearchTool:
             raise ToolArgumentError("query must contain search text without control characters")
         maximum = arguments.get("max_results", 5)
         timeout_seconds = arguments.get("timeout_seconds", 15)
+        now = time.monotonic()
+        ages = {engine: now - since for engine, since in _unreachable_since.items()}
         try:
-            return await asyncio.wait_for(
-                run_in_process(_web_search_sync, query, maximum, timeout_seconds),
-                timeout=timeout_seconds,
+            # A little over the search's own deadline, so the worker's answer, with which engines
+            # it reached, comes back rather than a bare timeout.
+            outcome = await asyncio.wait_for(
+                run_in_process(_web_search_worker, query, maximum, timeout_seconds, ages),
+                timeout=timeout_seconds + _WORKER_GRACE_SECONDS,
             )
         except TimeoutError as exc:
             raise ToolError(f"web_search timed out after {timeout_seconds} seconds") from exc
+        for engine, reachable in outcome["reached"].items():
+            if reachable:
+                _unreachable_since.pop(engine, None)
+            else:
+                _unreachable_since[engine] = time.monotonic()
+        if outcome["error"] is not None:
+            raise ToolError(outcome["error"])
+        return str(outcome["result"])
 
     async def execute_with_context(
         self, arguments: dict[str, Any], _context: ToolExecutionContext

@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import sqlite3
 import sys
 import threading
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import BinaryIO, cast
 
 from agent_workspace.config import default_database_path
-from agent_workspace.storage.sqlite import trust_databases_validated_here
+from agent_workspace.storage.slow_work import report_slow_work_with
+from agent_workspace.storage.sqlite import SQLiteEventStore, trust_databases_validated_here
+from agent_workspace.storage.stream_compaction import compact_finished_streams
 from agent_workspace.ui_gateway.backups import run_daily_backup
 from agent_workspace.ui_gateway.data_care import apply_pending_restore
 from agent_workspace.ui_gateway.gateway_code import (
@@ -19,6 +25,7 @@ from agent_workspace.ui_gateway.gateway_code import (
     CODE_QUERY_COMMANDS,
     EDITOR_MODEL_COMMANDS,
 )
+from agent_workspace.ui_gateway.gateway_common import _LOGGER
 from agent_workspace.ui_gateway.gateway_data import DATA_LONG_COMMANDS, DATA_QUERY_COMMANDS
 from agent_workspace.ui_gateway.gateway_debug import DEBUG_LONG_COMMANDS, DEBUG_QUERY_COMMANDS
 from agent_workspace.ui_gateway.gateway_git import (
@@ -65,6 +72,7 @@ class GatewayServer:
     _response_order_lock: threading.Lock = field(default_factory=threading.Lock, init=False)
     _output_lock: threading.Lock = field(default_factory=threading.Lock, init=False)
     _next_wire_sequence: int = field(default=1, init=False)
+    _drain_failure: str | None = field(default=None, init=False)
     _stopping: threading.Event = field(default_factory=threading.Event, init=False)
     _provider_test_slot: threading.BoundedSemaphore = field(
         default_factory=lambda: threading.BoundedSemaphore(1),
@@ -162,6 +170,16 @@ class GatewayServer:
         pump.start()
         try:
             while line := self.input_stream.readline(MAX_MESSAGE_BYTES + 2):
+                if len(line) > MAX_MESSAGE_BYTES and not line.endswith(b"\n"):
+                    # Too long to be one message. Read past the rest of the line, so the next
+                    # command starts clean, and answer this one: stopping here would end every
+                    # conversation the sidecar runs.
+                    self._skip_rest_of_line()
+                    with self._response_order_lock:
+                        self._write_error_response(
+                            _oversized_request_id(line), None, "message_too_large"
+                        )
+                    continue
                 if self._process_line(line, concurrent_commands=True):
                     return 0
             return 0
@@ -239,6 +257,7 @@ class GatewayServer:
                 "workspace.review.pr.refresh",
                 "system.doctor",
                 "session.history",
+                "session.reply.read",
                 # git diff on a large repository takes a while.
                 "workspace.git.diff",
                 "workspace.collaborations.list",
@@ -442,6 +461,13 @@ class GatewayServer:
             should_stop = reply.should_stop
         except (ProtocolError, GatewayError) as error:
             return self._write_error_response(request_id, session_id, str(error))
+        except Exception as error:
+            # A fault in one command must not end the sidecar and every conversation running in
+            # it, or leave the window waiting for this reply. runtime_error is the protocol's
+            # general code; the window's views fall back to their own message for it.
+            _LOGGER.exception("command %s failed", command.type)
+            code = "storage_unavailable" if isinstance(error, sqlite3.Error) else "runtime_error"
+            return self._write_error_response(request_id, session_id, code)
         self._write_response(response, request_id, session_id)
         return should_stop
 
@@ -467,7 +493,13 @@ class GatewayServer:
     ) -> bool:
         response = self.runtime.error_reply(request_id, error_code, session_id)
         self._write_response(response, request_id, session_id)
-        return error_code == "message_too_large"
+        # Never a reason to stop: an oversized line is read to its end before this (run).
+        return False
+
+    def _skip_rest_of_line(self) -> None:
+        while chunk := self.input_stream.readline(MAX_MESSAGE_BYTES):
+            if chunk.endswith(b"\n"):
+                return
 
     def _dispatch(self, command: CommandEnvelope) -> GatewayReply:
         if command.type == "app.handshake":
@@ -484,8 +516,23 @@ class GatewayServer:
                 self._write_pending_events()
 
     def _write_pending_events(self) -> None:
-        for event in self.runtime.drain_events():
-            self._write(event)
+        # Called from the event pump and after every reply, so a fault here would stop the events
+        # for good or end the command thread. A write to a closed pipe still ends them.
+        try:
+            events = self.runtime.drain_events()
+        except Exception as error:
+            # The pump polls many times a second: one line for a fault that repeats.
+            if repr(error) != self._drain_failure:
+                self._drain_failure = repr(error)
+                _LOGGER.exception("reading runtime events failed")
+            return
+        self._drain_failure = None
+        for event in events:
+            try:
+                self._write(event)
+            except ProtocolError as error:
+                # It took a number first, so the window sees a gap and reads the state again.
+                _LOGGER.error("event %s was not sent: %s", event.get("type"), error)
 
     def _write(self, message: Mapping[str, object]) -> None:
         document = dict(message)
@@ -498,6 +545,16 @@ class GatewayServer:
             self._next_wire_sequence += 1
         self.output_stream.write(encode_message(document))
         self.output_stream.flush()
+
+
+_REQUEST_ID_FIELD = re.compile(rb'"requestId"\s*:\s*"([A-Za-z0-9._:-]{1,128})"')
+
+
+def _oversized_request_id(line: bytes) -> str:
+    """The request id of a message too long to parse, from its start, so the window's request
+    gets its answer instead of waiting for one."""
+    found = _REQUEST_ID_FIELD.search(line[:4096])
+    return found.group(1).decode("ascii") if found else "invalid-request"
 
 
 def _request_context(line: bytes) -> tuple[str, str | None]:
@@ -515,20 +572,63 @@ def _request_context(line: bytes) -> tuple[str, str | None]:
     )
 
 
+def _check_database_first(database: Path) -> None:
+    """Do the first open's full check here, where only the window waits, and is told why. Left to
+    the restored conversation's host, which has seconds to start, a check past those left the
+    runtime stopped. A damaged database is for the window's recovery to report, as before."""
+    if database.is_file():
+        with suppress(Exception), SQLiteEventStore(database):
+            pass
+
+
+_BUSY_MARK = "aw-sidecar-busy"
+_BUSY_EVERY_SECONDS = 5.0
+
+
+def _busy_reporter() -> Callable[[], None]:
+    """A line on stderr now and then (desktop/src/main/sidecar.ts): stdout is the protocol's."""
+    last = 0.0
+
+    def report() -> None:
+        nonlocal last
+        now = time.monotonic()
+        if now - last < _BUSY_EVERY_SECONDS:
+            return
+        last = now
+        with suppress(Exception):
+            sys.__stderr__.write(f"{_BUSY_MARK}\n")  # type: ignore[union-attr]
+            sys.__stderr__.flush()  # type: ignore[union-attr]
+
+    return report
+
+
 def main() -> int:
     # Long tool results of earlier tasks (a fetched page, a large file) go on to the model as
     # their start only; the agent reads them again when it needs them. Set to 0 to keep them.
     os.environ.setdefault("AGENT_WORKSPACE_TRIM_EARLIER_TOOL_RESULTS", "1")
     # The diagnostic trace writes each model request as the messages it adds rather than the
     # whole conversation again, and keeps two weeks and at most 100 MB of traces.
+    os.environ.setdefault("AGENT_WORKSPACE_RAW_TRACE", "1")
     os.environ.setdefault("AGENT_WORKSPACE_RAW_TRACE_REQUEST_DELTAS", "1")
     os.environ.setdefault("AGENT_WORKSPACE_RAW_TRACE_MAX_TOTAL_BYTES", str(100 * 1024 * 1024))
     os.environ.setdefault("AGENT_WORKSPACE_RAW_TRACE_MAX_AGE_DAYS", "14")
+    # A task left working for hours survives a dead connection and a few minutes without a network.
+    os.environ.setdefault("AGENT_WORKSPACE_PROVIDER_IDLE_SECONDS", "300")
+    os.environ.setdefault("AGENT_WORKSPACE_STREAM_RECOVERY_DELAYS", "5,15,30,60,120,180")
+    # Tool calls take a worker process that has already started: a sandbox run needs four or five,
+    # and starting each took most of the time such a run spent, around a quarter of a long task.
+    os.environ.setdefault("AGENT_WORKSPACE_TOOL_WORKER_SPARES", "2")
     # Conversation switches open the database again; replaying its whole history
     # each time made them miss the host start deadline on a long history. A database
     # this app closed cleanly is not replayed again at the next start either.
     trust_databases_validated_here(across_restarts=True)
+    # A long check of a large history says it is at work, so the window waits for it.
+    report_slow_work_with(_busy_reporter())
     # A backup the user chose is put back now, while nothing has the database open.
-    apply_pending_restore(default_database_path().expanduser().resolve())
-    runtime = GatewayRuntime(daily_backup=run_daily_backup)
+    database = default_database_path().expanduser().resolve()
+    apply_pending_restore(database)
+    _check_database_first(database)
+    runtime = GatewayRuntime(
+        daily_backup=run_daily_backup, stream_compaction=compact_finished_streams
+    )
     return GatewayServer(sys.stdin.buffer, sys.stdout.buffer, runtime).run()

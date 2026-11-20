@@ -108,6 +108,11 @@ internal class ShareInboxUpload(private val tokenFile: File,
     private fun connection(path: String): HttpURLConnection {
         val token = fixedToken ?: tokenFile.inputStream().use { String(it.readBytesLimited(4096), Charsets.UTF_8).trim() }
         require(token.isNotEmpty() && token.none { it == '\r' || it == '\n' }) { "本地服务尚未就绪" }
+        // The token and the shared file go only to the engine that proves it holds the token, not to
+        // another app that took the port while the engine was down. Nothing was sent: not uncertain.
+        if (!com.agentworkspace.mobile.embedded.EngineIdentity.verify(baseUrl, token, 10000)) {
+            throw InboxTransferFailure("无法连接本地服务，请稍后重试")
+        }
         return (URL(baseUrl + path).openConnection() as HttpURLConnection).apply {
             instanceFollowRedirects = false
             setRequestProperty("Authorization", "Bearer $token")

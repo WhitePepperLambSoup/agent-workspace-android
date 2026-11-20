@@ -11,12 +11,17 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-
-from agent_workspace.credentials import CredentialStore
+from typing import Protocol
 
 
 class CredentialRotationError(ValueError):
     pass
+
+
+class ProviderCredentials(Protocol):
+    """Saves a provider's secret under the entry its requests read (ProviderSettingsStore)."""
+
+    def set_credential(self, provider_id: str, secret: str) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +44,7 @@ class CredentialRotationManager:
 
     def __init__(
         self,
-        store: CredentialStore,
+        store: ProviderCredentials,
         metadata_path: str | Path,
         *,
         clock: Callable[[], float] = time.time,
@@ -141,7 +146,7 @@ class CredentialRotationManager:
     def rotate(self, provider_id: str, new_secret: str) -> None:
         if not new_secret:
             raise CredentialRotationError("new credential secret may not be empty")
-        self._store.set(provider_id, new_secret)
+        self._store.set_credential(provider_id, new_secret)
         self.record_stored(provider_id)
 
 
@@ -149,4 +154,5 @@ __all__ = [
     "CredentialRotationError",
     "CredentialRotationManager",
     "CredentialStatus",
+    "ProviderCredentials",
 ]

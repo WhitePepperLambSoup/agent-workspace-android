@@ -38,16 +38,32 @@ class ProviderProfile:
     model: str
     credential_target: str
 
-    def validate(self) -> None:
+    def validate(self, *, check_transport: bool = True) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
             raise ValueError("provider name may not be empty")
         if not isinstance(self.protocol, ProviderProtocol):
             raise ValueError("provider protocol is invalid")
         if not isinstance(self.model, str):
             raise ValueError("provider model must be a string")
-        expected_target = credential_target(self.id, self.base_url)
+        expected_target = credential_target(
+            self.id, self.base_url, check_transport=check_transport
+        )
         if self.credential_target != expected_target:
             raise ValueError("credential target does not match the provider endpoint")
+
+
+@dataclass(frozen=True, slots=True)
+class InvalidProviderProfile:
+    """A profile entry of the settings file that cannot be read, as written there.
+
+    It is left out of the usable profiles and written back unchanged with every save, so a hand
+    edit that went wrong can be put right in the file instead of being lost.
+    """
+
+    id: str
+    name: str
+    error: str
+    document: Mapping[str, object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +71,10 @@ class ProviderSettings:
     version: int
     default_provider_id: str | None
     profiles: Mapping[str, ProviderProfile]
+    invalid_profiles: tuple[InvalidProviderProfile, ...] = ()
+    # The default the file names when that profile cannot be read: no default is used meanwhile,
+    # and the file keeps naming it until another default is chosen.
+    invalid_default_provider_id: str | None = None
 
 
 def _builtin_profile(
@@ -162,7 +182,7 @@ class ProviderSettingsStore:
             profiles = dict(current.profiles)
             profiles[profile.id] = profile
             default_id = profile.id if make_default else current.default_provider_id
-            updated = _make_settings(default_id, profiles)
+            updated = _carried(current, default_id, profiles, replaced_id=profile.id)
             old_target = old_profile.credential_target if old_profile is not None else None
             targets = {profile.credential_target}
             if old_target is not None:
@@ -203,7 +223,7 @@ class ProviderSettingsStore:
             default_provider_id = (
                 None if current.default_provider_id == provider_id else current.default_provider_id
             )
-            updated = _make_settings(default_provider_id, profiles)
+            updated = _carried(current, default_provider_id, profiles)
             snapshot = self._credential_store.get(profile.credential_target)
             settings_published = False
             credential_mutated = False
@@ -228,7 +248,7 @@ class ProviderSettingsStore:
             current = self.load()
             if provider_id not in current.profiles:
                 raise KeyError(f"unknown provider profile: {provider_id}")
-            updated = _make_settings(provider_id, current.profiles)
+            updated = _carried(current, provider_id, current.profiles)
             self._write(updated)
             return updated
 
@@ -254,12 +274,22 @@ class ProviderSettingsStore:
 
     def resolve_config(self, provider_id: str | None = None) -> ProviderConfig:
         settings = self.load()
-        resolved_id = provider_id if provider_id is not None else settings.default_provider_id
+        resolved_id = (
+            provider_id
+            if provider_id is not None
+            else settings.default_provider_id or settings.invalid_default_provider_id
+        )
         if resolved_id is None:
             raise ValueError("no default provider is configured")
         try:
             profile = settings.profiles[resolved_id]
         except KeyError:
+            for entry in settings.invalid_profiles:
+                if entry.id == resolved_id:
+                    raise ProviderSettingsError(
+                        f"provider profile {resolved_id!r} in {self.path} cannot be read: "
+                        f"{entry.error}"
+                    ) from None
             raise KeyError(f"unknown provider profile: {resolved_id}") from None
 
         config = ProviderConfig(
@@ -274,7 +304,8 @@ class ProviderSettingsStore:
 
     def _profile(self, provider: str | ProviderProfile) -> ProviderProfile:
         if isinstance(provider, ProviderProfile):
-            provider.validate()
+            # Only its credential target is needed here, not whether it may be connected to.
+            provider.validate(check_transport=False)
             return provider
         try:
             return self.load().profiles[provider]
@@ -326,10 +357,13 @@ class ProviderSettingsStore:
                     "credential_target": profile.credential_target,
                 }
                 for profile in settings.profiles.values()
-            ],
+            ]
+            # Entries the file could not read go back as they were written.
+            + [dict(entry.document) for entry in settings.invalid_profiles],
         }
-        if settings.default_provider_id is not None:
-            document["default_provider"] = settings.default_provider_id
+        default_provider = settings.default_provider_id or settings.invalid_default_provider_id
+        if default_provider is not None:
+            document["default_provider"] = default_provider
         payload = tomli_w.dumps(document).encode("utf-8")
         _atomic_write(self.path, payload)
 
@@ -351,13 +385,38 @@ def _default_settings() -> ProviderSettings:
 def _make_settings(
     default_provider_id: str | None,
     profiles: Mapping[str, ProviderProfile],
+    invalid_profiles: tuple[InvalidProviderProfile, ...] = (),
+    invalid_default_provider_id: str | None = None,
 ) -> ProviderSettings:
     copied_profiles = dict(profiles)
     return ProviderSettings(
         version=SETTINGS_VERSION,
         default_provider_id=default_provider_id,
         profiles=MappingProxyType(copied_profiles),
+        invalid_profiles=invalid_profiles,
+        invalid_default_provider_id=invalid_default_provider_id,
     )
+
+
+def _carried(
+    current: ProviderSettings,
+    default_provider_id: str | None,
+    profiles: Mapping[str, ProviderProfile],
+    *,
+    replaced_id: str | None = None,
+) -> ProviderSettings:
+    """Changed settings that keep the entries the file could not read.
+
+    Only saving a profile under the same id replaces such an entry; a default it held passes to
+    the saved profile, and choosing another default ends it.
+    """
+    invalid = tuple(entry for entry in current.invalid_profiles if entry.id != replaced_id)
+    kept_default = current.invalid_default_provider_id
+    if default_provider_id is None and kept_default is not None and kept_default == replaced_id:
+        default_provider_id = kept_default
+    if default_provider_id is not None:
+        kept_default = None
+    return _make_settings(default_provider_id, profiles, invalid, kept_default)
 
 
 def _decode_settings(document: dict[str, object]) -> ProviderSettings:
@@ -371,33 +430,55 @@ def _decode_settings(document: dict[str, object]) -> ProviderSettings:
     if not isinstance(raw_profiles, list):
         raise ValueError("'profiles' must be a list")
     profiles: dict[str, ProviderProfile] = {}
+    invalid: list[InvalidProviderProfile] = []
     for raw_profile in raw_profiles:
         if not isinstance(raw_profile, dict):
             raise ValueError("every 'profiles' entry must be a table")
-        profile_id = raw_profile.get("id")
-        if not isinstance(profile_id, str) or not profile_id:
-            raise ValueError("every 'profiles' entry must declare an id")
+        entry = cast(dict[str, object], raw_profile)
+        raw_id = entry.get("id")
+        profile_id = raw_id if isinstance(raw_id, str) else ""
         try:
-            profile = _decode_profile(cast(dict[str, object], raw_profile))
+            if not profile_id:
+                raise ValueError("it declares no id")
+            if profile_id in profiles:
+                raise ValueError("an earlier entry has the same id")
+            profile = _decode_profile(entry)
         except (TypeError, ValueError) as exc:
-            raise ValueError(f"provider profile {profile_id!r} is invalid: {exc}") from None
-        if profile.id in profiles:
-            raise ValueError(f"provider profile {profile_id!r} is duplicated")
+            # One entry a hand edit broke used to make the whole file unreadable, and every
+            # provider with it. The others stay usable; this one is reported and kept as written.
+            raw_name = entry.get("name")
+            invalid.append(
+                InvalidProviderProfile(
+                    id=profile_id,
+                    name=raw_name if isinstance(raw_name, str) else "",
+                    error=" ".join(str(exc).split()) or "it cannot be read",
+                    document=MappingProxyType(dict(entry)),
+                )
+            )
+            continue
         profiles[profile.id] = profile
 
     default_provider = document.get("default_provider")
     if default_provider is not None and not isinstance(default_provider, str):
         raise ValueError
+    invalid_default: str | None = None
     if default_provider is not None and default_provider not in profiles:
-        raise ValueError
-    return _make_settings(default_provider, profiles)
+        if all(entry.id != default_provider for entry in invalid):
+            raise ValueError
+        invalid_default, default_provider = default_provider, None
+    return _make_settings(default_provider, profiles, tuple(invalid), invalid_default)
 
 
 def _decode_profile(document: dict[str, object]) -> ProviderProfile:
-    if set(document) != _PROFILE_KEYS or not all(
-        isinstance(document[key], str) for key in _PROFILE_KEYS
-    ):
-        raise ValueError
+    missing = sorted(_PROFILE_KEYS - set(document))
+    if missing:
+        raise ValueError(f"missing {', '.join(missing)}")
+    unknown = sorted(set(document) - _PROFILE_KEYS)
+    if unknown:
+        raise ValueError(f"unknown {', '.join(unknown)}")
+    not_text = sorted(key for key in _PROFILE_KEYS if not isinstance(document[key], str))
+    if not_text:
+        raise ValueError(f"{', '.join(not_text)} must be text")
     provider_id = cast(str, document["id"])
     model = _canonical_model_name(provider_id, cast(str, document["model"]))
     profile = ProviderProfile(
@@ -408,7 +489,10 @@ def _decode_profile(document: dict[str, object]) -> ProviderProfile:
         model=model,
         credential_target=cast(str, document["credential_target"]),
     )
-    profile.validate()
+    # A LAN profile saved where AGENT_WORKSPACE_ALLOW_LAN_HTTP=1 used to make the whole file
+    # unreadable, every provider with it, in a process without that variable. Whether plain HTTP
+    # may be used is checked when that one provider connects (ProviderConfig.validate).
+    profile.validate(check_transport=False)
     return profile
 
 

@@ -249,6 +249,9 @@ class ReviewCommands(GatewayState):
         success = False
         summary = ""
         error_code: str | None = None
+        # Paths this delivery staged; taken out of the index again unless they were committed,
+        # or the next delivery would find them "already staged" and refuse.
+        added: list[str] = []
 
         try:
             if not git_cmd:
@@ -297,6 +300,7 @@ class ReviewCommands(GatewayState):
                         elif pre_staged.returncode != 0:
                             summary = "Unable to inspect selected staged changes"
                         else:
+                            added = valid_paths
                             subprocess.run(
                                 [git_cmd, "add", "--", *valid_paths],
                                 cwd=workspace,
@@ -338,7 +342,8 @@ class ReviewCommands(GatewayState):
                                 text=True,
                                 encoding="utf-8",
                                 errors="replace",
-                                timeout=15.0,
+                                # Commit hooks (formatters, test runs) can take minutes.
+                                timeout=300.0,
                                 env=env,
                             )
                             if proc.returncode == 0:
@@ -367,7 +372,8 @@ class ReviewCommands(GatewayState):
                                 if branch_proc.returncode == 0:
                                     branch = branch_proc.stdout.strip()
                             else:
-                                summary = "Git commit failed"
+                                reason = (proc.stderr or proc.stdout or "").strip()[-2000:]
+                                summary = "Git commit failed" + (f": {reason}" if reason else "")
                         else:
                             summary = "Unable to inspect selected changes"
         except GatewayError:
@@ -375,6 +381,16 @@ class ReviewCommands(GatewayState):
         except (OSError, subprocess.SubprocessError):
             summary = "Git delivery command failed"
         finally:
+            if added and not success and git_cmd:
+                with suppress(OSError, subprocess.SubprocessError):
+                    subprocess.run(
+                        [git_cmd, "reset", "-q", "--", *added],
+                        cwd=workspace,
+                        stdin=subprocess.DEVNULL,
+                        capture_output=True,
+                        timeout=30.0,
+                        env=env,
+                    )
             with self._lock:
                 self._git_delivery_in_progress = False
 

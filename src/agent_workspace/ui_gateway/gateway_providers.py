@@ -64,6 +64,11 @@ class ProviderCommands(GatewayState):
                 "epoch": self.epoch,
                 "defaultProviderId": settings.default_provider_id,
                 "providers": providers,
+                # Entries of config.toml that cannot be read: left out, and kept in the file.
+                "invalidProviders": [
+                    {"id": entry.id, "name": entry.name, "error": entry.error[:500]}
+                    for entry in settings.invalid_profiles
+                ],
             },
             session_id=None,
         )
@@ -383,9 +388,13 @@ class ProviderCommands(GatewayState):
         profile = self._saved_provider(settings, selected_id)
         has_credential = self._settings_store().has_credential(profile)
         # Local servers (Ollama, llama.cpp, LM Studio, vLLM) on loopback need no key.
-        local_endpoint = profile.protocol is ProviderProtocol.OLLAMA or is_loopback_endpoint(
-            profile.base_url
-        )
+        try:
+            local_endpoint = profile.protocol is ProviderProtocol.OLLAMA or is_loopback_endpoint(
+                profile.base_url
+            )
+        except ValueError:
+            # Plain HTTP to a LAN address this process may not use; starting it says why.
+            local_endpoint = False
         status = "ready" if has_credential or local_endpoint else "needs_credential"
         next_action = None if status == "ready" else "enter_api_key"
         return self._reply(
@@ -651,9 +660,14 @@ class ProviderCommands(GatewayState):
             ProviderProtocol.ANTHROPIC,
         }:
             return ()
-        native = supported_reasoning_efforts(
-            provider.protocol.value, provider.base_url, provider.model
-        )
+        try:
+            native = supported_reasoning_efforts(
+                provider.protocol.value, provider.base_url, provider.model
+            )
+        except ValueError:
+            # A saved LAN endpoint this process may not use over plain HTTP; it is refused when
+            # chosen, and must not take the rest of the provider list down with it.
+            return ()
         supported = {"none", "low", "medium", "high", "xhigh", "max"}
         return tuple(
             "off" if effort == "none" else effort for effort in native if effort in supported

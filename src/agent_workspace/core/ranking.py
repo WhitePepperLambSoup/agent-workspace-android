@@ -57,6 +57,36 @@ def bm25_score(
     return score
 
 
+def bm25_scores(query: str, documents: Sequence[str]) -> list[float]:
+    """Each document's BM25 score against the query, as :func:`bm25_score` gives it, with the
+    corpus statistics counted once (a few hundred documents stay fast)."""
+    query_terms = tokenize(query)
+    corpus = [tokenize(document) for document in documents]
+    if not query_terms or not corpus:
+        return [0.0] * len(corpus)
+    document_frequency: Counter[str] = Counter()
+    for terms in corpus:
+        document_frequency.update(set(terms))
+    average_length = sum(len(terms) for terms in corpus) / len(corpus)
+    scores: list[float] = []
+    for terms in corpus:
+        if not terms or average_length <= 0:
+            scores.append(0.0)
+            continue
+        counts = Counter(terms)
+        score = 0.0
+        for term in query_terms:
+            frequency = document_frequency.get(term, 0)
+            term_frequency = counts.get(term, 0)
+            if frequency <= 0 or term_frequency <= 0:
+                continue
+            idf = math.log(1.0 + (len(corpus) - frequency + 0.5) / (frequency + 0.5))
+            denominator = term_frequency + 1.2 * (1.0 - 0.75 + 0.75 * len(terms) / average_length)
+            score += idf * term_frequency * (1.2 + 1.0) / denominator
+        scores.append(score)
+    return scores
+
+
 def rank_by_bm25(
     query: str,
     documents: Sequence[str],

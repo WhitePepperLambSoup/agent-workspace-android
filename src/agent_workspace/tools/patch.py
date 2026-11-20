@@ -19,6 +19,7 @@ from .filesystem import (
     _workspace_paths,
     atomic_write,
     expected_sha256,
+    kept_executable_state,
     sha256_bytes,
 )
 from .paths import StrPath, WorkspacePaths
@@ -114,6 +115,7 @@ class ApplyPatchTool:
     ) -> str:
         path, relative, original_bytes, updated_bytes, expected, diff = self._prepare(arguments)
         postimage_digest = sha256_bytes(updated_bytes)
+        executable = kept_executable_state(path, original_bytes)
         await context.prepare_file_checkpoint(
             FileCheckpoint(
                 attempt_id=context.attempt_id,
@@ -125,6 +127,8 @@ class ApplyPatchTool:
                 preimage=original_bytes,
                 postimage_sha256=postimage_digest,
                 created_at=datetime.now(UTC).isoformat(),
+                preimage_executable=executable,
+                postimage_executable=executable,
             )
         )
         if self.versions is not None:
@@ -166,7 +170,7 @@ class ApplyPatchTool:
         expected: str,
         diff: str,
     ) -> str:
-        _, digest = atomic_write(self.paths, path, updated_bytes, expected)
+        _, digest = atomic_write(self.paths, path, updated_bytes, expected, preserve_mode=True)
         return json_result({"path": relative, "sha256": digest, "diff": diff})
 
     def _prepare(

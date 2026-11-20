@@ -8,12 +8,17 @@ import io
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from agent_workspace.office.ooxml import OfficeError, Package, S, q
 
 MAX_CELLS = 2_000_000
+# Blanks included: every row is padded to the widest, so a few far-away cells make a huge table.
+MAX_SLOTS = 2 * MAX_CELLS
+_MAX_ROWS = 1_048_576
+_MAX_COLUMNS = 16_384
 _BUILTIN_DATES = {14, 15, 16, 17, 18, 19, 20, 21, 22, 45, 46, 47, 57, 58}
 _CELL = re.compile(r"([A-Z]+)(\d+)")
 
@@ -101,11 +106,20 @@ def _excel_date(value: float, system_1904: bool) -> str:
 
 def _number(text: str) -> int | float:
     value = float(text)
+    # From the text, not the float: a long number in a number cell keeps its last digits.
     return (
-        int(value)
-        if value.is_integer() and abs(value) < 1e15 and "." not in text and "E" not in text.upper()
-        else value
+        int(text) if value.is_integer() and "." not in text and "E" not in text.upper() else value
     )
+
+
+def _row_number(text: str) -> int:
+    try:
+        number = int(text)
+    except ValueError:
+        number = 0
+    if not 1 <= number <= _MAX_ROWS:
+        raise OfficeError(f"the workbook has a row numbered {text[:20]}")
+    return number
 
 
 def read_xlsx(data: bytes) -> list[Sheet]:
@@ -130,6 +144,7 @@ def read_xlsx(data: bytes) -> list[Sheet]:
     dates = _date_formats(package)
     sheets = []
     cells = 0
+    slots = 0
     relationship = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
     for entry in workbook.iter(q(S, "sheet")):
         part = targets.get(entry.get(relationship, ""), "")
@@ -137,15 +152,19 @@ def read_xlsx(data: bytes) -> list[Sheet]:
             continue
         sheet = Sheet(entry.get("name", ""))
         root = package.xml(part).root
+        last_row = width = 0
         for row in root.iter(q(S, "row")):
-            row_number = int(row.get("r", len(sheet.rows) + 1))
-            while len(sheet.rows) < row_number:
-                sheet.rows.append([])
-            values = sheet.rows[row_number - 1]
+            row_number = _row_number(row.get("r", str(last_row + 1)))
+            last_row = max(last_row, row_number)
             for position, cell in enumerate(row.findall(q(S, "c"))):
                 reference = cell.get("r", "")
                 match = _CELL.fullmatch(reference)
-                column = column_index(match.group(1)) if match else position
+                # Four letters are out of range already, however many more there are.
+                column = column_index(match.group(1)[:4]) if match else position
+                if column >= _MAX_COLUMNS:
+                    raise OfficeError(
+                        f"the workbook has a cell beyond column XFD: {reference[:20]}"
+                    )
                 kind = cell.get("t", "n")
                 raw = cell.findtext(q(S, "v"))
                 value: Any = None
@@ -170,18 +189,32 @@ def read_xlsx(data: bytes) -> list[Sheet]:
                 formula = cell.findtext(q(S, "f"))
                 if formula:
                     sheet.formulas[(row_number - 1, column)] = "=" + formula
-                while len(values) <= column:
-                    values.append(None)
-                values[column] = value
                 cells += 1
                 if cells > MAX_CELLS:
                     raise OfficeError("the workbook has more than 2,000,000 cells")
+                # A cell with only a style (formatting taken out to the edge of the sheet) does
+                # not make the table bigger.
+                if value is None and not formula:
+                    continue
+                width = max(width, column + 1)
+                if slots + max(len(sheet.rows), row_number) * width > MAX_SLOTS:
+                    raise OfficeError(
+                        f"sheet {sheet.name} reaches row {max(len(sheet.rows), row_number)}, "
+                        f"column {column_letter(width - 1)}: too large a range to read. "
+                        "Clear stray cells far from the data"
+                    )
+                while len(sheet.rows) < row_number:
+                    sheet.rows.append([])
+                values = sheet.rows[row_number - 1]
+                while len(values) <= column:
+                    values.append(None)
+                values[column] = value
         merges = root.find(q(S, "mergeCells"))
         if merges is not None:
             sheet.merged = [item.get("ref", "") for item in merges.findall(q(S, "mergeCell"))]
-        width = max((len(values) for values in sheet.rows), default=0)
         for values in sheet.rows:
             values.extend([None] * (width - len(values)))
+        slots += len(sheet.rows) * width
         sheets.append(sheet)
     return sheets
 
@@ -207,6 +240,8 @@ def read_csv(data: bytes) -> list[Sheet]:
     for row in csv.reader(io.StringIO(text), dialect):
         rows.append([_csv_value(value) for value in row])
     width = max((len(row) for row in rows), default=0)
+    if sum(width - len(row) for row in rows) > MAX_SLOTS:
+        raise OfficeError(f"one row has {width} columns and most are far shorter: check the file")
     padding: list[Any] = [None]
     for row in rows:
         row.extend(padding * (width - len(row)))
@@ -215,9 +250,8 @@ def read_csv(data: bytes) -> list[Sheet]:
 
 def _csv_value(text: str) -> Any:
     stripped = text.strip()
-    if re.fullmatch(r"-?\d+(\.\d+)?", stripped) and not (
-        len(stripped) > 1 and stripped.lstrip("-").startswith("0") and "." not in stripped
-    ):
+    # 007 is a code; past 15 digits (ID and card numbers) a number in Excel loses the last ones.
+    if re.fullmatch(r"-?(0|[1-9][0-9]{0,14})(\.[0-9]+)?", stripped):
         return _number(stripped)
     return text
 
@@ -250,7 +284,9 @@ def display(value: Any) -> str:
     if isinstance(value, bool):
         return "TRUE" if value else "FALSE"
     if isinstance(value, float):
-        return f"{value:.10g}"
+        # Excel's 15 digits, written out in full up to a size where that still means something.
+        text = f"{value:.15g}"
+        return f"{Decimal(text):f}" if "e+" in text and abs(value) < 1e21 else text
     return str(value)
 
 

@@ -6,7 +6,7 @@ description: 用户想全面看看手机状况（电池、存储、耗电、最�
 
 只读取，不改任何设置、不删任何东西。
 
-1. 电池：`android_battery` 读电量、充电状态、温度。
+1. 电池：`system_status` 的 battery 读电量、充电状态、温度。
 2. 耗电：`android_action` open_page battery，读「耗电排行 / 应用耗电」前 5 名（没有这一项就跳过；有「电池健康 / 最大容量」也记下）。
 3. 存储：open_page storage，读总容量、已用、各分类（应用、图片、视频、其他）。
 4. 应用：open_page apps，读应用数量；按「最近安装 / 按安装时间」排序时记下最近 5 个。

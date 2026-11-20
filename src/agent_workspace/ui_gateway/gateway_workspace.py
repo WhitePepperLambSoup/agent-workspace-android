@@ -5,6 +5,8 @@ terminals.
 from __future__ import annotations
 
 import base64
+import codecs
+import contextlib
 import fnmatch
 import os
 import re
@@ -255,9 +257,39 @@ class WorkspaceCommands(GatewayState):
         skill_files = [paths.relative(path) for path in discover_skill_files(workspace)]
         servers: list[dict[str, object]] = []
         mcp_error: str | None = None
+        # Why a server the running agent started without could not start (mcp_host).
+        with self._lock:
+            host = self._host
+        running = getattr(host, "_runtime", None)
+        started = getattr(running, "mcp", None)
+        failures: dict[str, str] = {}
+        if started is not None:
+            with contextlib.suppress(Exception):
+                failures = dict(started.startup_failures())
+        # Approved .agent files the running agent left out because they could not be read.
+        skipped = getattr(running, "skipped_workspace_files", None)
+        skipped_files = [
+            {"path": path, "reason": _workspace_error_text(ValueError(reason), workspace)}
+            for path, reason in (skipped.items() if isinstance(skipped, dict) else ())
+        ]
+        # Custom tools the running agent left out because a built-in tool has the name.
+        clashing = getattr(running, "skipped_custom_tools", None)
+        skipped_tools: list[dict[str, object]] = []
+        for name, path in clashing.items() if isinstance(clashing, dict) else ():
+            try:
+                shown = paths.relative(Path(path))
+            except (OSError, ValueError, ToolError):
+                shown = str(path)
+            skipped_tools.append({"name": name, "path": shown, "reason": "name_taken"})
         try:
             for server in load_mcp_servers(workspace):
-                servers.append({"id": server.id, "command": list(server.command)[:32]})
+                servers.append(
+                    {
+                        "id": server.id,
+                        "command": list(server.command)[:32],
+                        "failed": failures.get(server.id),
+                    }
+                )
         except McpHostError as exc:
             mcp_error = _workspace_error_text(exc, workspace)
         custom_tools: list[dict[str, object]] = []
@@ -284,6 +316,8 @@ class WorkspaceCommands(GatewayState):
                 "mcp": {**file_fact(".agent/mcp.toml"), "servers": servers, "error": mcp_error},
                 "customTools": custom_tools,
                 "customToolError": custom_error,
+                "skippedFiles": skipped_files,
+                "skippedTools": skipped_tools,
             },
             session_id=None,
         )
@@ -343,7 +377,8 @@ class WorkspaceCommands(GatewayState):
     def _list_research_sources(self, command: CommandEnvelope) -> GatewayReply:
         self._require_payload(command, set(), optional={"offset", "limit"})
         self._require_selected_session(command.session_id)
-        assert command.session_id is not None
+        if command.session_id is None:
+            raise GatewayError("invalid_session")
         offset, limit = self._research_page_bounds(command, max_limit=50)
         try:
             with SQLiteEventStore(self._database) as store:
@@ -379,7 +414,8 @@ class WorkspaceCommands(GatewayState):
     def _read_research_source(self, command: CommandEnvelope) -> GatewayReply:
         self._require_payload(command, {"sourceId"}, optional={"offset", "maxChars"})
         self._require_selected_session(command.session_id)
-        assert command.session_id is not None
+        if command.session_id is None:
+            raise GatewayError("invalid_session")
         source_id = command.payload.get("sourceId")
         if not isinstance(source_id, str) or re.fullmatch(r"[0-9a-fA-F]{64}", source_id) is None:
             raise GatewayError("invalid_source_id")
@@ -428,7 +464,8 @@ class WorkspaceCommands(GatewayState):
     def _list_research_citations(self, command: CommandEnvelope) -> GatewayReply:
         self._require_payload(command, set(), optional={"offset", "limit"})
         self._require_selected_session(command.session_id)
-        assert command.session_id is not None
+        if command.session_id is None:
+            raise GatewayError("invalid_session")
         offset, limit = self._research_page_bounds(command, max_limit=20)
         try:
             with SQLiteEventStore(self._database) as store:
@@ -666,8 +703,8 @@ class WorkspaceCommands(GatewayState):
         self._require_configured()
         self._require_payload(command, set(), optional={"path", "maxDepth", "limit"})
         assert self._workspace is not None
-        root_path = self._workspace
-        paths = WorkspacePaths(root_path)
+        paths = WorkspacePaths(self._workspace)
+        root_path = paths.root
         rel_sub = command.payload.get("path", "")
         if not isinstance(rel_sub, str):
             raise GatewayError("invalid_path")
@@ -704,26 +741,35 @@ class WorkspaceCommands(GatewayState):
             ".gemini",
         }
 
+        def relative(path: Path) -> str:
+            # Plain path arithmetic: a symbolic link, a hard-linked file or a short-name-like
+            # file name is listed (reading it is checked when it is opened) instead of making
+            # the whole tree fail.
+            return path.relative_to(root_path).as_posix()
+
         items: list[dict[str, object]] = []
         target_depth = len(target_dir.parts)
         rules = _gitignore_rules(root_path)
         try:
             for current_root, dirnames, filenames in os.walk(target_dir):
                 curr_path = Path(current_root)
-                rel_root = paths.relative(curr_path) if curr_path != root_path else ""
+                rel_root = relative(curr_path) if curr_path != root_path else ""
                 dirnames[:] = [
                     d
                     for d in dirnames
                     if d not in ignore_dirs
                     and not d.startswith(".")
                     and not _git_ignored(f"{rel_root}/{d}".lstrip("/"), d, True, rules)
+                    # os.walk does not follow symbolic links but does enter junctions.
+                    and not os.path.islink(curr_path / d)
+                    and not os.path.isjunction(curr_path / d)
                 ]
                 curr_depth = len(curr_path.parts) - target_depth
                 if curr_depth >= max_depth:
                     dirnames.clear()
 
                 if curr_path != target_dir:
-                    rel_dir = paths.relative(curr_path)
+                    rel_dir = relative(curr_path)
                     try:
                         st = curr_path.stat()
                         mtime = st.st_mtime
@@ -751,7 +797,7 @@ class WorkspaceCommands(GatewayState):
                         st = file_path.stat()
                         items.append(
                             {
-                                "path": paths.relative(file_path),
+                                "path": relative(file_path),
                                 "name": f,
                                 "type": "file",
                                 "size": st.st_size,
@@ -796,12 +842,12 @@ class WorkspaceCommands(GatewayState):
             if size > _MAX_WORKSPACE_EDIT_BYTES:
                 with target.open("rb") as f:
                     sample = f.read(64 * 1024)
-                    if offset > 0:
-                        f.seek(offset)
+                    f.seek(offset)
                     slice_bytes = f.read(max_bytes)
                 sha256 = "unavailable_large_file"
                 try:
-                    sample.decode("utf-8")
+                    # The sample may end inside a character; only invalid bytes say binary.
+                    codecs.getincrementaldecoder("utf-8")().decode(sample, final=False)
                     is_binary = b"\x00" in sample
                 except UnicodeDecodeError:
                     is_binary = True
@@ -817,6 +863,10 @@ class WorkspaceCommands(GatewayState):
 
             content_str = slice_bytes.decode("utf-8", errors="replace")
             truncated = (offset + len(slice_bytes)) < size
+            if len(content_str) > _MAX_STRING_CHARS:
+                # A reply cannot carry a longer string: the start is shown, marked as cut.
+                content_str = content_str[:_MAX_STRING_CHARS]
+                truncated = True
             editable = (
                 offset == 0
                 and (not truncated)
@@ -1072,7 +1122,8 @@ class WorkspaceCommands(GatewayState):
             raise GatewayError("invalid_job")
         if type(offset) is not int or offset < 0:
             raise GatewayError("invalid_offset")
-        assert command.session_id is not None
+        if command.session_id is None:
+            raise GatewayError("invalid_session")
         self._selected_job(command.session_id, job_id)
         host = self._require_host()
         try:
@@ -1123,7 +1174,8 @@ class WorkspaceCommands(GatewayState):
         job_id = command.payload.get("jobId")
         if not isinstance(job_id, str) or not job_id or len(job_id) > 128:
             raise GatewayError("invalid_job")
-        assert command.session_id is not None
+        if command.session_id is None:
+            raise GatewayError("invalid_session")
         status = self._selected_job(command.session_id, job_id)
         if status.state in _TERMINAL_JOB_STATES:
             raise GatewayError("job_not_stoppable")

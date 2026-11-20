@@ -7,6 +7,7 @@ import os
 import shutil
 import stat
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,10 +29,14 @@ _MAX_PREVIEW_JSON_BYTES = 256 * 1024
 _MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 _MAX_ARTIFACT_BATCH_BYTES = 64 * 1024 * 1024
 _MAX_STALE_STAGING_ROOTS = 128
+# A staging directory whose owner cannot be read is removed once it has not changed for this long.
+_ABANDONED_STAGING_SECONDS = 24 * 3600
 _STAGING_NAME_PREFIX = "agent-stage-"
 # Left out of every staged copy, at any depth: a repository's history and hooks are not the
 # command's to read or change, and copying them is slow. The changes manifest ignores them too.
 STAGING_EXCLUSIONS = frozenset({".git"})
+# How many of the links and special files a copy left out are named in the run's result.
+_MAX_LEFT_OUT_LISTED = 50
 
 
 def _staged(names: list[str]) -> list[str]:
@@ -46,6 +51,9 @@ class StagingWorkspace:
     source_tree_sha256: str
     entries: int
     bytes: int
+    # Links, junctions and special files the copy left out, by workspace path (the first ones).
+    left_out: tuple[str, ...] = ()
+    left_out_count: int = 0
 
     def to_document(self) -> dict[str, Any]:
         return {
@@ -55,6 +63,8 @@ class StagingWorkspace:
             "source_tree_sha256": self.source_tree_sha256,
             "entries": self.entries,
             "bytes": self.bytes,
+            "left_out": list(self.left_out),
+            "left_out_count": self.left_out_count,
         }
 
     @classmethod
@@ -73,6 +83,15 @@ class StagingWorkspace:
             or byte_count < 0
         ):
             raise ToolError("staging workspace counts are invalid")
+        left_out = document.get("left_out", [])
+        left_out_count = document.get("left_out_count", 0)
+        if (
+            not isinstance(left_out, list)
+            or not all(isinstance(item, str) for item in left_out)
+            or type(left_out_count) is not int
+            or left_out_count < len(left_out)
+        ):
+            raise ToolError("staging workspace left-out list is invalid")
         return cls(
             root=document["root"],
             workspace=document["workspace"],
@@ -80,6 +99,8 @@ class StagingWorkspace:
             source_tree_sha256=document["source_tree_sha256"],
             entries=entries,
             bytes=byte_count,
+            left_out=tuple(left_out),
+            left_out_count=left_out_count,
         )
 
 
@@ -146,7 +167,10 @@ def create_staging_workspace_sync(
         staged_workspace.mkdir()
         if os.name != "nt":
             staged_workspace.chmod(0o700)
-        owner_path.write_text(
+        # Whole or not at all: an owner.json cut short by a crash left a directory that recovery
+        # could not attribute to anyone, a full copy of the workspace kept for good.
+        owner_temporary = creating / f".owner-{uuid4().hex}.tmp"
+        owner_temporary.write_text(
             json.dumps(
                 {
                     "execution_sha256": _identity_digest(execution_id),
@@ -156,20 +180,23 @@ def create_staging_workspace_sync(
             ),
             encoding="utf-8",
         )
+        os.replace(owner_temporary, owner_path)
         _check_staging_storage(
             owner_path,
             initial_free_space,
             max_staging_bytes,
             minimum_free_space_bytes,
         )
-        entries, byte_count = _copy_workspace(
+        entries, byte_count, left_out = _copy_workspace(
             source,
             staged_workspace,
             initial_free_space=initial_free_space,
             max_staging_bytes=min(max_staging_bytes, _MAX_SOURCE_BYTES),
             minimum_free_space_bytes=minimum_free_space_bytes,
         )
-        verified_entries, verified_bytes = _scan_tree(source.root, source)
+        verified_entries, verified_bytes = _scan_tree(
+            source.root, source, skipped=frozenset(left_out)
+        )
         if verified_entries != entries or verified_bytes != byte_count:
             raise ToolError("workspace changed while its sandbox staging snapshot was created")
         tree_sha256 = _tree_digest(entries)
@@ -208,6 +235,8 @@ def create_staging_workspace_sync(
                 source_tree_sha256=tree_sha256,
                 entries=len(entries),
                 bytes=byte_count,
+                left_out=tuple(left_out[:_MAX_LEFT_OUT_LISTED]),
+                left_out_count=len(left_out),
             ).to_document()
         )
         os.replace(creating, root)
@@ -392,37 +421,67 @@ def recover_stale_staging_workspaces_sync() -> str:
     if not parent.exists():
         return json_result({"recovered": 0, "active": 0})
     _assert_private_staging_parent(parent)
-    all_candidates = tuple(
-        child
-        for child in parent.iterdir()
-        if child.name.startswith(_STAGING_NAME_PREFIX)
-        or child.name.startswith(f".creating-{_STAGING_NAME_PREFIX}")
-        or child.name.startswith(".deleting-")
+    candidates = sorted(
+        (
+            child
+            for child in parent.iterdir()
+            if child.name.startswith(_STAGING_NAME_PREFIX)
+            or child.name.startswith(f".creating-{_STAGING_NAME_PREFIX}")
+            or child.name.startswith(".deleting-")
+        ),
+        key=lambda path: path.name,
     )
-    candidates = tuple(sorted(all_candidates, key=lambda path: path.name))[
-        :_MAX_STALE_STAGING_ROOTS
-    ]
     recovered = 0
     active = 0
     invalid = 0
+    failed = 0
+    remaining = 0
+    now = time.time()
     for candidate in candidates:
         try:
             owner_pid = _staging_candidate_owner_pid(candidate)
         except ToolError:
-            invalid += 1
+            # Nobody to ask whether it is still in use; no run lasts a day.
+            if not _abandoned_directory(candidate, now):
+                invalid += 1
+                continue
+        else:
+            if _process_is_alive(owner_pid):
+                active += 1
+                continue
+        # Only directories that could go count towards the limit. The first 128 by name used to be
+        # taken every time, so 128 kept ones (alive, or unreadable) filled it on every pass, and
+        # after eight passes every run_sandbox failed with "too many stale staging workspaces".
+        if recovered + failed >= _MAX_STALE_STAGING_ROOTS:
+            remaining += 1
             continue
-        if _process_is_alive(owner_pid):
-            active += 1
+        try:
+            _remove_tree(candidate)
+        except ToolError:
+            # Held open, say; tried again by the next process, without stopping this run.
+            failed += 1
             continue
-        _remove_tree(candidate)
         recovered += 1
     return json_result(
         {
             "recovered": recovered,
             "active": active,
             "invalid": invalid,
-            "remaining": len(all_candidates) - len(candidates),
+            "failed": failed,
+            "remaining": remaining,
         }
+    )
+
+
+def _abandoned_directory(path: Path, now: float) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and now - metadata.st_mtime > _ABANDONED_STAGING_SECONDS
     )
 
 
@@ -433,10 +492,14 @@ def _copy_workspace(
     initial_free_space: int,
     max_staging_bytes: int,
     minimum_free_space_bytes: int,
-) -> tuple[dict[str, dict[str, Any]], int]:
+) -> tuple[dict[str, dict[str, Any]], int, list[str]]:
     from .sandbox import _validate_workspace_mount
 
-    _validate_workspace_mount(source.root, STAGING_EXCLUSIONS)
+    # Links, junctions and special files are left out of the copy (and named in the result);
+    # a linked folder is not entered, so nothing outside the workspace is copied.
+    left_out: list[str] = []
+    _validate_workspace_mount(source.root, STAGING_EXCLUSIONS, left_out=left_out)
+    skipped = frozenset(left_out)
     entries: dict[str, dict[str, Any]] = {}
     total_bytes = 0
     entry_count = 0
@@ -447,13 +510,14 @@ def _copy_workspace(
     for directory, directory_names, file_names in os.walk(
         source.root,
         topdown=True,
+        followlinks=False,
         onerror=reject_walk_error,
     ):
-        directory_names[:] = _staged(directory_names)
-        file_names[:] = _staged(file_names)
+        relative_directory = Path(directory).relative_to(source.root)
+        directory_names[:] = _kept(_staged(directory_names), relative_directory, skipped)
+        file_names[:] = _kept(_staged(file_names), relative_directory, skipped)
         directory_names.sort()
         file_names.sort()
-        relative_directory = Path(directory).relative_to(source.root)
         for name in directory_names:
             relative = relative_directory / name
             relative_text = relative.as_posix()
@@ -500,7 +564,11 @@ def _copy_workspace(
                 "sha256": digest,
                 "executable": _is_executable(source_path.stat()),
             }
-    return entries, total_bytes
+    return entries, total_bytes, left_out
+
+
+def _kept(names: list[str], relative_directory: Path, skipped: frozenset[str]) -> list[str]:
+    return [name for name in names if (relative_directory / name).as_posix() not in skipped]
 
 
 def _copy_regular_file(
@@ -565,7 +633,10 @@ def _copy_regular_file(
 def _scan_tree(
     root: Path,
     source_paths: WorkspacePaths | None = None,
+    *,
+    skipped: frozenset[str] = frozenset(),
 ) -> tuple[dict[str, dict[str, Any]], int]:
+    """``skipped``: workspace paths the copy left out (links, special files), not scanned."""
     entries: dict[str, dict[str, Any]] = {}
     total_bytes = 0
     entry_count = 0
@@ -580,11 +651,11 @@ def _scan_tree(
         followlinks=False,
         onerror=reject_walk_error,
     ):
-        directory_names[:] = _staged(directory_names)
-        file_names[:] = _staged(file_names)
+        relative_directory = Path(directory).relative_to(root)
+        directory_names[:] = _kept(_staged(directory_names), relative_directory, skipped)
+        file_names[:] = _kept(_staged(file_names), relative_directory, skipped)
         directory_names.sort()
         file_names.sort()
-        relative_directory = Path(directory).relative_to(root)
         for name in (*directory_names, *file_names):
             path = Path(directory) / name
             relative = (relative_directory / name).as_posix()

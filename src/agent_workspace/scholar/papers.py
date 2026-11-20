@@ -204,7 +204,9 @@ def page_numbers(spec: str, total: int) -> list[int]:
             raise ToolArgumentError(f"pages must look like '1-3, 7', not {part!r}")
         if start < 1 or end < start:
             raise ToolArgumentError(f"page range {part!r} is not valid")
-        numbers.extend(number for number in range(start, end + 1) if number <= total)
+        # Cut at the last page first: "1-999999999999" would otherwise count through every
+        # number in a thread that a stopped turn cannot end.
+        numbers.extend(range(start, min(end, total) + 1))
     return sorted(set(numbers))
 
 

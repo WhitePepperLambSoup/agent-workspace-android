@@ -16,10 +16,12 @@ Semantics
 * ``next_after`` returns the first trigger strictly after the given moment at
   minute granularity and raises :class:`ScheduleError` after a bounded scan of
   four years (enough to cover every possible date, including leap days).
-* ``TaskScheduler`` consumes triggers: each trigger instant is delivered
-  exactly once per process by ``due`` and ``advance`` (they move an internal
-  cursor). Persistence across restarts and any external re-entrancy policy are
-  the caller's responsibility; the injectable clock is the recovery hook.
+* ``TaskScheduler`` consumes triggers: each trigger instant is delivered at
+  most once per process by ``due`` and ``advance`` (they move an internal
+  cursor); with ``latest_only`` a task whose triggers piled up between two
+  calls gets only the most recent one. Persistence across restarts and any
+  external re-entrancy policy are the caller's responsibility; the injectable
+  clock is the recovery hook.
 * Tasks with ``enabled=False`` never fire and are ignored by ``due``,
   ``advance`` and ``next_due``.
 """
@@ -381,11 +383,15 @@ class TaskScheduler:
         tasks: Iterable[ScheduledTask] = (),
         *,
         now: Callable[[], datetime] | None = None,
+        latest_only: bool = False,
     ) -> None:
         self._now: Callable[[], datetime] = _utc_now if now is None else now
         self._clock = self._now()
         self._tasks: dict[str, ScheduledTask] = {}
         self._cursor: dict[str, datetime] = {}
+        # With latest_only, a task whose triggers piled up (the computer slept, the loop
+        # stalled) is delivered once, at its most recent trigger, instead of once per trigger.
+        self._latest_only = latest_only
         self.paused = False
         for task in tasks:
             self.register(task)
@@ -403,6 +409,15 @@ class TaskScheduler:
         self._tasks[task.id] = task
         self._cursor[task.id] = self._clock
 
+    def catch_up_from(self, task_id: str, moment: datetime) -> None:
+        """Deliver the task's triggers after *moment* that have already passed (with
+        ``latest_only``, the most recent of them), as if the scheduler had been running since
+        then: a task's last recorded run, for the time the process was not running."""
+        if moment.tzinfo is None:
+            raise ScheduleError("moment must be timezone-aware")
+        if task_id in self._cursor:
+            self._cursor[task_id] = min(self._cursor[task_id], moment)
+
     def remove(self, task_id: str) -> None:
         """Remove a task by id, raising ``KeyError`` when it is unknown."""
         self._tasks.pop(task_id)
@@ -417,18 +432,31 @@ class TaskScheduler:
 
         Triggers are delivered for each task in ``(cursor, moment]`` order, and
         the per-task cursor moves past them so nothing is delivered twice.
-        Disabled tasks are skipped. Naive moments are rejected.
+        Disabled tasks are skipped. Naive moments are rejected. While paused,
+        the triggers passed are skipped rather than saved up for ``resume``.
         """
         if moment.tzinfo is None:
             raise ScheduleError("moment must be timezone-aware")
         self._clock = moment
         if self.paused:
+            for task_id, cursor in self._cursor.items():
+                self._cursor[task_id] = max(cursor, moment)
             return ()
         pending: list[tuple[datetime, int, ScheduledTask]] = []
         for index, task in enumerate(self._tasks.values()):
             if not task.enabled:
                 continue
-            trigger = task.cron.next_after(self._cursor[task.id])
+            # The cron fields are read on the moment's clock: a local time whose offset changed
+            # (summer time) since the cursor was set counts from the offset in force now.
+            trigger = task.cron.next_after(self._cursor[task.id].astimezone(moment.tzinfo))
+            if self._latest_only and trigger <= moment:
+                # Step to the last trigger at or before the moment; only that one is due.
+                latest = trigger
+                while (trigger := task.cron.next_after(trigger)) <= moment:
+                    latest = trigger
+                pending.append((latest, index, task))
+                self._cursor[task.id] = latest
+                continue
             while trigger <= moment:
                 pending.append((trigger, index, task))
                 self._cursor[task.id] = trigger

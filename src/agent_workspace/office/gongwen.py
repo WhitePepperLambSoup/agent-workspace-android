@@ -684,6 +684,65 @@ def check(data: bytes) -> Report:
 # ---- fixing --------------------------------------------------------------------------------------
 
 
+# The children of these elements come in a fixed order (ECMA-376); Word may call a file with
+# them out of order damaged, or ignore the misplaced formatting. Elements not listed (such as
+# extensions of later Word versions) go last.
+_ORDER = {
+    "pPr": """pStyle keepNext keepLines pageBreakBefore framePr widowControl numPr
+        suppressLineNumbers pBdr shd tabs suppressAutoHyphens kinsoku wordWrap overflowPunct
+        topLinePunct autoSpaceDE autoSpaceDN bidi adjustRightInd snapToGrid spacing ind
+        contextualSpacing mirrorIndents suppressOverlap jc textDirection textAlignment
+        textboxTightWrap outlineLvl divId cnfStyle rPr sectPr pPrChange""",
+    "rPr": """rStyle rFonts b bCs i iCs caps smallCaps strike dstrike outline shadow emboss
+        imprint noProof snapToGrid vanish webHidden color spacing w kern position sz szCs
+        highlight u effect bdr shd fitText vertAlign rtl cs em lang eastAsianLayout specVanish
+        oMath rPrChange""",
+    "sectPr": """headerReference footerReference footnotePr endnotePr type pgSz pgMar paperSrc
+        pgBorders lnNumType pgNumType cols formProt vAlign noEndnote titlePg textDirection bidi
+        rtlGutter docGrid printerSettings sectPrChange""",
+    "settings": """writeProtection view zoom removePersonalInformation removeDateAndTime
+        doNotDisplayPageBoundaries displayBackgroundShape printPostScriptOverText
+        printFractionalCharacterWidth printFormsData embedTrueTypeFonts embedSystemFonts
+        saveSubsetFonts saveFormsData mirrorMargins alignBordersAndEdges
+        bordersDoNotSurroundHeader bordersDoNotSurroundFooter gutterAtTop hideSpellingErrors
+        hideGrammaticalErrors activeWritingStyle proofState formsDesign attachedTemplate
+        linkStyles stylePaneFormatFilter stylePaneSortMethod documentType mailMerge revisionView
+        trackRevisions doNotTrackMoves doNotTrackFormatting documentProtection
+        autoFormatOverride styleLockTheme styleLockQFSet defaultTabStop autoHyphenation
+        consecutiveHyphenLimit hyphenationZone doNotHyphenateCaps showEnvelope summaryLength
+        clickAndTypeStyle defaultTableStyle evenAndOddHeaders bookFoldRevPrinting
+        bookFoldPrinting bookFoldPrintingSheets drawingGridHorizontalSpacing
+        drawingGridVerticalSpacing displayHorizontalDrawingGridEvery
+        displayVerticalDrawingGridEvery doNotUseMarginsForDrawingGridOrigin
+        drawingGridHorizontalOrigin drawingGridVerticalOrigin doNotShadeFormData
+        noPunctuationKerning characterSpacingControl printTwoOnOne strictFirstAndLastChars
+        noLineBreaksAfter noLineBreaksBefore savePreviewPicture doNotValidateAgainstSchema
+        saveInvalidXml ignoreMixedContent alwaysShowPlaceholderText doNotDemarcateInvalidXml
+        saveXmlDataOnly useXSLTWhenSaving saveThroughXslt showXMLTags
+        alwaysMergeEmptyNamespace updateFields hdrShapeDefaults footnotePr endnotePr compat
+        docVars rsids mathPr attachedSchema themeFontLang clrSchemeMapping
+        doNotIncludeSubdocsInStats doNotAutoCompressPictures forceUpgrade captions
+        readModeInkLockDown smartTagType schemaLibrary shapeDefaults doNotEmbedSmartTags
+        decimalSymbol listSeparator""",
+}
+_RANKS = {
+    parent: {name: rank for rank, name in enumerate(names.split())}
+    for parent, names in _ORDER.items()
+}
+
+
+def _insert_ordered(parent: ET.Element, child: ET.Element) -> ET.Element:
+    """child put among parent's children where the schema wants it."""
+    ranks = _RANKS[parent.tag.rpartition("}")[2]]
+    rank = ranks[child.tag.rpartition("}")[2]]
+    for index, sibling in enumerate(parent):
+        if ranks.get(sibling.tag.rpartition("}")[2], len(ranks)) > rank:
+            parent.insert(index, child)
+            return child
+    parent.append(child)
+    return child
+
+
 def _set_run_format(run: ET.Element, font: str, size: int, bold: bool | None = None) -> None:
     properties = run.find(q(W, "rPr"))
     if properties is None:
@@ -691,8 +750,7 @@ def _set_run_format(run: ET.Element, font: str, size: int, bold: bool | None = N
         run.insert(0, properties)
     fonts = properties.find(q(W, "rFonts"))
     if fonts is None:
-        fonts = ET.Element(q(W, "rFonts"))
-        properties.insert(0, fonts)
+        fonts = _insert_ordered(properties, ET.Element(q(W, "rFonts")))
     for attribute in ("asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme"):
         fonts.attrib.pop(q(W, attribute), None)
     fonts.set(q(W, "eastAsia"), font)
@@ -701,12 +759,12 @@ def _set_run_format(run: ET.Element, font: str, size: int, bold: bool | None = N
     for name in ("sz", "szCs"):
         element = properties.find(q(W, name))
         if element is None:
-            element = ET.SubElement(properties, q(W, name))
+            element = _insert_ordered(properties, ET.Element(q(W, name)))
         element.set(q(W, "val"), str(size))
     if bold is not None:
         existing = properties.find(q(W, "b"))
         if bold and existing is None:
-            ET.SubElement(properties, q(W, "b"))
+            _insert_ordered(properties, ET.Element(q(W, "b")))
         elif not bold and existing is not None:
             properties.remove(existing)
 
@@ -722,7 +780,7 @@ def _paragraph_properties(paragraph: ET.Element) -> ET.Element:
 def _set_child(properties: ET.Element, name: str, attributes: dict[str, str]) -> None:
     element = properties.find(q(W, name))
     if element is None:
-        element = ET.SubElement(properties, q(W, name))
+        element = _insert_ordered(properties, ET.Element(q(W, name)))
     element.attrib.clear()
     for key, value in attributes.items():
         element.set(q(W, key), value)
@@ -906,7 +964,25 @@ def _add_page_numbers(package: Package, section: ET.Element) -> None:
     if package.has("word/settings.xml"):
         settings = package.xml("word/settings.xml").root
         if settings.find(q(W, "evenAndOddHeaders")) is None:
-            settings.insert(0, ET.Element(q(W, "evenAndOddHeaders")))
+            _insert_ordered(settings, ET.Element(q(W, "evenAndOddHeaders")))
+            _keep_headers_on_even_pages(package.xml(DOCUMENT).root, relationship)
+
+
+def _keep_headers_on_even_pages(document: ET.Element, relationship: str) -> None:
+    """With different odd and even pages, even pages use the "even" header: a document with
+    only a default one (a unit's emblem) would lose it on pages 2, 4, 6… Each section's
+    default header is named for even pages too."""
+    for section in document.iter(q(W, "sectPr")):
+        references = section.findall(q(W, "headerReference"))
+        kinds = {reference.get(q(W, "type"), "default") for reference in references}
+        default = next(
+            (ref for ref in references if ref.get(q(W, "type"), "default") == "default"), None
+        )
+        rid = default.get(relationship) if default is not None else None
+        if default is None or rid is None or "even" in kinds:
+            continue
+        even = ET.Element(q(W, "headerReference"), {q(W, "type"): "even", relationship: rid})
+        section.insert(list(section).index(default) + 1, even)
 
 
 __all__ = [

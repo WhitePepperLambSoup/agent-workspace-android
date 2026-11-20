@@ -186,7 +186,7 @@ def _tool_reason(name: str, executables: dict[str, dict[str, str]]) -> str | Non
         )
     if name in {"lsp_diagnostics", "run_diagnostics"} and not any(
         name in executables
-        for name in ("pylsp", "pyright", "typescript_lsp", "rust_analyzer", "gopls")
+        for name in ("pyright", "typescript_lsp", "rust_analyzer", "gopls")
     ):
         return "No language server executable is installed in the APK environment"
     if name == "transcribe_audio" and not os.getenv("AGENT_WORKSPACE_AUDIO_BASE_URL"):
@@ -583,6 +583,10 @@ def refresh_android_registry(registry: Any) -> dict[str, Any]:
     return configure_android_registry(registry, getattr(registry, "_android_workspace", None))
 
 
+# Tools that start the agent's commands (command_guard refuses them while it is off).
+_COMMAND_TOOLS = frozenset({"run_terminal", "run_process", "start_service", "start_background_job"})
+
+
 def runtime_capabilities(runtime: Any | None = None) -> dict[str, Any]:
     """Return a bounded JSON-safe capability matrix for ``GET /mobile/capabilities``."""
     registry = None
@@ -600,9 +604,14 @@ def runtime_capabilities(runtime: Any | None = None) -> dict[str, Any]:
     names.update(
         {"run_terminal", "run_process", "speak_text", "browser", "run_sandbox", "sandbox_status"}
     )
+    from . import command_guard
+
+    guard = command_guard.known()
     rows = []
     for name in sorted(names):
         reason = unavailable.get(name) or _tool_reason(name, executables)
+        if reason is None and name in _COMMAND_TOOLS and command_guard.failed(guard):
+            reason = f"The command guard is off, so commands are refused: {guard.get('reason')}"
         if name == "speak_text":
             status = speech_status()
             reason = (
@@ -635,6 +644,7 @@ def runtime_capabilities(runtime: Any | None = None) -> dict[str, Any]:
         "android": _android_status(),
         "documents": document_status(),
         "doctor": {"ok": not any(row["registered"] and not row["available"] for row in rows)},
+        "command_guard": guard,
         "toolchain": _toolchain_snapshot(),
     }
 

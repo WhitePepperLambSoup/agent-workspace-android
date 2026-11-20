@@ -262,6 +262,11 @@ def parse_mobile_task_request(payload: Mapping[str, Any]) -> MobileTaskRequest:
         phone_tips = _required_text(phone_tips, "phone_tips", max_length=2000)
         if not phone_control:
             raise ValueError("phone_tips are only for phone_control tasks")
+        # The panel's records of earlier requests (mobile_app_notes): dropped while app notes are
+        # off, long numbers taken out before the task keeps them.
+        from mobile_app_notes import panel_records_for_task
+
+        phone_tips = panel_records_for_task(phone_tips)
     phone_screen = payload.get("phone_screen")
     if phone_screen is not None:
         phone_screen = _required_text(phone_screen, "phone_screen", max_length=4000)

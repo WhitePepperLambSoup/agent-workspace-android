@@ -10,6 +10,7 @@
     if (!disposed) void resumeSetup();
     if (!disposed) await loadWorkspaces();
     if (!disposed) await loadSessions(selectedSessionId);
+    if (!disposed) void showStartNotices();
     if (!disposed) refreshShareInbox();
     // 长辈模式 opens straight on its own screen.
     if (!disposed) await loadElder();

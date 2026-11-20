@@ -21,6 +21,7 @@ field. The first call hands out the parts, a later one is the review of the draf
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import json
 import os
@@ -47,8 +48,6 @@ MAX_REPORT_CHARS = 6000
 HELPER_MODEL_CALLS = 24
 HELPER_TOOL_CALLS = 40
 HELPER_SECONDS = 600
-# Remembered so usage can be shown as "sub-tasks" and the parent can be found from a helper.
-_REGISTRY_LIMIT = 500
 
 # Looking only: never files written, commands run, the phone operated, or personal data read.
 # Network tools that only read (a search, a page, a paper's record). Each call still asks as it would
@@ -106,6 +105,8 @@ class SubagentHost:
     knowledge: dict[str, str] = field(default_factory=dict)
     # Told when an expert starts or ends their part: {session_id, expert, name, phase, state}.
     notify: Any | None = None
+    # The task runs on the phone's own model, which answers one request at a time.
+    local: bool = False
 
 
 _HOST: contextvars.ContextVar[SubagentHost | None] = contextvars.ContextVar(
@@ -162,11 +163,12 @@ def helper_sessions() -> dict[str, str]:
 
 
 def _remember(helper_id: str, parent_id: str) -> None:
+    # Remembered so usage can be shown as "sub-tasks" and a conversation's helpers go with it when
+    # it is deleted. Every record is kept for as long as its helper exists (forget_helpers removes
+    # them with the conversation): dropping the oldest left old conversations' helpers behind.
     with _registry_lock:
         sessions = helper_sessions()
         sessions[helper_id] = parent_id
-        while len(sessions) > _REGISTRY_LIMIT:
-            sessions.pop(next(iter(sessions)))
         path = _registry_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(".tmp")
@@ -212,6 +214,14 @@ def _open_helper(host: SubagentHost, title: str, expert_id: str | None = None) -
         autonomy=host.session.autonomy,
         title=f"子任务：{title}"[:80],
     )
+    try:
+        _remember(session.id, host.session.id)
+    except OSError as error:
+        # Unrecorded, the helper would stay when its conversation is deleted and its cost would not
+        # count towards it: it goes again, and this part fails.
+        with contextlib.suppress(Exception):
+            host.runtime.store.delete_sessions([session.id])
+        raise ToolError("the helper's conversation could not be recorded on the phone") from error
     # Out of the conversation list, still there to open from the archive. The archive marks share
     # one file written compare-and-swap: helpers opening together take turns, and a write that lost
     # to another one (a rename in the app) is tried again.
@@ -224,10 +234,6 @@ def _open_helper(host: SubagentHost, title: str, expert_id: str | None = None) -
                 break
             except Exception:
                 time.sleep(0.05 * (attempt + 1))
-    try:
-        _remember(session.id, host.session.id)
-    except OSError:
-        pass
     _share_knowledge(host, session.id, expert_id)
     policy = getattr(getattr(service, "runner", None), "_egress_policy", None)
     link = getattr(policy, "link_session", None)
@@ -547,6 +553,13 @@ class RunSubagentsTool:
             raise ToolError("helpers can only be started from a running task in this app")
         if host.session.id in helper_sessions():
             raise ToolError("a helper cannot start helpers of its own")
+        if host.local:
+            # Side by side, all but one would be refused at once; one after another, each reads
+            # its own long prompt first, minutes on a phone (as for an expert team).
+            raise ToolError(
+                "helpers need a cloud model: the phone's own model answers one request at a time. "
+                "Do the parts yourself, one after another."
+            )
         tasks = _tasks(arguments)
         if host.limits is not None:
             host.limits.check()

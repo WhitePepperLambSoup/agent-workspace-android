@@ -4,6 +4,7 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import java.io.File
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -13,6 +14,7 @@ import javax.crypto.spec.GCMParameterSpec
 object EmbeddedSecrets {
     private const val KEY_ALIAS = "agent-workspace-embedded-v1"
     private const val PREFERENCES = "agent-workspace-encrypted-credentials"
+    private const val CREDENTIALS_FILE = "agent-credentials.json"
     private lateinit var applicationContext: Context
 
     @JvmStatic
@@ -25,7 +27,7 @@ object EmbeddedSecrets {
     @JvmStatic
     @Synchronized
     fun getCredential(target: String): String? {
-        val value = preferences().getString(target, null) ?: return null
+        val value = credentials().get(target) ?: return null
         return decrypt(Base64.decode(value, Base64.NO_WRAP), target.toByteArray())
             .toString(Charsets.UTF_8)
     }
@@ -34,22 +36,16 @@ object EmbeddedSecrets {
     @Synchronized
     fun setCredential(target: String, value: String) {
         val protected = encrypt(value.toByteArray(), target.toByteArray())
-        check(preferences().edit().putString(
-            target, Base64.encodeToString(protected, Base64.NO_WRAP)
-        ).commit()) { "Failed to save encrypted credential" }
+        credentials().put(target, Base64.encodeToString(protected, Base64.NO_WRAP))
     }
 
     @JvmStatic
     @Synchronized
-    fun deleteCredential(target: String): Boolean {
-        val existed = preferences().contains(target)
-        check(preferences().edit().remove(target).commit()) { "Failed to delete credential" }
-        return existed
-    }
+    fun deleteCredential(target: String): Boolean = credentials().remove(target)
 
     @JvmStatic
     @Synchronized
-    fun listCredentials(): Array<String> = preferences().all.keys.sorted().toTypedArray()
+    fun listCredentials(): Array<String> = credentials().targets().toTypedArray()
 
     @JvmStatic
     @Synchronized
@@ -74,6 +70,20 @@ object EmbeddedSecrets {
     private fun preferences() = applicationContext.getSharedPreferences(
         PREFERENCES, Context.MODE_PRIVATE
     )
+
+    private fun credentials() = CredentialFile(File(applicationContext.filesDir, CREDENTIALS_FILE), object : CredentialFile.OldStore {
+        override fun all(): Map<String, String> = preferences().all.mapNotNull { (target, value) ->
+            (value as? String)?.let { target to it }
+        }.toMap()
+
+        override fun put(target: String, value: String) {
+            check(preferences().edit().putString(target, value).commit()) { "Failed to save encrypted credential" }
+        }
+
+        override fun remove(target: String) {
+            check(preferences().edit().remove(target).commit()) { "Failed to delete credential" }
+        }
+    })
 
     private fun key(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }

@@ -22,9 +22,14 @@ import com.agentworkspace.mobile.UiText
 
 /**
  * The bottom panel shown while offline voice input listens: a live level meter, the text recognized
- * so far, and Cancel / Done. The finished text goes to [onText], which puts it in the composer.
+ * so far, and Cancel / Done. The finished text goes to [onText], which puts it in the composer;
+ * [onClosed] is told when the panel closes without any.
  */
-class VoiceInputDialog(private val activity: Activity, private val onText: (String) -> Unit) {
+class VoiceInputDialog(
+    private val activity: Activity,
+    private val onClosed: () -> Unit = {},
+    private val onText: (String) -> Unit,
+) {
     private val dialog = Dialog(activity)
     private val dark = (activity.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
         Configuration.UI_MODE_NIGHT_YES
@@ -87,6 +92,7 @@ class VoiceInputDialog(private val activity: Activity, private val onText: (Stri
         dialog.setContentView(panel)
         dialog.setCanceledOnTouchOutside(true)
         dialog.setOnCancelListener { session?.cancel() }
+        dialog.setOnDismissListener { if (!delivered) onClosed() }
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setGravity(Gravity.BOTTOM)

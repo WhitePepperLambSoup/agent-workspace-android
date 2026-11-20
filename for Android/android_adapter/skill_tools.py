@@ -8,10 +8,13 @@ nothing, so it runs without an approval prompt, like knowledge_search.
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from typing import Any
 
 from agent_workspace.core.models import Capability, ToolSpec
 from agent_workspace.tools.base import ToolArgumentError, ToolError, json_result
+
+SAVES_PER_TASK = 3
 
 
 class UseSkillTool:
@@ -68,7 +71,7 @@ class SaveSkillTool:
     """Turns what was just done into one of the user's skills, when they ask for it.
 
     Like memory_write it changes only app state the user sees and can delete (Skills page → 我的技能),
-    so it runs without an approval prompt.
+    so a new skill is saved without an approval prompt. Replacing one of the user's skills asks.
     """
 
     _SPEC = ToolSpec(
@@ -80,7 +83,8 @@ class SaveSkillTool:
             "buttons or tabs by their words, what to check, what to report, and when to stop and ask "
             "the user (payments, passwords, sending messages, deleting). No coordinates, refs or "
             "one-off values unless the user wants them fixed. Saving under an existing name replaces "
-            "that skill. Afterwards tell the user its name; it appears under Skills → 我的技能."
+            "that skill once the user approves. Afterwards tell the user its name; it appears "
+            "under Skills → 我的技能."
         ),
         input_schema={
             "type": "object",
@@ -99,12 +103,42 @@ class SaveSkillTool:
         capability=Capability.MEMORY_WRITE,
     )
 
+    # Shared by every registry's copy of the tool: each workspace builds its own.
+    _saves: OrderedDict[str, int] = OrderedDict()
+
     @property
     def spec(self) -> ToolSpec:
         return self._SPEC
 
+    def prepare_for_approval(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Saving under the name of one of the user's skills replaces it: that asks the user first
+        (the policy asks for a call marked _confirm_change)."""
+        from mobile_skills import get_skill_store
+
+        existing = get_skill_store().user_skill(arguments.get("name"))
+        if existing is None:
+            return dict(arguments)
+        confirm = {"kind": "replace_skill", "text": existing.get("name") or ""}
+        return {**arguments, "_confirm_change": confirm}
+
     async def execute(self, arguments: dict[str, Any]) -> str:
         return await asyncio.to_thread(self._save, arguments)
+
+    async def execute_with_context(self, arguments: dict[str, Any], context: Any) -> str:
+        # A few per task, as for memory: where nobody is asked (full access), one task must not be
+        # able to rewrite all of the user's skills.
+        key = f"{getattr(context, 'session_id', '')}:{getattr(context, 'correlation_id', '')}"
+        used = self._saves.get(key, 0)
+        if used >= SAVES_PER_TASK:
+            raise ToolError(
+                f"only {SAVES_PER_TASK} skills are saved per task; tell the user they can save "
+                "more in a new request"
+            )
+        self._saves[key] = used + 1
+        self._saves.move_to_end(key)
+        while len(self._saves) > 64:
+            self._saves.popitem(last=False)
+        return await self.execute(arguments)
 
     def _save(self, arguments: dict[str, Any]) -> str:
         from mobile_skills import SkillError, get_skill_store

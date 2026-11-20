@@ -227,9 +227,14 @@ class ServiceManager:
         transport = self._transport
         if transport is None:
             from android_adapter.toolchain import command_transport as transport
-        argv, environment, lease = transport(
-            list(record["argv"]), Path(record["cwd"]), Path(record.get("workspace") or record["cwd"])
-        )
+        from agent_workspace.tools.base import ToolError
+
+        try:
+            argv, environment, lease = transport(
+                list(record["argv"]), Path(record["cwd"]), Path(record.get("workspace") or record["cwd"])
+            )
+        except ToolError as error:  # the command guard refusing it
+            raise ServiceError(str(error)) from None
         try:
             process = subprocess.Popen(
                 argv,

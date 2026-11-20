@@ -6,8 +6,10 @@ interface settings the clients hand over. API keys are never included. Bulky or 
 (on-device models, the developer toolchain, logs) stays out.
 
 Restoring cannot replace databases the engine has open, so it is staged: the archive is checked
-and unpacked next to the live data, and the next engine start swaps it in before opening anything.
-The data it replaces is kept once as *.before-restore.
+and unpacked next to the live data, the app confirms it once it has heard (BackupController), and
+the next engine start swaps it in before opening anything. A restore nobody confirmed is dropped at
+that start: the user was never told it worked and has gone on with the data they had. The data it
+replaces is kept once as *.before-restore.
 """
 
 from __future__ import annotations
@@ -27,13 +29,18 @@ from typing import Any
 FORMAT = "agent-workspace-backup"
 VERSION = 1
 MANIFEST = "manifest.json"
-EXCLUDED_DATA_DIRS = {"logs", "local-models", "toolchain", "backups", "cache", "tmp"}
+EXCLUDED_DATA_DIRS = {"logs", "local-models", "toolchain", "backups", "cache", "tmp", "raw-traces"}
 EXCLUDED_SUFFIXES = (".tmp", ".part", "-wal", "-shm", "-journal", ".lock")
 STAGING = "restore-staging"
 READY_MARKER = "READY"
+CONFIRMED_MARKER = "CONFIRMED"  # written by the app, in the same folder (BackupController)
 MAX_ARCHIVE_ENTRIES = 200_000
 MAX_SETTINGS_BYTES = 4 * 1024 * 1024
 FREE_SPACE_MARGIN = 64 * 1024 * 1024
+# In a zip only "/" separates folders. These are ordinary characters in a phone's file names (a
+# report-10:30.txt from the terminal) and path syntax only where the backup is unpacked on Windows.
+_HOST_PATH_MARKS = ("\\", ":") if os.name == "nt" else ()
+_MAX_LISTED_SKIPPED = 100
 
 
 class BackupError(ValueError):
@@ -71,6 +78,21 @@ def _workspace_files(workspace: Path):
         yield path, path.relative_to(workspace)
 
 
+def _safe_member(name: str) -> PurePosixPath:
+    """The one rule for what a backup may hold: checked as it is written and as it is restored."""
+    path = PurePosixPath(name)
+    if (
+        name.startswith("/")
+        or "\x00" in name
+        or any(mark in name for mark in _HOST_PATH_MARKS)
+        or not path.parts
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or path.parts[0] not in {"agent-data", "workspace", "settings", MANIFEST}
+    ):
+        raise BackupError(f"the backup contains an unexpected entry: {name[:120]}")
+    return path
+
+
 def create_backup(
     files_dir: Path,
     output: Path,
@@ -83,6 +105,25 @@ def create_backup(
     data = files_dir / "agent-data"
     workspace = files_dir / "workspace"
     counts = {"data_files": 0, "workspace_files": 0, "bytes": 0}
+    skipped: list[str] = []
+
+    def admitted(name: str) -> bool:
+        """Whether a file goes in. What restoring would refuse stays out and is named, so that one
+        such file does not make the whole backup useless on the day it is needed."""
+        try:
+            name.encode("utf-8")  # zip names are UTF-8; Linux file names need not be
+            _safe_member(name)
+        except (UnicodeEncodeError, BackupError):
+            skipped.append(name.encode("utf-8", "replace").decode("utf-8")[:200])
+            return False
+        # With this file, the two settings files and the manifest.
+        if counts["data_files"] + counts["workspace_files"] + 4 > MAX_ARCHIVE_ENTRIES:
+            raise BackupError(
+                f"a backup holds at most {MAX_ARCHIVE_ENTRIES} files; remove what can be rebuilt, "
+                "such as node_modules, from the workspace first"
+            )
+        return True
+
     output.parent.mkdir(parents=True, exist_ok=True)
     partial = output.with_suffix(output.suffix + ".partial")
     with (
@@ -91,6 +132,8 @@ def create_backup(
     ):
         for path, relative in _data_files(data):
             name = PurePosixPath("agent-data", *relative.parts).as_posix()
+            if not admitted(name):
+                continue
             if _is_sqlite(path):
                 # A live database is copied through SQLite itself, never as raw bytes.
                 copy = Path(scratch) / f"{uuid.uuid4().hex}.db"
@@ -109,7 +152,10 @@ def create_backup(
                 counts["bytes"] += path.stat().st_size
             counts["data_files"] += 1
         for path, relative in _workspace_files(workspace):
-            archive.write(path, PurePosixPath("workspace", *relative.parts).as_posix())
+            name = PurePosixPath("workspace", *relative.parts).as_posix()
+            if not admitted(name):
+                continue
+            archive.write(path, name)
             counts["workspace_files"] += 1
             counts["bytes"] += path.stat().st_size
         for name, value in (
@@ -125,28 +171,16 @@ def create_backup(
             "app_version": (app_settings or {}).get("app_version"),
             **counts,
             "excluded": [*sorted(EXCLUDED_DATA_DIRS), "api keys"],
+            "skipped_count": len(skipped),
+            "skipped": skipped[:_MAX_LISTED_SKIPPED],
         }
         archive.writestr(MANIFEST, json.dumps(manifest, ensure_ascii=False, indent=1))
     os.replace(partial, output)
     return {**manifest, "path": str(output), "size": output.stat().st_size}
 
 
-def _safe_member(name: str) -> PurePosixPath:
-    path = PurePosixPath(name)
-    if (
-        name.startswith(("/", "\\"))
-        or "\\" in name
-        or ":" in name
-        or not path.parts
-        or any(part in {"", ".", ".."} for part in path.parts)
-        or path.parts[0] not in {"agent-data", "workspace", "settings", MANIFEST}
-    ):
-        raise BackupError(f"the backup contains an unexpected entry: {name[:120]}")
-    return path
-
-
 def stage_restore(files_dir: Path, archive_path: Path) -> dict[str, Any]:
-    """Check a backup and unpack it next to the live data; the next engine start swaps it in."""
+    """Check a backup and unpack it next to the live data; once the app confirms, the next engine start swaps it in."""
     files_dir = Path(files_dir)
     staging = files_dir / STAGING
     try:
@@ -201,12 +235,14 @@ def stage_restore(files_dir: Path, archive_path: Path) -> dict[str, Any]:
 
 
 def apply_staged_restore(files_dir: Path) -> bool:
-    """Run at engine start, before any database opens: swap a staged restore into place."""
+    """Run at engine start, before any database opens: swap a confirmed restore into place."""
     files_dir = Path(files_dir)
     staging = files_dir / STAGING
-    if not (staging / READY_MARKER).is_file():
+    if not (staging / READY_MARKER).is_file() or not (staging / CONFIRMED_MARKER).is_file():
         if staging.exists():
-            shutil.rmtree(staging, ignore_errors=True)  # an interrupted restore never started
+            # Interrupted, or never heard of by the app: swapped in now, it would silently roll back
+            # whatever the user did since.
+            shutil.rmtree(staging, ignore_errors=True)
         return False
     for name in ("agent-data", "workspace"):
         live = files_dir / name

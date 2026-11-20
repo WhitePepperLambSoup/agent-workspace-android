@@ -8,12 +8,13 @@ so the agent can add them by DOI or key without asking the databases again.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
 import threading
 from collections import OrderedDict
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -30,16 +31,29 @@ class LibraryError(ValueError):
 
 
 class ReferenceLibrary:
-    def __init__(self, workspace: Path) -> None:
+    def __init__(
+        self, workspace: Path, *, write: Callable[[str, str | None], None] | None = None
+    ) -> None:
         self.workspace = workspace
         self.path = workspace / LIBRARY_FILE
+        # Given, a change is handed to write (the new file text, and the SHA-256 of the file it
+        # was made from, None when there was none) instead of being saved here: the agent's tool
+        # saves it through the checkpointed file writer, so the change is listed and undoable.
+        self.write = write
+        self._loaded_sha256: str | None = None
 
     def _load(self) -> list[Work]:
         try:
-            document = json.loads(self.path.read_text(encoding="utf-8"))
+            data = self.path.read_bytes()
         except FileNotFoundError:
+            self._loaded_sha256 = None
             return []
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except OSError as exc:
+            raise LibraryError(f"the reference library could not be read: {exc}") from None
+        self._loaded_sha256 = hashlib.sha256(data).hexdigest()
+        try:
+            document = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise LibraryError(f"the reference library could not be read: {exc}") from None
         items = document.get("items") if isinstance(document, dict) else None
         if not isinstance(items, list):
@@ -47,12 +61,15 @@ class ReferenceLibrary:
         return [Work.from_csl(item) for item in items if isinstance(item, dict)]
 
     def _save(self, works: Sequence[Work]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         document = {
             "version": 1,
             "updated": datetime.now(UTC).replace(microsecond=0).isoformat(),
             "items": [work.to_csl() for work in works],
         }
+        if self.write is not None:
+            self.write(json.dumps(document, ensure_ascii=False, indent=1), self._loaded_sha256)
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary = tempfile.mkstemp(prefix=".references-", dir=self.path.parent)
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as stream:

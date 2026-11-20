@@ -62,6 +62,16 @@ class ProviderChangeCoordinator {
         }
     }
 
+    /**
+     * A change while no engine is serving: nothing can be running in it, so there is nothing to
+     * reserve, and a reservation left from an earlier change ended with its engine.
+     */
+    @Synchronized
+    fun changeWithoutEngine(save: () -> Unit) {
+        pending = null
+        save()
+    }
+
     @Synchronized
     fun change(client: Client, requireLocalEngine: Boolean, save: () -> Unit, restart: () -> Unit) {
         val previous = pending

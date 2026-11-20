@@ -21,7 +21,8 @@ MAX_STEPS = 60
 KINDS = ("tap", "long", "type", "enter", "scroll", "swipe", "launch", "key", "page", "find")
 _PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+")
 _KEYS = {"back", "home", "recents", "notifications"}
-_DIRECTIONS = {"up", "down", "left", "right"}
+# As the scroll action takes them (AndroidSystemBridge): top and bottom go all the way.
+_DIRECTIONS = {"up", "down", "left", "right", "top", "bottom"}
 _PENDING_TASKS = 8
 
 _lock = threading.Lock()

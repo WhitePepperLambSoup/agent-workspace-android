@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import errno
 import ntpath
 import os
 import re
 import stat
+import sys
 from pathlib import Path
+from typing import BinaryIO
 
 type StrPath = str | os.PathLike[str]
 
@@ -45,6 +48,94 @@ def is_sensitive_workspace_path(path: str) -> bool:
         or filename.startswith(".env.")
         or any(filename.endswith(suffix) for suffix in _SENSITIVE_SUFFIXES)
     )
+
+
+def open_checked(path: StrPath) -> BinaryIO:
+    """Open for reading a file at a path ``WorkspacePaths.resolve`` returned, refusing it when a
+    folder on the way became a link after the check (a command running in the workspace can
+    swap one in between): the file opened is then not the file that was checked.
+
+    Such a path has no link anywhere, so on POSIX each folder is opened without following
+    links (O_PATH where there is one, so no read permission is needed on the way). Windows has
+    no O_NOFOLLOW: the opened file's final path must be the checked path.
+    """
+    text = os.path.abspath(os.fspath(path))
+    if os.name == "nt":
+        stream = open(text, "rb")  # noqa: SIM115 - returned to the caller, who closes it
+        try:
+            final = _final_path(stream.fileno())
+            if final is not None and os.path.normcase(final) != os.path.normcase(text):
+                raise UnsafePathError(f"path changed during open: {text}")
+        except BaseException:
+            stream.close()
+            raise
+        return stream
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow or os.open not in os.supports_dir_fd:
+        return open(text, "rb")
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    folder_flags = (
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_PATH", 0) | nofollow | cloexec
+    )
+    parts = Path(text).parts
+    try:
+        folder = os.open(parts[0], folder_flags)
+    except PermissionError:
+        return open(text, "rb")  # no O_PATH here and the root folder is unreadable
+    try:
+        for index, part in enumerate(parts[1:-1], start=1):
+            try:
+                inner = os.open(part, folder_flags, dir_fd=folder)
+            except OSError as exc:
+                _refuse_link(exc, os.path.join(*parts[: index + 1]), text)
+                raise
+            os.close(folder)
+            folder = inner
+        try:
+            # Non-blocking: a FIFO put in the file's place does not hang the reader.
+            descriptor = os.open(
+                parts[-1],
+                os.O_RDONLY | nofollow | cloexec | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=folder,
+            )
+        except OSError as exc:
+            _refuse_link(exc, text, text)
+            raise
+    finally:
+        os.close(folder)
+    return os.fdopen(descriptor, "rb")
+
+
+def _refuse_link(error: OSError, component: str, path: str) -> None:
+    if error.errno in {errno.ELOOP, errno.ENOTDIR, errno.EMLINK} and os.path.islink(component):
+        raise UnsafePathError(f"path changed to a link during open: {path}") from error
+
+
+def _final_path(descriptor: int) -> str | None:
+    """Where an open file really is (Windows), or None when the system cannot say."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    import msvcrt
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    function = kernel32.GetFinalPathNameByHandleW
+    function.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32]
+    function.restype = ctypes.c_uint32
+    handle = msvcrt.get_osfhandle(descriptor)
+    size = 1024
+    while True:
+        buffer = ctypes.create_unicode_buffer(size)
+        length = function(handle, buffer, size, 0)  # normalized, with a drive letter
+        if length == 0:
+            return None
+        if length < size:
+            break
+        size = length + 1
+    final = buffer.value
+    if final.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + final[8:]
+    return final.removeprefix("\\\\?\\")
 
 
 class WorkspacePathError(ValueError):

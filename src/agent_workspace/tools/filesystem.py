@@ -7,6 +7,7 @@ import re
 import stat
 import tempfile
 from collections import deque
+from contextlib import suppress
 from datetime import UTC, datetime
 from itertools import islice
 from pathlib import Path
@@ -30,7 +31,7 @@ from .base import (
     optional_int,
     require_string,
 )
-from .paths import StrPath, UnsafePathError, WorkspacePathError, WorkspacePaths
+from .paths import StrPath, UnsafePathError, WorkspacePathError, WorkspacePaths, open_checked
 from .process_worker import run_in_process
 
 _SHA256_PATTERN = re.compile(r"[0-9a-fA-F]{64}\Z")
@@ -88,7 +89,9 @@ def _scan_file(
 
 def _open_identity_checked(path: Path, mode: str) -> Any:
     before = path.lstat()
-    stream = path.open(mode)
+    # Also refused when a folder on the way became a link after the path was checked: the
+    # identity check below goes through that same folder and would not see it.
+    stream = open_checked(path) if mode == "rb" else path.open(mode)
     after = WorkspacePaths.assert_safe_file_descriptor(stream.fileno(), path)
     if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
         stream.close()
@@ -131,6 +134,15 @@ def _file_executable_state(path: Path) -> bool | None:
             raise ToolError(f"path is not a regular file: {path}")
         return bool(metadata.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
     return actual
+
+
+def kept_executable_state(path: Path, preimage: bytes | None) -> bool | None:
+    """The executable bit an edit that keeps the file's mode records for its checkpoint, so a
+    rollback restores it; None (not executable) for a new file and on Windows, where the bit
+    comes from the file extension and cannot be set."""
+    if preimage is None or os.name == "nt":
+        return None
+    return _file_executable_state(path)
 
 
 def _check_expected_executable(path: Path, expected: bool) -> None:
@@ -216,7 +228,13 @@ def atomic_write(
     expected_executable: bool | None = None,
     target_executable: bool | None = None,
     maximum: int | None = _MAX_EDIT_BYTES,
+    preserve_mode: bool = False,
 ) -> tuple[Path, str]:
+    """Replace ``path`` with ``content`` through a temporary file.
+
+    With ``preserve_mode`` a replaced file keeps its permission bits (an edited build.sh stays
+    executable); otherwise the file gets the temporary file's owner-only mode, or the one
+    ``target_executable`` asks for."""
     if maximum is not None and len(content) > maximum:
         raise ToolError(f"content exceeds {maximum}-byte edit limit")
     target = paths.resolve(path)
@@ -239,6 +257,9 @@ def atomic_write(
                     raise ToolError("executable file mode is unavailable on Windows")
                 if os.name != "nt":
                     cast(Any, os).fchmod(stream.fileno(), 0o700 if target_executable else 0o600)
+            elif preserve_mode and os.name != "nt":
+                with suppress(FileNotFoundError):
+                    cast(Any, os).fchmod(stream.fileno(), stat.S_IMODE(target.lstat().st_mode))
             stream.flush()
             os.fsync(stream.fileno())
 
@@ -491,6 +512,9 @@ class ListFilesTool:
         pending: deque[Path] = deque((directory,))
         truncated = False
         entries_considered = 0
+        # Links, hard-linked files and names the workspace paths refuse (a colon, a short-name
+        # alias) are passed over one by one, as search_files does, not a reason to fail.
+        skipped = 0
         while pending:
             current = pending.popleft()
             remaining = maximum - len(entries)
@@ -508,11 +532,18 @@ class ListFilesTool:
             if len(sampled) > remaining:
                 truncated = True
                 for candidate in sampled[remaining:]:
-                    if candidate.is_dir():
-                        continuation_paths.add(self.paths.relative(self.paths.resolve(candidate)))
+                    with suppress(WorkspacePathError):
+                        if candidate.is_dir():
+                            continuation_paths.add(
+                                self.paths.relative(self.paths.resolve(candidate))
+                            )
             children = sampled[:remaining]
             for child in children:
-                checked = self.paths.resolve(child)
+                try:
+                    checked = self.paths.resolve(child)
+                except WorkspacePathError:
+                    skipped += 1
+                    continue
                 is_directory = checked.is_dir()
                 entries.append(
                     {
@@ -539,6 +570,8 @@ class ListFilesTool:
             "entries_considered": entries_considered,
             "truncated": truncated,
         }
+        if skipped:
+            document["skipped_links_or_unsafe_names"] = skipped
         if truncated:
             document["continuation_paths"] = sorted(continuation_paths)[:128]
         if truncated:
@@ -669,6 +702,7 @@ class WriteFileTool:
             await asyncio.to_thread(self.versions.keep, preimage)
         relative = self.paths.relative(path)
         postimage_digest = sha256_bytes(content)
+        executable = kept_executable_state(path, preimage)
         await context.prepare_file_checkpoint(
             FileCheckpoint(
                 attempt_id=context.attempt_id,
@@ -680,6 +714,8 @@ class WriteFileTool:
                 preimage=preimage,
                 postimage_sha256=postimage_digest,
                 created_at=datetime.now(UTC).isoformat(),
+                preimage_executable=executable,
+                postimage_executable=executable,
             )
         )
         result = await run_in_process(self._execute_prepared, path, content, expected)
@@ -706,7 +742,7 @@ class WriteFileTool:
         content: bytes,
         expected: str | None,
     ) -> str:
-        written_path, digest = atomic_write(self.paths, path, content, expected)
+        written_path, digest = atomic_write(self.paths, path, content, expected, preserve_mode=True)
         return json_result(
             {
                 "path": self.paths.relative(written_path),

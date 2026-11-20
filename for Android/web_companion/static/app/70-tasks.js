@@ -9,7 +9,14 @@
 
   let approvalFailure = null;
   // mobile_approval._ALWAYS_ASK_TOOLS: the engine approves these once even when "session" is picked.
-  const askEachTools = new Set(["delete_path", "memory_write", "app_note", "android_action", "notification_reply", "manage_app"]);
+  const askEachTools = new Set(["delete_path", "memory_write", "app_note", "save_skill", "android_action", "notification_reply", "manage_app"]);
+  // What a memory, app note or skill change removes or replaces (the tool's _confirm_change).
+  const confirmChangeLines = {
+    delete_memory: (text) => t("删除这条记忆：{0}", text),
+    replace_memory: (text) => t("改写你自己写的这条记忆：{0}", text),
+    delete_app_note: (text) => t("删除这条应用经验：{0}", text),
+    replace_skill: (text) => t("替换你已有的技能：{0}", text),
+  };
 
   function showApproval(approval) {
     if (approval && activeTask?.resolvedApprovals.has(approval.request_id)) approval = null;
@@ -79,8 +86,11 @@
         lines.push(t("打开：{0}", appCheckActionName(argumentsValue.page)));
         return lines.join("\n");
       }
+      const change = argumentsValue._confirm_change;
+      if (change && confirmChangeLines[change.kind]) lines.push(confirmChangeLines[change.kind](String(change.text ?? "")));
       for (const [name, value] of Object.entries(argumentsValue)) {
         if (name === "key" && String(details.tool).startsWith("notification_")) continue;
+        if (name.startsWith("_")) continue;  // Marks for the engine, said in words above.
         lines.push(`${name}: ${plain(value)}`);
       }
       return lines.join("\n");
@@ -165,7 +175,8 @@
       updateTaskStatus(task.waitingNetwork ? t("没有网络：联网后自动开始") : t("任务执行中"));
     } else if (event.event_type === "task.untrusted_content") {
       notice(t("AI 读到的内容（{0}）里有像是写给 AI 的指令。为了安全，这个任务接下来的每一步都会先问你。", toolTitles[payload.tool] || payload.tool || ""));
-    } else if (event.event_type === "runtime.message.created" && payload.role === "assistant") {
+    } else if (event.event_type === "runtime.message.created" && payload.role === "assistant" && !isInterruptedReply(payload)) {
+      // (A reply cut off midway is not final: it goes on in the same card.)
       const existing = envelope.source_event_id && eventCards.get(envelope.source_event_id);
       if (existing) {
         if (task.card && task.card !== existing) task.card.remove();
@@ -192,6 +203,9 @@
         }
       }
       if (envelope.source_event_id) eventCards.set(envelope.source_event_id, task.card);
+    } else if (event.event_type === "runtime.turn.completed" && payload.budget_exhausted === true) {
+      task.budgetExhausted = true;
+      markBudgetExhausted(task.card);
     } else if (event.event_type === "runtime.message.created" && payload.role === "user") {
       if (!task.prompt && typeof payload.content === "string") task.prompt = payload.content;
     } else if (event.event_type === "runtime.model.requested") {
@@ -292,6 +306,7 @@
         if (activeTask !== task) {
           const background = await apiJson(`/mobile/tasks/${encodeURIComponent(task.id)}`);
           if (backgroundTasks.get(task.sessionId) !== task) break;
+          failures = 0;
           task.state = background.task?.state || task.state;
           if (terminalStates.has(task.state) || task.state === "interrupted") {
             task.done = true;
@@ -300,7 +315,7 @@
             if (settingsPage === "tasks") void loadTaskCenter();
             break;
           }
-          await new Promise(resolve => setTimeout(resolve, 1500));
+          await pollPause(1500);
           continue;
         }
         const updates = await apiJson(`/mobile/tasks/${encodeURIComponent(task.id)}/events?after=${task.sequence}`);
@@ -344,7 +359,19 @@
         failures = 0;
       } catch (error) {
         if (disposed || backgroundTasks.get(task.sessionId) !== task) { task.watching = false; return; }
-        if (activeTask !== task) { await new Promise(resolve => setTimeout(resolve, 2000)); continue; }
+        if (activeTask !== task) {
+          failures += 1;
+          if (failures >= 3 && error.status && error.status < 500 && error.status !== 401) {
+            // A definite answer such as "unknown task" (its conversation deleted, the engine's data
+            // reset): asking every two seconds kept the model and permission settings locked.
+            task.done = true;
+            backgroundTasks.delete(task.sessionId);
+            syncControls();
+            break;
+          }
+          await pollPause(Math.min(2000 * 2 ** Math.min(failures - 1, 3), 16000));
+          continue;
+        }
         setConnection(false);
         failures += 1;
         if (error.network || error.status === 401) {
@@ -360,7 +387,7 @@
           updateTaskStatus(t("引擎暂时没有响应，正在重试..."));
         }
       }
-      if (!task.done) await new Promise((resolve) => setTimeout(resolve, failures ? Math.min(500 * 2 ** Math.min(failures, 4), 8000) : 500));
+      if (!task.done) await pollPause(failures ? Math.min(500 * 2 ** Math.min(failures, 4), 8000) : 500);
     }
     task.watching = false;
     if (disposed) return;
@@ -376,7 +403,8 @@
       announce(t("任务失败: {0}", task.error));
       retryTask = task.prompt ? task : null;
       // Lost the network on the way: tried again once the phone is back online (65-privacy.js).
-      task.offlineFailure = navigator.onLine === false && !!task.prompt;
+      // A task on the phone's own model did not fail for that, and waits for the user's retry.
+      task.offlineFailure = navigator.onLine === false && !task.onDevice && !!task.prompt;
       updateTaskStatus(task.offlineFailure ? t("任务失败：没有网络。联网后会自动重试") : t("任务失败"), { retry: !!task.prompt, idle: true });
       if (!elements.promptInput.value.trim() && task.inputText) {
         elements.promptInput.value = task.inputText;
@@ -602,7 +630,7 @@
   }
 
   async function regenerateReply(card) {
-    if (activeTask || !historyReady || !currentSessionId) return;
+    if (activeTask || privacyAsking || !historyReady || !currentSessionId) return;
     let userCard = card.previousElementSibling;
     while (userCard && !(userCard.classList.contains("user") && !userCard.hidden)) userCard = userCard.previousElementSibling;
     if (!userCard) return;
@@ -664,26 +692,37 @@
     return text;
   }
 
-  async function sendPrompt(customText = null, attachmentOverride = []) {
+  async function sendPrompt(customText = null, attachmentOverride = [], earlierRoute = null) {
     flushQuickEffort();
     // No model can answer yet: choose one first; what was typed stays in the composer.
     if (!activeTask && setupNeeded() && openSetup("send")) return;
     // What the settings are now, for the agent's app_settings tool.
     void syncAppSettings();
     // Personal numbers typed for a cloud model, or no network: answered on the phone, masked, sent
-    // once online, or cancelled (65-privacy.js).
+    // once online, or cancelled (65-privacy.js). What joins a task on the phone's model stays there.
     let route = {};
-    if (customText === null && privacyNeeded()) {
+    if (customText === null && !(canSteer() && activeTask.onDevice) && privacyNeeded()) {
       route = await privacyCheck();
       if (!route) return;
     }
-    if (customText === null && canSteer()) { await steerActiveTask(); return; }
+    if (customText === null && canSteer()) {
+      // The running task keeps its model: this one message cannot go to the phone's instead.
+      if (route.onDevice && !activeTask.onDevice) { notice(t("运行中的任务用的是云端模型，这条补充没有发送。等它结束后再发，可以由本机模型回答。")); return; }
+      await steerActiveTask();
+      return;
+    }
     if (customText === null && importsInFlight(currentSessionId)) { notice(t("附件还在导入，稍等片刻再发送"), "info"); return; }
     const requestedImports = customText === null ? [...attachments] : [...attachmentOverride];
     const defaultPrompt = requestedImports.every(item => item.media_type?.startsWith("image/") || /\.(png|jpe?g|webp|gif)$/i.test(item.name || "")) ? t("请描述图片内容。") : t("请查看附件内容。");
-    const plainText = customText || elements.promptInput.value.trim() || (requestedImports.length ? defaultPrompt : "");
-    if (!plainText || activeTask || isLoadingSession || isUploading || isPreparingSubmission || restartPending || localDeviceTesting || !historyReady || !currentSessionId || !settingsAvailable) return;
+    const askedText = customText || elements.promptInput.value.trim() || (requestedImports.length ? defaultPrompt : "");
+    if (!askedText || activeTask || isLoadingSession || isUploading || isPreparingSubmission || restartPending || localDeviceTesting || !historyReady || !currentSessionId || !settingsAvailable) return;
     const sessionId = currentSessionId;
+    // Not typed just now (a retry, a regenerate, a card's button): the same question about its numbers.
+    if (customText) {
+      route = await privacyCheck(customText, earlierRoute);
+      if (!route) return;
+    }
+    const plainText = route.text || askedText;
     let imports;
     isPreparingSubmission = true;
     syncControls();
@@ -718,7 +757,7 @@
     const userCard = appendMessageCard("user", t("您"), plainText);
     userCard.dataset.messageText = submittedPrompt;
     // A retry sends the prompt that the failure put back in the composer, so that copy goes too.
-    const composerHoldsPrompt = customText !== null && elements.promptInput.value.trim() === plainText.trim()
+    const composerHoldsPrompt = customText !== null && elements.promptInput.value.trim() === askedText.trim()
       && JSON.stringify(attachments.map(attachmentReceipt)) === JSON.stringify(imports.map(attachmentReceipt));
     if (customText === null || composerHoldsPrompt) {
       elements.promptInput.value = "";
@@ -735,6 +774,7 @@
     task.requestId = requestId;
     task.planMode = payload.plan_mode === true;
     task.onDevice = payload.on_device === true;
+    task.route = route; // A retry goes the way the user chose for this message.
     task.voiceTurn = voiceTurnPending;
     voiceTurnPending = false;
     retryTask = null;
@@ -794,6 +834,8 @@
     scrollToBottom();
   }
 
+  // The name this page gives a new conversation, in each of its languages (each catalog's "新会话").
+  const defaultSessionTitles = new Set(["新会话", "New chat", "新會話", "新しい会話", "새 대화"]); // i18n-ignore: stored data
   // A conversation still named "新会话" takes its first instruction as its name, so the list stays readable.
-  // Stored titles are compared raw: a conversation created in either language counts as untitled.
-  const placeholderTitles = new Set(["", "新会话", "New chat", "New session", "New conversation"]); // i18n-ignore: stored data
+  // Stored titles are compared raw: a conversation created in any language counts as untitled.
+  const placeholderTitles = new Set(["", ...defaultSessionTitles, "New session", "New conversation"]); // i18n-ignore: stored data

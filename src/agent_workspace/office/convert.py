@@ -1,10 +1,10 @@
 # ruff: noqa: E501 -- the PowerShell script keeps its statements on one line each.
 """Word, Excel and PowerPoint files saved as PDF by the office suite on this computer.
 
-Microsoft Office or WPS do it through their automation interface, hidden, from a fixed
-PowerShell script that reads the file names from an environment variable (never from its own
-text); LibreOffice does it from the command line. An instance that already has documents open
-(the user's own) is neither hidden nor closed.
+Microsoft Office or WPS do it through their automation interface, hidden, macros off, from a
+fixed PowerShell script that reads the file names from an environment variable (never from its
+own text); LibreOffice does it from the command line. An instance that already has documents
+open (the user's own) is neither hidden nor closed.
 """
 
 from __future__ import annotations
@@ -48,12 +48,26 @@ function Retry([scriptblock]$block) {
   }
   throw 'the office suite stayed busy'
 }
+# An instance made through automation runs every macro in the files it opens until told otherwise
+# (3 = msoAutomationSecurityForceDisable). A suite that will not take the setting does not get the
+# file. An instance already running gets its own setting back once the file is open.
+function Open-NoMacros($app, $fresh, [scriptblock]$open) {
+  try {
+    $before = Retry { $app.AutomationSecurity }
+    Retry { $app.AutomationSecurity = 3 }
+    if ((Retry { $app.AutomationSecurity }) -ne 3) { throw 'not applied' }
+  } catch {
+    if ($fresh) { try { Retry { $app.Quit() } } catch { } }
+    throw 'macros_stay_on'
+  }
+  try { return Retry $open } finally { if (-not $fresh) { try { Retry { $app.AutomationSecurity = $before } } catch { } } }
+}
 if ($kind -eq 'word') {
   $app = Open-App @('Word.Application', 'KWPS.Application')
   $fresh = Retry { $app.Documents.Count -eq 0 }
   if ($fresh) { Retry { $app.Visible = $false } }
   Retry { $app.DisplayAlerts = 0 }
-  $doc = Retry { $app.Documents.Open($source, $false, $true, $false) }
+  $doc = Open-NoMacros $app $fresh { $app.Documents.Open($source, $false, $true, $false) }
   try { Retry { $doc.ExportAsFixedFormat($target, 17) } } finally { Retry { $doc.Close(0) } }
   if ($fresh -and (Retry { $app.Documents.Count }) -eq 0) { Retry { $app.Quit() } }
 } elseif ($kind -eq 'excel') {
@@ -62,13 +76,13 @@ if ($kind -eq 'word') {
   # it reject every call after.
   $fresh = Retry { $app.Workbooks.Count -eq 0 }
   Retry { $app.DisplayAlerts = $false }
-  $book = Retry { $app.Workbooks.Open($source, 0, $true) }
+  $book = Open-NoMacros $app $fresh { $app.Workbooks.Open($source, 0, $true) }
   try { Retry { $book.ExportAsFixedFormat(0, $target) } } finally { Retry { $book.Close($false) } }
   if ($fresh -and (Retry { $app.Workbooks.Count }) -eq 0) { Retry { $app.Quit() } }
 } else {
   $app = Open-App @('PowerPoint.Application', 'KWPP.Application')
   $fresh = Retry { $app.Presentations.Count -eq 0 }
-  $deck = Retry { $app.Presentations.Open($source, -1, 0, 0) }
+  $deck = Open-NoMacros $app $fresh { $app.Presentations.Open($source, -1, 0, 0) }
   try { Retry { $deck.SaveAs($target, 32) } } finally { Retry { $deck.Close() } }
   if ($fresh -and (Retry { $app.Presentations.Count }) -eq 0) { Retry { $app.Quit() } }
 }
@@ -182,6 +196,11 @@ def to_pdf(source: Path, timeout: float = TIMEOUT_SECONDS) -> bytes:
         produced = target if target.is_file() else Path(folder) / "source.pdf"
         if done.returncode != 0 or not produced.is_file():
             detail = " ".join((done.stderr or done.stdout or "").split())
+            if "macros_stay_on" in detail:
+                raise OfficeError(
+                    "this office suite cannot turn macros off, so the file was not opened: "
+                    "update it, or install Microsoft Office or LibreOffice"
+                )
             raise OfficeError(f"the conversion failed: {detail[:400]}")
         return produced.read_bytes()
 

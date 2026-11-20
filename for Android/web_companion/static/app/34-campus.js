@@ -383,11 +383,7 @@
    * a thing with a page of its own opens it. */
   function placePick(id) {
     if (id === "agent") { closeStudio(); return; }
-    if (id.startsWith("run:")) {
-      if (openSession(id.slice(4))) closeStudio();
-      else notice(t("任务进行中，结束后再打开"));
-      return;
-    }
+    if (id.startsWith("run:")) { openFromStudio(id.slice(4)); return; }
     if (id.startsWith("place:")) {
       const next = id.slice(6);
       void (placeScene?.approach(id) ?? Promise.resolve()).then(() => choosePlace(next));

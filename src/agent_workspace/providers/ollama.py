@@ -27,6 +27,7 @@ from agent_workspace.providers.base import (
     response_http_error,
     stream_request_timeout,
     stream_with_retries,
+    with_reported_usage,
 )
 from agent_workspace.providers.streaming import iter_bounded_lines
 
@@ -124,7 +125,9 @@ class OllamaProvider:
                     if chunk.get("error") is not None:
                         raw_error = chunk.get("error")
                         detail = raw_error if isinstance(raw_error, str) else None
-                        raise provider_stream_error(detail, status_code=status_code)
+                        raise provider_stream_error(
+                            detail, status_code=status_code, api_key=self._api_key
+                        )
 
                     raw_done = chunk.get("done")
                     if not isinstance(raw_done, bool):
@@ -214,10 +217,14 @@ class OllamaProvider:
                         status_code=status_code,
                         retryable=emitted_content,
                     )
-        except ProviderError:
+        except ProviderError as exc:
+            # Usage that came before the failure is still what the request cost.
+            with_reported_usage(exc, usage)
             raise
         except httpx.RequestError as exc:
-            raise provider_request_error(exc, status_code=status_code) from None
+            raise with_reported_usage(
+                provider_request_error(exc, status_code=status_code), usage
+            ) from None
 
     @staticmethod
     def _request_body(request: ProviderRequest) -> dict[str, Any]:
@@ -234,8 +241,8 @@ class OllamaProvider:
             options["temperature"] = request.temperature
         if request.max_output_tokens is not None:
             options["num_predict"] = request.max_output_tokens
-        if options:
-            body["options"] = options
+        options["num_ctx"] = _context_tokens(body, request)
+        body["options"] = options
 
         try:
             json.dumps(body, ensure_ascii=False, allow_nan=False)
@@ -245,6 +252,36 @@ class OllamaProvider:
                 status_code=None,
             ) from None
         return body
+
+
+_MIN_CONTEXT_TOKENS = 8192
+_MAX_CONTEXT_TOKENS = 131072
+_REPLY_TOKENS = 4096
+_IMAGE_TOKENS = 2048
+
+
+def _context_tokens(body: dict[str, Any], request: ProviderRequest) -> int:
+    """The context a request asks Ollama for (num_ctx). Unless told, Ollama keeps only its default
+    few thousand tokens of a longer prompt and drops the start of it, the system prompt and the
+    tools, without an error. The size fits the prompt and the reply, counted at 3 bytes a token as
+    the runner counts, and goes up in powers of two: a new size reloads the model."""
+    text = {
+        **body,
+        "messages": [
+            {key: value for key, value in message.items() if key != "images"}
+            for message in body["messages"]
+        ],
+    }
+    images = sum(len(message.images) for message in request.messages)
+    needed = (
+        len(encode_json_request(text)) // 3
+        + images * _IMAGE_TOKENS
+        + (request.max_output_tokens or _REPLY_TOKENS)
+    )
+    size = _MIN_CONTEXT_TOKENS
+    while size < needed and size < _MAX_CONTEXT_TOKENS:
+        size *= 2
+    return size
 
 
 def _messages_to_ollama(messages: tuple[ChatMessage, ...]) -> list[dict[str, Any]]:

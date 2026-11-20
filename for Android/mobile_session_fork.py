@@ -15,6 +15,7 @@ from typing import Any
 
 from agent_workspace.core.events import Event
 from agent_workspace.storage import fork_session
+from mobile_task_store import TASK_STREAM_EVENT
 
 _TERMINAL = {"succeeded", "failed", "cancelled", "interrupted"}
 
@@ -50,7 +51,7 @@ def _renumbered_tasks(events: list[Event]) -> list[Event]:
     states: dict[str, str] = {}
     copied = []
     for event in events:
-        if not (event.type.startswith("mobile.task.") or event.type == "mobile.event"):
+        if not (event.type.startswith("mobile.task.") or event.type in {"mobile.event", TASK_STREAM_EVENT}):
             copied.append(event)
             continue
         data: dict[str, Any] = dict(event.data)

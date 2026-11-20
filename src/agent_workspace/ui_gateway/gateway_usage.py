@@ -13,13 +13,19 @@ from uuid import uuid4
 
 from agent_workspace.application.cost_estimate import project, recent_calls
 from agent_workspace.application.usage_bill import current_month, month_bill
+from agent_workspace.config import self_hosted_endpoint
 from agent_workspace.core.budgets import (
     MAX_TASK_COST_LIMIT_USD,
     MAX_TASK_TOKEN_LIMIT,
     TaskBudget,
     TaskLimits,
 )
-from agent_workspace.core.cost import UNKNOWN_PRICING, resolve_pricing, session_cost
+from agent_workspace.core.cost import (
+    UNKNOWN_PRICING,
+    UNLISTED_PRICING,
+    resolve_pricing,
+    session_cost,
+)
 from agent_workspace.storage import (
     SQLiteEventStore,
 )
@@ -54,6 +60,13 @@ class UsageCommands(GatewayState):
     batches.
     """
 
+    def _estimate_unlisted(self) -> bool:
+        """Whether a model without a listed price is counted at the cautious default (marked as
+        an estimate): yes unless the model in use is served here or on the local network."""
+        with self._lock:
+            provider = self._provider
+        return provider is None or not self_hosted_endpoint(provider.base_url, provider.protocol)
+
     def _estimate_cost(self, command: CommandEnvelope) -> GatewayReply:
         """A rough range for what the next task costs, for the composer while the user types."""
         self._require_payload(command, {"messageChars"}, optional={"sessionId"})
@@ -73,7 +86,9 @@ class UsageCommands(GatewayState):
         if provider is None or workspace is None:
             raise GatewayError("runtime_unconfigured")
         payload: dict[str, object] = {"epoch": self.epoch, "model": provider.model}
-        pricing = resolve_pricing(provider.model)
+        pricing = resolve_pricing(provider.model, estimate_unlisted=self._estimate_unlisted())
+        # No listed price: the figure comes from the cautious default, and says so.
+        payload["unlisted"] = pricing is UNLISTED_PRICING
         if pricing is UNKNOWN_PRICING:
             return self._reply(
                 "cost.estimate.result", {**payload, "priced": False}, session_id=None
@@ -234,6 +249,7 @@ class UsageCommands(GatewayState):
             raise GatewayError("invalid_payload")
         kinds = frozenset({"model.requested", "usage.updated", "session.forked"})
         conversations: list[dict[str, object]] = []
+        unlisted = self._estimate_unlisted()
         for session_id in dict.fromkeys(ids):
             try:
                 session = self._workspace_session(session_id)
@@ -258,7 +274,9 @@ class UsageCommands(GatewayState):
                 if event.type == "tool.settled" and event.data.get("name") == "delegate_tasks":
                     # The result may be cut short; the ids are found in what is left of it.
                     runs.update(_RUN_ID.findall(str(event.data.get("result") or "")))
-            own = session_cost([event for event in events if event.type in kinds])
+            own = session_cost(
+                [event for event in events if event.type in kinds], estimate_unlisted=unlisted
+            )
             team_cost = 0.0
             estimated = own.estimated
             models = set(own.models)
@@ -271,7 +289,8 @@ class UsageCommands(GatewayState):
                     cost = session_cost(
                         SQLiteEventStore.list_session_events_of_types_read_only(
                             self._agent_run_database(run_id, self._database), run.session_id, kinds
-                        )
+                        ),
+                        estimate_unlisted=unlisted,
                     )
                     team_cost += cost.cost_usd
                     estimated = estimated or cost.estimated
@@ -285,7 +304,13 @@ class UsageCommands(GatewayState):
                     "estimated": estimated,
                     # Unpriced models count as free; the UI must not present $0 as a price.
                     "priced": any(
-                        resolve_pricing(model) is not UNKNOWN_PRICING for model in models
+                        resolve_pricing(model, estimate_unlisted=unlisted) is not UNKNOWN_PRICING
+                        for model in models
+                    ),
+                    # Part of it is at the cautious default price: the UI marks it as an estimate.
+                    "unlisted": any(
+                        resolve_pricing(model, estimate_unlisted=unlisted) is UNLISTED_PRICING
+                        for model in models
                     ),
                 }
             )
@@ -313,8 +338,12 @@ class UsageCommands(GatewayState):
         marker = fork_marker(events)
         if marker is not None:
             events = events[marker[0] + 1 :]
-        cost = session_cost(events)
-        priced = any(resolve_pricing(model) is not UNKNOWN_PRICING for model in cost.models)
+        unlisted = self._estimate_unlisted()
+        cost = session_cost(events, estimate_unlisted=unlisted)
+        priced = any(
+            resolve_pricing(model, estimate_unlisted=unlisted) is not UNKNOWN_PRICING
+            for model in cost.models
+        )
         return self._reply(
             "session.usage.result",
             {
@@ -328,6 +357,8 @@ class UsageCommands(GatewayState):
                 "costUsd": round(cost.cost_usd, 6),
                 # Unpriced models count as free; the UI must not present $0 as a price.
                 "priced": priced,
+                # Part of it is at the cautious default price: the UI marks it as an estimate.
+                "unlisted": bool(cost.unlisted_models),
                 "models": list(cost.models)[:16],
             },
             session_id=None,
@@ -427,7 +458,9 @@ class UsageCommands(GatewayState):
             and self._clock() - cached[1] < _MONTH_COST_SECONDS
         ):
             return cached[2]
-        cost = month_bill(self._usage_databases(), month).cost_usd
+        cost = month_bill(
+            self._usage_databases(), month, estimate_unlisted=self._estimate_unlisted()
+        ).cost_usd
         self._month_cost = (month, self._clock(), cost)
         return cost
 
@@ -454,7 +487,9 @@ class UsageCommands(GatewayState):
             if not isinstance(month, str) or not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month):
                 raise GatewayError("invalid_month")
             try:
-                bill = month_bill(self._usage_databases(), month)
+                bill = month_bill(
+                    self._usage_databases(), month, estimate_unlisted=self._estimate_unlisted()
+                )
                 if month == this_month:
                     self._month_cost = (month, self._clock(), bill.cost_usd)
                 spent = bill.cost_usd if month == this_month else self._month_to_date()
@@ -480,11 +515,13 @@ class UsageCommands(GatewayState):
                             "cachedTokens": line.cached_tokens,
                             "costUsd": line.cost_usd,
                             "priced": line.priced,
+                            "unlisted": line.unlisted,
                         }
                         for line in bill.models
                     ],
                     "days": [{"day": day, "costUsd": cost} for day, cost in bill.days],
                     "unpricedCalls": bill.unpriced_calls,
+                    "unlistedCalls": bill.unlisted_calls,
                     "capUsd": self._monthly_cap(),
                     "monthToDateUsd": spent,
                 },

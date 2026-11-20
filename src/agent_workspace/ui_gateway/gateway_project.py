@@ -114,15 +114,13 @@ class ProjectCommands(GatewayState):
         if config is None or not config.checks:
             raise GatewayError("project_no_checks")
         checks = [check for check in config.checks if names is None or check.name in names]
-        state = self._coding.state(root)
-        if state.running:
+        if not self._coding.try_start(root):
             raise GatewayError("project_checks_running")
-        state.running = True
         self._announce_checks(root, None, [check.name for check in checks])
         try:
             results = run_checks(root, checks)
         finally:
-            state.running = False
+            self._coding.finish(root)
         self._coding.record(root, results)
         return self._project_document(root)
 
@@ -177,10 +175,8 @@ class ProjectCommands(GatewayState):
         config = self._accepted_config(root)
         if config is None or not config.after_turn or not config.checks:
             return
-        state = self._coding.state(root)
-        if state.running:
+        if not self._coding.try_start(root):
             return
-        state.running = True
         names = [check.name for check in config.checks]
         self._announce_checks(root, session.id, names)
         threading.Thread(
@@ -191,14 +187,13 @@ class ProjectCommands(GatewayState):
         ).start()
 
     def _run_checks_after_turn(self, root: Path, session_id: str, config: ProjectConfig) -> None:
-        state = self._coding.state(root)
         try:
             results: list[CheckResult] = run_checks(root, config.checks)
         except Exception:
             _LOGGER.exception("project checks failed to run")
-            state.running = False
+            self._coding.finish(root)
             return
-        state.running = False
+        self._coding.finish(root)
         self._coding.record(root, results)
         if all(result.ok for result in results):
             self._check_fix_rounds.pop(session_id, None)

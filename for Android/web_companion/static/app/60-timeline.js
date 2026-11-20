@@ -135,21 +135,45 @@
     return diagramLoader;
   }
 
+  // The drawing as a picture of its own. A model's diagram is untrusted and this page holds the
+  // AndroidBridge: as an image the SVG cannot run anything or load anything, whatever slips past the
+  // renderer's sanitizer. Null when it has no usable size.
+  function diagramImage(svg) {
+    // HTML labels are not XML (<br>): such a drawing goes through the HTML parser instead.
+    const parser = new DOMParser();
+    const xml = parser.parseFromString(svg, "image/svg+xml");
+    const element = xml.querySelector("parsererror") ? parser.parseFromString(svg, "text/html").querySelector("svg") : xml.documentElement;
+    const box = (element?.getAttribute("viewBox") || "").split(/[\s,]+/).map(Number);
+    if (!element || box.length !== 4 || box.some((value) => !Number.isFinite(value)) || box[2] <= 0 || box[3] <= 0) return null;
+    // "100%" gives an image no size of its own.
+    const width = Math.ceil(box[2]);
+    const height = Math.ceil(box[3]);
+    element.setAttribute("width", String(width));
+    element.setAttribute("height", String(height));
+    element.removeAttribute("style");
+    return { src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(new XMLSerializer().serializeToString(element))}`, width, height };
+  }
+
   function renderDiagram(wrapper, source) {
     const dark = preferences.theme === "dark" || (preferences.theme === "system" && darkSchemeQuery?.matches === true);
     const key = `${dark ? "dark" : "light"}\n${source}`;
-    const show = (svg) => {
-      if (!wrapper.isConnected || !svg) return;
+    const show = (image) => {
+      if (!wrapper.isConnected || !image) return;
       const diagram = document.createElement("div");
       diagram.className = "diagram";
-      diagram.innerHTML = svg;
+      const picture = document.createElement("img");
+      picture.src = image.src;
+      picture.width = image.width;
+      picture.height = image.height;
+      picture.alt = t("图表");
+      diagram.append(picture);
       wrapper.classList.add("has-diagram");
       wrapper.insertBefore(diagram, wrapper.querySelector("pre"));
     };
     if (diagramCache.has(key)) { show(diagramCache.get(key)); return; }
     loadDiagramRenderer()
       .then((renderer) => renderer.render(source, dark))
-      .then((svg) => { diagramCache.set(key, svg); show(svg); })
+      .then((svg) => { const image = diagramImage(svg); diagramCache.set(key, image); show(image); })
       // A diagram the renderer rejects stays visible as its source code.
       .catch(() => diagramCache.set(key, ""));
   }
@@ -312,6 +336,8 @@
     office_read: t("读取办公文档"), word_document: t("修改 Word 文档"), spreadsheet: t("制作 Excel 表格"), pdf_tools: t("处理 PDF"),
     slides_from_template: t("制作幻灯片"), office_template: t("按模板生成文档"),
     active_notifications: t("查看通知"), notification_reply: t("回复通知"), notification_open: t("打开通知"),
+    // Not a tool: the notification a notification rule started the task from (task.untrusted_content).
+    notification: t("通知"),
     app_audit: t("应用体检"), manage_app: t("处理应用"),
     compose_sms: t("写好短信"), system_settings: t("调整手机设置"), system_status: t("查看手机状态"),
     find_contacts: t("查找联系人"), current_location: t("查看位置"),
@@ -406,7 +432,7 @@
         misses = !value.active && !value.bytes ? misses + 1 : 0;
       } catch { misses += 1; }
       if (misses > 5) { delete card.dataset.following; return; }
-      window.setTimeout(poll, 1000);
+      void pollPause(1000).then(poll);
     };
     window.setTimeout(poll, 700);
   }
@@ -499,6 +525,7 @@
     } else if (event.type === "tool.proposed") rememberToolArguments(payload);
     else if (event.type === "tool.started") renderTool(payload);
     else if (toolOutcomeEvents[event.type]) renderTool(payload, toolOutcomeEvents[event.type]);
+    else if (event.type === "turn.completed" && payload.budget_exhausted === true) markBudgetExhausted(historyAssistantCard);
     else if (event.type === "task.completed" || (event.type === "mobile.event" && payload.event_type === "task.completed")) {
       const completion = event.type === "mobile.event" ? payload.payload || {} : payload;
       if (!taskArtifacts(completion.artifacts).length && !completion.artifacts_error && !completion.artifacts_truncated) return;
@@ -566,7 +593,7 @@
         button.addEventListener("click", () => {
           if (help.action === "setup") { if (!openSetup()) openModelSettings(); }
           else if (help.action === "model") openModelSheet();
-          else if (help.action === "local") { openMenu(); setSettingsPage("localModels"); }
+          else if (help.action === "local") openSettingsPage("localModels");
         });
         message.append(button);
       }
@@ -605,17 +632,25 @@
 
   // Edit-and-resend and regenerate keep the replaced turns in the store (context.rewound marks
   // where the conversation restarted); history shows the conversation as it now stands.
+  // A reply cut off midway that went on later: its finished message holds all of it.
   function visibleHistory(events) {
     const shown = [];
+    const finished = new Set(events.flatMap((event) => (event.data || event.payload || {}).superseded_model_request_ids || []));
     for (const event of events) {
+      const data = event.data || event.payload || {};
       if (event.type === "context.rewound") {
-        const from = shown.findIndex((item) => item.id === (event.data || event.payload || {}).from_event_id);
+        const from = shown.findIndex((item) => item.id === data.from_event_id);
         if (from >= 0) shown.length = from;
         continue;
       }
+      if (event.type === "message.created" && isInterruptedReply(data) && finished.has(data.model_request_id)) continue;
       shown.push(event);
     }
     return shown;
+  }
+
+  function isInterruptedReply(data) {
+    return data.provider_metadata?.["agent_workspace.stream_interrupted"] === true;
   }
 
   async function loadTimeline(sessionId) {
@@ -923,6 +958,17 @@
     task.card.classList.toggle("pending", !task.done && !task.text);
     task.card.classList.toggle("streaming", !task.done && !!task.text && !task.messageFinal);
     if (task.reasoning) appendReasoning(task.card, task.reasoning);
+    if (task.budgetExhausted) markBudgetExhausted(task.card);
     if (task.state === "succeeded") renderTaskArtifacts(task.card, task, task.id);
+  }
+
+  // A quiet line under a complete reply whose turn ended there because its token or cost budget
+  // ran out (turn.completed budget_exhausted): nothing failed, and nothing is left to do.
+  function markBudgetExhausted(card) {
+    if (!card || card.querySelector(".budget-note")) return;
+    const note = document.createElement("p");
+    note.className = "budget-note";
+    note.textContent = t("已达到本轮预算上限");
+    card.querySelector(".message-body")?.after(note);
   }
 

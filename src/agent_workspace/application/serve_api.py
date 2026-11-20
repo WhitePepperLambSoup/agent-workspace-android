@@ -8,6 +8,7 @@ import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from time import monotonic
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
@@ -429,6 +430,17 @@ class _Handler(BaseHTTPRequestHandler):
                 self._reply(404, {"error": "unknown run"})
                 return
             except ServeApiError as exc:
+                if str(exc) == "approval_not_supported":
+                    self._reply(
+                        409,
+                        {
+                            "error": "approval_not_supported",
+                            "message": "allow and deny do not reach a run: the serve command "
+                            "asks for approvals on its own console and refuses them without "
+                            "one; only cancel is accepted here",
+                        },
+                    )
+                    return
                 self._reply(409, {"error": str(exc)})
                 return
         if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "run":
@@ -458,6 +470,19 @@ class _Handler(BaseHTTPRequestHandler):
                 turn_result = self._api.run_turn(parts[1], prompt, model)
             except KeyError:
                 self._reply(404, {"error": "unknown session"})
+                return
+            except ServeApiError as exc:
+                if str(exc) == "run_timeout":
+                    self._reply(
+                        504,
+                        {
+                            "error": "run_timeout",
+                            "message": f"the run took longer than {_RUN_TIMEOUT_SECONDS:g} "
+                            "seconds and was cancelled; use async runs for long tasks",
+                        },
+                    )
+                    return
+                self._reply(503, {"error": str(exc)})
                 return
             except Exception as exc:
                 self._reply(500, {"error": " ".join(str(exc).split())[:2000]})
@@ -629,6 +654,8 @@ class ServeApi:
     def _validate_start(
         self, session_id: str, prompt: str, model: str | None
     ) -> tuple[Session, str, str]:
+        if not self.session_exists(session_id):
+            raise KeyError(f"unknown session: {session_id}")
         session = self.runtime.service.get_session(session_id)
         resolved_model = model or self.default_model
         if resolved_model is None:
@@ -819,6 +846,10 @@ class ServeApi:
             decision = payload.get("decision")
             if not isinstance(decision, str) or decision not in {"allow", "deny", "cancel"}:
                 raise ServeApiError("invalid_approval")
+            if decision != "cancel":
+                # Nothing here reaches the run: its approvals are asked on the server's own
+                # console (or refused without one). Saying "ok" to allow/deny would mislead.
+                raise ServeApiError("approval_not_supported")
             if run.approval == {"decision": decision}:
                 return self._run_document(run)
             run.approval = {"decision": decision}
@@ -828,7 +859,19 @@ class ServeApi:
             return await self._cancel_run(run_id)
         return document
 
+    def _scope(self) -> Path | None:
+        """The workspace this server runs in: the database can hold other workspaces' sessions,
+        which the token given out for this one must not reach."""
+        workspace = getattr(self.runtime.service, "_execution_workspace", None)
+        return None if workspace is None else Path(workspace)
+
     def list_sessions(self) -> list[dict[str, Any]]:
+        scope = self._scope()
+        sessions = (
+            self.runtime.store.list_sessions(limit=100)
+            if scope is None
+            else cast(Any, self.runtime.store).list_sessions(limit=100, workspace=scope)
+        )
         return [
             {
                 "id": session.id,
@@ -838,7 +881,7 @@ class ServeApi:
                 "autonomy": session.autonomy.value,
                 "updated_at": session.updated_at,
             }
-            for session in self.runtime.store.list_sessions(limit=100)
+            for session in sessions
         ]
 
     def create_session(self, title: str) -> dict[str, Any]:
@@ -863,7 +906,12 @@ class ServeApi:
         }
 
     def session_exists(self, session_id: str) -> bool:
-        return self.runtime.store.get_session(session_id) is not None
+        """The session is in this server's workspace (another workspace's reads as unknown)."""
+        session = self.runtime.store.get_session(session_id)
+        if session is None:
+            return False
+        scope = self._scope()
+        return scope is None or Path(session.workspace).resolve() == scope.resolve()
 
     def list_events(self, session_id: str) -> list[dict[str, Any]]:
         return [
@@ -885,16 +933,34 @@ class ServeApi:
     def add_comment(self, session_id: str, text: str, author: str) -> str:
         from agent_workspace.core.comments import add_comment
 
+        if not self.session_exists(session_id):
+            raise KeyError(f"unknown session: {session_id}")
         return add_comment(self.runtime.store, session_id, text, author)
 
     def run_turn(self, session_id: str, prompt: str, model: str | None) -> tuple[str, str]:
+        with self._lifecycle_lock:
+            stopped = self._stopped
+        if threading.get_ident() == self._loop_thread_id:
+            raise ServeApiError("serve_api_sync_bridge_event_loop")
+        if stopped:
+            raise ServeApiError("serve_api_stopped")
+        if self._loop.is_closed():
+            raise ServeApiError("serve_api_loop_closed")
         future = asyncio.run_coroutine_threadsafe(
             self._run(session_id, prompt, model),
             self._loop,
         )
-        return future.result(timeout=_RUN_TIMEOUT_SECONDS)
+        try:
+            return future.result(timeout=_RUN_TIMEOUT_SECONDS)
+        except TimeoutError:
+            # Left running, the turn would go on changing files with nothing to stop it, and a
+            # client retrying after the error would start a second one beside it.
+            future.cancel()
+            raise ServeApiError("run_timeout") from None
 
     async def _run(self, session_id: str, prompt: str, model: str | None) -> tuple[str, str]:
+        if not self.session_exists(session_id):
+            raise KeyError(f"unknown session: {session_id}")
         session = self.runtime.service.get_session(session_id)
         resolved_model = model or self.default_model
         if resolved_model is None:

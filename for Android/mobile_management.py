@@ -46,7 +46,7 @@ class MobileManagement:
         )
         self.workflows = MobileWorkflows(path)
         self.evaluations = MobileEvaluations(path)
-        self.schedules = MobileScheduleManager(controller, data / "mobile-schedules.json")
+        self.schedules = MobileScheduleManager.open(controller, data / "mobile-schedules.json")
         self._job = None
         self._maintenance_jobs = set()
         self._provider_change_lease = None
@@ -548,6 +548,10 @@ class MobileManagement:
             return 400, {"error": str(error)}
         return 404, {"error": "unknown shortcut route"}
 
+    def _session(self, session_id):
+        """A conversation in any workspace; self.runtime's service answers for the default one only."""
+        return self.controller.runtime.service.get_session(session_id)
+
     async def _session_controller(self, session_id):
         if session_id is None:
             return self.controller
@@ -571,6 +575,10 @@ class MobileManagement:
             await asyncio.to_thread(
                 discover_runnable_executables, getattr(registry, "_android_workspace", None)
             )
+            # Looking is also a reason to check the command guard again (off the event loop).
+            from android_adapter.command_guard import status as guard_status
+
+            await asyncio.to_thread(guard_status)
 
             return 200, runtime_capabilities(self.runtime)
         if path == "/mobile/android-system/status":
@@ -860,8 +868,9 @@ class MobileManagement:
 
         return get_notification_rules(self.data)
 
-    async def _submit_rule_task(self, rule, prompt):
-        """A notification rule's task, submitted like a scheduled one into the rule's conversation."""
+    async def _submit_rule_task(self, rule, prompt, untrusted=None):
+        """A notification rule's task, submitted like a scheduled one into the rule's conversation.
+        [untrusted]: the notification reads like instructions to the agent (mobile_injection)."""
         from mobile_protocol import parse_mobile_task_request
 
         request = parse_mobile_task_request({
@@ -870,7 +879,14 @@ class MobileManagement:
             "model": rule.get("model") or self.controller.default_model,
             "reasoning_effort": rule.get("reasoning_effort") or self.controller.default_reasoning_effort,
         })
-        task = await self.controller.submit(request)
+        from mobile_notification_rules import NotificationRules
+
+        options = {
+            **({"untrusted": untrusted} if untrusted else {}),
+            # A rule about codes: the notifications its task reads keep them, as its prompt does.
+            **({"notification_codes": True} if NotificationRules.about_codes(rule) else {}),
+        }
+        task = await self.controller.submit(request, **options)
         return task.task_id
 
     async def _notification_rules_post(self, action, payload):
@@ -1154,7 +1170,7 @@ class MobileManagement:
             session_id, fmt = payload.get("session_id"), payload.get("format")
             if not isinstance(session_id, str) or fmt not in FORMATS:
                 return 400, {"error": f"session_id and a format ({', '.join(FORMATS)}) are required"}
-            session = self.runtime.service.get_session(session_id)
+            session = self._session(session_id)
             events = await asyncio.to_thread(self.runtime.store.list_events, session_id)
             title = str(payload.get("title") or "")[:120] or "Agent Workspace"
             labels = export_labels(payload.get("labels"))
@@ -1175,7 +1191,7 @@ class MobileManagement:
                 return 404, {"error": "unknown task"}
             if task.state.value in {"queued", "running", "waiting_approval"}:
                 return 409, {"error": "the task is still running"}
-            session = self.runtime.service.get_session(task.session_id)
+            session = self._session(task.session_id)
             versions = task_file_versions(self.controller.events(task_id))
             files = await asyncio.to_thread(undo_task_files, session.workspace, task.session_id, versions, paths, apply=apply)
             return 200, {"files": files, "applied": apply}
@@ -1186,7 +1202,7 @@ class MobileManagement:
             session_id, fmt = payload.get("session_id"), payload.get("format")
             if not isinstance(session_id, str) or fmt not in ANSWER_FORMATS:
                 return 400, {"error": f"session_id and a format ({', '.join(ANSWER_FORMATS)}) are required"}
-            session = self.runtime.service.get_session(session_id)
+            session = self._session(session_id)
             title = str(payload.get("title") or "")[:120]
             try:
                 return 200, await export_answer(session.workspace, title, payload.get("markdown"), fmt)
@@ -1199,7 +1215,7 @@ class MobileManagement:
             title = payload.get("title")
             if not isinstance(session_id, str) or not isinstance(message_id, str) or not isinstance(keep_reply, bool):
                 return 400, {"error": "session_id, message_event_id and keep_reply are required"}
-            source = self.runtime.service.get_session(session_id)
+            source = self._session(session_id)
             title = title.strip()[:200] if isinstance(title, str) and title.strip() else source.title
             try:
                 result = await asyncio.to_thread(fork_conversation, self.runtime.store, session_id, message_id,
@@ -1234,7 +1250,7 @@ class MobileManagement:
             session_id = payload.get("session_id")
             if not isinstance(session_id, str) or not session_id:
                 return 400, {"error": "session_id is required"}
-            session = self.runtime.service.get_session(session_id)
+            session = self._session(session_id)
             try:
                 return 200, await export_tutorial(session.workspace, str(payload.get("task_id") or ""), payload.get("title"),
                                                   payload.get("subtitle", ""), payload.get("frames"))
@@ -1324,12 +1340,15 @@ class MobileManagement:
             try:
                 if action == "delete_note":
                     await asyncio.to_thread(notes.delete_note, payload.get("package_name"), payload.get("id"))
+                elif action == "delete_panel_record":
+                    # How a control panel request was done in the app (PhoneMemory.kt).
+                    await asyncio.to_thread(notes.delete_panel_record, payload.get("package_name"), payload.get("id"))
                 elif action == "forget_app":
                     await asyncio.to_thread(notes.forget_app, payload.get("package_name"))
                 elif action == "set_enabled" and isinstance(payload.get("enabled"), bool):
                     await asyncio.to_thread(notes.set_enabled, payload["enabled"])
                 else:
-                    return 400, {"error": "action must be delete_note, forget_app or set_enabled"}
+                    return 400, {"error": "action must be delete_note, delete_panel_record, forget_app or set_enabled"}
             except ValueError as error:
                 return 400, {"error": str(error)}
             return 200, await asyncio.to_thread(notes.listing)

@@ -120,7 +120,7 @@ class EngineLifecycleState @JvmOverloads constructor(context: Context,
             }
             it
         }
-        // Heartbeats repeat the state every 15 s; the task widget redraws only when it changes.
+        // Heartbeats repeat the state every 30 s; the task widget redraws only when it changes.
         if (previous != state) AgentWidgets.engineStateChanged(appContext)
     }
 

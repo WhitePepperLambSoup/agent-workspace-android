@@ -120,6 +120,13 @@ def _slug(text: str, fallback: str = "skill") -> str:
     return value if value and _ID.fullmatch(value) else fallback
 
 
+def _user_skill_id(name: str) -> str:
+    """A Chinese name keeps its words for display and gets a stable id: saving it again replaces
+    it."""
+    skill_id = _slug(name, "") if re.fullmatch(r"[A-Za-z0-9 ._-]+", name) else ""
+    return skill_id or "my-" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:10]
+
+
 # ----- SKILL.md --------------------------------------------------------------------------------
 
 
@@ -908,10 +915,7 @@ class SkillStore:
                 len(instructions.encode("utf-8")) > MAX_INSTRUCTION_BYTES - 2048:
             raise SkillError("the instructions are empty or too long")
         name = " ".join(name.split())
-        # A Chinese name keeps its words for display and gets a stable id: saving it again replaces it.
-        skill_id = _slug(name, "") if re.fullmatch(r"[A-Za-z0-9 ._-]+", name) else ""
-        if not skill_id:
-            skill_id = "my-" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:10]
+        skill_id = _user_skill_id(name)
         summary = " ".join(description.split())
 
         def quote(text: str) -> str:
@@ -944,6 +948,22 @@ class SkillStore:
             pack["updated_at"] = _now()
             self._write_index(index)
         return {"skill": skill_id, "name": name, "replaced": replaced}
+
+    def user_skill(self, name: object) -> dict[str, Any] | None:
+        """The user's skill that saving under this name would replace, if there is one."""
+        if not isinstance(name, str) or not name.strip():
+            return None
+        skill_id = _user_skill_id(" ".join(name.split()))
+        with self._lock:
+            packs = self._index()["packs"]
+        skills = [
+            skill
+            for pack in packs
+            if pack["id"] == USER_PACK_ID
+            for skill in pack["skills"]
+            if skill["id"] == skill_id
+        ]
+        return dict(skills[0]) if skills else None
 
     def delete_user_skill(self, skill_id: object) -> None:
         with self._lock:
@@ -1013,7 +1033,9 @@ class SkillStore:
         elif source.get("subpath"):
             spec["subpath"] = source["subpath"]
         data, record = fetch_github(spec)
-        preview = self._stage(data, record, name_hint=pack["name"])
+        # The same hint as the first import (preview_github): a pack whose skill-pack.json has a
+        # name but no id took its id from the repository, not from that name.
+        preview = self._stage(data, record, name_hint=f"{owner}-{repo}")
         if preview["id"] != pack["id"]:
             shutil.rmtree(self.staging_dir / preview["token"], ignore_errors=True)
             raise SkillError("the new version names a different pack; remove this one and import it")

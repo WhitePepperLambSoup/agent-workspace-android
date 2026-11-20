@@ -19,13 +19,17 @@ if TYPE_CHECKING:
 
 _DEFAULT_STREAM_TIMEOUT_SECONDS = 60.0
 _STREAM_TIMEOUT_ENV = "AGENT_WORKSPACE_PROVIDER_TIMEOUT"
+_STREAM_IDLE_ENV = "AGENT_WORKSPACE_PROVIDER_IDLE_SECONDS"
+# For acceptance tests, whose stand-in provider listens on this computer.
+_STREAM_IDLE_LOCAL_TOO_ENV = "AGENT_WORKSPACE_TEST_PROVIDER_IDLE_LOCAL"
 
 
 def provider_stream_timeout() -> float:
-    """Resolve the per-request provider stream timeout.
+    """Resolve the per-request provider stream timeout (AGENT_WORKSPACE_PROVIDER_TIMEOUT, seconds).
 
-    Long-thinking models can exceed 60s before their first token, so the
-    timeout is configurable through AGENT_WORKSPACE_PROVIDER_TIMEOUT (seconds).
+    It bounds connecting, writing and waiting for a pooled connection, not reading: a stream may
+    stay quiet for as long as AGENT_WORKSPACE_PROVIDER_IDLE_SECONDS allows (_stream_idle_seconds),
+    and without it for as long as the turn lasts.
     """
     raw = os.getenv(_STREAM_TIMEOUT_ENV)
     if not raw:
@@ -39,6 +43,18 @@ def provider_stream_timeout() -> float:
     return value
 
 
+def _stream_idle_seconds() -> float | None:
+    """How long a model stream may send nothing at all, when set (the desktop app sets it). A
+    connection that died without a word would otherwise keep a task waiting for ever; servers send
+    keep-alives while a model thinks, so this does not cut one that is only slow."""
+    raw = os.getenv(_STREAM_IDLE_ENV)
+    try:
+        value = float(raw) if raw else 0.0
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
 def create_provider(
     config: ProviderConfig,
     *,
@@ -47,6 +63,13 @@ def create_provider(
 ) -> ManagedModelProvider:
     config.validate()
     resolved_timeout = provider_stream_timeout() if timeout is None else timeout
+    idle = _stream_idle_seconds()
+    # A model on this computer may rightly say nothing for a long time while it loads.
+    local = is_loopback_endpoint(config.base_url) and not os.getenv(_STREAM_IDLE_LOCAL_TOO_ENV)
+    if idle is not None and not local and not isinstance(resolved_timeout, httpx.Timeout):
+        resolved_timeout = httpx.Timeout(
+            connect=resolved_timeout, read=idle, write=resolved_timeout, pool=resolved_timeout
+        )
     arguments = (config.id, config.base_url, config.api_key)
     if config.protocol is ProviderProtocol.OPENAI_COMPATIBLE:
         return OpenAICompatibleProvider(*arguments, timeout=resolved_timeout, client=client)

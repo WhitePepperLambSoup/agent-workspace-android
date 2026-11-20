@@ -23,6 +23,51 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
+/** What a demonstration keeps of the words on the screen, on plain values so it can be tested without a phone. */
+internal object DemonstrationWords {
+    private val separators = Regex("[\\s,，.．。·\\-–—_¥￥$€£]")
+    private val longNumber = Regex("\\d{4,}")
+    private val amount = Regex("[¥￥$€£]\\s*\\d")
+    private val key = Regex("[0-9A-Za-z]")
+
+    /** This many keys in a row on an app's own keypad are a number or a code, not buttons to find again. */
+    private const val KEYS_IN_A_ROW = 4
+
+    /** The words, unless they look like a code, a phone number or an amount, however they are written. */
+    fun keep(text: String?): String? {
+        val value = text?.replace(Regex("\\s+"), " ")?.trim()?.take(200)
+        return value?.takeIf { it.isNotEmpty() && !amount.containsMatchIn(it) && !longNumber.containsMatchIn(it.replace(separators, "")) }
+    }
+
+    /** A text field by what it says when empty, never by what it holds. */
+    fun fieldName(hint: String?, description: String?): String? = keep(hint) ?: keep(description)
+
+    fun yours(words: String): JSONObject = JSONObject().put("kind", "tap").put("x", 0).put("y", 0).put("label", words)
+
+    private fun isKey(step: JSONObject?): Boolean =
+        step?.optString("kind") == "tap" && key.matches(step.optString("label").trim())
+
+    /**
+     * Adds a step to [steps]. A run of single keys collapses into [yours] (a PIN pad's digits, in
+     * order, would be the PIN), and a key after that adds nothing; the same goes for [yours] itself.
+     */
+    fun add(steps: JSONArray, step: JSONObject, yours: JSONObject) {
+        val last = steps.optJSONObject(steps.length() - 1)
+        val afterYours = last != null && last.optString("label") == yours.optString("label")
+        if (afterYours && (isKey(step) || step.optString("label") == yours.optString("label"))) return
+        if (isKey(step)) {
+            var run = 0
+            while (isKey(steps.optJSONObject(steps.length() - 1 - run))) run++
+            if (run + 1 >= KEYS_IN_A_ROW) {
+                repeat(run) { steps.remove(steps.length() - 1) }
+                steps.put(yours)
+                return
+            }
+        }
+        steps.put(step)
+    }
+}
+
 /**
  * 「演示一遍」: the user's own taps in other apps, as shortcut steps (mobile_shortcuts.KINDS), so the
  * app can do it again later. Started from the Shortcuts page through the engine; a small bar over the
@@ -30,13 +75,13 @@ import java.io.File
  * tapped or long-pressed by their words (and where), the fields typed into (never what was typed: the
  * user fills that in before saving), the direction of scrolling, and the keyboard's own search key
  * (an "enter" step when the keyboard closed after typing without a tap). Nothing in this app, the home
- * screen, the keyboard or the notification shade; nothing from a password field; no words with a long
- * number in them (codes, phone numbers, amounts).
+ * screen, the keyboard or the notification shade; nothing from a password field or what a text field
+ * holds; no words with a long number in them (codes, phone numbers, amounts). On a password or payment
+ * screen, and for a run of keys on an app's own keypad, one step says it is the user's to do there.
  */
 internal class DemonstrationRecorder(private val service: AccessibilityService, private val finished: () -> Unit) {
     companion object {
         const val MAX_STEPS = 60
-        private val longNumber = Regex("\\d{4,}")
         fun resultFile(context: Context): File = File(context.filesDir, "automation/demonstration.json")
     }
 
@@ -87,10 +132,14 @@ internal class DemonstrationRecorder(private val service: AccessibilityService, 
                 lastClickAt = SystemClock.uptimeMillis()
                 val node = event.source
                 try {
-                    if (node?.isPassword == true) return
+                    if (node?.isPassword == true || event.isPassword || passwordInputType(node?.inputType ?: 0)) return
+                    if (secretScreen()) { add(yours()); return }
                     val step = JSONObject().put("kind", if (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) "tap" else "long")
                     place(step, node)
-                    step.put("label", words(node) ?: words(event.text?.joinToString(" ")) ?: JSONObject.NULL)
+                    // A text field by its hint, as AgentAccessibilityService.ownLabel knows it: its text is what was typed.
+                    val field = node?.isEditable == true || event.className?.contains("EditText") == true
+                    step.put("label", (if (field) DemonstrationWords.fieldName(node?.hintText?.toString(), node?.contentDescription?.toString())
+                        else words(node) ?: words(event.text?.joinToString(" "))) ?: JSONObject.NULL)
                     node?.className?.toString()?.take(120)?.let { step.put("class", it) }
                     add(step)
                 } finally { node?.recycle() }
@@ -101,7 +150,7 @@ internal class DemonstrationRecorder(private val service: AccessibilityService, 
             AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> if (app !in ignored && front != null && keyboardOpen() && SystemClock.uptimeMillis() - lastClickAt > 600) {
                 val node = event.source
                 try {
-                    if (node == null || node.isPassword) return
+                    if (node == null || node.isPassword || passwordInputType(node.inputType)) return
                     // The field by its hint or name; what was typed stays out.
                     val label = words(node.hintText?.toString()) ?: words(node.contentDescription?.toString())
                         ?: node.viewIdResourceName?.substringAfterLast('/')?.take(120) ?: return
@@ -155,7 +204,9 @@ internal class DemonstrationRecorder(private val service: AccessibilityService, 
     /** A control's words: its own, else the first of its children's; none that look like a code or a number. */
     private fun words(node: AccessibilityNodeInfo?, depth: Int = 0): String? {
         node ?: return null
-        val own = words(node.text?.toString()) ?: words(node.contentDescription?.toString())
+        // What a field inside a row holds is typed text, a password field's even more so.
+        val hidden = node.isEditable || node.isPassword || (Build.VERSION.SDK_INT >= 34 && node.isAccessibilityDataSensitive)
+        val own = if (hidden) null else words(node.text?.toString()) ?: words(node.contentDescription?.toString())
         if (own != null || depth >= 3) return own
         for (index in 0 until minOf(node.childCount, 8)) {
             val child = node.getChild(index) ?: continue
@@ -164,14 +215,33 @@ internal class DemonstrationRecorder(private val service: AccessibilityService, 
         return null
     }
 
-    private fun words(text: String?): String? {
-        val value = text?.replace(Regex("\\s+"), " ")?.trim()?.take(200)
-        return value?.takeIf { it.isNotEmpty() && !longNumber.containsMatchIn(it) }
+    private fun words(text: String?): String? = DemonstrationWords.keep(text)
+
+    /** Whether the window in front asks for a password or shows a payment step. */
+    private fun secretScreen(): Boolean {
+        val root = runCatching { service.rootInActiveWindow }.getOrNull() ?: return false
+        var seen = 0
+        fun visit(node: AccessibilityNodeInfo, depth: Int): Boolean {
+            if (++seen > 400 || depth > 24) return false
+            if (node.isVisibleToUser && (node.isPassword || (Build.VERSION.SDK_INT >= 34 && node.isAccessibilityDataSensitive) ||
+                    passwordInputType(node.inputType) ||
+                    PaymentFirewall.marksPaymentScreen(node.text?.toString()) ||
+                    PaymentFirewall.marksPaymentScreen(node.contentDescription?.toString()))) return true
+            for (index in 0 until minOf(node.childCount, 200)) {
+                val child = node.getChild(index) ?: continue
+                try { if (visit(child, depth + 1)) return true } finally { child.recycle() }
+            }
+            return false
+        }
+        return try { visit(root, 0) } finally { root.recycle() }
     }
+
+    /** The step that stands for what stays out: a replay stops there, as it finds no such control. */
+    private fun yours(): JSONObject = DemonstrationWords.yours(UiText.of(service, "这里需要你自己完成", "Finish this step yourself"))
 
     private fun add(step: JSONObject) {
         if (steps.length() >= MAX_STEPS) return
-        steps.put(step)
+        DemonstrationWords.add(steps, step, yours())
         count?.text = recordingText()
     }
 

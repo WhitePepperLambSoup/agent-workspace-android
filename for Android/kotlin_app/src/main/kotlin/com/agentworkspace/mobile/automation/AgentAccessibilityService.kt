@@ -34,26 +34,39 @@ import java.util.concurrent.atomic.AtomicLong
 /** How deep inside a wordless row or button its words are looked for. */
 private const val INNER_DEPTH = 4
 
+/** How deep inside a list row a control is still known by the row's words (Target.context). */
+private const val ROW_DEPTH = 6
+
 /** A finger held this long is a long press on every Android version. */
 private const val LONG_PRESS_MS = 650L
 
-/**
- * Words on a control that deletes, clears, uninstalls or stops an app (spaces removed). Pressing one
- * needs the user's yes for that very control. Paying is not asked about at all: see PaymentFirewall.
- */
 private val GOES_ON_SWIPE = Regex("上滑或点击|上滑跳转|向上滑动|滑动查看详情|(?i)swipe up")
-
-private val CONSEQUENTIAL = Regex(
-    "删除|清除|清空|卸载|强行停止|强制停止|恢复出厂|格式化|注销账号|注销账户|" +
-        "(?i)(delete|clearcache|cleardata|clearstorage|uninstall|forcestop|factoryreset|erase)"
-)
 
 /** Actions that only move the screen or press a system key: failing one does not pause automation. */
 private val HARMLESS_ACTIONS = setOf("scroll", "swipe", "back", "home", "recents", "notifications", "launch_app")
 
+/** Actions a finger or a click lands with: checked against the screen as it is at that moment. */
+private val TOUCHING_ACTIONS = setOf("tap", "ref", "long_press", "type_text", "enter", "swipe")
+
 /** A repeat without a count runs at most this long. */
 private const val MAX_REPEAT_MS = 4 * 60 * 60 * 1000L
 private const val MAX_IDLE_ROUNDS = 5
+
+/**
+ * How long and how many rounds a repeat may run: at most four hours, and for an unattended task
+ * within what is left of its hosted limits (the engine sends them): its time, and its steps, each
+ * step of every round counting as one.
+ */
+internal object RepeatAllowance {
+    data class Limits(val ms: Long, val rounds: Int?, val byTime: Boolean, val bySteps: Boolean)
+
+    fun of(hostedMs: Long?, hostedSteps: Int?, stepsPerRound: Int, times: Int?): Limits {
+        val ms = minOf(MAX_REPEAT_MS, hostedMs ?: MAX_REPEAT_MS)
+        val stepRounds = hostedSteps?.let { it / maxOf(1, stepsPerRound) }
+        val rounds = listOfNotNull(times, stepRounds).minOrNull()
+        return Limits(ms, rounds, byTime = ms < MAX_REPEAT_MS, bySteps = stepRounds != null && stepRounds == rounds && stepRounds != times)
+    }
+}
 
 /** Runs in :engine so the accessibility connection and Chaquopy share a process. */
 class AgentAccessibilityService : AccessibilityService(), DisplayManager.DisplayListener {
@@ -100,14 +113,21 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         val longClickable: Boolean = false,
         /** In or on a view that rotates what it shows by itself (a search box's hot searches). */
         val rotating: Boolean = false,
+        /**
+         * The first words of the list row it is in (see rowWords), null outside a list: a recycled
+         * row puts another item's "删除" at the same place, under other words.
+         */
+        val context: String? = null,
     ) {
         val actionable: Boolean get() = clickable || editable || scrollable || longClickable
 
         // Counting numbers ("重新发送(59)", a timer) and the words a switcher rotates through keep a
-        // control the same while it stays in place.
+        // control the same while it stays in place. Its row must still say the same (numbers aside):
+        // the same words on the button alone used to pass a recycled row for the one approved.
         fun sameControl(other: Target?): Boolean = other != null && className == other.className &&
             viewId == other.viewId && (label == other.label || bounds == other.bounds &&
-                (rotating || label?.replace(digits, "#") == other.label?.replace(digits, "#")))
+                (rotating || label?.replace(digits, "#") == other.label?.replace(digits, "#"))) &&
+            TouchGuard.sameRow(context, other.context)
 
         companion object {
             private val digits = Regex("[0-9]+")
@@ -122,16 +142,10 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         val windows: String = "",
     )
 
-    private class AutomationFailure(val code: String, message: String) : RuntimeException(message)
+    /** [confirmation]: with needs_confirmation, the token the engine keeps for the user's yes. */
+    private class AutomationFailure(val code: String, message: String, val confirmation: String? = null) : RuntimeException(message)
 
-    private val heartbeat = object : Runnable {
-        override fun run() {
-            if (AndroidSystemBridge.service === this@AgentAccessibilityService) {
-                AndroidAutomationControl.connected(this@AgentAccessibilityService, true)
-                handler.postDelayed(this, 2000)
-            }
-        }
-    }
+    private val confirmations = ConfirmationBook({ SystemClock.elapsedRealtime() })
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -139,7 +153,8 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         AndroidSystemBridge.service = this
         (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager).registerDisplayListener(this, handler)
         invalidate()
-        handler.post(heartbeat)
+        // For the app's own process, which asks whether the service runs (AndroidSystemBridge.status).
+        AndroidAutomationControl.connected(this, true)
         // No system accessibility button: Android would pin it to every screen, in the agent's
         // screenshots too. The panel opens from the bubble and stays up over screens that hide
         // other apps' overlays (Settings), so a task can still go there.
@@ -151,6 +166,9 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
     /** The display the request being run works on: the phone's screen, or the background screen. */
     @Volatile private var screenId = Display.DEFAULT_DISPLAY
     private val onBackground: Boolean get() = screenId != Display.DEFAULT_DISPLAY
+
+    /** Whether the user started the request's task on the phone in person (the engine says). */
+    @Volatile private var taskInPerson = false
 
     /** The windows of [display] (the background screen's when the agent works there). */
     private fun screenWindows(display: Int = screenId): List<AccessibilityWindowInfo> =
@@ -217,7 +235,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
 
     /** Floating windows over most of the phone's screen, by app (reader thread). */
     private fun checkOverlays() {
-        val size = screen()
+        val size = screen(Display.DEFAULT_DISPLAY)
         if (size.width <= 0 || size.height <= 0) return
         val large = HashSet<String>()
         val all = runCatching { screenWindows(Display.DEFAULT_DISPLAY) }.getOrDefault(emptyList())
@@ -236,28 +254,36 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
 
     override fun onInterrupt() {
         invalidate()
-        AndroidAutomationControl.set(this, true, true)
+        // Any app may call AccessibilityManager.interrupt(); this service gives no spoken feedback to
+        // stop. Automation still pauses (the user resumes it), but as a pause of its own with this
+        // reason: it used to be recorded as the user taking over, and the agent told the user so.
+        AndroidAutomationControl.set(this, true, false, automatic = true, reason = AndroidAutomationControl.INTERRUPTED)
     }
 
     override fun onDestroy() {
         demonstration?.stop(false)
         stopRepeat("the accessibility service stopped")
-        panel?.close()
+        // Forced: the repeat's stop is only posted, so the panel would still shrink to its pill
+        // and keep its window, blur listener, coroutines and polling after the service is gone.
+        panel?.close(force = true)
         panel = null
         reader.quitSafely()
-        handler.removeCallbacks(heartbeat)
         (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager).unregisterDisplayListener(this)
-        if (AndroidSystemBridge.service === this) AndroidSystemBridge.service = null
-        AndroidAutomationControl.connected(this, false)
+        // A newer instance already connected has written its own state; this one must not undo it.
+        if (AndroidSystemBridge.service === this) {
+            AndroidSystemBridge.service = null
+            AndroidAutomationControl.connected(this, false)
+        }
         invalidate()
         super.onDestroy()
     }
 
-    // Another display coming or changing (the background screen being created, a cast) leaves what
-    // the phone's screen shows as it was; a display going away may take a screen read from it.
-    override fun onDisplayAdded(displayId: Int) { if (displayId == Display.DEFAULT_DISPLAY) invalidate() }
+    // Only the screen the agent works on changing makes its reads stale: turning the phone while
+    // the agent works on the background screen leaves that screen as it was, and another display
+    // coming (a cast) leaves the phone's screen as it was. A display going away may take a read.
+    override fun onDisplayAdded(displayId: Int) { if (displayId == screenId) invalidate() }
     override fun onDisplayRemoved(displayId: Int) = invalidate()
-    override fun onDisplayChanged(displayId: Int) { if (displayId == Display.DEFAULT_DISPLAY) invalidate() }
+    override fun onDisplayChanged(displayId: Int) { if (displayId == screenId) invalidate() }
 
     internal fun invalidate() {
         epoch.incrementAndGet()
@@ -291,8 +317,13 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         return front to label
     }
 
-    /** In words, what an android_action request does (the panel's steps and approval prompts). */
-    internal fun describeAction(arguments: JSONObject): String {
+    /**
+     * In words, what an android_action request does (the panel's steps and approval prompts).
+     * [forApproval]: for the person deciding, also the text to be typed and every step of a batch
+     * (steps that send, delete or pay marked ⚠); the panel's step list keeps the short form, which is
+     * also what it remembers for the app.
+     */
+    internal fun describeAction(arguments: JSONObject, forApproval: Boolean = false): String {
         fun say(zh: String, en: String) = com.agentworkspace.mobile.UiText.of(this, zh, en)
         val saved = arguments.optString("snapshot_version").takeIf { it.isNotEmpty() }?.let { synchronized(recent) { recent[it] } }
         fun named(target: Target?) = target?.label?.takeIf { it.isNotBlank() }?.take(24)
@@ -304,14 +335,34 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             "swipe" -> {
                 val dx = arguments.optInt("x2") - x
                 val dy = arguments.optInt("y2") - y
-                if (kotlin.math.abs(dy) >= kotlin.math.abs(dx)) {
+                // One that stays on a control presses it: the person approving is told so.
+                val pressed = saved?.let { snapshot ->
+                    if (TouchGuard.barelyMoves(x, y, x + dx, y + dy, snapshot.screen.density)) hit(snapshot.targets.values, x, y)?.label
+                    else pressedBySwipe(arguments, snapshot).firstNotNullOfOrNull { it.label }
+                }?.takeIf { it.isNotBlank() }?.take(24)
+                if (pressed != null) say("点按「$pressed」", "Tap “$pressed”")
+                else if (kotlin.math.abs(dy) >= kotlin.math.abs(dx)) {
                     if (dy < 0) say("向上滑动", "Swipe up") else say("向下滑动", "Swipe down")
                 } else if (dx < 0) say("向左滑动", "Swipe left") else say("向右滑动", "Swipe right")
             }
             "ref" -> named(saved?.targets?.get(arguments.optString("ref")))?.let { say("点按「$it」", "Tap “$it”") }
                 ?: say("点按一个控件", "Tap a control")
-            "type_text" -> named(saved?.targets?.get(arguments.optString("ref")))?.let { say("在「$it」里输入文字", "Type into “$it”") }
-                ?: say("输入文字", "Type text")
+            "type_text" -> {
+                val field = named(saved?.targets?.get(arguments.optString("ref")))
+                val typed = arguments.optString("text")
+                if (forApproval && typed.isNotEmpty()) {
+                    // What is approved is what gets typed: the start of it, and how long it is.
+                    // Each case is a whole sentence, so the Japanese and Korean catalogs translate it.
+                    val (start, more) = TouchGuard.typedPreview(typed)
+                    val count = typed.length
+                    when {
+                        field != null && more -> say("在「$field」里输入“$start”…（共 $count 字）", "Type “$start”… ($count characters) into “$field”")
+                        field != null -> say("在「$field」里输入“$start”", "Type “$start” into “$field”")
+                        more -> say("输入“$start”…（共 $count 字）", "Type “$start”… ($count characters)")
+                        else -> say("输入“$start”", "Type “$start”")
+                    }
+                } else field?.let { say("在「$it」里输入文字", "Type into “$it”") } ?: say("输入文字", "Type text")
+            }
             "launch_app" -> {
                 val name = arguments.optString("package_name")
                 val label = runCatching { packageManager.getApplicationLabel(packageManager.getApplicationInfo(name, 0)).toString() }
@@ -334,18 +385,22 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             "notifications" -> say("下拉通知栏", "Open the notifications")
             "batch" -> {
                 val steps = arguments.optJSONArray("steps") ?: JSONArray()
-                val parts = (0 until minOf(steps.length(), 4)).map { index ->
+                // Approved, every step is shown (a batch has at most 12): a "发送" at step 6 is in it.
+                val shown = if (forApproval) steps.length() else minOf(steps.length(), 4)
+                val parts = (0 until shown).map { index ->
                     describeAction(JSONObject(steps.getJSONObject(index).toString())
-                        .put("snapshot_version", arguments.optString("snapshot_version")))
+                        .put("snapshot_version", arguments.optString("snapshot_version")), forApproval)
+                        .let { if (forApproval && TouchGuard.weighty(it)) "⚠ $it" else it }
                 }
                 say("连续 ${steps.length()} 步：", "${steps.length()} steps: ") + parts.joinToString(say("，", ", ")) +
-                    (if (steps.length() > 4) say("……", "…") else "")
+                    (if (steps.length() > shown) say("……", "…") else "")
             }
             "repeat" -> {
                 val seconds = arguments.optLong("every_ms") / 1000.0
                 val every = if (seconds == Math.floor(seconds)) seconds.toLong().toString() else "%.1f".format(seconds)
                 val what = describeAction(JSONObject().put("action", "batch").put("steps", arguments.optJSONArray("steps") ?: JSONArray())
-                    .put("snapshot_version", arguments.optString("snapshot_version"))).substringAfter("：").substringAfter(": ")
+                    .put("snapshot_version", arguments.optString("snapshot_version")), forApproval)
+                    .substringAfter("：").substringAfter(": ")
                 val times = if (arguments.has("times")) arguments.optInt("times") else null
                 say("每 $every 秒：$what" + (times?.let { "，共 $it 次" } ?: "，直到停止（最长 4 小时）"),
                     "Every $every s: $what" + (times?.let { ", $it times" } ?: ", until stopped (4 hours at most)"))
@@ -379,15 +434,29 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         }
     }
 
+    // The phone's own installers, also under a maker's name ElderGuard does not list (looked up once).
+    private val systemInstallers: Set<String> by lazy { ElderGuard.installerPackages(packageManager) }
+
     private fun blockedFront(): Blocked? {
         val elder = ElderGuard.on(this)
         if (BlockedApps.packages(this).isEmpty() && !elder) return null
-        val front = frontPackage() ?: return null
-        val guarded = elder && ElderGuard.guarded(front)
-        if (!guarded && !BlockedApps.blocked(this, front)) return null
+        // Not only the app in front: one in the other half of a split screen or in a small window is
+        // on the screen as well, and its windows are read and can be tapped like the front one's.
+        val shown = (listOfNotNull(frontPackage()) + appsOnScreen()).distinct()
+        val front = shown.firstOrNull { (elder && ElderGuard.guarded(it, systemInstallers)) || BlockedApps.blocked(this, it) } ?: return null
+        val guarded = elder && ElderGuard.guarded(front, systemInstallers)
         val label = runCatching { packageManager.getApplicationLabel(packageManager.getApplicationInfo(front, 0)).toString() }
             .getOrDefault(front)
         return Blocked(label, guarded)
+    }
+
+    /** The packages of every app window on the screen the agent works on. */
+    private fun appsOnScreen(): List<String> = onReader {
+        val all = screenWindows()
+        try {
+            all.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+                .mapNotNull { window -> window.root?.let { root -> root.packageName?.toString().also { recycle(root) } } }
+        } finally { all.forEach { recycle(it) } }
     }
 
     // ---- A task recorded as a shortcut, and a shortcut run again ------------------------------
@@ -445,7 +514,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
      * paints them out, since whoever follows it has none of them.
      */
     private fun floatingWindows(on: Int): List<FloatArray> {
-        val size = screen()
+        val size = screen(on)
         if (size.width <= 0 || size.height <= 0) return emptyList()
         val found = ArrayList<FloatArray>()
         val all = screenWindows(on)
@@ -621,7 +690,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
     private fun scrollToLabel(label: String): Boolean {
         val before = capture()
         if (goesOnSwipe(before)) return false
-        val app = before.observation.optString("package_name")
+        val app = observedPackage(before.observation)
         val answer = executeRequest(JSONObject().put("action", "scroll_to_text").put("text", label.take(200)).put("max_scrolls", 10))
         if (answer.optBoolean("ok", false)) return true
         val code = answer.optJSONObject("error")?.optString("code")
@@ -631,8 +700,10 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         // A list the accessibility tree does not mark as scrollable: swipe up a screen at a time.
         repeat(8) {
             val observed = capture()
-            // A swipe that left the app is no longer looking through its page.
-            if (observed.observation.optString("package_name") != app || goesOnSwipe(observed)) return false
+            // A swipe that left the app is no longer looking through its page (an unreadable
+            // snapshot is not taken for another app).
+            val now = observedPackage(observed.observation)
+            if ((now != null && now != app) || goesOnSwipe(observed)) return false
             val width = observed.screen.width
             val height = observed.screen.height
             val swiped = executeRequest(JSONObject().put("action", "swipe").put("snapshot_version", observed.version)
@@ -704,10 +775,14 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
      * [settle]: wait for a page to finish loading before reading it back (not between a batch's steps).
      * Whatever the action, the screen of an app the user keeps the agent away from is not returned.
      */
-    internal fun executeRequest(request: JSONObject, settle: Boolean = true, background: Boolean = false): JSONObject =
+    internal fun executeRequest(request: JSONObject, settle: Boolean = true, background: Boolean = false, byUser: Boolean = false,
+        inPerson: Boolean? = null): JSONObject =
         synchronized(executionLock) {
-        // A batch runs its steps through here too: they stay on the screen the batch works on.
+        // A batch runs its steps through here too: they stay on the screen the batch works on, for
+        // the same task.
         val outer = screenId
+        val outerInPerson = taskInPerson
+        if (inPerson != null) taskInPerson = inPerson
         // A task from a conversation works on the background screen when the user turned it on
         // (BackgroundScreen); the phone control panel's tasks always use the phone's own screen.
         if (background && BackgroundScreen.enabled(this)) {
@@ -719,7 +794,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             }
         }
         try {
-            val response = executeUnguarded(request, settle)
+            val response = executeUnguarded(request, settle, byUser)
             if (response.isNull("observation") || response.optJSONObject("error")?.optString("code") == "blocked_app") {
                 return@synchronized response
             }
@@ -728,6 +803,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             AndroidSystemBridge.failure("blocked_app", blocked.refusal(true)).put("executed", response.optBoolean("executed"))
         } finally {
             screenId = outer
+            taskInPerson = outerInPerson
             agentActedAt = SystemClock.uptimeMillis()
         }
     }
@@ -755,7 +831,20 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         return words.joinToString(" / ").take(limit)
     }
 
-    private fun executeUnguarded(request: JSONObject, settle: Boolean): JSONObject = synchronized(executionLock) {
+    /**
+     * This app, which the agent neither reads nor operates. A debuggable build (never published)
+     * leaves it open, so the evaluation scenarios that work its own screens can run there
+     * (mobile_evaluation lists them only in such a build).
+     */
+    private val keptAway: String? by lazy {
+        if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) null else packageName
+    }
+
+    private fun ownApp() = AutomationFailure("own_app", "This is Agent Workspace itself, whose approvals and settings are " +
+        "the user's: the agent does not read or operate it, in any mode. Open the app the task is about with launch_app or " +
+        "open_page; anything to do in Agent Workspace is for the user, so tell them.")
+
+    private fun executeUnguarded(request: JSONObject, settle: Boolean, byUser: Boolean = false): JSONObject = synchronized(executionLock) {
         // An app the agent opens comes to the front while the action runs: not a pop-up (PopupWatch).
         agentActedAt = SystemClock.uptimeMillis()
         var actionStarted = false
@@ -770,10 +859,20 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             if (action != "stop_repeat") blockedFront()?.let { blocked ->
                 return@synchronized AndroidSystemBridge.failure("blocked_app", blocked.refusal(false))
             }
+            // With this app in front the agent can only leave it (nothing of it is read: see capture).
+            if (TouchGuard.refusedInOwnApp(action, byUser) && keptAway != null && frontPackage() == keptAway) throw ownApp()
             // Reading the screen works with it dark or locked; anything that touches it does not. The
             // background screen is drawn whatever the phone's screen does: that one is left alone.
             if (!onBackground && action !in setOf("observe", "verify", "wait_for", "stop_repeat")) {
                 screenGate(refuseLocked = action !in setOf("screenshot", "ocr"))
+            }
+            // With the phone locked, the background screen is read but not operated, unless the user
+            // started this task on the phone in person: whoever has the phone in the drawer did not.
+            if (onBackground && TouchGuard.refusedWhileLocked(action, keyguardLocked(), taskInPerson)) {
+                throw AutomationFailure("phone_locked", "The phone is locked, and this task was not started by the " +
+                    "user on the phone (a schedule, a notification rule, another device or another app started it), so " +
+                    "nothing is tapped, typed or opened on the background screen until the phone is unlocked. Stop and " +
+                    "tell the user; they can unlock the phone and run the task again")
             }
             if (onBackground && action in setOf("repeat", "home", "recents", "notifications")) {
                 throw AutomationFailure("not_on_background", if (action == "home") "The background screen has no " +
@@ -850,8 +949,8 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
                 // agent need not look again just to wait (that cost a model call each time).
                 action == "launch_app" -> {
                     val opened = runCatching { launchIntent(request).let { it.component?.packageName ?: it.`package` } }.getOrNull()
-                    if (opened != null && opened == source.observation.optString("package_name")) waitUntilQuiet(1500, 350)
-                    else waitForNewScreen(source.windows, source.observation.optString("package_name").ifEmpty { null })
+                    if (opened != null && opened == observedPackage(source.observation)) waitUntilQuiet(1500, 350)
+                    else waitForNewScreen(source.windows, observedPackage(source.observation))
                 }
                 else -> { Thread.sleep(180); waitUntilQuiet(1500, 350) }
             }
@@ -865,6 +964,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             // that moved), so there is nothing to inspect and automation keeps running.
             AndroidSystemBridge.failure(error.code, error.message ?: "Android system action failed", freshObservation())
                 .put("executed", actionExecuted)
+                .also { failure -> error.confirmation?.let { failure.getJSONObject("error").put("confirmation_token", it) } }
         } catch (_: TimeoutException) {
             if (actionStarted && harmless) {
                 invalidate()
@@ -999,7 +1099,16 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         val steps = request.getJSONArray("steps")
         val everyMs = request.getLong("every_ms")
         val times = if (request.has("times")) request.getInt("times") else null
-        val app = planned.observation.optString("package_name").ifEmpty { null }
+        // An unattended task's repeat goes on after the task: it keeps within the task's hosted limits.
+        val allowance = RepeatAllowance.of(
+            if (request.has("hosted_ms")) request.getLong("hosted_ms") else null,
+            if (request.has("hosted_steps")) request.getInt("hosted_steps") else null,
+            steps.length(), times,
+        )
+        if (allowance.ms <= 0 || allowance.rounds == 0) throw AutomationFailure("hosted_limit", "What is left of this " +
+            "unattended task's hosted limits (time or steps) leaves no room for a repeat. Stop and tell the user; they can " +
+            "raise the limits under Device & tools → Hosted limits, or start the repeat themselves")
+        val app = observedPackage(planned.observation)
         stopRepeat("replaced by a new repeat")
         val description = describeAction(JSONObject().put("action", "batch").put("steps", steps)
             .put("snapshot_version", planned.version)).substringAfter("：").substringAfter(": ")
@@ -1009,17 +1118,21 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         val power = getSystemService(android.os.PowerManager::class.java)
         val thread = Thread({
             val started = SystemClock.elapsedRealtime()
-            val limit = started + MAX_REPEAT_MS
+            val limit = started + allowance.ms
+            val rounds = allowance.rounds
             var done = 0
             var idle = 0
             var slot = 0L
             var reason: String? = null
             try {
-                while (times == null || done < times) {
+                while (rounds == null || done < rounds) {
                     // Rounds keep to the clock: round n starts at start + n × interval.
                     val wait = started + slot * everyMs - SystemClock.elapsedRealtime()
                     if (wait > 0) Thread.sleep(wait)
-                    if (SystemClock.elapsedRealtime() > limit) { reason = "reached the four-hour limit"; break }
+                    if (SystemClock.elapsedRealtime() > limit) {
+                        reason = if (allowance.byTime) "reached the task's hosted time limit" else "reached the four-hour limit"
+                        break
+                    }
                     if (!power.isInteractive) { reason = "the screen went off"; break }
                     reason = synchronized(executionLock) { repeatRound(steps, app) }
                     if (reason != null) break
@@ -1038,14 +1151,19 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             }
             if (repeatThread === Thread.currentThread()) {
                 repeatThread = null
-                publishRepeat(status.copy(done = done, running = false, reason = reason ?: "finished"))
+                val ended = reason ?: if (allowance.bySteps) "reached the task's hosted step limit" else "finished"
+                publishRepeat(status.copy(done = done, running = false, reason = ended))
             }
         }, "agent-repeat")
         repeatThread = thread
         thread.start()
         return result(planned, executed = true).put("repeat", status.json()
             .put("note", "Started. The phone runs it by itself: tell the user now and end your turn; do not watch it. " +
-                "It stops when they leave the app, the screen goes off or they tap stop."))
+                "It stops when they leave the app, the screen goes off or they tap stop." +
+                if (allowance.byTime || allowance.bySteps) " As this task runs unattended, it also stops at what is " +
+                    "left of the task's hosted limits: about " +
+                    (if (allowance.ms < 60_000) "${allowance.ms / 1000} seconds" else "${allowance.ms / 60_000} minutes") +
+                    (allowance.rounds?.let { ", $it rounds" } ?: "") + "." else ""))
     }
 
     /** Whether the last round did at least one step (read only by the repeat thread). */
@@ -1061,8 +1179,11 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             // Stopped while waiting for the lock: not one more tap.
             if (Thread.interrupted()) throw InterruptedException()
             val snapshot = capture()
-            val now = snapshot.observation.optString("package_name").ifEmpty { null }
+            val now = observedPackage(snapshot.observation)
             if (app != null && now != null && now != app) return "the user left $app"
+            // Which app is in front could not be read this time: no step into the unknown; the
+            // round goes on (and rounds that do nothing end the repeat after a few).
+            if (app != null && now == null) continue
             val step = JSONObject(steps.getJSONObject(index).toString()).put("snapshot_version", snapshot.version)
             panel?.step(describeAction(step))
             agentActedAt = SystemClock.uptimeMillis()
@@ -1072,7 +1193,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
                     "target_changed", "not_scrollable", "control_disabled" -> false
                     // The window changed right then: another app means the user left, anything else waits a round.
                     "stale_snapshot" -> {
-                        val after = capture().observation.optString("package_name").ifEmpty { null }
+                        val after = observedPackage(capture().observation)
                         if (app != null && after != null && after != app) return "the user left $app"
                         false
                     }
@@ -1114,12 +1235,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
     private fun ensureUnpaused() {
         val control = AndroidAutomationControl.readState(this)
         if (control.optBoolean("paused") || control.optBoolean("takeover_requested")) {
-            // Said plainly so the agent stops instead of trying to reach the phone some other way.
-            throw AutomationFailure("paused", (if (control.optBoolean("automatic"))
-                "Automation paused itself after an action Android rejected or did not confirm. "
-                else "The user paused automation. ") +
-                "Stop and tell the user; do not try another way to operate the phone. They can check the screen " +
-                "and resume it (Retry in the phone control window, or Resume in Agent Workspace).")
+            throw AutomationFailure("paused", AndroidAutomationControl.pausedMessage(control))
         }
     }
 
@@ -1127,8 +1243,11 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
      * Before an action: a locked phone is refused (no app may unlock it), without lighting the
      * screen; a dark one that is not locked yet is woken, since a tap on it would do nothing.
      */
+    private fun keyguardLocked(): Boolean =
+        getSystemService(android.app.KeyguardManager::class.java)?.isKeyguardLocked == true
+
     private fun screenGate(refuseLocked: Boolean) {
-        val locked = getSystemService(android.app.KeyguardManager::class.java)?.isKeyguardLocked == true
+        val locked = keyguardLocked()
         if (locked && refuseLocked) throw AutomationFailure("phone_locked", "The phone is locked and no app may " +
             "unlock it. Stop and ask the user to unlock the phone; go on once they have")
         val power = getSystemService(android.os.PowerManager::class.java) ?: return
@@ -1164,10 +1283,15 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         requireSnapshot(saved.version)
     }
 
+    /**
+     * The size and turn of the screen [on] (by default the one the agent works on). The background
+     * screen keeps its own portrait size while the phone's screen turns: taking the phone's for it put
+     * taps out of bounds and the screenshot's scale wrong.
+     */
     @Suppress("DEPRECATION")
-    private fun screen(): Screen {
-        val display = (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager)
-            .getDisplay(Display.DEFAULT_DISPLAY)
+    private fun screen(on: Int = screenId): Screen {
+        val manager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        val display = manager.getDisplay(on) ?: manager.getDisplay(Display.DEFAULT_DISPLAY)
         val metrics = DisplayMetrics()
         display?.getRealMetrics(metrics)
         if (metrics.widthPixels <= 0 || metrics.heightPixels <= 0) {
@@ -1182,7 +1306,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
     private fun capture(maxNodes: Int = 400, maxDepth: Int = 24, store: Boolean = true, on: Int = screenId): Snapshot = onReader(10_000) {
         val generation = epoch.get()
         val content = contentEpoch.get()
-        val display = screen()
+        val display = screen(on)
         val version = "$session:$generation:${sequence.incrementAndGet()}"
         val targets = linkedMapOf<String, Target>()
         val ownLabels = hashMapOf<String, String?>()
@@ -1192,13 +1316,14 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         var sensitive = false
         var activePackage: String? = null
 
-        fun visit(node: AccessibilityNodeInfo, windowId: Int, path: List<Int>, parent: String?, depth: Int, parentSensitive: Boolean, parentRotating: Boolean = false) {
+        // [before]: in a list, the words of the item before this child (TouchGuard.wordsBefore).
+        fun visit(node: AccessibilityNodeInfo, windowId: Int, path: List<Int>, parent: String?, depth: Int, parentSensitive: Boolean,
+                  parentRotating: Boolean = false, inList: Boolean = false, before: String? = null) {
             if (targets.size >= maxNodes || depth > maxDepth) {
                 truncated = true
                 return
             }
-            val protected = parentSensitive || node.isPassword ||
-                (Build.VERSION.SDK_INT >= 34 && node.isAccessibilityDataSensitive)
+            val protected = parentSensitive || secret(node)
             sensitive = sensitive || protected
             val ref = refMemory.getOrPut("$windowId/${path.joinToString(".")}") { "n${refNext++}" }
             val bounds = Rect().also { node.getBoundsInScreen(it) }
@@ -1228,13 +1353,19 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
                 return
             }
             if (children != node.childCount) truncated = true
+            val list = listOfRows(node)
+            // The children of a list read so far: their words, and whether each is a control.
+            val earlier = ArrayList<Pair<String?, Boolean>>()
             for (index in 0 until children) {
                 if (targets.size >= maxNodes) { truncated = true; break }
                 // Android 13+ fetches a node's descendants in one round trip instead of one per node.
                 val child = (if (Build.VERSION.SDK_INT >= 33) node.getChild(index, AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_HYBRID)
                     else node.getChild(index)) ?: continue
-                try { visit(child, windowId, path + index, ref, depth + 1, protected, rotating) }
-                finally { recycle(child) }
+                try {
+                    visit(child, windowId, path + index, ref, depth + 1, protected, rotating, list,
+                        if (list) TouchGuard.wordsBefore(earlier) else null)
+                    if (list) earlier += refMemory["$windowId/${(path + index).joinToString(".")}"]?.let { ownLabels[it] } to actionable(child)
+                } finally { recycle(child) }
             }
             // A row or button without words of its own is known by the words inside it (as
             // innerLabel reads them from a live node), so a recycled row is not taken for it.
@@ -1245,8 +1376,32 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
                     .take(2).joinToString(" / ").take(160).ifEmpty { null }
                 if (inner != null) targets[ref] = targets.getValue(ref).copy(label = inner)
             }
+            // A list row: its first words (as rowWords reads them from a live node) go with every
+            // control in it, so the same button in a recycled row showing another item is told apart.
+            if (inList && !protected) {
+                val inside = targets.entries.drop(firstInside).map { it.key to it.value }
+                val insideWords = inside
+                    .filter { (_, it) -> !it.sensitive && it.path.size - path.size <= INNER_DEPTH }
+                    .mapNotNull { (key, _) -> ownLabels[key]?.takeIf { it.isNotBlank() } }
+                // A list left flat (a web page's): a control with nothing inside goes by the item's words before it.
+                val lead = if (insideWords.isEmpty() && actionable(node)) listOfNotNull(before) else emptyList()
+                val words = (lead + listOfNotNull(label?.takeIf { it.isNotBlank() }) + insideWords)
+                    .take(2).joinToString(" / ").take(160).ifEmpty { null }
+                if (words != null) {
+                    // A row of a list inside this row already named its own controls.
+                    for ((key, target) in listOf(ref to targets.getValue(ref)) + inside) {
+                        if (target.context == null && target.path.size - path.size <= ROW_DEPTH) {
+                            targets[key] = target.copy(context = words)
+                        }
+                    }
+                }
+            }
         }
 
+        // This app's own windows (the app, its bubble) are listed but not read: their approvals and
+        // settings are the user's, and a finger landing on one is refused (ownWindowAt).
+        val own = keptAway
+        val isOwn = { name: String? -> own != null && name == own }
         val allWindows = screenWindows(on)
         val observedWindows = appWindows(allWindows)
         val windowsBefore = signature(observedWindows)
@@ -1271,13 +1426,13 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
                     .put("package_name", packageName ?: JSONObject.NULL)
                     .put("title", bounded(window.title, 255) ?: JSONObject.NULL))
                 if (root != null) {
-                    try { visit(root, window.id, emptyList(), null, 0, false) }
+                    try { if (!isOwn(packageName)) visit(root, window.id, emptyList(), null, 0, false) }
                     finally { recycle(root) }
                 }
             }
             if (observedWindows.size > 8) truncated = true
             // The active window's root belongs to the phone's screen: no use on the background screen.
-            if (targets.isEmpty() && on == Display.DEFAULT_DISPLAY) {
+            if (targets.isEmpty() && on == Display.DEFAULT_DISPLAY && !isOwn(activePackage)) {
                 rootInActiveWindow?.let { root ->
                     try {
                         activePackage = bounded(root.packageName, 255)
@@ -1285,7 +1440,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
                         windowsJson.put(JSONObject().put("id", root.windowId).put("type", AccessibilityWindowInfo.TYPE_APPLICATION)
                             .put("active", true).put("focused", true).put("bounds", boundsJson(bounds))
                             .put("package_name", activePackage ?: JSONObject.NULL).put("title", JSONObject.NULL))
-                        visit(root, -1, emptyList(), null, 0, false)
+                        if (!isOwn(activePackage)) visit(root, -1, emptyList(), null, 0, false)
                     } finally { recycle(root) }
                 }
             }
@@ -1306,10 +1461,15 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             .put("locked", on == Display.DEFAULT_DISPLAY &&
                 getSystemService(android.app.KeyguardManager::class.java)?.isKeyguardLocked == true)
             .put("background_screen", on != Display.DEFAULT_DISPLAY)
+            .put("own_app", isOwn(activePackage))
         Snapshot(version, generation, SystemClock.elapsedRealtime(), display,
             AndroidAutomationControl.readState(this).optString("revision"), targets, data, sensitive, windowsBefore)
             .also { if (store) synchronized(recent) { recent[version] = it } }
     }
+
+    /** A password or other sensitive control, a shown password included (passwordInputType). */
+    private fun secret(node: AccessibilityNodeInfo): Boolean = node.isPassword ||
+        (Build.VERSION.SDK_INT >= 34 && node.isAccessibilityDataSensitive) || passwordInputType(node.inputType)
 
     /** What a control says by itself (an editable field: its hint). */
     private fun ownLabel(node: AccessibilityNodeInfo): String? =
@@ -1317,22 +1477,66 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         else bounded(node.text ?: node.contentDescription, 160)
 
     /** The first words inside [node], read the way capture() reads them for a control without its own. */
-    private fun innerLabel(node: AccessibilityNodeInfo): String? {
+    private fun innerLabel(node: AccessibilityNodeInfo): String? = innerWords(node).take(2).joinToString(" / ").take(160).ifEmpty { null }
+
+    private fun innerWords(node: AccessibilityNodeInfo): List<String> {
         val found = mutableListOf<String>()
         fun walk(current: AccessibilityNodeInfo, depth: Int) {
             for (index in 0 until minOf(current.childCount, 400)) {
                 if (found.size >= 2) return
                 val child = current.getChild(index) ?: continue
                 try {
-                    if (child.isPassword || (Build.VERSION.SDK_INT >= 34 && child.isAccessibilityDataSensitive)) continue
+                    if (secret(child)) continue
                     ownLabel(child)?.takeIf { it.isNotBlank() }?.let { found += it }
                     if (depth < INNER_DEPTH) walk(child, depth + 1)
                 } finally { recycle(child) }
             }
         }
         walk(node, 1)
-        return found.take(2).joinToString(" / ").take(160).ifEmpty { null }
+        return found
     }
+
+    /** Whether [node] lays out list rows: it scrolls and holds more than one child (not a page in a ScrollView). */
+    private fun listOfRows(node: AccessibilityNodeInfo): Boolean = node.isScrollable && node.childCount > 1
+
+    /** Whether a finger does something to [node]: a list item that is one is no text of an item. */
+    private fun actionable(node: AccessibilityNodeInfo): Boolean =
+        node.isClickable || node.isLongClickable || node.isEditable || node.isCheckable
+
+    /**
+     * The first words of the list row [node] is in, read the way capture() reads them (Target.context):
+     * the row's own words, then the first ones inside it; a control with nothing inside, in a list left
+     * flat, also goes by the item's words before it ([path]: [node]'s child indexes, to find them).
+     * Null outside a list or deeper than ROW_DEPTH.
+     */
+    private fun rowWords(node: AccessibilityNodeInfo, path: List<Int>): String? {
+        var current = node
+        val climbed = mutableListOf<AccessibilityNodeInfo>()
+        try {
+            for (level in 0..ROW_DEPTH) {
+                val parent = current.parent ?: return null
+                climbed += parent
+                if (listOfRows(parent)) {
+                    if (secret(current)) return null
+                    val inner = innerWords(current)
+                    val index = path.getOrNull(path.size - 1 - level)
+                    val lead = if (inner.isEmpty() && actionable(current) && index != null) listOfNotNull(wordsBefore(parent, index))
+                        else emptyList()
+                    return (lead + listOfNotNull(ownLabel(current)?.takeIf { it.isNotBlank() }) + inner)
+                        .take(2).joinToString(" / ").take(160).ifEmpty { null }
+                }
+                current = parent
+            }
+            return null
+        } finally { climbed.forEach { recycle(it) } }
+    }
+
+    /** The words of the item before child [index] of [list], as capture() finds them. */
+    private fun wordsBefore(list: AccessibilityNodeInfo, index: Int): String? =
+        TouchGuard.wordsBefore((maxOf(0, index - TouchGuard.ROW_LOOKBACK) until index).map { at ->
+            val child = list.getChild(at) ?: return@map null to false
+            try { (if (secret(child)) null else ownLabel(child)) to actionable(child) } finally { recycle(child) }
+        })
 
     private fun freshObservation(): JSONObject? = runCatching { capture().observation }.getOrNull()
 
@@ -1358,60 +1562,129 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         }
     }
 
-    /**
-     * What the control under a tap says, when it deletes, clears, uninstalls, stops an app or pays.
-     * Only button-like words count: a long row that merely mentions one of them is not such a control.
-     */
-    private fun consequentialLabel(request: JSONObject, saved: Snapshot): String? {
-        val target = if (request.has("ref")) saved.targets[request.getString("ref")] else {
-            val (x, y) = request.optInt("x") to request.optInt("y")
-            saved.targets.values.filter { it.visible && (it.clickable || it.longClickable) && it.bounds.contains(x, y) }
-                .minByOrNull { it.bounds.width().toLong() * it.bounds.height() }
-        }
-        return listOfNotNull(target?.label, request.optString("read_label").ifEmpty { null })
-            .map { label -> label.filterNot { it.isWhitespace() } }
-            .firstOrNull { it.isNotEmpty() && it.length <= 12 && CONSEQUENTIAL.containsMatchIn(it) }
+    private fun controls(snapshot: Snapshot): List<TouchGuard.Control> = snapshot.targets.values.map { target ->
+        TouchGuard.Control(target.bounds.left, target.bounds.top, target.bounds.right, target.bounds.bottom, target.label,
+            target.visible, target.clickable, target.longClickable, target.scrollable, target.windowId, target.path, target.className)
     }
 
-    /** Why the payment firewall stops this action, or null: a paying control, or anything on a payment screen. */
-    private fun paymentBlock(request: JSONObject, saved: Snapshot): String? {
-        val screen = saved.targets.values.firstOrNull { target ->
-            target.visible && PaymentFirewall.marksPaymentScreen(target.label)
+    /** The controls a swipe presses, going by what [snapshot] shows. */
+    private fun pressedBySwipe(request: JSONObject, snapshot: Snapshot): List<TouchGuard.Control> =
+        TouchGuard.pressedBySwipe(controls(snapshot), request.optInt("x"), request.optInt("y"), request.optInt("x2"),
+            request.optInt("y2"), snapshot.screen.width, snapshot.screen.height)
+
+    /** The words on what this action presses, in the snapshot it cites and on the screen as it is now. */
+    private fun pressedWords(request: JSONObject, saved: Snapshot, live: Snapshot): List<String?> {
+        val read = request.optString("read_label").ifEmpty { null }
+        if (request.has("ref")) return listOf(saved.targets[request.getString("ref")]?.label, read)
+        val pressed = when (request.getString("action")) {
+            "enter" -> emptyList()
+            "swipe" -> pressedBySwipe(request, saved) + pressedBySwipe(request, live)
+            else -> TouchGuard.pressed(controls(saved), request.optInt("x"), request.optInt("y")) +
+                TouchGuard.pressed(controls(live), request.optInt("x"), request.optInt("y"))
         }
-        if (screen != null) return "this screen is a payment step (“${screen.label!!.trim().take(30)}”)"
-        val target = if (request.has("ref")) saved.targets[request.getString("ref")] else {
-            val (x, y) = request.optInt("x") to request.optInt("y")
-            saved.targets.values.filter { it.visible && (it.clickable || it.longClickable) && it.bounds.contains(x, y) }
-                .minByOrNull { it.bounds.width().toLong() * it.bounds.height() }
+        return pressed.map { it.label } + read
+    }
+
+    /**
+     * The screen as it is now, read whole: the snapshot an action cites may be seconds old, or cut short
+     * by limits the request asked for. A slow read refuses the action: nothing has been done yet.
+     */
+    private fun liveScreen(): Snapshot = try { capture(store = false) } catch (_: TimeoutException) {
+        throw AutomationFailure("observation_timeout", "The screen could not be read to check this action; look again")
+    }
+
+    /** The picture of a window was last found free of payment words: a run of taps there reads it once. */
+    private var pictureCheckedWindows: String? = null
+    private var pictureCheckedAt = 0L
+
+    /**
+     * A wordless control in a window that says next to nothing (a game, a canvas, an app without
+     * accessibility): the controls cannot tell whether this is a payment step, so the picture has to.
+     * A window whose picture cannot be had is refused.
+     */
+    private fun checkPicture(request: JSONObject, saved: Snapshot, live: Snapshot) {
+        val target = if (request.has("ref")) saved.targets[request.getString("ref")] else null
+        val x = target?.bounds?.centerX() ?: request.optInt("x")
+        val y = target?.bounds?.centerY() ?: request.optInt("y")
+        val controls = controls(live)
+        if (!TouchGuard.saysAlmostNothing(controls, hit(live.targets.values, x, y)?.windowId) &&
+            !TouchGuard.pictureUnder(controls, x, y, live.screen.width, live.screen.height)) return
+        if (pictureCheckedWindows == live.windows && SystemClock.elapsedRealtime() - pictureCheckedAt < 2000) return
+        val read = try {
+            recognizeText(live).map { (text, box) -> TouchGuard.Line(text, box.left, box.top, box.right, box.bottom) }
+        } catch (error: InterruptedException) {
+            throw error
+        } catch (_: Exception) {
+            throw AutomationFailure("unreadable_screen", "This window shows almost no readable controls and Android does " +
+                "not give the agent its picture, so the payment firewall cannot tell what this press does. Stop and tell " +
+                "the user this step is theirs to do on the phone (on Android 10 and older, the live screen in Device & " +
+                "tools lets the agent read such windows).")
         }
-        val label = listOfNotNull(target?.label, request.optString("read_label").ifEmpty { null })
-            .firstOrNull { PaymentFirewall.paysOrMovesMoney(it) } ?: return null
-        return "“${label.trim().take(30)}” pays or moves money"
+        TouchGuard.pictureReason(read, x, y)?.let { throw paymentBlocked(it) }
+        pictureCheckedWindows = live.windows
+        pictureCheckedAt = SystemClock.elapsedRealtime()
+    }
+
+    private fun paymentBlocked(why: String) = AutomationFailure("payment_blocked", "Payment firewall: $why. The agent never " +
+        "pays, transfers or enters payment passwords, in any mode. Stop operating the phone now and tell the user in your " +
+        "reply that this step is theirs to finish on the phone; do not look for another way to do it.")
+
+    /**
+     * What every touch goes through, by what the finger lands on rather than what the action is called.
+     * A swipe with real movement presses nothing: in a list it is never refused for the words on the
+     * screen, outside one (a slider) a payment step still stops it.
+     */
+    private fun checkTouch(request: JSONObject, saved: Snapshot, live: Snapshot) {
+        val action = request.getString("action")
+        val swipe = action == "swipe"
+        val pressing = action in setOf("tap", "ref", "long_press") ||
+            (swipe && (pressedBySwipe(request, saved).isNotEmpty() || pressedBySwipe(request, live).isNotEmpty()))
+        if ((action == "tap" || (action == "long_press" && !request.has("ref")) || (swipe && pressing)) &&
+            (onSystemBar(saved, request.optInt("x"), request.optInt("y")))) {
+            throw AutomationFailure("system_bar", "That point is on the status or navigation bar, not the app. A control " +
+                "hidden up there (a header that slid away) comes back by scrolling the page up; or use tap_text")
+        }
+        val words = pressedWords(request, saved, live)
+        val screen = (saved.targets.values + live.targets.values).filter { it.visible }.map { it.label } +
+            request.optString("read_label").ifEmpty { null }
+        // The payment firewall: no mode, approval or confirmed=true lets the agent pay; the user does.
+        if (!swipe || pressing || !TouchGuard.startsInList(controls(live), request.optInt("x"), request.optInt("y"))) {
+            TouchGuard.paymentReason(screen, words)?.let { throw paymentBlocked(it) }
+        }
+        // A task-wide go-ahead does not cover these: the user says yes to each one in the conversation.
+        if (pressing) {
+            if (ElderGuard.on(this)) {
+                val app = observedPackage(saved.observation)
+                (ElderGuard.permissionRow(app, words) ?: ElderGuard.permissionPage(app, screen))?.let { row ->
+                    throw AutomationFailure("blocked_app", Blocked("“${row.trim().take(30)}”", true).refusal(false))
+                }
+            }
+            TouchGuard.consequential(words)?.let { label ->
+                val target = if (request.has("ref")) saved.targets[request.getString("ref")]
+                    else hit(saved.targets.values.filter { it.clickable || it.longClickable }, request.optInt("x"), request.optInt("y"))
+                val control = ConfirmationBook.Control(observedPackage(saved.observation), label,
+                    target?.className, target?.viewId)
+                // The engine hands back the token of this refusal once the user has answered: that very
+                // control, once. A swipe cannot carry one: it is pressed by tap or ref.
+                if (swipe || !confirmations.redeem(request.optString("confirmed").ifEmpty { null }, control)) {
+                    throw AutomationFailure("needs_confirmation", "“$label” deletes, clears, uninstalls, stops an app or pays. " +
+                        "Do not press it yet: ask the user in your reply whether to, and end your turn. Only after they say yes " +
+                        "in a new message, repeat the same action with confirmed=true (by tap or ref if this was a swipe); " +
+                        "before that it does not count.", confirmations.issue(control))
+                }
+            }
+            if (words.all { it.isNullOrBlank() }) checkPicture(request, saved, live)
+        }
     }
 
     private fun perform(request: JSONObject, saved: Snapshot): Boolean {
         val action = request.getString("action")
-        if ((action == "tap" || (action == "long_press" && !request.has("ref"))) &&
-            onSystemBar(saved, request.optInt("x"), request.optInt("y"))) {
-            throw AutomationFailure("system_bar", "That point is on the status or navigation bar, not the app. A control " +
-                "hidden up there (a header that slid away) comes back by scrolling the page up; or use tap_text")
+        if (action == "swipe" && TouchGuard.barelyMoves(request.optInt("x"), request.optInt("y"), request.optInt("x2"),
+                request.optInt("y2"), saved.screen.density)) {
+            throw AutomationFailure("not_a_swipe", "That swipe barely moves, and Android takes it as a tap. Use tap or ref " +
+                "for a control; a swipe has to travel")
         }
-        // The payment firewall: no mode, approval or confirmed=true lets the agent pay; the user does.
-        if (action in setOf("tap", "ref", "long_press", "type_text", "enter")) {
-            paymentBlock(request, saved)?.let { why ->
-                throw AutomationFailure("payment_blocked", "Payment firewall: $why. The agent never pays, transfers or " +
-                    "enters payment passwords, in any mode. Stop operating the phone now and tell the user in your reply " +
-                    "that this step is theirs to finish on the phone; do not look for another way to do it.")
-            }
-        }
-        // A task-wide go-ahead does not cover these: the user says yes to each one in the conversation.
-        if (action in setOf("tap", "ref", "long_press") && !request.optBoolean("confirmed")) {
-            consequentialLabel(request, saved)?.let { label ->
-                throw AutomationFailure("needs_confirmation", "“$label” deletes, clears, uninstalls, stops an app or pays. " +
-                    "Do not press it yet: ask the user in your reply whether to, and end your turn. Only after they say yes, " +
-                    "repeat the same action with confirmed=true.")
-            }
-        }
+        val live = if (action in TOUCHING_ACTIONS) liveScreen().also { checkTouch(request, saved, it) } else null
         // A global action would go to the phone's own screen: the background screen gets the key.
         if (action == "back" && onBackground) {
             onReader { recheck(saved) }
@@ -1419,10 +1692,10 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             return true
         }
         return when (action) {
-            "tap" -> gesture(saved, request.getInt("x"), request.getInt("y"), duration = 70)
-            "swipe" -> gesture(saved, request.getInt("x"), request.getInt("y"), request.getInt("x2"), request.getInt("y2"), 350)
+            "tap" -> gesture(saved, live!!, request.getInt("x"), request.getInt("y"), duration = 70)
+            "swipe" -> gesture(saved, live!!, request.getInt("x"), request.getInt("y"), request.getInt("x2"), request.getInt("y2"), 350)
             "long_press" -> if (request.has("ref")) actOnRef(request, saved)
-                else gesture(saved, request.getInt("x"), request.getInt("y"), duration = LONG_PRESS_MS)
+                else gesture(saved, live!!, request.getInt("x"), request.getInt("y"), duration = LONG_PRESS_MS)
             "scroll" -> actOnRef(request.apply { if (!has("ref")) put("ref", defaultScrollable(saved, getString("direction"))) }, saved)
             "enter" -> if (request.has("ref")) actOnRef(request, saved) else onReader {
                 recheck(saved)
@@ -1441,6 +1714,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             }
             "launch_app" -> {
                 val intent = launchIntent(request)
+                if (keptAway != null && (intent.component?.packageName ?: intent.`package`) == keptAway) throw ownApp()
                 if (onBackground) {
                     onReader { recheck(saved) }
                     BackgroundScreen.start(intent)?.let { throw AutomationFailure("launch_failed", it) }
@@ -1553,6 +1827,9 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         }
         // Words drawn in a picture (a badge, a game, a canvas) are not controls: read the screenshot.
         val read = runCatching { recognizeText(observed) }.getOrNull().orEmpty()
+        // "确认付款" anywhere in the same picture makes this a payment step, whichever words are tapped.
+        TouchGuard.pictureReason(read.map { (text, box) -> TouchGuard.Line(text, box.left, box.top, box.right, box.bottom) })
+            ?.let { throw paymentBlocked(it) }
         val key = plain(wanted)
         val line = read.filter { plain(it.first) == key }.ifEmpty { read.filter { plain(it.first).contains(key) } }
             .minByOrNull { it.first.length }
@@ -1606,7 +1883,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
                 shootStep(describeAction(request))
                 if (request.optBoolean("tap")) {
                     val tap = JSONObject().put("action", "ref").put("ref", found.key).put("snapshot_version", observed.version)
-                        .put("confirmed", request.optBoolean("confirmed"))
+                        .put("confirmed", request.optString("confirmed"))
                     panel?.step(describeAction(tap))
                     if (!perform(tap, observed)) throw AutomationFailure("action_failed", "Android rejected the tap")
                     invalidate()
@@ -1706,8 +1983,10 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             "dial" -> Intent(Intent.ACTION_DIAL, android.net.Uri.parse("tel:" + android.net.Uri.encode(request.optString("number"))))
             else -> throw AutomationFailure("invalid_arguments", "Unknown page")
         }.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        if (intent.resolveActivity(packageManager) == null) throw AutomationFailure("page_unavailable",
+        val opens = intent.resolveActivity(packageManager) ?: throw AutomationFailure("page_unavailable",
             "This phone has no page for $page; open Settings and look for it there")
+        // This app's pages, and the system's pages about it (stop it, its permissions, its notifications).
+        if (keptAway != null && (opens.packageName == keptAway || packageName == keptAway)) throw ownApp()
         panel?.step(describeAction(request))
         val windowsBefore = windowSignature()
         val packageBefore = frontPackage()
@@ -1952,9 +2231,9 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             fun checkSame(current: AccessibilityNodeInfo) {
                 val label = ownLabel(current) ?: if (current.isClickable) innerLabel(current) else null
                 val now = Target(target.windowId, target.path, Rect().also { current.getBoundsInScreen(it) },
-                    bounded(current.className, 160), bounded(current.viewIdResourceName, 255), false, label)
-                if (!target.sameControl(now) || current.isPassword ||
-                    (Build.VERSION.SDK_INT >= 34 && current.isAccessibilityDataSensitive)) {
+                    bounded(current.className, 160), bounded(current.viewIdResourceName, 255), false, label,
+                    context = rowWords(current, target.path))
+                if (!target.sameControl(now) || secret(current)) {
                     throw AutomationFailure("target_changed", "The referenced control changed; observe again")
                 }
                 // Said apart from a changed control: observing again shows the same greyed-out button.
@@ -2011,6 +2290,10 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
                     "long_press" -> if (longClickThrough(current)) return@onReader true
                     else -> if (clickThrough(current)) return@onReader true
                 }
+                // A finger dragged inside a button presses it: only what is a list is dragged.
+                if (operation == "scroll" && !target.scrollable) throw AutomationFailure("not_scrollable",
+                    "That control does not scroll and no list around it moved (it may be at its end). Pass the ref of " +
+                        "the list, or swipe")
                 // Neither it nor a container takes the action (custom drawn views): do it with a finger.
                 tapAt = Rect().also { current.getBoundsInScreen(it) }
                 false
@@ -2020,18 +2303,19 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
             if (done || area == null) return done
             val (x, y) = area.centerX() to area.centerY()
             if (x !in 0 until saved.screen.width || y !in 0 until saved.screen.height) return false
+            if (keptAway != null && TouchGuard.ownWindowAt(saved.observation.optJSONArray("windows"), x, y, packageName)) throw ownApp()
             val shield = panel
+            // A list that offers no scroll action is dragged inside its own bounds, checked like any swipe.
+            val drag = if (operation != "scroll") emptyList() else when (request.getString("direction")) {
+                "down", "bottom" -> listOf(x, area.top + area.height() * 3 / 4, x, area.top + area.height() / 4)
+                "up", "top" -> listOf(x, area.top + area.height() / 4, x, area.top + area.height() * 3 / 4)
+                "right" -> listOf(area.left + area.width() * 3 / 4, y, area.left + area.width() / 4, y)
+                else -> listOf(area.left + area.width() / 4, y, area.left + area.width() * 3 / 4, y)
+            }
+            if (drag.isNotEmpty()) checkTouch(JSONObject().put("action", "swipe").put("x", drag[0]).put("y", drag[1])
+                .put("x2", drag[2]).put("y2", drag[3]), saved, liveScreen())
             fun finger(): Boolean = when (operation) {
-                // A list that offers no scroll action is dragged inside its own bounds.
-                "scroll" -> {
-                    val (fromX, fromY, toX, toY) = when (request.getString("direction")) {
-                        "down", "bottom" -> listOf(x, area.top + area.height() * 3 / 4, x, area.top + area.height() / 4)
-                        "up", "top" -> listOf(x, area.top + area.height() / 4, x, area.top + area.height() * 3 / 4)
-                        "right" -> listOf(area.left + area.width() * 3 / 4, y, area.left + area.width() / 4, y)
-                        else -> listOf(area.left + area.width() / 4, y, area.left + area.width() * 3 / 4, y)
-                    }
-                    dispatch(saved, fromX, fromY, toX, toY, 350)
-                }
+                "scroll" -> dispatch(saved, drag[0], drag[1], drag[2], drag[3], 350)
                 "long_press" -> dispatch(saved, x, y, x, y, LONG_PRESS_MS)
                 else -> dispatch(saved, x, y, x, y, 70)
             }
@@ -2104,7 +2388,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         return node
     }
 
-    private fun gesture(saved: Snapshot, x: Int, y: Int, x2: Int = x, y2: Int = y, duration: Long): Boolean {
+    private fun gesture(saved: Snapshot, current: Snapshot, x: Int, y: Int, x2: Int = x, y2: Int = y, duration: Long): Boolean {
         if (x !in 0 until saved.screen.width || y !in 0 until saved.screen.height ||
             x2 !in 0 until saved.screen.width || y2 !in 0 until saved.screen.height) {
             throw AutomationFailure("out_of_bounds", "Coordinates must fit the current display; observe again")
@@ -2119,10 +2403,10 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
         // What is under the finger must still be what the snapshot showed there: content may change
         // around it (a clock, a video), but a feed that scrolled puts another row at the same place.
         val expected = hit(saved.targets.values, x, y)
-        val current = capture(store = false)
         if (current.targets.values.any { it.sensitive && it.bounds.contains(x, y) }) {
             throw AutomationFailure("protected_node", "The target contains password or sensitive content")
         }
+        if (keptAway != null && TouchGuard.ownWindowAt(current.observation.optJSONArray("windows"), x, y, packageName)) throw ownApp()
         val now = hit(current.targets.values, x, y)
         if (if (expected == null) now != null else !expected.sameControl(now)) {
             throw AutomationFailure("target_changed", "Something else is at these coordinates now; observe again")
@@ -2159,7 +2443,7 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
      * Which windows are on screen, in which order and where: what an observation's coordinates rely
      * on. The app's own floating bubble is left out: it moves and comes back on its own (snapping to
      * the side, reappearing after the app closes), which made every snapshot stale. It stays in the
-     * observation, so a tap that would land on it is still refused by the hit check.
+     * observation's windows, so a tap that would land on it is still refused (ownWindowAt).
      */
     private fun signature(list: List<AccessibilityWindowInfo>): String = list.filterNot { ownOverlay(it) }
         .joinToString(";") { window ->
@@ -2400,6 +2684,11 @@ class AgentAccessibilityService : AccessibilityService(), DisplayManager.Display
     @Suppress("DEPRECATION")
     private fun recycle(window: AccessibilityWindowInfo) { window.recycle() }
 }
+
+/** The app a snapshot shows, or null when it could not be read (a busy app, a window changing).
+ * Android's optString gives the text "null" for a JSON null, which read as another app. */
+internal fun observedPackage(observation: JSONObject): String? =
+    if (observation.isNull("package_name")) null else observation.optString("package_name").ifEmpty { null }
 
 internal fun matchesAndroidObservation(observation: JSONObject, expectation: JSONObject): Boolean {
     if (!observation.optBoolean("stable")) return false

@@ -15,6 +15,7 @@ import android.os.SystemClock
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -94,6 +95,9 @@ class VoiceNoteActivity : Activity() {
         recorder = media
         output = file
         startedAt = SystemClock.elapsedRealtime()
+        // The screen going off would stop the activity, and with it the recording (onStop): a
+        // meeting recorded with the phone on the table ran a minute or two.
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         handler.post(tick)
         status.text = if (OfflineSpeech.status(this).optBoolean("available")) {
             UiText.of(this, "正在录音。说完点「完成」，会在手机上转写并整理成纪要。",
@@ -109,6 +113,7 @@ class VoiceNoteActivity : Activity() {
         val media = recorder ?: return false
         recorder = null
         handler.removeCallbacks(tick)
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         return try {
             media.stop()
             true
@@ -141,6 +146,16 @@ class VoiceNoteActivity : Activity() {
         stopRecorder()
         output?.delete()
         finish()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // Dark mode, font size and the like come here (manifest) instead of recreating the
+        // activity, which would end the recording: the card is drawn again in the new colours.
+        val shown = status.text
+        setContentView(layout())
+        status.text = shown
+        if (recorder != null) elapsed.text = clock(SystemClock.elapsedRealtime() - startedAt)
     }
 
     override fun onStop() {

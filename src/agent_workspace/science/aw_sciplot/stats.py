@@ -182,7 +182,16 @@ def annotate_pairs(
 
     ordered = sorted(pairs, key=lambda item: abs(where(item[1]) - where(item[0])))
     if test == "tukey":
-        names = list(dict.fromkeys(str(name) for item in ordered for name in item))
+        # Tukey HSD depends on every group: the pooled variance and the number of groups k
+        # both come from all of them, not just the ones in the pairs drawn.
+        names = [
+            name
+            for name in dict.fromkeys(str(item) for item in frame[group].dropna().unique())
+            if len(_values(frame, group, value, name))
+        ]
+        for a, b in ordered:
+            if str(a) not in names or str(b) not in names:
+                raise ValueError(f"group {a} or {b} has no numbers")
         samples = [_values(frame, group, value, name) for name in names]
         tukey = scipy_stats.tukey_hsd(*samples)
         results = []
@@ -194,6 +203,7 @@ def annotate_pairs(
                     "a": str(a),
                     "b": str(b),
                     "test": "Tukey HSD",
+                    "groups": len(names),
                     "p": p,
                     "p_text": format_p(p),
                     "stars": stars(p),

@@ -67,10 +67,15 @@ object ShareSignature {
         }
     }.getOrDefault(false)
 
-    /** The first 6 bytes of the key's SHA-256, as "AB12-CD34-EF56": short enough to read aloud. */
+    /**
+     * The first 10 bytes (80 bits) of the key's SHA-256, as "AB12-CD34-EF56-7890-1A2B": still
+     * readable aloud. It was 6 bytes, few enough that a key with someone's fingerprint could be
+     * made on purpose. Codes shared before still import: the code carries the whole key, and the
+     * fingerprint is worked out from it when the code is read.
+     */
     @JvmStatic
     fun fingerprint(publicKey: String): String = runCatching {
-        MessageDigest.getInstance("SHA-256").digest(decoder.decode(publicKey)).take(6)
+        MessageDigest.getInstance("SHA-256").digest(decoder.decode(publicKey)).take(10)
             .joinToString("") { "%02X".format(it) }.chunked(4).joinToString("-")
     }.getOrDefault("")
 }

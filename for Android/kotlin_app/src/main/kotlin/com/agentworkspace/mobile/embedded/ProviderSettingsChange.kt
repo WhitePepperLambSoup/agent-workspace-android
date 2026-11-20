@@ -65,8 +65,12 @@ object ProviderSettingsChange {
     }
 
     private fun post(context: Context, token: String, path: String, body: JSONObject): Pair<Int, JSONObject> {
+        val base = EngineAddress.baseUrl(context)
+        // The body carries the provider's API key: only the engine that proves it holds the token gets
+        // it. Unverified counts as unreachable (an IOException), so the change takes the restart path.
+        EngineIdentity.require(base, token, 5000)
         val bytes = body.toString().toByteArray(Charsets.UTF_8)
-        val connection = java.net.URL("${EngineAddress.baseUrl(context)}$path").openConnection() as java.net.HttpURLConnection
+        val connection = java.net.URL("$base$path").openConnection() as java.net.HttpURLConnection
         try {
             connection.requestMethod = "POST"
             connection.instanceFollowRedirects = false
@@ -84,6 +88,21 @@ object ProviderSettingsChange {
         } finally {
             connection.disconnect()
         }
+    }
+
+    /**
+     * Save a change at once when no engine is serving, and return true: the caller then starts the
+     * engine again with it. False when one is serving; [apply] reserves the change with it instead.
+     * This is the start-up screen's way out when a setting (an on-device model too large for the
+     * phone, say) keeps the engine from starting: [apply] needs the engine and refused there.
+     */
+    fun saveWithoutEngine(context: Context, save: () -> Unit): Boolean {
+        val token = runCatching { File(context.applicationContext.filesDir, "serve.token").readText().trim() }
+            .getOrNull()?.takeIf { it.isNotEmpty() }
+        if (token != null) return false
+        coordinator.changeWithoutEngine(save)
+        restartingFromToken = null
+        return true
     }
 
     fun apply(context: Context, requireLocalEngine: Boolean = false, save: () -> Unit) {

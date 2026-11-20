@@ -3,8 +3,9 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import logging
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,12 +25,26 @@ from agent_workspace.tools.paths import (
 
 ApprovalResult = ApprovalDecision
 
+_LOGGER = logging.getLogger(__name__)
 _LOCATION_KEYS = ("source", "destination", "repository", "cwd", "path")
+# Files of .agent that instruct the agent or act on their own, with the file used of each kind
+# (the first found). They get the consent MCP servers and custom tools get: a cloned folder or an
+# earlier turn may have written them.
+_WORKSPACE_FILES = (
+    ("optimizations", ("optimizations.json", "optimizations.toml")),
+    ("prompt_assembly", ("prompt-assembly.json",)),
+    ("schedule", ("schedule.toml",)),
+    ("openapi", ("openapi.json",)),
+)
+WORKSPACE_FILE_KINDS = frozenset(kind for kind, _names in _WORKSPACE_FILES)
+_MAX_WORKSPACE_FILE_BYTES = 1024 * 1024
 # Native actions with a fixed effect, not general command execution. add_calendar_event (the
 # Android app) writes one event to the user's calendar after a one-time approval.
 # Process tools whose command the model does not write: run_checks runs the commands the user
 # set up for the folder.
 _FIXED_COMMAND_PROCESS_TOOLS = frozenset({"speak_text", "add_calendar_event", "run_checks"})
+# What outlasts the turn and comes back as context later: refused in a distrusted session.
+_LASTING_TOOLS = frozenset({"knowledge_add", "memory_write"})
 
 
 type ApprovalValue = ApprovalResult | bool
@@ -39,14 +54,30 @@ type ApprovalCallback = Callable[
 
 
 @dataclass(frozen=True, slots=True)
+class YoloRules:
+    """What YOLO mode allows on a platform. The defaults fit one with run_sandbox for commands."""
+
+    # No run_sandbox on this platform, so YOLO's commands run as host processes.
+    host_process: bool = False
+    # Effects asked about as in workspace mode. Any other unknown effect is refused.
+    ask_effects: frozenset[str] = frozenset()
+
+
+DEFAULT_YOLO_RULES = YoloRules()
+
+
+@dataclass(frozen=True, slots=True)
 class WorkspaceExtensionRequest:
-    kind: str  # "mcp" or "custom_tool"
+    kind: str  # "mcp", "custom_tool" or one of WORKSPACE_FILE_KINDS
     identifier: str
     command: tuple[str, ...]
     cwd: str
     config_source: str
     config_digest: str
     executable_sha256: str = ""
+    # The configuration lets YOLO mode run this extension's tools without asking (`yolo = true`):
+    # the approval says so, and its digest covers it.
+    yolo: bool = False
 
 
 class ExtensionApprovalRequiredError(PermissionError):
@@ -61,11 +92,55 @@ def compute_extension_digest(
     cwd: str,
     config_source: str,
     executable_sha256: str = "",
+    *,
+    command_files: dict[str, str] | None = None,
+    yolo: bool = False,
 ) -> str:
-    content = f"{list(command)}:{cwd}:{config_source}"
-    if executable_sha256:
-        content = f"{content}:{executable_sha256}"
+    """What an approval is bound to, as structured data: a joined string could read two
+    different (command, cwd) pairs, with colons in Windows paths, as the same."""
+    payload: dict[str, Any] = {
+        "command": list(command),
+        "cwd": cwd,
+        "config": config_source,
+        "executable_sha256": executable_sha256,
+        "command_files": dict(sorted((command_files or {}).items())),
+    }
+    if yolo:
+        # Turning `yolo = true` on is asked about again; without it the digest is as before, so
+        # existing approvals stay valid.
+        payload["yolo"] = True
+    content = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+_MAX_COMMAND_FILE_BYTES = 32 * 1024 * 1024
+
+
+def _workspace_command_files(command: Sequence[str], workspace_path: Path) -> dict[str, str]:
+    """The content of each file of the workspace a command names (["node", "tools/server.js"]):
+    an approval binds to it, so a script the agent rewrote after the approval, which a
+    checkpointed write allows without asking, is asked about again before it runs."""
+    try:
+        paths = WorkspacePaths(workspace_path)
+    except WorkspacePathError:
+        return {}
+    found: dict[str, str] = {}
+    for argument in command[:64]:
+        if not isinstance(argument, str) or not argument or "\x00" in argument:
+            continue
+        try:
+            candidate = paths.resolve(argument)
+            if not candidate.is_file():
+                continue
+            size = candidate.stat().st_size
+            relative = paths.relative(candidate)
+            if size > _MAX_COMMAND_FILE_BYTES:
+                found[relative] = f"size:{size}"
+                continue
+            found[relative] = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        except (WorkspacePathError, OSError):
+            continue
+    return found
 
 
 def build_custom_tool_extension_request(
@@ -74,11 +149,14 @@ def build_custom_tool_extension_request(
 ) -> WorkspaceExtensionRequest:
     command = (cdef.executable, *cdef.argv_template)
     config_source = cdef.path
+    yolo = getattr(cdef, "yolo", False) is True
     digest = compute_extension_digest(
         command,
         str(workspace_path),
         config_source,
         executable_sha256=cdef.executable_sha256,
+        command_files=_workspace_command_files(command, workspace_path),
+        yolo=yolo,
     )
     return WorkspaceExtensionRequest(
         kind="custom_tool",
@@ -88,6 +166,7 @@ def build_custom_tool_extension_request(
         config_source=config_source,
         config_digest=digest,
         executable_sha256=cdef.executable_sha256,
+        yolo=yolo,
     )
 
 
@@ -97,10 +176,13 @@ def build_mcp_extension_request(
 ) -> WorkspaceExtensionRequest:
     command = tuple(server.command)
     config_source = str(workspace_path / ".agent" / "mcp.toml")
+    yolo = getattr(server, "yolo", False) is True
     digest = compute_extension_digest(
         command,
         str(workspace_path),
         config_source,
+        command_files=_workspace_command_files(command, workspace_path),
+        yolo=yolo,
     )
     return WorkspaceExtensionRequest(
         kind="mcp",
@@ -109,7 +191,69 @@ def build_mcp_extension_request(
         cwd=str(workspace_path),
         config_source=config_source,
         config_digest=digest,
+        yolo=yolo,
     )
+
+
+def _openapi_server(content: bytes) -> tuple[str, ...]:
+    """Where an OpenAPI file's tools send requests, for the person asked to allow them."""
+    try:
+        url = json.loads(content)["servers"][0]["url"]
+    except (ValueError, KeyError, IndexError, TypeError):
+        return ()
+    return (url,) if isinstance(url, str) else ()
+
+
+def workspace_file_requests(
+    workspace_path: Path, *, kinds: Collection[str] = WORKSPACE_FILE_KINDS
+) -> list[WorkspaceExtensionRequest]:
+    """A request for each such file of the folder, bound to its content."""
+    requests: list[WorkspaceExtensionRequest] = []
+    for kind, names in _WORKSPACE_FILES:
+        path = next(
+            (
+                candidate
+                for name in names
+                if (candidate := workspace_path / ".agent" / name).is_file()
+            ),
+            None,
+        )
+        if kind not in kinds or path is None:
+            continue
+        if path.stat().st_size > _MAX_WORKSPACE_FILE_BYTES:
+            _LOGGER.warning("ignoring %s: larger than %d bytes", path, _MAX_WORKSPACE_FILE_BYTES)
+            continue
+        content = path.read_bytes()
+        command = _openapi_server(content) if kind == "openapi" else ()
+        content_sha256 = hashlib.sha256(content).hexdigest()
+        requests.append(
+            WorkspaceExtensionRequest(
+                kind=kind,
+                identifier=f".agent/{path.name}",
+                command=command,
+                cwd=str(workspace_path),
+                config_source=str(path),
+                config_digest=compute_extension_digest(
+                    command, str(workspace_path), str(path), executable_sha256=content_sha256
+                ),
+                executable_sha256=content_sha256,
+            )
+        )
+    return requests
+
+
+def workspace_file_decision(
+    request: WorkspaceExtensionRequest,
+    allow_workspace_extensions: bool,
+    extension_approval_callback: ExtensionApprovalCallback | None,
+) -> bool | Awaitable[bool]:
+    if allow_workspace_extensions:
+        return True
+    if extension_approval_callback is None:
+        raise ExtensionApprovalRequiredError(
+            f"workspace file {request.identifier} requires authorization before it is used"
+        )
+    return extension_approval_callback(request)
 
 
 class WorkspacePolicy:
@@ -124,11 +268,13 @@ class WorkspacePolicy:
         grant_store_path: StrPath | None = None,
         session_grant_ttl_seconds: int = 3600,
         clock: Callable[[], float] = time.time,
+        yolo_rules: YoloRules = DEFAULT_YOLO_RULES,
     ) -> None:
         self.paths = (
             workspace if isinstance(workspace, WorkspacePaths) else WorkspacePaths(workspace)
         )
         self.autonomy = autonomy
+        self.yolo_rules = yolo_rules
         self.approval_callback = approval_callback
         self.argument_policy = argument_policy
         self.autonomy_policy = autonomy_policy
@@ -142,7 +288,53 @@ class WorkspacePolicy:
         self._grant_store_path = Path(grant_store_path) if grant_store_path is not None else None
         self._clock = clock
         self._session_grant_expiry: dict[tuple[str, str], float] = {}
+        self._distrusted_sessions: set[str] = set()
+        self._instructed_sessions: set[str] = set()
         self._load_session_grants()
+
+    def remember_outside_instructions(self, session_id: str) -> None:
+        """The session read outside content that talks to the agent. From then on, in later turns
+        too, writing the workspace's instruction files or skills asks the user each time, whatever
+        the autonomy: written now, the content would instruct every later conversation."""
+        self._instructed_sessions.add(session_id)
+
+    def writes_instructions(
+        self, tool: ToolSpec, arguments: dict[str, Any], session_id: str | None
+    ) -> bool:
+        """Whether this call writes an instruction file or skill in a session that read outside
+        content talking to the agent (remember_outside_instructions)."""
+        if session_id not in self._instructed_sessions:
+            return False
+        if self._effect_kind(tool.side_effect) not in {"write", "move"}:
+            return False
+        # Here, not at the top: core.instructions imports the tools package, which imports this.
+        from agent_workspace.core.instructions import INSTRUCTION_FILENAMES
+
+        instruction_paths = {name.casefold() for name in INSTRUCTION_FILENAMES}
+        for raw_path in self._raw_paths(tool, arguments):
+            try:
+                relative = self.paths.relative(raw_path).casefold()
+            except WorkspacePathError:
+                continue
+            if relative in instruction_paths or relative.startswith(".agent/skills/"):
+                return True
+        return False
+
+    def distrust_session(self, session_id: str) -> None:
+        """Outside content talked to the agent: the session's grants go, and until its next turn
+        every step asks, whatever the autonomy, and nothing lasting is written."""
+        self._distrusted_sessions.add(session_id)
+        self.revoke_session_grant(session_id)
+
+    def trust_session_again(self, session_id: str) -> None:
+        self._distrusted_sessions.discard(session_id)
+
+    def session_distrusted(self, session_id: str | None) -> bool:
+        return session_id in self._distrusted_sessions
+
+    def grants_sandbox_for_session(self, arguments: dict[str, Any]) -> bool:
+        """Whether this sandbox run can be allowed for the session, for the approval dialog."""
+        return self.autonomy is Autonomy.WORKSPACE and not arguments.get("_sandbox_sensitive_count")
 
     async def authorize(
         self,
@@ -174,8 +366,20 @@ class WorkspacePolicy:
                 frozenset(granted_tools),
             )
         effect = self._effect_kind(tool.side_effect)
+        distrusted = session_id in self._distrusted_sessions
+        if distrusted:
+            if effect == "memory_write" or tool.name in _LASTING_TOOLS:
+                return ApprovalResult(
+                    False,
+                    "outside content in this turn talked to the agent; nothing lasting is written",
+                )
+            effective_autonomy = Autonomy.ASK
         if effect == "session_state":
             effect = "read_state" if arguments.get("action") == "list" else "write_state"
+            # The tool found, while preparing the call, that it removes or replaces something the
+            # user kept (the phone's memory, app notes and skills): asked as a memory change.
+            if arguments.get("_confirm_change"):
+                effect = "memory_write"
         elif tool.name == "browser":
             action = arguments.get("action")
             if action in {"screenshot", "print_pdf"} and "path" in arguments:
@@ -218,6 +422,15 @@ class WorkspacePolicy:
             sensitive_path = True
         sensitive_read = effect == "read" and sensitive_path
 
+        if self.writes_instructions(tool, arguments, session_id):
+            return await self._request_approval(
+                tool,
+                arguments,
+                "this conversation read outside content that talks to the agent, and this file "
+                "instructs every later conversation of the workspace: approve each write",
+                grant_key=None,
+            )
+
         if effective_autonomy is Autonomy.FULL_ACCESS:
             # Full access removes approval prompts for the explicitly selected
             # session, including sensitive files, host processes, network
@@ -232,11 +445,32 @@ class WorkspacePolicy:
                 "Full access mode allows this operation without approval; audit recorded",
             )
 
+        if effective_autonomy is Autonomy.YOLO and effect in self.yolo_rules.ask_effects:
+            effective_autonomy = Autonomy.WORKSPACE
+
         if effective_autonomy is Autonomy.YOLO:
-            if effect == "process" and tool.name not in _FIXED_COMMAND_PROCESS_TOOLS:
+            # A workspace extension's tool (an MCP server's or a custom tool) runs in YOLO mode only
+            # when its configuration says `yolo = true`, on every platform; it then goes on as any
+            # other YOLO action, with the same record.
+            if tool.yolo_opt_in is False and self.yolo_rules.host_process:
                 return ApprovalResult(
                     False,
-                    "YOLO host process execution is disabled; use run_sandbox",
+                    "YOLO mode does not run a workspace extension's tools (an MCP server's or a "
+                    "custom tool) without asking, so this tool is not available now; it works in "
+                    "workspace mode, where each call is approved",
+                )
+            if (
+                effect == "process"
+                and tool.name not in _FIXED_COMMAND_PROCESS_TOOLS
+                and not self.yolo_rules.host_process
+                and tool.yolo_opt_in is not True
+            ):
+                # Not "use run_sandbox": an MCP server's or custom tool cannot be redone there.
+                return ApprovalResult(
+                    False,
+                    "YOLO mode starts no programs on this computer except through run_sandbox, "
+                    "so this tool is not available now; it works in workspace mode, where each "
+                    "call is approved",
                 )
             allowed_effects = {
                 "delete",
@@ -276,9 +510,21 @@ class WorkspacePolicy:
                     grant_key=None,
                 )
             if effective_autonomy is Autonomy.WORKSPACE:
-                return ApprovalResult(
-                    True,
-                    "networkless sandbox execution cannot directly mutate the workspace",
+                # Only the workspace is a copy: the command runs on this computer, and its files
+                # and the network are within reach. Asked once for a session, since a turn of
+                # coding runs many.
+                sandbox_grant = (
+                    (session_id, tool.name) if session_id and not untrusted_context else None
+                )
+                if sandbox_grant is not None and sandbox_grant in self._session_grants:
+                    return ApprovalResult(
+                        True, "sandbox runs are approved for this session", ApprovalScope.SESSION
+                    )
+                return await self._request_approval(
+                    tool,
+                    arguments,
+                    "a sandbox command runs on this computer and requires approval",
+                    grant_key=sandbox_grant,
                 )
             return await self._request_approval(
                 tool,
@@ -297,7 +543,10 @@ class WorkspacePolicy:
 
         grant_key = (
             (session_id, tool.name)
-            if session_id and not sensitive_path and (not file_effect or location is True)
+            if session_id
+            and not distrusted
+            and not sensitive_path
+            and (not file_effect or location is True)
             else None
         )
         if effect in {
@@ -405,10 +654,14 @@ class WorkspacePolicy:
                 for value in (operation.get("path"), operation.get("to"))
                 if isinstance(value, str) and value
             )
+        input_schema = tool.input_schema
+        properties = input_schema.get("properties") if isinstance(input_schema, dict) else None
+        declared = properties if isinstance(properties, dict) else {}
         keys = (
             ("source", "destination")
             if tool.name == "move_path"
-            else ("repository",)
+            # git_blame names a file besides the repository: checked for sensitive data too.
+            else ("repository", "path")
             if tool.name.startswith("git_")
             else ("cwd",)
             if tool.name
@@ -419,6 +672,9 @@ class WorkspacePolicy:
                 "start_background_job",
                 "stop_background_job",
             }
+            # Any other tool that runs in a folder (run_wsl): without cwd it runs in the
+            # workspace, as the default says, rather than being refused for a missing path.
+            or ("cwd" in declared and "path" not in declared)
             else ("cwd",)
             if isinstance(arguments.get("cwd"), str)
             else ("path",)
@@ -429,6 +685,12 @@ class WorkspacePolicy:
             value = arguments.get(key, default)
             if isinstance(value, str) and value:
                 values.append(value)
+        # Lists of workspace files (git_diff, code_diagnostics): each one is checked too.
+        listed = arguments.get("paths")
+        if (tool.name.startswith("git_") or tool.name == "code_diagnostics") and isinstance(
+            listed, list
+        ):
+            values.extend(value for value in listed if isinstance(value, str) and value)
         return tuple(values)
 
     def _resolved_path_is_sensitive(self, raw_path: str) -> bool:

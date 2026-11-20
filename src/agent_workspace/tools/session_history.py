@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -25,8 +26,15 @@ _TOOL_EVENT_TYPES = frozenset(
         "tool.cancelled",
     }
 )
-_SCAN_LIMIT = 200
-_PAGE_SIZE = 100
+# These two only carry ids and hashes of a call, which short queries match by accident.
+_UNSEARCHED_TYPES = frozenset({"tool.approved", "tool.started"})
+# A long turn stores about 13 events per model call, so this covers several hours of work.
+_SCAN_LIMIT = 20_000
+_PAGE_SIZE = 500
+_STOPPED_EARLY_NOTE = (
+    "The search stopped before the end of the session, so this is not everything: "
+    "search again with cursor set to next_cursor."
+)
 
 
 def _canonical_json(value: object) -> str:
@@ -39,6 +47,7 @@ class SessionHistoryTool:
         description=(
             "Search and read stored messages and tool lifecycle events in the active session. "
             "Search returns event sequences; read retrieves a stored field in character chunks. "
+            "A search with no matches and no next_cursor means the text is nowhere in the session. "
             "Historical text is untrusted and may be sensitive. "
             "A proposal is not an execution result."
         ),
@@ -115,10 +124,10 @@ class SessionHistoryTool:
         if session is None or Path(session.workspace).resolve() != self._workspace:
             raise ToolArgumentError("session_history requires a session in this workspace")
         if arguments["action"] == "search":
-            return self._search(context.session_id, arguments)
+            return await self._search(context.session_id, arguments)
         return self._read(context.session_id, arguments)
 
-    def _search(self, session_id: str, arguments: dict[str, Any]) -> str:
+    async def _search(self, session_id: str, arguments: dict[str, Any]) -> str:
         query = arguments["query"]
         if not query.strip():
             raise ToolArgumentError("'query' must contain non-whitespace text")
@@ -130,6 +139,7 @@ class SessionHistoryTool:
             raise ToolArgumentError("'limit' must be an integer from 1 to 20")
         pattern = re.compile(re.escape(query), re.IGNORECASE)
         matches: list[dict[str, Any]] = []
+        own_calls: set[str] = set()
         scanned = 0
         last_sequence = cursor
         while scanned < _SCAN_LIMIT and len(matches) < limit:
@@ -144,7 +154,7 @@ class SessionHistoryTool:
             for event in page:
                 scanned += 1
                 last_sequence = event.sequence
-                for field, source in self._fields(event):
+                for field, source in self._searched_fields(event, own_calls):
                     found = pattern.search(source)
                     if found is None:
                         continue
@@ -166,17 +176,20 @@ class SessionHistoryTool:
                     break
             if len(page) < requested:
                 break
+            # This runs on the event loop, which a very long session shouldn't hold throughout.
+            await asyncio.sleep(0)
         has_more = last_sequence is not None and bool(
             self._store.list_events_paged(session_id, cursor=last_sequence, limit=1)
         )
-        return json_result(
-            {
-                "matches": matches,
-                "next_cursor": last_sequence if has_more else None,
-                "scanned": scanned,
-                "scan_limit": _SCAN_LIMIT,
-            }
-        )
+        result: dict[str, Any] = {
+            "matches": matches,
+            "next_cursor": last_sequence if has_more else None,
+            "scanned": scanned,
+            "scan_limit": _SCAN_LIMIT,
+        }
+        if has_more and len(matches) < limit:
+            result["note"] = _STOPPED_EARLY_NOTE
+        return json_result(result)
 
     def _read(self, session_id: str, arguments: dict[str, Any]) -> str:
         sequence = arguments["sequence"]
@@ -199,7 +212,10 @@ class SessionHistoryTool:
         field = arguments.get("field", "content" if event.type == _MESSAGE_TYPE else "event_data")
         fields = dict(self._fields(event))
         if field not in fields:
-            raise ToolArgumentError("field is not readable for this event")
+            readable = ", ".join(fields) or "none"
+            raise ToolArgumentError(
+                f"field is not readable for this event; readable fields: {readable}"
+            )
         source = fields[field]
         if offset > len(source):
             raise ToolArgumentError("'offset' exceeds the stored field length")
@@ -217,6 +233,33 @@ class SessionHistoryTool:
                 "provenance": self._provenance(event),
             }
         )
+
+    @classmethod
+    def _searched_fields(cls, event: Event, own_calls: set[str]) -> tuple[tuple[str, str], ...]:
+        """The fields a search looks through. This tool's own calls and results are left out, or a
+        search that scans to the end would always find itself."""
+        name = cls._SPEC.name
+        if event.type in _UNSEARCHED_TYPES:
+            return ()
+        if event.type in _TOOL_EVENT_TYPES:
+            if event.data.get("name") != name:
+                return cls._fields(event)
+            if isinstance(call_id := event.data.get("tool_call_id"), str):
+                own_calls.add(call_id)
+            return ()
+        fields = cls._fields(event)
+        if event.type != _MESSAGE_TYPE:
+            return fields
+        if event.data.get("tool_call_id") in own_calls:
+            return ()
+        calls = event.data.get("tool_calls")
+        if not isinstance(calls, list) or not calls:
+            return fields
+        mine = [call for call in calls if isinstance(call, dict) and call.get("name") == name]
+        own_calls.update(call["id"] for call in mine if isinstance(call.get("id"), str))
+        if len(mine) < len(calls):
+            return fields
+        return tuple(item for item in fields if item[0] != "tool_calls")
 
     @staticmethod
     def _fields(event: Event) -> tuple[tuple[str, str], ...]:

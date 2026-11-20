@@ -414,7 +414,7 @@ class MobileTaskStore:
         event = self.event_store.append(
             Event(
                 session_id=task.session_id,
-                type="mobile.event",
+                type=TASK_STREAM_EVENT if event_type == "assistant.delta" else "mobile.event",
                 data={
                     "task_id": task.task_id,
                     "session_id": task.session_id,
@@ -432,18 +432,21 @@ class MobileTaskStore:
             created_at=event.created_at,
         )
 
-    def events(self, task_id: str, after: int = 0) -> list[MobileEvent]:
+    def events(self, task_id: str, after: int = 0, *, stream: bool = True) -> list[MobileEvent]:
+        """A task's events after a sequence; ``stream=False`` leaves out the reply as it was written,
+        for a caller after the task's other events."""
         task = self.get(task_id)
         if after < 0:
             raise ValueError("after must be non-negative")
         result: list[MobileEvent] = []
-        for event in self._task_events(task.session_id, after):
+        prefixes = (*_TASK_EVENT_PREFIXES, TASK_STREAM_EVENT) if stream else _TASK_EVENT_PREFIXES
+        for event in self._task_events(task.session_id, after, prefixes):
             if event.sequence is None or event.sequence <= after:
                 continue
             if event.type == "mobile.task.created" or event.type.startswith("mobile.task."):
                 event_type = event.type
                 payload = dict(event.data)
-            elif event.type == "mobile.event":
+            elif event.type in ("mobile.event", TASK_STREAM_EVENT):
                 if event.data.get("task_id") != task_id:
                     continue
                 event_type = event.data.get("event_type")
@@ -466,7 +469,7 @@ class MobileTaskStore:
             )
         return result
 
-    def _task_events(self, session_id: str, after: int) -> Iterator[Event]:
+    def _task_events(self, session_id: str, after: int, prefixes: tuple[str, ...]) -> Iterator[Event]:
         """A session's task events after a sequence, read by type and position where the store can.
         The console polls a running task's events (the stream every 0.1 s): reading the whole
         conversation each time decoded every message and tool result in it."""
@@ -475,7 +478,9 @@ class MobileTaskStore:
             yield from self.event_store.list_events(session_id)
             return
         while True:
-            events, _oldest, _newest, has_more = self._replay_task_events(replay, session_id, after)
+            events, _oldest, _newest, has_more = self._replay_task_events(
+                replay, session_id, after, prefixes
+            )
             yield from events
             if not has_more or not events:
                 return
@@ -499,19 +504,28 @@ class MobileTaskStore:
     def _rebuild(self) -> dict[str, MobileTask]:
         """The tasks visible to this store.
 
-        Status is polled every few seconds while a task runs, so tasks are projected once per
-        event store and advanced with only the events appended since the last call, instead of
-        re-reading every event of every session each time.
+        Status is polled every few seconds while a task runs (twice a second by the console), so
+        tasks are projected once per event store and advanced with only the events appended since
+        the last call. One query says which sessions moved, whichever store wrote to them; the
+        others are not asked at all, which with a few hundred conversations was most of the work
+        of every poll.
         """
         replay = getattr(self.event_store, "replay_events", None)
         projection = _projection(self.event_store) if callable(replay) else None
         if projection is None:
             return self._rebuild_full()
+        heads = getattr(self.event_store, "session_heads", None)
         with projection.lock:
-            sessions = {
-                session.id: session.workspace
-                for session in self.event_store.list_sessions(limit=2_147_483_647)
-            }
+            rows = (
+                heads()
+                if callable(heads)
+                else [
+                    (session.id, session.workspace, None)
+                    for session in self.event_store.list_sessions(limit=2_147_483_647)
+                ]
+            )
+            sessions = {session_id: workspace for session_id, workspace, _newest in rows}
+            newest_known = {session_id: newest for session_id, _workspace, newest in rows}
             for gone in set(projection.cursors) - set(sessions):
                 projection.forget(gone)
             visible = {
@@ -525,6 +539,8 @@ class MobileTaskStore:
             }
             for session_id in visible:
                 after = projection.cursors.get(session_id, 0)
+                if newest_known[session_id] == after:
+                    continue
                 while True:
                     events, _oldest, newest, has_more = self._replay_task_events(
                         replay, session_id, after
@@ -549,11 +565,18 @@ class MobileTaskStore:
             }
 
     @staticmethod
-    def _replay_task_events(replay: Any, session_id: str, after: int) -> Any:
+    def _replay_task_events(
+        replay: Any, session_id: str, after: int, prefixes: tuple[str, ...] | None = None
+    ) -> Any:
         """Only the events the projection folds in: at engine start this skipped decoding every
         message and tool event of every conversation (1.6 s on a phone with a few months of use)."""
         try:
-            return replay(session_id, after_sequence=after, limit=1000, type_prefixes=_TASK_EVENT_PREFIXES)
+            return replay(
+                session_id,
+                after_sequence=after,
+                limit=1000,
+                type_prefixes=prefixes or _TASK_EVENT_PREFIXES,
+            )
         except TypeError:  # an event store without type filtering
             return replay(session_id, after_sequence=after, limit=1000)
 
@@ -612,6 +635,9 @@ def _projection(event_store: Any) -> _TaskProjection | None:
 
 # The event types _apply_task_event reads.
 _TASK_EVENT_PREFIXES = ("mobile.task.", "mobile.event")
+# The reply as it was written: dozens of rows a model call, of no use once it has finished. Kept
+# apart from "mobile.event" so that engine start and opening a conversation do not read them.
+TASK_STREAM_EVENT = "mobile.delta"
 
 
 def _apply_task_event(tasks: dict[str, MobileTask], event: Event) -> None:

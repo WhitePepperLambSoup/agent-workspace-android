@@ -271,6 +271,55 @@ class Revisions:
             self._comment_around(anchor_first, anchor_last, comment)
         return read_paragraph(paragraph.part, element)
 
+    def mark_change(self, paragraph: Paragraph, start: int, end: int, old: str) -> Paragraph:
+        """Show [start, end) as text that replaced ``old``: those runs are marked inserted and
+        ``old`` goes in before them as deleted text. The paragraph's own runs stay where they
+        are, with their links, fields, pictures and bookmarks; text already marked inserted
+        by someone else keeps that mark."""
+        element = paragraph.element
+        for offset in (start, end):
+            paragraph = read_paragraph(paragraph.part, element)
+            _split_run(paragraph, offset)
+        paragraph = read_paragraph(paragraph.part, element)
+        current = _runs_between(paragraph, start, end) if end > start else []
+        if old:
+            template = current[0].run if current else self._run_before(paragraph, start)
+            deleted = self.mark(_DEL)
+            run = ET.SubElement(deleted, _R)
+            properties = template.find(_RPR) if template is not None else None
+            if properties is not None:
+                run.append(copy.deepcopy(properties))
+            for index, line in enumerate(clean(old).split("\n")):
+                if index:
+                    ET.SubElement(run, q(W, "br"))
+                _set_text(ET.SubElement(run, _DEL_TEXT), line)
+            if current:
+                parent = current[0].parent
+                parent.insert(list(parent).index(current[0].run), deleted)
+            else:
+                parent, position = self._insert_point(paragraph, start, None)
+                parent.insert(position, deleted)
+        groups: list[list[Piece]] = []
+        for piece in current:
+            if piece.parent.tag in {_INS, q(W, "moveTo")}:
+                continue
+            if (
+                groups
+                and groups[-1][-1].parent is piece.parent
+                and _adjacent(piece.parent, groups[-1][-1].run, piece.run)
+            ):
+                groups[-1].append(piece)
+            else:
+                groups.append([piece])
+        for group in groups:
+            parent = group[0].parent
+            wrapper = self.mark(_INS)
+            parent.insert(list(parent).index(group[0].run), wrapper)
+            for piece in group:
+                parent.remove(piece.run)
+                wrapper.append(piece.run)
+        return read_paragraph(paragraph.part, element)
+
     def comment(self, paragraph: Paragraph, start: int, end: int, text: str) -> None:
         """A comment on [start, end) of the paragraph, the text unchanged."""
         element = paragraph.element

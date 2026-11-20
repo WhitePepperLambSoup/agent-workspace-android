@@ -71,6 +71,8 @@ Set-Location 'for Android/kotlin_app'
 
 缺少变量或没有显式选择 `--signed` 都会停止，不把签名凭据放入命令参数/源码/导出包。此流程不生成、不替换、不上传用户的 debug keystore。签名证书决定覆盖升级的兼容性；第一次选择 release 身份前记录证书摘要并妥善保管。使用 `apksigner verify --print-certs APK` 检查产物，保留当前已安装身份；签名不同不能覆盖安装，不能通过卸载解决。
 
+本地测试包另有两个开关，只用于自己的手机：`AGENT_WEBVIEW_DEBUG=1` 打开控制台页面的 WebView 远程调试（连着 USB 调试的电脑可以用 chrome://inspect 读到页面，包括网关 token 和对话），`AGENT_TEST_APP_SUFFIX` 换掉应用 id，让测试包装在正式版旁边成为一个全新安装。只要设置了其中一个，`build_release.py` 就会拒绝构建，除非同时加上 `--local-test`；加上后会提示这个 APK 不能发布。发布流程从不使用 `--local-test`。保留数据覆盖安装到测试手机的测试包用 `--signed --local-test` 加 `AGENT_WEBVIEW_DEBUG=1`；全新的并排副本用 `--local-test` 加 `AGENT_TEST_APP_SUFFIX`。
+
 `.github/workflows/android.yml` 在 Android/共享源码变更时跑 Python、Web、JNI/APK 构建。手动 `signed_release` 选项读取 GitHub secrets `AGENT_ANDROID_KEYSTORE_BASE64` 和后三个签名字段，将临时 keystore 写入 runner 临时目录并在结束时删除，只上传 APK 构建工件，不公开发布到商店。fork PR 不读取 release secrets。
 
 ## 设备验证和覆盖升级
@@ -87,6 +89,6 @@ CI 的可选 `emulator_smoke` 在一次性 API35 x86_64 模拟器上运行 SQLit
 python "for Android/export_android_source.py" --output artifacts/android-public-source.zip
 ```
 
-导出包含当前 Android/共享 Python 源码、固定构建配置、标准 wrapper、许可说明，以及用于安装移动 Web 构建与测试依赖的 `for Android/package.json` / `package-lock.json`（与桌面端 `desktop/` 完全独立）。它排除 `.env`、凭据、数据库、设备备份、个人 SDK 路径、签名、GGUF、构建输出、JNI 下载资产和依赖缓存。导出还包含未提交的当前源码，发布前应审阅文件清单 `ANDROID_SOURCE_MANIFEST.json` 和内容。
+导出包含当前 Android/共享 Python 源码、固定构建配置、标准 wrapper、许可说明，以及用于安装移动 Web 构建与测试依赖的 `for Android/package.json` / `package-lock.json`（与桌面端 `desktop/` 完全独立）。它排除 `.env`、凭据、数据库、设备备份、个人 SDK 路径、签名、GGUF、构建输出、JNI 下载资产和依赖缓存。在 git 检出里只导出 git 跟踪的文件（按工作区里的当前内容），被 .gitignore 忽略的本地文件（日志、笔记等）不会进入；要连同未跟踪也未忽略的新文件一起导出，加 `--include-untracked`，这些文件会逐个列出并写进清单的 `untracked_files`。发布前仍应审阅文件清单 `ANDROID_SOURCE_MANIFEST.json` 和内容。
 
 解压到新的目录后按本页固定环境重新运行准备、测试、wrapper 构建；完整许可证从随附源码校验并复制，其他生成依赖从固定 URL 和摘要重新取得，不依赖开发机器的 `output/` 缓存。实际编译验证通过后才能声称源码包可重建。分发 APK 时同时提供本项目 Apache-2.0 许可、第三方 notices、打包的对应源代码及重建/单点二进制修改说明，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

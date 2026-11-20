@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import contextlib
 import ctypes
 import multiprocessing
@@ -9,8 +10,11 @@ import pickle
 import signal
 import subprocess
 import sys
+import threading
 import time
+from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from typing import Any, cast
@@ -36,7 +40,11 @@ _PROCESS_TERMINATE = 0x0001
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _TOOL_WORKER_ARGUMENT = "--agent-workspace-tool-worker"
-_MAX_WORKER_MESSAGE_BYTES = 16 * 1024 * 1024
+# Above the largest payload a tool may pass: run_sandbox returns up to 64 MiB of changed files
+# (sandbox_staging._MAX_ARTIFACT_BATCH_BYTES) and applies a 16 MiB file, plus pickle framing.
+_MAX_WORKER_MESSAGE_BYTES = 80 * 1024 * 1024
+_SPARES_ENV = "AGENT_WORKSPACE_TOOL_WORKER_SPARES"
+_SPARE_IDLE_SECONDS = 300.0
 
 
 def _active_process_limit(*, allow_children: bool) -> int:
@@ -93,7 +101,8 @@ class _JobExtendedLimitInformation(ctypes.Structure):
 
 
 class _WindowsJob:
-    def __init__(self, *, allow_children: bool = False) -> None:
+    def __init__(self, *, allow_children: bool = False, limits: bool = True) -> None:
+        """Without limits the job only groups a process tree: closing it kills nothing."""
         kernel32: Any = ctypes.WinDLL("Kernel32.dll", use_last_error=True)
         kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
         kernel32.CreateJobObjectW.restype = ctypes.c_void_p
@@ -117,6 +126,12 @@ class _WindowsJob:
             raise _windows_worker_error("CreateJobObjectW")
         self._kernel32 = kernel32
         self._handle: int | None = cast(int, handle)
+        if limits:
+            self.set_limits(allow_children=allow_children)
+
+    def set_limits(self, *, allow_children: bool) -> None:
+        handle = self._handle
+        kernel32 = self._kernel32
         information = _JobExtendedLimitInformation()
         information.basic_limit_information.limit_flags = (
             _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
@@ -144,6 +159,20 @@ class _WindowsJob:
             )
         if not kernel32.SetInformationJobObject(
             handle,
+            _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+            ctypes.byref(information),
+            ctypes.sizeof(information),
+        ):
+            self.close()
+            raise _windows_worker_error("SetInformationJobObject")
+
+    def kill_on_close(self) -> None:
+        """Closing the job, or this process ending, ends every process in it; nothing else
+        is limited."""
+        information = _JobExtendedLimitInformation()
+        information.basic_limit_information.limit_flags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not self._kernel32.SetInformationJobObject(
+            self._handle,
             _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
             ctypes.byref(information),
             ctypes.sizeof(information),
@@ -250,6 +279,206 @@ def _worker_command() -> tuple[str, ...]:
     )
 
 
+class _WorkerNotStarted(Exception):
+    """A waiting worker was gone before it took its task, so the task has not run."""
+
+
+@dataclass(frozen=True, slots=True)
+class _WaitingWorker:
+    identity: tuple[object, ...]
+    process: subprocess.Popen[bytes]
+    job: _WindowsJob
+
+    def dismiss(self) -> None:
+        # Closing the job kills the worker: KILL_ON_JOB_CLOSE.
+        self.job.close()
+        for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+            if stream is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    stream.close()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            self.process.wait(timeout=_TERMINATE_SECONDS)
+
+
+def _launch_identity() -> tuple[object, ...] | None:
+    """What a worker takes from this process when it starts, and so must still hold when it runs."""
+    try:
+        return (_worker_command(), os.getcwd(), tuple(sorted(os.environ.items())))
+    except OSError:
+        return None
+
+
+class _WorkerSpares:
+    """Workers already started, each waiting for its one task, so that a tool call need not wait
+    for a process to start and import (on Windows over a second, and a sandbox run takes four or
+    five). Each still does one task and ends, as a worker started for it would. Each is in its Job
+    Object from the start, so it cannot outlive this process; idle ones go away after a while."""
+
+    def __init__(self, count: int, *, idle_seconds: float = _SPARE_IDLE_SECONDS) -> None:
+        self._count = count
+        self._idle_seconds = idle_seconds
+        self._condition = threading.Condition()
+        self._waiting: deque[_WaitingWorker] = deque()
+        self._identity: tuple[object, ...] | None = None
+        self._last_claim = 0.0
+        self._thread: threading.Thread | None = None
+        self._closed = False
+
+    def claim(self, *, allow_children: bool) -> _WaitingWorker | None:
+        """A worker ready for a task with these limits, or None to start one as usual; each claim
+        also has the next one started, for the call after this."""
+        identity = _launch_identity()
+        stale: list[_WaitingWorker] = []
+        found: _WaitingWorker | None = None
+        with self._condition:
+            if self._closed or identity is None:
+                return None
+            self._last_claim = time.monotonic()
+            self._identity = identity
+            while self._waiting and found is None:
+                worker = self._waiting.popleft()
+                if worker.identity == identity and worker.process.poll() is None:
+                    found = worker
+                else:
+                    stale.append(worker)
+            if self._thread is None:
+                self._thread = threading.Thread(
+                    target=self._keep_ready, name="agent-workspace-worker-spares", daemon=True
+                )
+                self._thread.start()
+            self._condition.notify_all()
+        for worker in stale:
+            worker.dismiss()
+        if found is None:
+            return None
+        try:
+            found.job.set_limits(allow_children=allow_children)
+        except ToolWorkerError:
+            found.dismiss()
+            return None
+        return found
+
+    def close(self) -> None:
+        with self._condition:
+            self._closed = True
+            waiting = list(self._waiting)
+            self._waiting.clear()
+            self._condition.notify_all()
+        for worker in waiting:
+            worker.dismiss()
+
+    def _keep_ready(self) -> None:
+        while True:
+            with self._condition:
+                while not self._closed and not self._should_start() and not self._idle():
+                    remaining = self._idle_seconds - (time.monotonic() - self._last_claim)
+                    self._condition.wait(timeout=max(0.01, remaining))
+                if self._closed or self._idle():
+                    idle = list(self._waiting)
+                    self._waiting.clear()
+                    self._thread = None
+                    break
+                identity = self._identity
+            assert identity is not None
+            try:
+                worker = _start_waiting_worker(identity)
+            except (OSError, ToolWorkerError):
+                # Starting one at the moment of need reports the failure to the tool call.
+                with self._condition:
+                    self._thread = None
+                return
+            with self._condition:
+                self._waiting.append(worker)
+                if self._closed:
+                    self._waiting.remove(worker)
+                    self._thread = None
+                    idle = [worker]
+                    break
+        for worker in idle:
+            worker.dismiss()
+
+    def _should_start(self) -> bool:
+        return len(self._waiting) < self._count
+
+    def _idle(self) -> bool:
+        return time.monotonic() - self._last_claim >= self._idle_seconds
+
+
+def _start_waiting_worker(identity: tuple[object, ...]) -> _WaitingWorker:
+    job = _WindowsJob(allow_children=False)
+    try:
+        process = subprocess.Popen(
+            _worker_command(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except OSError:
+        job.close()
+        raise
+    worker = _WaitingWorker(identity, process, job)
+    try:
+        job.assign(process.pid)
+    except ToolWorkerError:
+        with contextlib.suppress(OSError):
+            process.kill()
+        worker.dismiss()
+        raise
+    return worker
+
+
+_spares: _WorkerSpares | None = None
+_spares_lock = threading.Lock()
+
+
+def _worker_spares() -> _WorkerSpares | None:
+    """The waiting workers, when this process asked for them: the desktop app does."""
+    global _spares
+    raw_count = os.environ.get(_SPARES_ENV, "")
+    if not raw_count.isdecimal() or int(raw_count) == 0:
+        return None
+    with _spares_lock:
+        if _spares is None:
+            _spares = _WorkerSpares(int(raw_count))
+            atexit.register(_spares.close)
+        return _spares
+
+
+def _exchange_with_waiting_worker(process: subprocess.Popen[bytes], payload: bytes) -> bytes:
+    assert process.stdin is not None and process.stdout is not None
+    try:
+        process.stdin.write(len(payload).to_bytes(8, "big") + payload)
+        process.stdin.close()
+    except OSError as exc:
+        raise _WorkerNotStarted from exc
+    try:
+        size = int.from_bytes(_read_exact(process.stdout, 8), "big")
+        if size > _MAX_WORKER_MESSAGE_BYTES:
+            raise ToolWorkerError("tool worker response is too large")
+        return _read_exact(process.stdout, size)
+    except ToolWorkerError as exc:
+        if "incomplete" not in str(exc):
+            raise
+        stderr = b"" if process.stderr is None else process.stderr.read(4096)
+        detail = stderr.decode("utf-8", errors="replace")
+        suffix = f": {' '.join(detail.split())[:1000]}" if detail else ""
+        raise ToolWorkerError(
+            f"tool worker exited without a result (exit_code={process.poll()}){suffix}"
+        ) from exc
+
+
+async def _run_waiting_worker[T](worker: _WaitingWorker, payload: bytes) -> T:
+    try:
+        raw_message = await asyncio.to_thread(
+            _exchange_with_waiting_worker, worker.process, payload
+        )
+        return cast(T, _worker_result(pickle.loads(raw_message)))
+    finally:
+        # Also what stops a cancelled task: its thread then sees the pipes end.
+        await asyncio.to_thread(worker.dismiss)
+
+
 async def _run_windows_worker_subprocess[T](
     function: Callable[..., T],
     arguments: tuple[Any, ...],
@@ -259,6 +488,11 @@ async def _run_windows_worker_subprocess[T](
     payload = pickle.dumps((function, arguments), protocol=pickle.HIGHEST_PROTOCOL)
     if len(payload) > _MAX_WORKER_MESSAGE_BYTES:
         raise ToolWorkerError("tool worker request is too large")
+    spares = _worker_spares()
+    waiting = spares.claim(allow_children=allow_children) if spares is not None else None
+    if waiting is not None:
+        with contextlib.suppress(_WorkerNotStarted):
+            return cast(T, await _run_waiting_worker(waiting, payload))
     job = _WindowsJob(allow_children=allow_children)
     process: asyncio.subprocess.Process | None = None
     try:

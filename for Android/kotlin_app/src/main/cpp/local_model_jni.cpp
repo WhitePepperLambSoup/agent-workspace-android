@@ -16,6 +16,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -45,7 +46,15 @@ constexpr size_t MAX_RGB_IMAGE_BYTES = 512 * 512 * 3;
 std::mutex engine_mutex;
 std::mutex state_mutex;
 std::once_flag backend_once;
+// This request is cancelled (by its id, or while it runs): set again for each request (RunState).
 std::atomic<bool> cancelled{false};
+// "Cancel all" and unload count up; a generation notes the count when it enters, before it parses
+// its request, and stops once the count moved. A flag reset by the next request could lose a
+// cancel-all sent while that request was still being parsed, and an unload then waited for the
+// whole generation (up to two hours) on engine_mutex.
+std::atomic<uint64_t> cancel_epoch{0};
+std::atomic<uint64_t> run_epoch{0};
+bool run_cancelled() { return cancelled.load() || cancel_epoch.load() != run_epoch.load(); }
 // Lowered by LocalModelBridge while the phone is hot (0 = no limit); followed between
 // prompt batches and generated tokens so a long generation cools down instead of heating up.
 std::atomic<int> thread_limit{0};
@@ -194,7 +203,7 @@ void quiet_log(ggml_log_level level, const char * text, void *) {
 
 struct Budget {
     Clock::time_point deadline;
-    bool stopped() const { return cancelled.load() || Clock::now() >= deadline; }
+    bool stopped() const { return run_cancelled() || Clock::now() >= deadline; }
 };
 bool abort_decode(void * pointer) { return static_cast<Budget *>(pointer)->stopped(); }
 bool progress_load(float, void * pointer) { return !static_cast<Budget *>(pointer)->stopped(); }
@@ -402,7 +411,7 @@ json generation_result(json metadata, const std::string & text, int prompt_token
 
 json interrupted(const std::string & text = "", int prompt_tokens = 0, int output_tokens = 0,
                  const json & metadata = json::object(), int64_t first_token_ms = -1, int64_t elapsed_ms = 0) {
-    const bool was_cancelled = cancelled.load();
+    const bool was_cancelled = run_cancelled();
     // A deadline may interrupt a tool-call envelope. Return its usage and
     // diagnostics, but never offer partial output as an executable completion.
     auto result = generation_result(metadata, was_cancelled ? text : "", prompt_tokens, output_tokens,
@@ -416,6 +425,7 @@ json generate(const std::string & raw, const std::vector<std::string> & rgb_imag
     std::unique_lock<std::mutex> engine_lock(engine_mutex, std::try_to_lock);
     if (!engine_lock.owns_lock())
         return failure("engine_busy", "Another local Qwen generation or unload is running");
+    run_epoch.store(cancel_epoch.load());
     try {
         if (!initialized) return failure("engine_unavailable", "Native inference has not been initialized");
         if (raw.size() > MAX_REQUEST_BYTES) throw RequestFailure("invalid_request", "Native request is too large");
@@ -1068,7 +1078,10 @@ Java_com_agentworkspace_mobile_localmodels_LocalModelBridge_nativeCancel(
     try {
         const std::string id = bytes(env, request, 80);
         std::lock_guard<std::mutex> lock(state_mutex);
-        if (id.empty() || active_request == id) cancelled.store(true);
+        if (id.empty()) {
+            cancel_epoch.fetch_add(1);
+            cancelled.store(true);
+        } else if (active_request == id) cancelled.store(true);
         else {
             if (std::find(pending_cancellations.begin(), pending_cancellations.end(), id) == pending_cancellations.end())
                 pending_cancellations.push_back(id);
@@ -1093,6 +1106,7 @@ Java_com_agentworkspace_mobile_localmodels_LocalModelBridge_nativeReleasePromptC
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_agentworkspace_mobile_localmodels_LocalModelBridge_nativeUnload(JNIEnv *, jobject) {
+    cancel_epoch.fetch_add(1);
     cancelled.store(true);
     std::lock_guard<std::mutex> lock(engine_mutex);
     free_model();

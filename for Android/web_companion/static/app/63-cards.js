@@ -2,7 +2,7 @@
   // ---- Interactive cards (2.0): ```card blocks in a reply become things to act on --------------
   // The agent writes one JSON object (see _ANDROID_SYSTEM_SUFFIX): a checklist to tick off, options
   // side by side, an event for the calendar, a place to go, links, or next steps. Everything is
-  // drawn as text; links must be http(s); a prompt is sent only when the user taps it.
+  // drawn as text; links must be http(s); a prompt goes into the message box for the user to send.
   const cardTypes = new Set(["checklist", "compare", "event", "place", "links", "actions"]);
 
   function cardText(value, limit = 300) { return typeof value === "string" ? value.slice(0, limit) : value == null ? "" : String(value).slice(0, limit); }
@@ -24,6 +24,14 @@
   function openCardUrl(url) {
     if (typeof bridge?.openExternal === "function") bridge.openExternal(url);
     else window.open(url, "_blank", "noopener");
+  }
+  // What a card asks for goes into the message box, where the user reads all of it and sends it or
+  // not: the reply wrote it, and once sent it counts as the user's own words. A draft already there stays.
+  function draftCardPrompt(prompt) {
+    const draft = elements.promptInput.value.trim();
+    elements.promptInput.value = draft ? `${draft}\n${prompt}` : prompt;
+    elements.promptInput.dispatchEvent(new Event("input", { bubbles: true }));
+    elements.promptInput.focus();
   }
   // A checklist remembers its ticks on this device, by the card's own text.
   function cardKey(source) {
@@ -124,8 +132,9 @@
           location: cardText(spec.location, 160), notes: cardText(spec.notes, 1000) };
         const answer = typeof bridge?.addCalendarEvent === "function" ? JSON.parse(bridge.addCalendarEvent(JSON.stringify(event)) || "{}") : null;
         if (!answer?.ok) {
-          void sendPrompt(event.location ? t("把这个日程加到日历：{0}，{1}，地点 {2}", event.title, when.textContent, event.location)
+          draftCardPrompt(event.location ? t("把这个日程加到日历：{0}，{1}，地点 {2}", event.title, when.textContent, event.location)
             : t("把这个日程加到日历：{0}，{1}", event.title, when.textContent));
+          notice(t("没能直接加到日历。请求已放进输入框，发送后由 AI 添加"));
         }
       }, true));
     } else if (spec.type === "place") {
@@ -155,10 +164,7 @@
       for (const item of items.slice(0, 6)) {
         const prompt = cardText(item?.prompt, 2000).trim();
         if (!prompt) continue;
-        list.append(cardButton("sparkles", cardText(item.label || prompt, 40), () => {
-          if (activeTask) { notice(t("请等待当前任务结束")); return; }
-          void sendPrompt(prompt);
-        }));
+        list.append(cardButton("sparkles", cardText(item.label || prompt, 40), () => draftCardPrompt(prompt)));
       }
       if (!list.children.length) return null;
       card.append(list);

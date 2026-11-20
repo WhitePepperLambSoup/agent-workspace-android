@@ -77,7 +77,8 @@ class SystemStatusTool(_Tool):
         description=(
             "Read the phone's switches: volume of media, ring, alarm and notifications (percent), "
             "brightness, Do Not Disturb, Wi-Fi and Bluetooth on or off, whether music is playing, "
-            "and whether this app may change brightness and Do Not Disturb."
+            "and whether this app may change brightness and Do Not Disturb; and the battery "
+            "(percent, charging, temperature in °C)."
         ),
         input_schema={"type": "object", "properties": {}, "additionalProperties": False},
         side_effect="none",
@@ -152,6 +153,7 @@ class FindContactsTool(_Tool):
         },
         side_effect="none",
         capability=Capability.MEMORY_READ,
+        sensitive_result=True,
     )
 
     async def execute(self, arguments: dict[str, Any]) -> str:
@@ -173,6 +175,7 @@ class CurrentLocationTool(_Tool):
         input_schema={"type": "object", "properties": {}, "additionalProperties": False},
         side_effect="none",
         capability=Capability.MEMORY_READ,
+        sensitive_result=True,
     )
 
     async def execute(self, _arguments: dict[str, Any]) -> str:
@@ -210,7 +213,8 @@ class RecentNotificationsTool(_Tool):
         description=(
             "Notifications the phone received in the last hours (newest first: time, app, title, text), "
             "kept on the phone while the user has the notification digest on (Settings → Notification "
-            "rules → Notification digest). Verification codes are already hidden. For a digest: sort "
+            "rules → Notification digest). Verification codes, card and ID numbers are already "
+            "hidden. For a digest: sort "
             "them into needs attention / can wait / ads, and pull out pickup codes, flights or trains, "
             "meeting changes and bills due; a checklist card suits the things to do."
         ),
@@ -221,6 +225,7 @@ class RecentNotificationsTool(_Tool):
         },
         side_effect="none",
         capability=Capability.MEMORY_READ,
+        sensitive_result=True,
     )
 
     async def execute(self, arguments: dict[str, Any]) -> str:

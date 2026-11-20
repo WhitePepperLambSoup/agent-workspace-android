@@ -14,12 +14,14 @@
 | SenseVoice Small int8 语音识别模型 | `mobile_model_catalog.py` 的 `SPEECH_CATALOG`（Hugging Face `csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17` 或 ModelScope 镜像，固定 revision 与 SHA256）；分词表随 APK 提供 | FunASR Model License 1.1（FunAudioLLM / 阿里巴巴）；模型权重为用户可选下载，不打进 APK；许可文本在 `licenses/FunASR-MODEL_LICENSE.txt` |
 | Qwen3 / Qwen3.5 基础模型与 Qwen3.5 视觉组件 | `mobile_model_catalog.py` 的来源、固定 GGUF revision/文件/摘要 | Apache-2.0；用户可选下载，无权重打进 APK。Qwen3 Q8_0 来自 Qwen 官方 GGUF；Q4_K_M、Qwen3.5 Q4/Q8 及 F16 mmproj 来自 Unsloth 社区发布，不能称为 Qwen 官方 GGUF |
 | Gradle Wrapper 8.11.1 | Gradle 官方 `v8.11.1` 标准脚本/JAR及发布校验文件 | Apache-2.0；脚本保留原版权，摘要清单在 `gradle/wrapper/gradle-wrapper-verification.json` |
-| Chaquopy 17.0.0 | 官方 `chaquo/chaquopy/17.0.0/LICENSE.txt` | MIT，Copyright 2017–2025 Chaquo Ltd and contributors；完整文本及 SHA256 保存于 `licenses/Chaquopy-17.0.0-LICENSE.txt`，准备时校验并复制到 APK。嵌入的 CPython 和 Python 依赖仍保留各自许可 |
+| Chaquopy 17.0.0 | 官方 `chaquo/chaquopy/17.0.0/LICENSE.txt` | MIT，Copyright 2017–2025 Chaquo Ltd and contributors；完整文本及 SHA256 保存于 `licenses/Chaquopy-17.0.0-LICENSE.txt`，准备时校验并复制到 APK。嵌入的 CPython 和 Python 依赖见下两行 |
+| CPython 3.12（Chaquopy 内嵌） | Chaquopy 17.0.0 的 Python 3.12 运行时 | PSF License Version 2；完整文本在 `licenses/CPython-3.12-LICENSE.txt`（取自 CPython 3.12.10 发行包的 LICENSE.txt，3.12 各版本条款相同），准备时校验 SHA256 并复制到 APK `assets/licenses/CPython-3.12-PSF-2.0.txt` |
+| APK 内的 Python 包 | `kotlin_app/build.gradle.kts` 固定的 httpx、websockets、pypdf、tomli-w、jsonschema、pyrsistent、attrs，以及 pip 解析的依赖 httpcore、h11、anyio、idna、certifi、typing_extensions | httpx、httpcore、idna、pypdf、websockets 为 BSD-3-Clause；h11、anyio、attrs、jsonschema、pyrsistent、tomli-w 为 MIT；certifi 为 MPL-2.0；typing_extensions 为 PSF-2.0。各包完整许可文本随包装在 APK `assets/chaquopy/requirements-common.imy` 中各自的 `*.dist-info` 里 |
 | ZXing core 3.5.3 | `com.google.zxing:core:3.5.3`（在手机上离线识别电脑端的配对二维码） | Apache-2.0；保留上游 notices |
 | AndroidX、Kotlin、WorkManager、Shizuku API | Gradle 固定依赖 | Apache-2.0；保留各组件上游 notices。可选 Shizuku 服务需要用户另行安装/授权 |
 | SQLite Android 3500400 | `mil.nga:sqlite-android:3500400` | 该 Maven artifact 的 POM 声明 Public Domain，来源为 SQLite Fossil；保留上游版权/公共领域说明 |
-| 移动离线 Web bundle（Markdown、KaTeX 公式、图标） | `web_companion/static/mobile-vendor.js` | 保留相邻 `mobile-vendor.LICENSE.txt`（含 unified/remark/rehype、KaTeX、lucide 等各包许可） |
-| Mermaid 流程图 bundle | `web_companion/static/mobile-mermaid.js`，按需加载 | Mermaid 11（MIT），许可文本在 `mobile-vendor.LICENSE.txt`；其打包依赖的许可注释保留在 bundle 内 |
+| 移动离线 Web bundle（Markdown、KaTeX 公式、图标） | `web_companion/static/mobile-vendor.js` | 相邻的 `mobile-vendor.LICENSE.txt` 收录三个 bundle 实际打包的每个 npm 包的许可文本（`web_companion/vendor-licenses.mjs` 按 esbuild 报告的输入从 node_modules 读取，不下载）；没有许可文件的包列在文件末尾，并写明其 package.json 声明的许可 |
+| Mermaid 流程图 bundle | `web_companion/static/mobile-mermaid.js`，按需加载 | Mermaid 11（MIT）及其打包的依赖（d3 各模块 ISC、dagre-d3-es、cytoscape、chevrotain Apache-2.0、lodash-es、DOMPurify、marked、dayjs、roughjs、stylis、uuid 等）的许可文本都在 `mobile-vendor.LICENSE.txt` |
 | 专家团 3D 工作室 bundle | `web_companion/static/mobile-studio.js`，按需加载（源码 `web_companion/studio`） | three.js 0.186.1（MIT），许可文本在 `mobile-vendor.LICENSE.txt`；场景代码与电脑版工作室同源 |
 | Termux PRoot 5.1.107.95 | `prepare_android_toolchain.py` 中固定官方 .deb 和源码 ZIP | GPL-2.0-only；PRoot 作为独立进程执行，不与 Agent/llama.cpp JNI 链接；源代码/许可随 APK 提供 |
 | talloc 2.4.3 | 固定 Termux .deb 与 Samba 官方源码 archive | 上游 library 为 LGPL-3.0-or-later；Termux 包声明 GPL-3.0。保留完整来源许可及包声明 |

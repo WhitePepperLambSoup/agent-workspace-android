@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -351,6 +351,8 @@ class MobileWorkspaceController:
         self._admitting = 0
         self._connection_epoch = 0
         self._recovered_tasks = 0
+        # Messages sent with no network, queued again after a restart (start).
+        self._requeue: asyncio.Task[None] | None = None
         self._runtime_view = (
             MobileScopedRuntime(base_controller.runtime, catalog.default().path, catalog=catalog)
             if base_controller is not None
@@ -693,6 +695,7 @@ class MobileWorkspaceController:
         self._started = True
         self._connection_epoch += 1
         recovered = []
+        offline = []
         for task in self._tasks():
             if task.state in {TaskState.QUEUED, TaskState.RUNNING, TaskState.WAITING_APPROVAL}:
                 recovered.append(
@@ -703,8 +706,39 @@ class MobileWorkspaceController:
                         resume_available=True,
                     )
                 )
+            elif task.state is not TaskState.INTERRUPTED or not task.resume_available:
+                continue
+            if self._sent_offline(task):
+                offline.append(task.task_id)
         self._recovered_tasks = len(recovered)
+        if offline:
+            # A message sent with no network still goes out once the phone is online after the
+            # engine stopped or restarted meanwhile (each waits for the network again).
+            self._requeue = asyncio.create_task(self._resume_all(offline))
         return recovered
+
+    def _sent_offline(self, task: MobileTask) -> bool:
+        """A task waiting for the network that never started, sent within the last day: older
+        ones stay interrupted, so a stale message is not sent out of the blue."""
+        try:
+            created = datetime.fromisoformat(task.created_at)
+        except ValueError:
+            return False
+        if created.tzinfo is None or datetime.now(UTC) - created > timedelta(days=1):
+            return False
+        kinds = {
+            event.event_type
+            for event in MobileTaskStore(self.store, session_id=task.session_id).events(
+                task.task_id, stream=False
+            )
+        }
+        return "task.wait_network" in kinds and "mobile.task.running" not in kinds
+
+    async def _resume_all(self, task_ids: list[str]) -> None:
+        for task_id in task_ids:
+            # One that cannot go now (cancelled meanwhile, maintenance) stays for the user.
+            with suppress(Exception):
+                await self.resume(task_id)
 
     async def reconnect(self) -> dict[str, Any]:
         if not self._started:
@@ -815,6 +849,9 @@ class MobileWorkspaceController:
 
     async def aclose(self) -> None:
         self._closing = True
+        if self._requeue is not None and not self._requeue.done():
+            self._requeue.cancel()
+            await asyncio.gather(self._requeue, return_exceptions=True)
         for handle, closers in tuple(self._deferred_closes.values()):
             handle.cancel()
             await self._close_released(closers)

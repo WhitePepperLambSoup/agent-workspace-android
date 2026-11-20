@@ -391,6 +391,10 @@ def install_android_runtime() -> None:
     credentials.default_credential_store = default_credential_store
     credentials.protect_current_user_data = protect_current_user_data
     credentials.unprotect_current_user_data = unprotect_current_user_data
+    # What provider_transport reads and writes, as on a Termux host (patcher.py).
+    credentials.get_credential = _credential_store.get
+    credentials.set_credential = _credential_store.set
+    credentials.delete_credential = _credential_store.delete
     sys.modules["agent_workspace.tools.process_worker"] = sys.modules[__name__]
 
     from .toolchain import install_toolchain_adapters
@@ -437,3 +441,8 @@ def install_android_runtime() -> None:
     _validate_database_once_per_process()
     _check_each_tool_schema_once()
     _share_default_tls_context()
+
+    # Custom request headers and backup API keys for the model provider (kept in the keystore).
+    from .provider_transport import patch_providers
+
+    patch_providers()

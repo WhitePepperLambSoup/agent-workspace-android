@@ -71,6 +71,7 @@ def _invoke_git(
     *,
     timeout_seconds: int = 60,
     index_file: Path | None = None,
+    environment: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     raw = _run_command_sync(
         workspace,
@@ -85,7 +86,11 @@ def _invoke_git(
             # Prevent Git from walking above the selected workspace. A packaged
             # project often lives inside the source checkout, which otherwise
             # makes Git discover the outer repository and leak a path escape.
-            "GIT_CEILING_DIRECTORIES": workspace,
+            # The ceiling is the workspace's parent: Git never enters a ceiling
+            # directory, so the workspace itself would hide a repository at its
+            # root from a subfolder.
+            "GIT_CEILING_DIRECTORIES": str(Path(workspace).parent),
+            **(environment or {}),
         },
         expected_executable_sha256,
     )
@@ -93,6 +98,41 @@ def _invoke_git(
     if not isinstance(result, dict):
         raise ToolError("Git returned an invalid result")
     return result
+
+
+def _filter_overrides(
+    workspace: str,
+    repository: str,
+    executable: str,
+    expected_executable_sha256: str,
+) -> list[str]:
+    """`-c` settings that switch off the filter commands the repository's config names.
+
+    Comparing the work tree (status, a work-tree diff, blame of a changed file) runs a
+    filter's clean or process command, and that command comes from the repository's own
+    config: a downloaded folder with a planted .git/config would run it from a read-only
+    tool. Read with includes, so a driver in an included file is found too."""
+    result = _invoke_git(
+        workspace,
+        repository,
+        _git_arguments(
+            "config", "-z", "--name-only", "--get-regexp", r"^filter\..+\.(clean|smudge|process)$"
+        ),
+        executable,
+        expected_executable_sha256,
+    )
+    if result.get("exit_code") == 1:  # Nothing matched.
+        return []
+    drivers = {
+        name.rsplit(".", 1)[0]
+        for name in _git_stdout(result, "filter lookup").split("\x00")
+        if name.strip()
+    }
+    overrides: list[str] = []
+    for driver in sorted(drivers):
+        for setting in ("clean=", "smudge=", "process=", "required=false"):
+            overrides.extend(("-c", f"{driver}.{setting}"))
+    return overrides
 
 
 def _git_stdout(
@@ -165,7 +205,8 @@ def _validate_repository(
     git_dir_path = paths.resolve(git_dir)
     common_candidate = Path(common_dir)
     if not common_candidate.is_absolute():
-        common_candidate = top_path / common_candidate
+        # Relative to where git ran (the folder asked for), not to the top level.
+        common_candidate = root / common_candidate
     common_dir_path = paths.resolve(common_candidate)
     if not top_path.is_dir() or not git_dir_path.is_dir() or not common_dir_path.is_dir():
         raise ToolError("Git repository metadata is invalid")
@@ -205,14 +246,20 @@ def _git_status_sync(
             executable,
             expected_executable_sha256,
         )
-    except (PathOutsideWorkspaceError, ToolError):
+    except (PathOutsideWorkspaceError, ToolError) as exc:
         # `git rev-parse` can legitimately report no repository when the
         # selected workspace is nested inside another checkout. Return a
         # structured result so the model can recover instead of receiving a
-        # worker exception that looks like a conversation failure.
+        # worker exception that looks like a conversation failure. Anything
+        # else (a timeout, dubious ownership, a changed git executable) is
+        # reported as itself rather than as "not a repository".
+        if not isinstance(exc, PathOutsideWorkspaceError) and (
+            "not a git repository" not in str(exc).casefold()
+        ):
+            raise
         return json_result(
             {
-                "repository": ".",
+                "repository": repository,
                 "is_repository": False,
                 "reason": "not_git_repository",
                 "entries": [],
@@ -223,6 +270,7 @@ def _git_status_sync(
             }
         )
     arguments = _git_arguments(
+        *_filter_overrides(workspace, paths.relative(top), executable, expected_executable_sha256),
         "status",
         "--porcelain=v1",
         "-z",
@@ -230,17 +278,19 @@ def _git_status_sync(
         "--untracked-files=all",
         *(("--ignored",) if include_ignored else ()),
     )
-    output = _git_stdout(
-        _invoke_git(
-            workspace,
-            paths.relative(top),
-            arguments,
-            executable,
-            expected_executable_sha256,
-        ),
-        "status",
+    result = _invoke_git(
+        workspace,
+        paths.relative(top),
+        arguments,
+        executable,
+        expected_executable_sha256,
     )
-    records = output.split("\x00")
+    # A large status (node_modules with --ignored) passes the output limit: the complete
+    # records before the cut are listed and the result is marked truncated.
+    output = _git_stdout(result, "status", allow_truncated_stdout=True)
+    cut = result["stdout"].get("truncated") is True
+    # Every record ends with NUL; what follows the last one is empty or cut short.
+    records = output.split("\x00")[:-1]
     branch = ""
     entries: list[dict[str, Any]] = []
     index = 0
@@ -259,6 +309,8 @@ def _git_status_sync(
         original: str | None = None
         if "R" in xy or "C" in xy:
             if index >= len(records):
+                if cut:
+                    break
                 raise ToolError("Git status returned an incomplete rename")
             original = records[index]
             index += 1
@@ -270,7 +322,7 @@ def _git_status_sync(
             "repository": paths.relative(top),
             "branch": branch,
             "entries": entries,
-            "truncated": len(entries) >= maximum and any(records[index:]),
+            "truncated": cut or (len(entries) >= maximum and any(records[index:])),
             "index_sha256": _file_sha256(git_dir / "index"),
             "git_executable": executable,
             "git_executable_sha256": expected_executable_sha256,
@@ -304,7 +356,13 @@ def _git_diff_sync(
         # Git pathspecs are relative to the repository top-level working
         # directory and always use forward slashes.
         selected_paths.append(Path(relative_to_top).as_posix())
-    arguments = _git_arguments("diff", "--no-ext-diff", "--no-textconv", f"--unified={context}")
+    arguments = _git_arguments(
+        *_filter_overrides(workspace, paths.relative(top), executable, expected_executable_sha256),
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        f"--unified={context}",
+    )
     if scope == "index":
         arguments.append("--cached")
     elif scope == "head":
@@ -342,6 +400,55 @@ def _git_diff_sync(
     )
 
 
+def _commit_identity(
+    workspace: str,
+    repository: str,
+    executable: str,
+    expected_executable_sha256: str,
+) -> dict[str, str]:
+    """The user's own name and email, as Git reads them from the environment.
+
+    Git runs here without the global config, which is where most people set them, so
+    these keys alone are read from it. The repository's own config still comes first.
+    """
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    config_home = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    # In the order Git reads them: what is read later wins.
+    global_configs = [
+        {"GIT_CONFIG_GLOBAL": str(path), "HOME": home}
+        for path in (Path(config_home) / "git" / "config", Path(home) / ".gitconfig")
+        if path.is_file()
+    ]
+    values: dict[str, str] = {}
+    for environment in global_configs or [{}]:
+        result = _invoke_git(
+            workspace,
+            repository,
+            _git_arguments(
+                "config", "-z", "--get-regexp", r"^(user|author|committer)\.(name|email)$"
+            ),
+            executable,
+            expected_executable_sha256,
+            environment=environment,
+        )
+        # Exit code 1 only says that nothing matched.
+        if result.get("exit_code") == 0:
+            for entry in _git_stdout(result, "identity lookup").split("\x00"):
+                key, _, value = entry.partition("\n")
+                values[key] = value
+    identity: dict[str, str] = {}
+    for role in ("author", "committer"):
+        for field in ("name", "email"):
+            chosen = values.get(f"{role}.{field}") or values.get(f"user.{field}")
+            if not chosen:
+                raise ToolError(
+                    "Git has no identity to commit with; set user.name and user.email "
+                    "with git config"
+                )
+            identity[f"GIT_{role.upper()}_{field.upper()}"] = chosen
+    return identity
+
+
 def _git_commit_sync(
     workspace: str,
     repository: str,
@@ -375,6 +482,9 @@ def _git_commit_sync(
     )
     if current_head != expected_head:
         raise ConcurrentModificationError("Git HEAD changed before commit")
+    identity = _commit_identity(
+        workspace, paths.relative(top), executable, expected_executable_sha256
+    )
     index_path = git_dir / "index"
     try:
         index_snapshot = index_path.read_bytes()
@@ -414,6 +524,7 @@ def _git_commit_sync(
             executable,
             expected_executable_sha256,
             timeout_seconds=110,
+            environment=identity,
         ),
         "commit object creation",
     ).strip()
@@ -436,6 +547,7 @@ def _git_commit_sync(
                 ),
                 executable,
                 expected_executable_sha256,
+                environment=identity,  # for the reflog
             ),
             "atomic reference update",
         )
@@ -496,20 +608,22 @@ def _git_log_sync(
         executable,
         expected_executable_sha256,
     )
-    output = _git_stdout(
-        _invoke_git(
-            workspace,
-            paths.relative(top),
-            _git_arguments(
-                "log",
-                f"--max-count={max_count}",
-                "--format=%H%x1f%h%x1f%an%x1f%aI%x1f%s",
-            ),
-            executable,
-            expected_executable_sha256,
+    result = _invoke_git(
+        workspace,
+        paths.relative(top),
+        _git_arguments(
+            "log",
+            f"--max-count={max_count}",
+            "--format=%H%x1f%h%x1f%an%x1f%aI%x1f%s",
         ),
-        "log",
+        executable,
+        expected_executable_sha256,
     )
+    # Long subjects can pass the output limit before max_count: list the complete commits.
+    output = _git_stdout(result, "log", allow_truncated_stdout=True)
+    cut = result["stdout"].get("truncated") is True
+    if cut:
+        output = output[: output.rfind("\n") + 1]
     commits: list[dict[str, str]] = []
     for line in output.splitlines():
         fields = line.split("\x1f", 4)
@@ -528,6 +642,7 @@ def _git_log_sync(
         {
             "repository": paths.relative(top),
             "commits": commits,
+            **({"truncated": True} if cut else {}),
         }
     )
 
@@ -551,45 +666,75 @@ def _git_blame_sync(
     if not resolved_path.is_file():
         raise ToolError(f"Git blame path is not a file: {relative_path}")
     top_relative = str(resolved_path.relative_to(top))
-    output = _git_stdout(
-        _invoke_git(
-            workspace,
-            paths.relative(top),
-            _git_arguments("blame", "--line-porcelain", "--", top_relative),
-            executable,
-            expected_executable_sha256,
+    # Only the lines asked for, each commit's details once (--porcelain): the whole file
+    # with every line's details repeated (--line-porcelain) passed the output limit at a few
+    # hundred lines.
+    wanted = min(maximum, _line_count(resolved_path))
+    if wanted == 0:
+        return json_result({"repository": paths.relative(top), "path": top_relative, "lines": []})
+    result = _invoke_git(
+        workspace,
+        paths.relative(top),
+        _git_arguments(
+            *_filter_overrides(
+                workspace, paths.relative(top), executable, expected_executable_sha256
+            ),
+            "blame",
+            "--no-textconv",
+            "--porcelain",
+            f"-L1,{wanted}",
+            "--",
+            top_relative,
         ),
-        "blame",
+        executable,
+        expected_executable_sha256,
     )
+    output = _git_stdout(result, "blame", allow_truncated_stdout=True)
+    truncated = result["stdout"].get("truncated") is True
+    if truncated:
+        output = output[: output.rfind("\n") + 1]  # the last line may be cut short
     lines: list[dict[str, Any]] = []
-    current: dict[str, Any] = {}
-    current_line = 1
+    commits: dict[str, dict[str, str]] = {}
+    current: dict[str, str] = {}
+    line_number = 0
     for raw in output.splitlines():
         if raw.startswith("\t"):
-            current["line"] = current_line
-            current["content"] = raw[1:]
-            lines.append(dict(current))
-            current_line += 1
+            lines.append({**current, "line": line_number, "content": raw[1:]})
             if len(lines) >= maximum:
                 break
             continue
-        if raw.startswith("author "):
+        parts = raw.split()
+        if len(parts) >= 3 and _valid_object_id(parts[0]) and parts[2].isdecimal():
+            current = commits.setdefault(parts[0], {"commit": parts[0]})
+            line_number = int(parts[2])
+        elif raw.startswith("author "):
             current["author"] = raw[7:]
         elif raw.startswith("author-time "):
             current["author_time"] = raw[12:]
         elif raw.startswith("summary "):
             current["summary"] = raw[8:]
-        else:
-            parts = raw.split()
-            if len(parts) >= 2 and _valid_object_id(parts[0]) and parts[1].isdecimal():
-                current = {"commit": parts[0]}
     return json_result(
         {
             "repository": paths.relative(top),
             "path": top_relative,
             "lines": lines,
+            **({"truncated": True} if truncated else {}),
         }
     )
+
+
+def _line_count(path: Path) -> int:
+    """Lines in a work-tree file as blame counts them (a last line without a newline too)."""
+    count = 0
+    last = b""
+    try:
+        with path.open("rb") as stream:
+            while chunk := stream.read(64 * 1024):
+                count += chunk.count(b"\n")
+                last = chunk
+    except OSError as exc:
+        raise ToolError(f"cannot read the file to blame: {path.name}") from exc
+    return count + (1 if last and not last.endswith(b"\n") else 0)
 
 
 class _GitTool:
@@ -816,8 +961,9 @@ class GitCommitTool(_GitTool):
         name="git_commit",
         description=(
             "Commit only the already-staged Git index after HEAD and index CAS checks. "
-            "Hooks, signing, global config, and prompts are disabled. After a successful "
-            "commit the repository index is refreshed to the committed tree."
+            "Hooks, signing, and prompts are disabled; of the global config only the user's "
+            "name and email are read. After a successful commit the repository index is "
+            "refreshed to the committed tree."
         ),
         input_schema={
             "type": "object",

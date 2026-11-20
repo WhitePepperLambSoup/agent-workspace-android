@@ -4,6 +4,7 @@ them up, with what failed."""
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -46,11 +47,18 @@ class RunChecksTool:
         workspace: Path,
         trust: TrustBook,
         report: Callable[[Path, list[CheckResult]], None] | None = None,
+        *,
+        start: Callable[[Path], bool] | None = None,
+        finish: Callable[[Path], None] | None = None,
     ) -> None:
         self.root = workspace
         self.trust = trust
         # Tells the window of the results, as if the checks had been run from it.
         self.report = report
+        # The folder's running mark, shared with the Changes page and the run after a turn:
+        # start takes it (False when a run is going), finish gives it back.
+        self.start = start
+        self.finish = finish
 
     @property
     def spec(self) -> ToolSpec:
@@ -86,7 +94,40 @@ class RunChecksTool:
         if not checks:
             names = ", ".join(check.name for check in config.checks)
             raise ToolError(f"there is no check named {name!r}; the checks are: {names}")
-        results = await asyncio.to_thread(run_checks, self.root, checks)
+        if self.start is not None and not self.start(self.root):
+            raise ToolError(
+                "the folder's checks are running already (from the Changes page or after a "
+                "turn); wait for them to finish, then run them again"
+            )
+        stop = threading.Event()
+        guard = threading.Lock()
+        progress = {"began": False, "abandoned": False}
+
+        def run() -> list[CheckResult]:
+            with guard:
+                if progress["abandoned"]:
+                    return []  # Stopped before the thread got to it; given back below.
+                progress["began"] = True
+            try:
+                return run_checks(self.root, checks, cancel=stop)
+            finally:
+                # Given back when the last check has ended, not when the turn stopped: a run
+                # started meanwhile would meet the check still being killed.
+                if self.finish is not None:
+                    self.finish(self.root)
+
+        try:
+            results = await asyncio.to_thread(run)
+        except asyncio.CancelledError:
+            # The turn was stopped: end the check now rather than let it and the ones after it
+            # run to their timeouts with nobody waiting for them.
+            stop.set()
+            with guard:
+                progress["abandoned"] = True
+                began = progress["began"]
+            if not began and self.finish is not None:
+                self.finish(self.root)
+            raise
         if self.report is not None:
             self.report(self.root, results)
         return json_result(

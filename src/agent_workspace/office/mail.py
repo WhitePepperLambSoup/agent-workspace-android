@@ -118,18 +118,26 @@ class _Compound:
         if data[:8] != bytes.fromhex("D0CF11E0A1B11AE1"):
             raise OfficeError("not an Outlook message (.msg)")
         self.data = data
-        self.sector_size = 1 << struct.unpack_from("<H", data, 30)[0]
-        self.mini_size = 1 << struct.unpack_from("<H", data, 32)[0]
+        sector_shift, mini_shift = struct.unpack_from("<HH", data, 30)
+        # The format allows only these: anything else is a damaged or crafted file.
+        if sector_shift not in (9, 12) or mini_shift != 6:
+            raise OfficeError("not a valid Outlook message")
+        self.sector_size = 1 << sector_shift
+        self.mini_size = 1 << mini_shift
         fat_count, directory_start = struct.unpack_from("<II", data, 44)
         self.cutoff = struct.unpack_from("<I", data, 56)[0]
         mini_fat_start, mini_fat_count, difat_start, difat_count = struct.unpack_from(
             "<IIII", data, 60
         )
         difat = list(struct.unpack_from("<109I", data, 76))
-        sector = difat_start
-        for _ in range(difat_count):
-            if sector in (_FREE, _END):
+        # The DIFAT chain can be no longer than the file has sectors, and visits each once: a
+        # chain that loops would otherwise grow the table for up to 2**32 rounds.
+        sectors_in_file = len(data) // self.sector_size
+        sector, visited = difat_start, set()
+        for _ in range(min(difat_count, sectors_in_file)):
+            if sector in (_FREE, _END) or sector in visited or sector >= sectors_in_file:
                 break
+            visited.add(sector)
             values = struct.unpack_from(f"<{self.sector_size // 4}I", self._sector(sector))
             difat.extend(values[:-1])
             sector = values[-1]
@@ -198,10 +206,14 @@ class _Compound:
         """Names of a storage's direct children and their entry numbers."""
         out: dict[str, int] = {}
         stack = [self.entries[index]["child"]]
+        # The entries form a tree by their left/right links; a file whose links loop would
+        # otherwise be walked forever.
+        visited: set[int] = set()
         while stack:
             current = stack.pop()
-            if current in (_FREE, _END) or current >= len(self.entries):
+            if current in (_FREE, _END) or current >= len(self.entries) or current in visited:
                 continue
+            visited.add(current)
             entry = self.entries[current]
             out[entry["name"]] = current
             stack.extend([entry["left"], entry["right"]])
@@ -225,12 +237,25 @@ def _filetime(compound: _Compound, items: dict[str, int], wanted: int) -> str:
         tag = struct.unpack_from("<I", data, offset)[0]
         if tag >> 16 == wanted and tag & 0xFFFF == 0x0040:
             value = struct.unpack_from("<Q", data, offset + 8)[0]
-            moment = datetime(1601, 1, 1, tzinfo=UTC) + timedelta(microseconds=value // 10)
-            return moment.astimezone().strftime("%Y-%m-%d %H:%M")
+            try:
+                moment = datetime(1601, 1, 1, tzinfo=UTC) + timedelta(microseconds=value // 10)
+                return moment.astimezone().strftime("%Y-%m-%d %H:%M")
+            except (OverflowError, OSError, ValueError):
+                return ""  # a time outside what the system can show (0 in a damaged file)
     return ""
 
 
 def read_msg(data: bytes) -> Mail:
+    try:
+        return _read_msg(data)
+    except OfficeError:
+        raise
+    except (struct.error, IndexError, KeyError, ValueError, OverflowError):
+        # A truncated or damaged file: said plainly, as the reader's own error.
+        raise OfficeError("not a valid Outlook message") from None
+
+
+def _read_msg(data: bytes) -> Mail:
     compound = _Compound(data)
     items = compound.children(0)
     mail = Mail(

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +33,36 @@ from agent_workspace.core.session import Session
 from agent_workspace.optimizations import ModelRequestOptimizer
 
 _ACTIVE_RUN_CLOSE_TIMEOUT_SECONDS = 5.0
+# The cancel message a turn gets at its time limit; the runner records it as a timeout.
+TURN_TIMEOUT = "turn_timeout"
+
+
+@contextlib.asynccontextmanager
+async def _turn_time_limit(task: asyncio.Task[Any], seconds: float) -> AsyncIterator[None]:
+    """Like ``asyncio.timeout``, but the cancellation names itself, so the runner records the
+    turn as timed out (``turn.failed``, TimeoutError) instead of cancelled by an unknown source,
+    matching the TimeoutError the caller gets."""
+    loop = asyncio.get_running_loop()
+    cancelling = task.cancelling()
+    expired = False
+
+    def expire() -> None:
+        nonlocal expired
+        expired = True
+        task.cancel(TURN_TIMEOUT)
+
+    handle = loop.call_later(seconds, expire)
+    try:
+        yield
+    except asyncio.CancelledError:
+        if expired and task.uncancel() <= cancelling:
+            raise TimeoutError(f"the turn reached its time limit of {seconds:g} seconds") from None
+        raise
+    else:
+        if expired:
+            task.uncancel()  # the turn finished as the limit came: nothing to cancel
+    finally:
+        handle.cancel()
 
 
 def _consume_active_run(task: asyncio.Task[Any]) -> None:
@@ -56,6 +88,7 @@ class ApplicationService:
         profile_turns: bool = False,
         raw_trace: RawConversationTrace | None = None,
         tool_hooks: ToolHooks | None = None,
+        estimate_unlisted_cost: bool = False,
     ) -> None:
         self.store = store
         self._tools = tools
@@ -84,6 +117,7 @@ class ApplicationService:
             profile_turns=profile_turns,
             raw_trace=raw_trace,
             tool_hooks=tool_hooks,
+            estimate_unlisted_cost=estimate_unlisted_cost,
         )
 
     def create_session(
@@ -135,6 +169,7 @@ class ApplicationService:
         prefix_stable: bool = False,
         context_notes: tuple[str, ...] = (),
         summary_model: str | None = None,
+        exclude_correlations: frozenset[str] = frozenset(),
     ) -> RunResult:
         task = self._begin_run()
         try:
@@ -146,7 +181,7 @@ class ApplicationService:
                 include_instructions=include_instructions,
                 include_skills=include_skills,
             )
-            async with asyncio.timeout(task_budget.max_turn_seconds):
+            async with _turn_time_limit(task, task_budget.max_turn_seconds):
                 return await self.runner.run(
                     session,
                     user_input,
@@ -164,6 +199,7 @@ class ApplicationService:
                     prefix_stable=prefix_stable,
                     context_notes=context_notes,
                     summary_model=summary_model,
+                    exclude_correlations=exclude_correlations,
                 )
         finally:
             self._active_runs.discard(task)
@@ -188,6 +224,7 @@ class ApplicationService:
         include_skills: bool = True,
         prefix_stable: bool = False,
         summary_model: str | None = None,
+        exclude_correlations: frozenset[str] = frozenset(),
     ) -> RunResult:
         task = self._begin_run()
         try:
@@ -199,7 +236,7 @@ class ApplicationService:
                 include_instructions=include_instructions,
                 include_skills=include_skills,
             )
-            async with asyncio.timeout(task_budget.max_turn_seconds):
+            async with _turn_time_limit(task, task_budget.max_turn_seconds):
                 return await self.runner.run(
                     session,
                     None,
@@ -217,6 +254,7 @@ class ApplicationService:
                     summarize_history=summarize_history,
                     prefix_stable=prefix_stable,
                     summary_model=summary_model,
+                    exclude_correlations=exclude_correlations,
                 )
         finally:
             self._active_runs.discard(task)

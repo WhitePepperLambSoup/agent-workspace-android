@@ -50,6 +50,8 @@ from agent_workspace.policy import (
     WorkspacePolicy,
     build_custom_tool_extension_request,
     build_mcp_extension_request,
+    workspace_file_decision,
+    workspace_file_requests,
 )
 from agent_workspace.providers import create_provider
 from agent_workspace.storage import ProcessWriteLock, SQLiteEventStore, create_verified_backup
@@ -62,7 +64,7 @@ from agent_workspace.tools.mcp_host import (
     build_mcp_host,
     load_mcp_servers,
 )
-from agent_workspace.tools.openapi import OpenApiGetTool, load_openapi_file
+from agent_workspace.tools.openapi import OpenApiGetTool, OpenApiOperation, load_openapi_file
 from agent_workspace.tools.process_worker import run_in_process
 from agent_workspace.tools.sandbox import (
     LocalSandboxConfig,
@@ -526,6 +528,16 @@ async def build_multi_provider_runtime(
     database_path = Path(database).expanduser().resolve()
     database_path.parent.mkdir(parents=True, exist_ok=True)
 
+    openapi_operations: tuple[OpenApiOperation, ...] = ()
+    for request in workspace_file_requests(workspace_path, kinds={"openapi"}):
+        file_decision = workspace_file_decision(
+            request, allow_workspace_extensions, extension_approval_callback
+        )
+        if inspect.isawaitable(file_decision):
+            file_decision = await file_decision
+        if file_decision:
+            openapi_operations = load_openapi_file(request.config_source)
+
     # Extension discovery & authorization (R01 & R27)
     mcp_servers = load_mcp_servers(workspace_path)
     approved_mcp_servers: list[McpServerConfig] = []
@@ -594,21 +606,19 @@ async def build_multi_provider_runtime(
             sandbox_backend=sandbox,
             allow_host_process=autonomy is not Autonomy.YOLO,
             background_jobs=jobs,
-            custom_tools=(
-                CustomCommandTool(workspace_path, definition) for definition in approved_custom_defs
-            ),
         )
         tools.register(CodeMapTool(workspace_path))
-        openapi_path = workspace_path / ".agent" / "openapi.json"
-        if openapi_path.is_file():
-            for operation in load_openapi_file(openapi_path):
-                tools.register(OpenApiGetTool(operation))
+        for operation in openapi_operations:
+            tools.register(OpenApiGetTool(operation))
 
         if approved_mcp_servers:
             mcp_host = build_mcp_host(workspace_path, approved_mcp_servers)
             if mcp_host is not None:
                 for proxy in mcp_host.tools():
                     tools.register(proxy)
+        # Last, so a custom tool named like any tool above is the one left out.
+        for definition in approved_custom_defs:
+            tools.register_unless_taken(CustomCommandTool(workspace_path, definition))
 
         policy = WorkspacePolicy(workspace_path, autonomy, approval_callback)
         routes: dict[str, CollaborationRoute] = {}

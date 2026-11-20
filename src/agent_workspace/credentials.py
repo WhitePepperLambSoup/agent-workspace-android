@@ -53,7 +53,7 @@ class MemoryCredentialStore:
         self._credentials.pop(target, None)
 
 
-def credential_target(provider_id: str, base_url: str) -> str:
+def credential_target(provider_id: str, base_url: str, *, check_transport: bool = True) -> str:
     """Build a stable credential target scoped to a provider and endpoint origin."""
 
     if not isinstance(provider_id, str) or _PROVIDER_ID_PATTERN.fullmatch(provider_id) is None:
@@ -61,7 +61,7 @@ def credential_target(provider_id: str, base_url: str) -> str:
     if not isinstance(base_url, str):
         raise ValueError("provider base URL must be a string")
 
-    scheme, hostname, port = provider_origin(base_url)
+    scheme, hostname, port = provider_origin(base_url, check_transport=check_transport)
     hostname = _normalize_hostname(hostname)
     origin_hostname = f"[{hostname}]" if ":" in hostname else hostname
     origin = f"{scheme}://{origin_hostname}:{port}"

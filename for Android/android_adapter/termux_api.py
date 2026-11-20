@@ -40,6 +40,7 @@ class AndroidClipboardTool:
         },
         side_effect="external",
         capability=Capability.WORKSPACE_READ,
+        sensitive_result=True,
     )
 
     @property

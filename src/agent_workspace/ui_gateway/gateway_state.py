@@ -10,6 +10,7 @@ from __future__ import annotations
 import queue
 import threading
 from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import Future
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -88,7 +89,10 @@ class GatewayState:
     _active_queue_id: str | None
     _active_turn: str | None
     _agent_control: AgentControlService | None
+    _runs_recovered_in: set[Path]
     _approval_ledger: dict[str, _ApprovalEntry]
+    _team_grants: dict[str, set[str]]
+    _team_distrusted: set[str]
     _async_workspace_switch: bool
     _audio_transcriber: Callable[[ProviderConfig, str, bytes, str, str], str]
     _autonomy: Autonomy
@@ -133,7 +137,6 @@ class GatewayState:
     _month_cost: tuple[str, float, float] | None
     _next_wire_sequence: int
     _orchestration_runtime: object | None
-    _pending_autonomy_request: tuple[str, Autonomy] | None
     _pending_host_events: list[Event]
     _pending_session_activation_id: str | None
     _pending_workspace_activation: tuple[Path, ProviderConfig] | None
@@ -269,6 +272,16 @@ class GatewayState:
         def _commit_approval_resolution(
             self, request_id: str, entry: _ApprovalEntry, scope: ApprovalScope | None
         ) -> None: ...
+
+        def _settle_approval_resolution(
+            self, request_id: str, entry: _ApprovalEntry, future: Future[None]
+        ) -> None: ...
+
+        def _allow_for_team(self, entry: _ApprovalEntry) -> None: ...
+
+        def _allow_as_team_did(self, request_id: str, entry: _ApprovalEntry) -> bool: ...
+
+        def _distrust_team(self, team: str) -> None: ...
 
         def _start_host(self, *, session_id: str | None, deadline: float | None = None) -> None: ...
 

@@ -1,8 +1,11 @@
 """Language servers the desktop knows: which files each serves, where it is, how to get it.
 
 Only servers outside the folder are started: on PATH, in the app's own tools folder, or in the
-Rust and Go toolchains' bin folders. A folder's own node_modules or virtual environment is never
-run because a file was opened, so an untrusted project cannot start its code that way.
+Rust and Go toolchains' bin folders. A folder's own node_modules or virtual environment is not run
+because a file was opened, and servers that would run them are told not to (here and in
+lsp_pool.py) until the user has accepted the folder's commands. rust-analyzer runs cargo to read
+the project, and cargo honours the folder's .cargo/config.toml and rust-toolchain file; no setting
+of rust-analyzer closes that, so it is not started at all until then.
 """
 
 from __future__ import annotations
@@ -34,7 +37,13 @@ class ServerSpec:
     npm_entry: tuple[str, ...] = ()
     # How to get it when it cannot be installed from here.
     hint: str = ""
+    # Told to the server until the user has accepted the folder's commands: no code of the folder.
     initialization_options: Mapping[str, object] = field(default_factory=dict)
+    # Files of the tools folder's node_modules it is not started without, or it takes the folder's.
+    requires: tuple[str, ...] = ()
+    # Not started until the user has accepted the folder's commands: it runs the folder's code
+    # whatever it is told.
+    waits_for_trust: bool = False
 
 
 SERVERS: tuple[ServerSpec, ...] = (
@@ -62,6 +71,8 @@ SERVERS: tuple[ServerSpec, ...] = (
         (("typescript-language-server", "--stdio"),),
         npm=("typescript-language-server@5", "typescript@5"),
         npm_entry=("typescript-language-server/lib/cli.mjs", "--stdio"),
+        # Without tsserver.path it runs the folder's node_modules/typescript (lsp_pool.py).
+        requires=("typescript/lib/tsserver.js",),
     ),
     ServerSpec(
         "rust",
@@ -69,6 +80,14 @@ SERVERS: tuple[ServerSpec, ...] = (
         {".rs": "rust"},
         (("rust-analyzer",),),
         hint="rustup component add rust-analyzer",
+        # By default it runs the project's build scripts and procedural macros, and cargo check.
+        initialization_options={
+            "cargo": {"buildScripts": {"enable": False}},
+            "procMacro": {"enable": False},
+            "checkOnSave": False,
+        },
+        # Even so it runs cargo, which follows the folder's .cargo/config.toml and rust-toolchain.
+        waits_for_trust=True,
     ),
     ServerSpec(
         "go",
@@ -134,9 +153,16 @@ class NodeRuntime:
     environment: Mapping[str, str]
 
 
+def _on_path(program: str, which: Which) -> str | None:
+    found = which(program)
+    # On Windows shutil.which looks in the current directory before PATH, and on the command line
+    # the current directory is usually the folder.
+    return None if found and Path(found).parent == Path(os.curdir) else found
+
+
 def find_node(which: Which = shutil.which) -> NodeRuntime | None:
     """Node on PATH, else the desktop's Electron run as Node."""
-    found = which("node")
+    found = _on_path("node", which)
     if found:
         return NodeRuntime((found,), {})
     electron = os.environ.get(ELECTRON_NODE_ENV)
@@ -156,16 +182,21 @@ class ServerCommand:
 
 def find_server(
     spec: ServerSpec,
-    tools_dir: Path,
+    tools_dir: Path | None,
     *,
     which: Which = shutil.which,
     node: Callable[[], NodeRuntime | None] | None = None,
 ) -> ServerCommand | None:
+    if spec.requires and (
+        tools_dir is None
+        or not all((tools_dir / "node_modules" / item).is_file() for item in spec.requires)
+    ):
+        return None
     for program, *arguments in spec.commands:
-        found = which(program) or _in_toolchains(program)
+        found = _on_path(program, which) or _in_toolchains(program)
         if found:
             return ServerCommand(spec, (found, *arguments), {}, "path")
-    if spec.npm_entry:
+    if spec.npm_entry and tools_dir is not None:
         script = tools_dir / "node_modules" / spec.npm_entry[0]
         if script.is_file():
             runtime = (node or (lambda: find_node(which)))()

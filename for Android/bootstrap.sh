@@ -38,7 +38,7 @@ source "$VENV_DIR/bin/activate"
 # 5. 安装纯 Python 核心依赖
 echo "[+] 正在安装 Agent Workspace 纯 Python 依赖项..."
 pip install --upgrade pip
-pip install "httpx>=0.27,<1" "jsonschema>=4.23,<5" "pypdf>=6.16.0" "tomli-w>=1.2,<2" "websockets>=17.0.1"
+pip install "httpx>=0.27,<1" "jsonschema>=4.23,<5" "pypdf>=6.21.4" "tomli-w>=1.2,<2" "websockets>=17.0.1"
 
 # 6. 配置可执行权限
 chmod +x run_cli.sh run_server.sh entrypoint.py

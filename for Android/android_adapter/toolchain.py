@@ -8,10 +8,12 @@ import contextvars
 import os
 import tempfile
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from agent_workspace.coding.servers import spec_for
 from agent_workspace.tools.background_jobs import StartBackgroundJobTool
 from agent_workspace.tools.base import ToolArgumentError, ToolError
 from agent_workspace.tools.lsp import LspDiagnosticsTool
@@ -29,6 +31,19 @@ class AndroidLspDiagnosticsTool(LspDiagnosticsTool):
     """Allow a bounded mobile CPU window for the first LSP diagnostic notification."""
 
     hard_cancellable = False
+
+    def _server_command(self, path: Path) -> tuple[str, ...]:
+        # The toolchain's Pyright is not on PATH; the client below starts it in the toolchain.
+        manager = installed_toolchain()
+        spec = spec_for(path)
+        if (
+            manager is not None
+            and spec is not None
+            and spec.id == "python"
+            and "pyright" in manager.executables()
+        ):
+            return ("pyright-langserver", "--stdio")
+        return super()._server_command(path)
 
     async def execute(self, arguments: dict[str, Any]) -> str:
         token = _LSP_WORKSPACE.set(self.paths.root)
@@ -52,10 +67,15 @@ def installed_toolchain() -> Any:
     """The phone's one toolchain, for every workspace: wrap() is told which one a command is in."""
     if os.getenv("AGENT_WORKSPACE_EMBEDDED_PYTHON") != "chaquopy":
         return None
-    from mobile_toolchain import get_toolchain_manager
+    from mobile_toolchain import ToolchainError, get_toolchain_manager
 
-    manager = get_toolchain_manager()
-    return manager if manager is not None and manager.snapshot()["available"] else None
+    try:
+        manager = get_toolchain_manager()
+        return manager if manager is not None and manager.snapshot()["available"] else None
+    except ToolchainError:
+        # Damaged toolchain files must not stop commands that do not need it: they run under the
+        # guard, as when no toolchain is installed.
+        return None
 
 
 def command_transport(
@@ -123,6 +143,7 @@ def _invoke_git(
     *,
     timeout_seconds: int = 60,
     index_file: Path | None = None,
+    environment: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     manager = installed_toolchain()
     if manager is None:
@@ -134,6 +155,7 @@ def _invoke_git(
             expected_executable_sha256,
             timeout_seconds=timeout_seconds,
             index_file=index_file,
+            environment=environment,
         )
     from agent_workspace.tools.command import _required_executable_sha256
     from agent_workspace.tools.paths import WorkspacePaths
@@ -152,12 +174,13 @@ def _invoke_git(
     cwd = WorkspacePaths(workspace).resolve(repository)
     manager.begin_process()
     try:
-        argv, environment = manager.wrap([executable, *arguments], cwd, workspace)
+        argv, wrapped = manager.wrap([executable, *arguments], cwd, workspace)
+        wrapped.update(environment or {})
         with contextlib.ExitStack() as temporary_files:
             if index_file is not None:
                 index = index_file.resolve()
                 if index.is_relative_to(Path(workspace).resolve()):
-                    environment["GIT_INDEX_FILE"] = str(index)
+                    wrapped["GIT_INDEX_FILE"] = str(index)
                 else:
                     require_snapshot = (
                         index.name == "index"
@@ -180,14 +203,14 @@ def _invoke_git(
                     guest_dir = "/tmp/" + snapshot_dir.name
                     position = argv.index("-w") + 2
                     argv[position:position] = ["-b", f"{snapshot_dir}:{guest_dir}"]
-                    environment["GIT_INDEX_FILE"] = guest_dir + "/index"
+                    wrapped["GIT_INDEX_FILE"] = guest_dir + "/index"
             result = _run_sync(
                 argv,
                 str(cwd),
                 timeout_seconds,
                 "",
                 getattr(_WORKER_CANCEL, "event", threading.Event()),
-                environment,
+                wrapped,
                 separate_stderr=True,
             )
         return {
@@ -208,6 +231,90 @@ def _invoke_git(
         }
     finally:
         manager.end_process()
+
+
+def _guarded_command_sync(
+    workspace: str,
+    kind: str,
+    executable: str | None,
+    argv: list[str],
+    command: str | None,
+    raw_cwd: str,
+    timeout_seconds: int,
+    environment_overrides: dict[str, str] | None = None,
+    expected_executable_sha256: str | None = None,
+) -> str:
+    """A declared custom tool's command (tools/custom.py), started as every other command the agent
+    runs: in the toolchain's Linux or under the command guard, never as the app itself."""
+    original = _ORIGINALS["run_command"]
+    arguments = (workspace, kind, executable, argv, command, raw_cwd, timeout_seconds)
+    if kind != "direct" or executable is None:
+        return original(*arguments, environment_overrides, expected_executable_sha256)
+    from agent_workspace.tools.base import json_result
+    from agent_workspace.tools.command import _required_executable_sha256, _resolve_executable
+    from agent_workspace.tools.paths import WorkspacePaths
+
+    from .terminal import MAX_OUTPUT_BYTES, _run_sync
+
+    paths = WorkspacePaths(workspace)
+    cwd = paths.resolve(raw_cwd)
+    resolved = _resolve_executable(executable)
+    digest = _required_executable_sha256(resolved)
+    if expected_executable_sha256 is not None and digest != expected_executable_sha256.casefold():
+        raise ToolError("executable changed after discovery or approval")
+    transported, environment, lease = command_transport([str(resolved), *argv], cwd, paths.root)
+    if environment is None:  # Away from the phone, or a program the guard cannot find.
+        return original(*arguments, environment_overrides, expected_executable_sha256)
+    started = time.monotonic()
+    try:
+        result = _run_sync(
+            transported,
+            str(cwd),
+            timeout_seconds,
+            "",
+            getattr(_WORKER_CANCEL, "event", threading.Event()),
+            {**environment, **(environment_overrides or {})},
+            separate_stderr=True,
+        )
+    finally:
+        if lease is not None:
+            lease.end_process()
+    return json_result(
+        {
+            "kind": kind,
+            "executable": str(resolved),
+            "executable_sha256": digest,
+            "argv": argv,
+            "command_sha256": None,
+            "cwd": paths.relative(cwd),
+            "exit_code": result["returncode"],
+            "timed_out": result["timed_out"],
+            "duration_ms": round((time.monotonic() - started) * 1000),
+            **{
+                name: {
+                    "text": result[name],
+                    "truncated": result[name + "_bytes"] > MAX_OUTPUT_BYTES,
+                    "bytes": result[name + "_bytes"],
+                    "sha256": result[name + "_sha256"],
+                }
+                for name in ("stdout", "stderr")
+            },
+        }
+    )
+
+
+# The workspace an MCP host is being built for (build_mcp_host blocks until its servers started).
+_MCP_LOCK = threading.Lock()
+_MCP_WORKSPACE: list[Path] = []
+
+
+def _build_mcp_host(workspace: Any, servers: Any = None) -> Any:
+    with _MCP_LOCK:
+        _MCP_WORKSPACE.append(Path(workspace))
+        try:
+            return _ORIGINALS["build_mcp_host"](workspace, servers)
+        finally:
+            _MCP_WORKSPACE.clear()
 
 
 class AndroidStartBackgroundJobTool(StartBackgroundJobTool):
@@ -266,23 +373,33 @@ def install_toolchain_adapters() -> None:
         def __init__(self, command: Any, **kwargs: Any) -> None:
             manager = installed_toolchain()
             self._toolchain_lease = None
-            if manager is not None:
-                command = list(command)
-                if command and command[0] in {"pyright", "pyright-langserver"}:
-                    command = [
-                        str(manager.rootfs / "usr/bin/node"),
-                        "/opt/pyright/langserver.index.js",
-                        *command[1:],
-                    ]
-                if command and manager.owns_command(command[0]):
-                    manager.begin_process()
-                    try:
-                        root = _LSP_WORKSPACE.get() or manager.workspace
-                        command, _environment = manager.wrap(command, root, root)
-                    except Exception:
-                        manager.end_process()
-                        raise
-                    self._toolchain_lease = manager
+            command = list(command)
+            root = _LSP_WORKSPACE.get() or (manager.workspace if manager else Path.cwd())
+            if manager is not None and command and command[0] in {"pyright", "pyright-langserver"}:
+                command = [
+                    str(manager.rootfs / "usr/bin/node"),
+                    "/opt/pyright/langserver.index.js",
+                    *command[1:],
+                ]
+            if manager is not None and command and manager.owns_command(command[0]):
+                manager.begin_process()
+                try:
+                    command, _environment = manager.wrap(command, root, root)
+                except Exception:
+                    manager.end_process()
+                    raise
+                self._toolchain_lease = manager
+            elif command:
+                # A server outside the toolchain runs under the guard, as other commands do.
+                from .command_guard import guard
+
+                guarded = guard(command, root, root)
+                if guarded is not None:
+                    command = guarded[0]
+                    kwargs["extra_environment"] = {
+                        **guarded[1],
+                        **(kwargs.get("extra_environment") or {}),
+                    }
             super().__init__(command, **kwargs)
 
         async def shutdown_exit(self) -> None:
@@ -305,6 +422,64 @@ def install_toolchain_adapters() -> None:
 
     lsp.StdioLspClient = AndroidLspClient
     lsp._lsp_environment = environment
+    install_extension_guards()
+
+
+def install_extension_guards() -> None:
+    """A declared custom tool and an MCP server start as every other command does: in the toolchain's
+    Linux or under the command guard. Run directly they would read the app's own files (serve.token,
+    the conversations) and ask Android for what the app may do."""
+    if "run_command" in _ORIGINALS:
+        return
+    from agent_workspace.application import multi_runtime, runtime
+    from agent_workspace.tools import custom, mcp_host
+
+    _ORIGINALS.update(
+        run_command=custom._run_command_sync,
+        mcp_client=mcp_host.StdioMcpClient,
+        build_mcp_host=mcp_host.build_mcp_host,
+    )
+    custom._run_command_sync = _guarded_command_sync
+
+    class AndroidMcpClient(_ORIGINALS["mcp_client"]):
+        def __init__(self, command: Any, **kwargs: Any) -> None:
+            root = _MCP_WORKSPACE[0] if _MCP_WORKSPACE else Path(tempfile.gettempdir())
+            self._toolchain_lease: Any = None
+            self._refused: ToolError | None = None
+            extra: dict[str, str] | None = None
+            try:
+                transported, extra, self._toolchain_lease = command_transport(list(command), root, root)
+            except ToolError as refused:
+                # Said when the server starts, as any server that cannot start (mcp_host).
+                transported, self._refused = list(command), refused
+            if extra is not None and not kwargs.get("cwd"):
+                kwargs["cwd"] = str(root)
+            super().__init__(transported, **kwargs)
+            self._declared = tuple(command)
+            if extra:
+                self._environment.update(extra)
+
+        @property
+        def command(self) -> tuple[str, ...]:
+            return self._declared  # As the server was declared, not as it is started.
+
+        async def connect(self) -> None:
+            if self._refused is not None:
+                raise self._refused
+            await super().connect()
+
+        async def aclose(self) -> None:
+            try:
+                await super().aclose()
+            finally:
+                lease, self._toolchain_lease = self._toolchain_lease, None
+                if lease is not None:
+                    lease.end_process()
+
+    mcp_host.StdioMcpClient = AndroidMcpClient
+    mcp_host.build_mcp_host = _build_mcp_host
+    runtime.build_mcp_host = _build_mcp_host
+    multi_runtime.build_mcp_host = _build_mcp_host
 
 
 __all__ = [

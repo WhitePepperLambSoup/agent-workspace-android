@@ -115,6 +115,16 @@ def delete(trigger_id: str) -> None:
         _write(remaining)
 
 
+def forget_sessions(session_ids: set[str]) -> int:
+    """Removes the triggers of deleted conversations (they could only fail now); how many went."""
+    with _lock:
+        items = _read()
+        remaining = [item for item in items if item.get("session_id") not in session_ids]
+        if len(remaining) != len(items):
+            _write(remaining)
+        return len(items) - len(remaining)
+
+
 def set_enabled(trigger_id: str, enabled: bool) -> dict[str, Any]:
     if not isinstance(enabled, bool):
         raise ValueError("enabled must be true or false")

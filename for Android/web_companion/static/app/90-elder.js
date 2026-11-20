@@ -217,7 +217,7 @@
     renderElderRepeat();
     const ended = (async () => {
       for (let tries = 0; tries < 300 && speakingId === id && !disposed; tries += 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, 400));
+        await pollPause(400);
         let state = "";
         try { state = (await apiJson(`/mobile/speech/status?id=${encodeURIComponent(id)}`)).state || ""; } catch { break; }
         if (["completed", "failed", "stopped", "cancelled", "interrupted", "unknown"].includes(state)) break;

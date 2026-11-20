@@ -92,6 +92,9 @@ def forget(session_ids: set[str]) -> None:
     """Drops tags and pins of deleted conversations."""
     with _lock:
         document = _read()
-        document["tags"] = {key: value for key, value in document["tags"].items() if key not in session_ids}
-        document["pinned"] = [item for item in document["pinned"] if item not in session_ids]
-        _write(document)
+        kept = {
+            "tags": {key: value for key, value in document["tags"].items() if key not in session_ids},
+            "pinned": [item for item in document["pinned"] if item not in session_ids],
+        }
+        if kept != document:
+            _write(kept)

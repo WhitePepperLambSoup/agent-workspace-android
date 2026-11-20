@@ -1055,6 +1055,16 @@ class KnowledgeStore:
             ).fetchall()
         return [self._document(row) for row in rows]
 
+    def watched_versions(self, origin_path: str, collection_id: str) -> list[dict[str, Any]]:
+        """The documents a file in a watched folder has added to a knowledge base."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM documents WHERE origin = 'watch' AND origin_path = ? "
+                "AND collection_id = ?",
+                (origin_path, collection_id),
+            ).fetchall()
+        return [self._document(row) for row in rows]
+
     def document(self, document_id: object) -> dict[str, Any]:
         with self._connect() as db:
             row = db.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone()
@@ -1503,6 +1513,13 @@ class KnowledgeStore:
         )
         raw_origin_path = source.get("origin_path")
         origin_path = raw_origin_path if isinstance(raw_origin_path, str) else None
+        if (
+            source.get("origin") == "web"
+            and origin_path is not None
+            and origin_path.startswith(("https://", "http://"))
+        ):
+            # A saved web page stays one, with its address: results and answers cite it.
+            origin = "web"
         collection_id = collection_id or DEFAULT_COLLECTION
         with self._lock, self._connect() as db:
             if (
@@ -2038,8 +2055,10 @@ class KnowledgeStore:
             for document in self.documents(ready_only=True)
             if document["collection_id"] in selected
         ]
-        titles = ", ".join(f'"{document["title"]}"' for document in documents[:12])
-        more = f" and {len(documents) - 12} more" if len(documents) > 12 else ""
+        # The titles come from the documents (a saved page names itself): they follow each
+        # request as data (supplement), never here, in the instructions.
+        titles = "their titles follow each request"
+        more = ""
         automatic = (
             "Passages that match a request are attached after it automatically. "
             if settings["auto"]
@@ -2118,11 +2137,36 @@ class KnowledgeStore:
     def supplement(
         self, request: str, *, local: bool = False, session_id: str | None = None
     ) -> tuple[ChatMessage, ...]:
-        """The passages for a request as untrusted data placed after it, for this run only."""
-        text = self.passages_for(request, local=local, session_id=session_id)
-        if not text:
+        """The passages for a request, and the titles of the documents the conversation uses,
+        as untrusted data placed after it, for this run only."""
+        parts = [
+            part
+            for part in (
+                "" if local else self._titles_for(session_id),
+                self.passages_for(request, local=local, session_id=session_id),
+            )
+            if part
+        ]
+        if not parts:
             return ()
-        return (ChatMessage(Role.USER, text, trust=ContentTrust.UNTRUSTED_DATA),)
+        return (ChatMessage(Role.USER, "\n\n".join(parts), trust=ContentTrust.UNTRUSTED_DATA),)
+
+    def _titles_for(self, session_id: str | None) -> str:
+        """The titles of the knowledge base documents in use, as the documents named them."""
+        if not self.settings()["enabled"]:
+            return ""
+        with self._connect() as db:
+            selected = self._selected(db, session_id)[0]
+        documents = [
+            document
+            for document in self.documents(ready_only=True)
+            if document["collection_id"] in selected
+        ]
+        if not documents:
+            return ""
+        titles = ", ".join(f'"{document["title"]}"' for document in documents[:12])
+        more = f" and {len(documents) - 12} more" if len(documents) > 12 else ""
+        return f"Documents in the knowledge base in use: {titles}{more}."
 
 
 _stores: dict[Path, KnowledgeStore] = {}

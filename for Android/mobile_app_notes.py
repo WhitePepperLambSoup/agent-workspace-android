@@ -24,7 +24,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from mobile_memory import _SECRET
+from mobile_memory import has_secret
 
 MAX_APPS = 100
 MAX_NOTES = 8
@@ -115,7 +115,7 @@ def _clean_note(text: object) -> str:
         raise AppNoteError("the note is empty")
     if len(text) > MAX_NOTE_CHARS:
         raise AppNoteError(f"keep a note to one fact of at most {MAX_NOTE_CHARS} characters")
-    if _SECRET.search(text):
+    if has_secret(text):
         raise AppNoteError("notes must not contain passwords, keys, codes or ID/card numbers")
     return text
 
@@ -167,12 +167,100 @@ def delete_note(package: object, note_id: object) -> None:
 
 
 def forget_app(package: object) -> None:
-    """Deletes everything kept about one app (its notes and its taps)."""
+    """Deletes everything kept about one app (its notes, its taps and the panel's records)."""
     package = _package(package)
     with _lock:
         document = _load()
         if document["apps"].pop(package, None) is not None:
             _save(document)
+        _drop_panel_records(package, None)
+
+
+# ---- The phone control panel's records -------------------------------------------------------
+# How requests typed into the control panel were done in each app (PhoneMemory.kt keeps the last
+# three per app in <files>/automation/app-tips.json, beside the data folder). Listed and deleted
+# here with the app's notes; the agent gets them as records from earlier tasks.
+
+
+def _panel_path() -> Path | None:
+    path = _path()
+    return path.parent.parent / "automation" / "app-tips.json" if path else None
+
+
+def readable(text: object) -> str:
+    """A record as shown and as sent: long numbers (codes, phone numbers, amounts) taken out."""
+    return _LONG_NUMBER.sub("…", " ".join(str(text or "").split()))
+
+
+def _panel_records() -> dict[str, list[dict[str, Any]]]:
+    path = _panel_path()
+    try:
+        document = json.loads(path.read_text(encoding="utf-8")) if path else {}
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(document, dict):
+        return {}
+    records: dict[str, list[dict[str, Any]]] = {}
+    for package, entries in document.items():
+        if not isinstance(package, str) or not _PACKAGE.fullmatch(package) or not isinstance(entries, list):
+            continue
+        kept = [
+            {
+                "id": str(entry.get("at") or index),
+                "request": readable(entry.get("request"))[:200],
+                "steps": [readable(step)[:60] for step in entry.get("steps") or [] if isinstance(step, str)][:20],
+                "at": entry.get("at") if isinstance(entry.get("at"), int) else 0,
+            }
+            for index, entry in enumerate(entries)
+            if isinstance(entry, dict)
+        ]
+        if kept:
+            records[package] = kept
+    return records
+
+
+def _drop_panel_records(package: str, record_id: str | None) -> None:
+    """Removes one app's records (all of them for record_id None) from the panel's file."""
+    path = _panel_path()
+    if path is None or not path.is_file():
+        return
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(document, dict) or package not in document:
+        return
+    entries = document.get(package)
+    if record_id is not None and isinstance(entries, list):
+        entries = [
+            entry for index, entry in enumerate(entries)
+            if not isinstance(entry, dict) or str(entry.get("at") or index) != record_id
+        ]
+    if record_id is None or not entries:
+        document.pop(package, None)
+    else:
+        document[package] = entries
+    temporary = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+    temporary.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def delete_panel_record(package: object, record_id: object) -> None:
+    package = _package(package)
+    if not isinstance(record_id, str) or not record_id:
+        raise AppNoteError("id is required")
+    with _lock:
+        if not any(record["id"] == record_id for record in _panel_records().get(package, [])):
+            raise AppNoteError(f"{package} has no record with the id {record_id}")
+        _drop_panel_records(package, record_id)
+
+
+def panel_records_for_task(tips: object) -> str | None:
+    """The panel's records a phone control task sends, as the agent gets them: none while app
+    notes are off, and long numbers taken out (records kept by older versions have them)."""
+    if not isinstance(tips, str) or not tips.strip() or not enabled():
+        return None
+    return readable(tips)[:1800]
 
 
 def _drop_if_empty(document: dict[str, Any], package: str) -> None:
@@ -190,7 +278,7 @@ def _label(text: object) -> str | None:
     if not isinstance(text, str):
         return None
     label = " ".join(text.split())
-    if not label or len(label) > MAX_LABEL_CHARS or _LONG_NUMBER.search(label) or _SECRET.search(label):
+    if not label or len(label) > MAX_LABEL_CHARS or _LONG_NUMBER.search(label) or has_secret(label):
         return None
     return label
 
@@ -279,13 +367,16 @@ def notes_for(package: object) -> str | None:
 
 
 def listing() -> dict[str, Any]:
-    """Everything kept, for the settings page: apps with their notes and tap counts."""
+    """Everything kept, for the settings page: apps with their notes, tap counts and the control
+    panel's records."""
     document = _load()
+    panel = _panel_records()
     apps = []
     for package, app in document["apps"].items():
         if not isinstance(app, dict):
             continue
         taps = app.get("taps") or {}
+        records = panel.pop(package, [])
         apps.append(
             {
                 "package_name": package,
@@ -296,7 +387,19 @@ def listing() -> dict[str, Any]:
                     for label, tap in taps.items()
                     if isinstance(tap, dict)
                 ],
-                "updated_ms": app.get("updated_ms", 0),
+                "panel": records,
+                "updated_ms": max([app.get("updated_ms", 0), *(record["at"] for record in records)]),
+            }
+        )
+    for package, records in panel.items():
+        apps.append(
+            {
+                "package_name": package,
+                "app": None,
+                "notes": [],
+                "taps": [],
+                "panel": records,
+                "updated_ms": max(record["at"] for record in records),
             }
         )
     apps.sort(key=lambda item: -item["updated_ms"])
@@ -308,10 +411,13 @@ __all__ = [
     "SAVES_PER_TASK",
     "add_note",
     "delete_note",
+    "delete_panel_record",
     "enabled",
     "forget_app",
     "listing",
     "notes_for",
+    "panel_records_for_task",
+    "readable",
     "record_tap",
     "set_enabled",
 ]

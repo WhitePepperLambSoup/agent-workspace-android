@@ -8,6 +8,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 from collections.abc import Mapping
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -87,6 +88,8 @@ class MobileScheduleManager:
         self.path = Path(storage_path)
         self._lock = threading.RLock()
         self._dispatch_lock = asyncio.Lock()
+        # The name a file that could not be read was moved to (see open).
+        self.set_aside: str | None = None
         self._items = self._load()
         changed = False
         for item in self._items.values():
@@ -97,7 +100,23 @@ class MobileScheduleManager:
                 )
                 changed = True
         if changed:
-            self._save()
+            # A full disk now is no reason not to start; the next save writes this too.
+            with suppress(OSError):
+                self._save()
+
+    @classmethod
+    def open(cls, controller: MobileRuntimeController, storage_path: str | Path) -> MobileScheduleManager:
+        """For the engine's start: one file it cannot read must not stop the whole engine. The file
+        is kept beside the new, empty list, and the schedules page says so."""
+        path = Path(storage_path)
+        try:
+            return cls(controller, path)
+        except ValueError:
+            kept = path.with_name(f"{path.name}.corrupt-{int(time.time())}")
+            os.replace(path, kept)
+            manager = cls(controller, path)
+            manager.set_aside = kept.name
+            return manager
 
     def list(self) -> list[dict[str, object]]:
         with self._lock:
@@ -119,6 +138,7 @@ class MobileScheduleManager:
                 # Scheduled runs approve their own network requests and tool calls; the
                 # always-ask tools wait for the user.
                 "approval_scope": "task",
+                **({"set_aside": self.set_aside} if self.set_aside else {}),
             },
         }
 
@@ -146,18 +166,35 @@ class MobileScheduleManager:
     def update(self, schedule_id: str, payload: Mapping[str, object]) -> dict[str, object]:
         with self._lock:
             item = self._get(schedule_id)
-            config = self._config(payload, existing=item)
+            # Pausing, renaming or moving one saved under another provider must still work.
+            config = self._config(
+                payload,
+                existing=item,
+                check_runtime=payload.get("enabled") is True or bool({"model", "reasoning_effort"} & set(payload)),
+            )
             if config["enabled"]:
                 if not config["shortcut_id"]:
                     self._require_unattended(config["session_id"])
-                if item["last_occurrence"] == config["due_at"]:
+                # A repeat's first run has the start time as its occurrence too; only a one-time
+                # schedule has nothing left to run.
+                if config["repeat_seconds"] is None and item["last_occurrence"] == config["due_at"]:
                     raise ValueError(
                         "this occurrence was already handled; choose a new due_at "
                         "to schedule it again"
                     )
+            resumed = config["enabled"] and not item["enabled"]
             item.update(config)
             if "due_at" in payload:
                 item["next_due_at"] = config["due_at"]
+            elif resumed and config["repeat_seconds"] is not None:
+                # Switched back on, a repeat goes on at its next time from now, not at one that
+                # passed while it was off.
+                start = _instant(config["due_at"], "due_at")
+                interval = config["repeat_seconds"]
+                elapsed = int((datetime.now(UTC) - start).total_seconds())
+                if elapsed >= 0:
+                    start += timedelta(seconds=(elapsed // interval + 1) * interval)
+                item["next_due_at"] = start.isoformat()
             if "enabled" in payload or "due_at" in payload:
                 item["last_status"] = "scheduled" if config["enabled"] else "disabled"
                 item["last_error"] = None
@@ -324,8 +361,15 @@ class MobileScheduleManager:
             raise ValueError("schedule session is outside the mobile workspace")
 
     def _config(
-        self, payload: Mapping[str, object], *, existing: Mapping[str, object] | None = None
+        self,
+        payload: Mapping[str, object],
+        *,
+        existing: Mapping[str, object] | None = None,
+        check_runtime: bool = True,
     ) -> dict[str, object]:
+        """A schedule's fields, checked. ``check_runtime`` also holds its model and thinking effort
+        against the provider in use: not for what was saved under another one, which fails at its
+        due time with the reason, and not for a shortcut, which uses no model."""
         if not isinstance(payload, Mapping) or set(payload) - _CONFIG_FIELDS:
             raise ValueError("invalid schedule fields")
         config = (
@@ -343,17 +387,18 @@ class MobileScheduleManager:
         )
         config.update(payload)
         request = parse_mobile_task_request(config)
-        if not request.model:
-            raise ValueError("no model configured for the scheduled task")
-        if (
-            self.controller.protocol is not None
-            and self.controller.base_url is not None
-            and request.reasoning_effort
-            not in supported_reasoning_efforts(
-                self.controller.protocol, self.controller.base_url, request.model
-            )
-        ):
-            raise ValueError(f"{request.model} does not support the scheduled reasoning_effort")
+        if check_runtime and not config.get("shortcut_id"):
+            if not request.model:
+                raise ValueError("no model configured for the scheduled task")
+            if (
+                self.controller.protocol is not None
+                and self.controller.base_url is not None
+                and request.reasoning_effort
+                not in supported_reasoning_efforts(
+                    self.controller.protocol, self.controller.base_url, request.model
+                )
+            ):
+                raise ValueError(f"{request.model} does not support the scheduled reasoning_effort")
         title = config.get("title")
         if not isinstance(title, str) or not title.strip() or len(title) > 160:
             raise ValueError("schedule title must contain 1 to 160 characters")
@@ -416,15 +461,19 @@ class MobileScheduleManager:
                     "last_occurrence",
                     "last_error",
                 }
-                if not required <= set(item) <= required | set(_LATER_FIELDS):
+                # Fields a newer version added are kept as they are.
+                if not required <= set(item):
                     raise ValueError
                 identifier = item["schedule_id"]
                 if not isinstance(identifier, str) or not identifier or identifier in result:
                     raise ValueError
-                self._config({field: item.get(field, _LATER_FIELDS.get(field)) for field in _CONFIG_FIELDS})
+                self._config(
+                    {field: item.get(field, _LATER_FIELDS.get(field)) for field in _CONFIG_FIELDS},
+                    check_runtime=False,
+                )
                 _instant(item["next_due_at"], "next_due_at")
                 if item["last_status"] not in _STATUSES:
-                    raise ValueError
+                    item["last_status"] = "scheduled" if item["enabled"] else "disabled"
                 result[identifier] = item
             return result
         except (KeyError, ValueError, TypeError, OSError) as error:

@@ -248,11 +248,20 @@ def _background_allowed() -> bool:
     return allowed()
 
 
+def _in_person() -> bool:
+    try:
+        from mobile_screen import in_person
+    except ImportError:  # outside the app
+        return False
+    return in_person()
+
+
 def _invoke(bridge: Any | None, request: dict[str, Any]) -> dict[str, Any]:
     _require_available(bridge)
     if _background_allowed():
         # A conversation task: the phone uses the background screen when the user turned it on.
-        request = {**request, "background": True}
+        # With the phone locked it only reads there, unless the user started the task in person.
+        request = {**request, "background": True, **({"in_person": True} if _in_person() else {})}
     try:
         raw = _bridge_or_default(bridge).execute(
             json.dumps(request, ensure_ascii=False, separators=(",", ":"))
@@ -597,6 +606,8 @@ def _ad_layer(nodes: list[dict[str, Any]], full: int) -> dict[str, Any] | None:
 
 def _picture_hint(observation: dict[str, Any]) -> str | None:
     """Says so when the app in front shows little as text (pictures, a game, a web canvas)."""
+    if observation.get("own_app"):
+        return None  # not read at all: see _OWN_APP
     windows = [
         window
         for window in observation.get("windows") or []
@@ -754,8 +765,12 @@ _DRAWN_CHANGE = (
 )
 
 
+_OWN_APP = (
+    "Agent Workspace itself is in front: the agent does not read or operate it. Open the app the "
+    "task is about with launch_app or open_page."
+)
 # Actions that touch something on the screen; one that lands in another app may have hit an ad.
-_TOUCHES = frozenset({"ref", "tap", "tap_text", "long_press", "batch", "scroll_to_text"})
+_TOUCHES =frozenset({"ref", "tap", "tap_text", "long_press", "batch", "scroll_to_text"})
 # Apps whose windows show up on their own over others (this app's panel, keyboards, installers).
 _NOT_LEFT_FOR = frozenset({"com.agentworkspace.mobile", "android", "com.android.systemui"}) | _PERMISSION_PACKAGES
 
@@ -791,6 +806,8 @@ def _for_model(
     """A bridge response as the model reads it: the screen as short lines instead of every field of
     every node (about a tenth of the size, and each later request carries it again). After an
     action on the same screen, only what changed."""
+    if isinstance(response.get("error"), dict):
+        response["error"].pop("confirmation_token", None)  # never the model's to hold
     observation = response.get("observation")
     if not isinstance(observation, dict) or not isinstance(observation.get("nodes"), list):
         return response
@@ -803,6 +820,8 @@ def _for_model(
         if observation.get(flag):
             compact[flag] = True
     compact.update(_phone_state(observation))
+    if observation.get("own_app"):
+        compact["own_app"] = _OWN_APP
     lines = _ui_lines(observation)
     identity = (observation.get("ref_epoch"), observation.get("package_name"))
     by_ref = {match.group(1): line.strip() for line in lines if (match := _REF_IN_LINE.match(line))}
@@ -978,6 +997,7 @@ class AndroidObserveTool(_BridgeTool):
         },
         side_effect="read",
         capability=Capability.WORKSPACE_READ,
+        sensitive_result=True,
     )
 
     @property
@@ -1051,6 +1071,7 @@ class AndroidScreenshotTool(_BridgeTool):
         },
         side_effect="read",
         capability=Capability.WORKSPACE_READ,
+        sensitive_result=True,
     )
 
     @property
@@ -1060,12 +1081,17 @@ class AndroidScreenshotTool(_BridgeTool):
     def _run(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return self._capture(arguments)[0]
 
-    def _capture(self, arguments: dict[str, Any]) -> tuple[dict[str, Any], bytes | None]:
+    def _capture(
+        self, arguments: dict[str, Any], *, by_user: bool = False
+    ) -> tuple[dict[str, Any], bytes | None]:
         validate_tool_arguments(self.spec, arguments)
         marks = arguments.get("marks", True)
         if not isinstance(marks, bool):
             raise ToolArgumentError("'marks' must be true or false")
-        response = _invoke(self.bridge, {"action": "screenshot", "marks": marks})
+        request: dict[str, Any] = {"action": "screenshot", "marks": marks}
+        if by_user:
+            request["by_user"] = True
+        response = _invoke(self.bridge, request)
         screenshot = response.get("screenshot")
         if not isinstance(screenshot, dict):
             return response, None
@@ -1195,9 +1221,10 @@ _FIELD_SCHEMAS: dict[str, dict[str, Any]] = {
     "tap": {"type": "boolean", "description": "scroll_to_text: tap it once found."},
     "confirmed": {
         "type": "boolean",
-        "description": "Only after the user said yes in this conversation to pressing a control that "
-        "deletes, clears, uninstalls or stops an app (a result's needs_confirmation names it). It never "
-        "unlocks paying: payments are always the user's.",
+        "description": "Only after the user said yes in a new message to pressing a control that "
+        "deletes, clears, uninstalls or stops an app (a result's needs_confirmation names it); before "
+        "that it does not count, and it covers that one control once. It never unlocks paying: "
+        "payments are always the user's.",
     },
     "page": {"type": "string", "enum": list(_PAGES)},
     "url": {
@@ -1211,9 +1238,12 @@ _FIELD_SCHEMAS: dict[str, dict[str, Any]] = {
 }
 
 
-def _action_branch(action: str, common: tuple[str, ...]) -> dict[str, Any]:
+def _action_branch(
+    action: str, common: tuple[str, ...], leave_out: tuple[str, ...] = ()
+) -> dict[str, Any]:
     """The JSON Schema branch for one action: its own fields only, and what it needs."""
-    then: dict[str, Any] = {"propertyNames": {"enum": [*common, *_ACTION_FIELDS[action]]}}
+    fields = [name for name in _ACTION_FIELDS[action] if name not in leave_out]
+    then: dict[str, Any] = {"propertyNames": {"enum": [*common, *fields]}}
     groups = _REQUIRED.get(action, ())
     if len(groups) == 1:
         then["required"] = list(groups[0])
@@ -1224,6 +1254,7 @@ def _action_branch(action: str, common: tuple[str, ...]) -> dict[str, Any]:
     return {"if": {"properties": {"action": {"const": action}}, "required": ["action"]}, "then": then}
 
 
+# A yes covers one press: never a step of a batch or a repeat.
 _STEP_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -1231,11 +1262,11 @@ _STEP_SCHEMA: dict[str, Any] = {
         **{
             name: schema
             for name, schema in _FIELD_SCHEMAS.items()
-            if any(name in _ACTION_FIELDS[action] for action in _BATCH_ACTIONS)
+            if name != "confirmed" and any(name in _ACTION_FIELDS[action] for action in _BATCH_ACTIONS)
         },
     },
     "required": ["action"],
-    "allOf": [_action_branch(action, ("action",)) for action in _BATCH_ACTIONS],
+    "allOf": [_action_branch(action, ("action",), ("confirmed",)) for action in _BATCH_ACTIONS],
     "additionalProperties": False,
 }
 
@@ -1287,6 +1318,8 @@ def _action_payload(arguments: dict[str, Any], *, in_batch: bool = False) -> dic
         common = _COMMON_ACTION_FIELDS
     if set(arguments) - set(common) - set(_ACTION_FIELDS[action]):
         raise ToolArgumentError(f"unexpected arguments for Android action {action}")
+    if in_batch and "confirmed" in arguments:
+        raise ToolArgumentError("confirmed covers one press, not a step of a batch or a repeat")
     groups = _REQUIRED.get(action, ())
     present = [group for group in groups if all(name in arguments for name in group)]
     if groups and not present:
@@ -1314,7 +1347,9 @@ def _action_payload(arguments: dict[str, Any], *, in_batch: bool = False) -> dic
         if flag in arguments:
             if not isinstance(arguments[flag], bool):
                 raise ToolArgumentError(f"'{flag}' must be true or false")
-            payload[flag] = arguments[flag]
+            # confirmed stays here: what reaches the phone is the permission of _handed_over.
+            if flag != "confirmed":
+                payload[flag] = arguments[flag]
     if action == "scroll_to_text" and arguments.get("direction") in ("top", "bottom"):
         raise ToolArgumentError("scroll_to_text scrolls up, down, left or right")
     if action == "open_page":
@@ -1379,6 +1414,30 @@ def _action_payload(arguments: dict[str, Any], *, in_batch: bool = False) -> dic
     return payload
 
 
+# The one-time permission the phone issued with a needs_confirmation, by conversation, with the turn
+# it was refused in. The model never sees it and only ever says confirmed=true; it reaches the phone
+# once the user has spoken since (a later turn), and the phone holds it to that very control.
+_PERMISSIONS: dict[str, tuple[str, str]] = {}
+
+
+def _handed_over(arguments: dict[str, Any], context: ToolExecutionContext) -> str | None:
+    """The permission for a press the model marked confirmed, once the user has answered."""
+    if arguments.get("confirmed") is not True:
+        return None
+    held = _PERMISSIONS.get(context.session_id)
+    if held is None or held[1] == context.correlation_id:
+        return None
+    del _PERMISSIONS[context.session_id]
+    return held[0]
+
+
+def _keep_permission(response: dict[str, Any], context: ToolExecutionContext) -> None:
+    error = response.get("error")
+    token = error.pop("confirmation_token", None) if isinstance(error, dict) else None
+    if isinstance(token, str):
+        _PERMISSIONS[context.session_id] = (token, context.correlation_id)
+
+
 # Ads come at any moment in Chinese apps; the model is told once, with every phone task.
 _ADS = (
     "Ads can show at any moment: a splash ad as an app opens, a pop-up or red-packet layer over a "
@@ -1431,10 +1490,12 @@ class AndroidActionTool(_BridgeTool):
             "not reopen it), the screen goes off or they tap stop; stop_repeat ends it. Supply only "
             "fields belonging to the chosen action. A control that deletes, clears (cache or data), "
             "uninstalls or stops an app is refused with needs_confirmation even when the task was "
-            "approved: ask the user about that very control and end your turn; after their yes, repeat "
-            "the action with confirmed=true. Paying, transferring, withdrawing, placing an order and "
+            "approved: ask the user about that very control and end your turn; after their yes in a new "
+            "message, repeat the action with confirmed=true (it does not count before that, and not in "
+            "a batch or a repeat). Paying, transferring, withdrawing, placing an order and "
             "payment password screens are refused with payment_blocked in every mode: stop and tell the "
-            "user to finish that step themselves. " + _ADS
+            "user to finish that step themselves. Agent Workspace itself is refused with own_app: open "
+            "other apps from it, do not operate it. " + _ADS
         ),
         input_schema={
             "type": "object",
@@ -1473,7 +1534,9 @@ class AndroidActionTool(_BridgeTool):
         self, arguments: dict[str, Any], context: ToolExecutionContext
     ) -> str:
         await _wait_if_paused()
-        response = await asyncio.to_thread(_on_screen, self._run, arguments)
+        permission = _handed_over(arguments, context)
+        response = await asyncio.to_thread(_on_screen, self._run, arguments, permission)
+        _keep_permission(response, context)
         error = response.get("error")
         await context.record_event(
             Event(
@@ -1521,9 +1584,25 @@ class AndroidActionTool(_BridgeTool):
         permitted = (*common, *_ACTION_FIELDS.get(str(action), ()))
         return {name: arguments[name] for name in permitted if name in arguments}
 
-    def _run(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _run(self, arguments: dict[str, Any], permission: str | None = None) -> dict[str, Any]:
         validate_tool_arguments(self.spec, arguments)
-        return _invoke(self.bridge, _action_payload(arguments))
+        payload = _action_payload(arguments)
+        if permission:
+            payload["confirmed"] = permission
+        if payload.get("action") == "repeat":
+            payload.update(_hosted_allowance())
+        return _invoke(self.bridge, payload)
+
+
+def _hosted_allowance() -> dict[str, int]:
+    """For a repeat an unattended task starts: what is left of its hosted limits. The phone ends
+    the repeat there (time), and counts each of its steps against the steps left."""
+    try:
+        from mobile_hosted_limits import allowance
+    except ImportError:  # outside the app
+        return {}
+    left = allowance()
+    return {} if left is None else {"hosted_steps": left[0], "hosted_ms": left[1]}
 
 
 def _validate_expect(expect: dict[str, Any]) -> dict[str, Any]:
@@ -1640,7 +1719,8 @@ def execute_android_system_request(
     if action == "observe":
         return AndroidObserveTool(bridge)._run(arguments)
     if action == "screenshot":
-        return AndroidScreenshotTool(bridge)._run(arguments)
+        # Circling something on the screen from the bubble: the user's own, also over this app.
+        return AndroidScreenshotTool(bridge)._capture(arguments, by_user=True)[0]
     if action == "verify":
         return AndroidVerifyTool(bridge)._run(arguments)
     return AndroidActionTool(bridge)._run(request)

@@ -228,6 +228,15 @@ class TrustBook:
             temporary.write_text(json.dumps(book, indent=1), encoding="utf-8")
             os.replace(temporary, self.path)
 
+    def accepted(self, root: Path) -> bool:
+        """The user accepted commands of this folder as they stand, so its own programs may run;
+        a folder with none to accept has not been looked at by anyone."""
+        try:
+            config = load_config(root)
+        except ProjectConfigError:
+            return False
+        return config is not None and config.runs_commands and self.trusted(root, config)
+
 
 # -- what a folder's own files suggest ----------------------------------------------------------
 
@@ -384,10 +393,7 @@ def run_check(root: Path, check: Check, *, cancel: threading.Event | None = None
     except OSError as error:
         return CheckResult(check.name, check.command, False, None, 0.0, f"could not start: {error}")
     output: list[bytes] = []
-    reader = threading.Thread(
-        target=lambda: output.append(process.stdout.read() if process.stdout else b""),
-        daemon=True,
-    )
+    reader = threading.Thread(target=_read_output, args=(process.stdout, output), daemon=True)
     reader.start()
     timed_out = False
     deadline = started + check.timeout
@@ -412,6 +418,12 @@ def run_check(root: Path, check: Check, *, cancel: threading.Event | None = None
         text,
         timed_out,
     )
+
+
+def _read_output(stream: Any, output: list[bytes]) -> None:
+    # read1: read() gives back nothing until the pipe ends, which a build daemon can put off.
+    while chunk := stream.read1(64 * 1024):
+        output.append(chunk)
 
 
 def _kill_tree(process: subprocess.Popen[bytes]) -> None:
@@ -503,10 +515,21 @@ _SECRETS = (
     ("private key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----")),
     ("AWS access key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
     ("GitHub token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")),
+    ("GitHub token", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,}\b")),
     ("API key", re.compile(r"\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}\b")),
+    ("Stripe key", re.compile(r"\b[rs]k_live_[A-Za-z0-9]{20,}\b")),
     ("Slack token", re.compile(r"\bxox[abpr]-[A-Za-z0-9-]{10,}\b")),
     ("Google API key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
+    ("Alibaba Cloud key", re.compile(r"\bLTAI[0-9A-Za-z]{12,24}\b")),
+    ("Tencent Cloud key", re.compile(r"\bAKID[0-9A-Za-z]{32}\b")),
 )
+
+
+def mask_secrets(text: str) -> str:
+    """``text`` with each key the commit check knows replaced by a marker naming its kind."""
+    for kind, pattern in _SECRETS:
+        text = pattern.sub(f"[{kind} hidden]", text)
+    return text
 
 
 def scan_secrets(diff: str) -> list[str]:
@@ -528,8 +551,10 @@ def scan_secrets(diff: str) -> list[str]:
 
 
 def staged_diff(root: Path) -> str:
+    """The staged changes of the repository at ``root``; raises when Git cannot tell."""
     result = subprocess.run(
-        ["git", "diff", "--cached", "--no-color", "--unified=0"],
+        # No external diff or textconv: the repository's own config must not run a command here.
+        ["git", "diff", "--cached", "--no-color", "--no-ext-diff", "--no-textconv", "--unified=0"],
         cwd=root,
         stdin=subprocess.DEVNULL,
         capture_output=True,
@@ -537,6 +562,9 @@ def staged_diff(root: Path) -> str:
         creationflags=_CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         check=False,
     )
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip().splitlines()
+        raise ValueError(f"git diff failed: {detail[-1][:300] if detail else result.returncode}")
     return result.stdout.decode("utf-8", errors="replace")
 
 
@@ -607,6 +635,7 @@ __all__ = [
     "failure_report",
     "format_file",
     "load_config",
+    "mask_secrets",
     "matches",
     "parse_config",
     "protected_reason",

@@ -14,7 +14,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 
-from agent_workspace.core.cost import UNKNOWN_PRICING, estimate_cost_usd, resolve_pricing
+from agent_workspace.core.cost import (
+    UNKNOWN_PRICING,
+    UNLISTED_PRICING,
+    estimate_cost_usd,
+    resolve_pricing,
+)
 from agent_workspace.storage.sqlite import SQLiteEventStore
 
 
@@ -27,6 +32,8 @@ class ModelBill:
     cached_tokens: int
     cost_usd: float
     priced: bool
+    # Priced at the cautious default for a model without a listed price (estimate_unlisted).
+    unlisted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +47,7 @@ class MonthBill:
     models: tuple[ModelBill, ...]
     days: tuple[tuple[str, float], ...]  # (YYYY-MM-DD, cost) for each day with calls
     unpriced_calls: int
+    unlisted_calls: int = 0
 
     @property
     def cache_ratio(self) -> float:
@@ -90,7 +98,15 @@ def _calls(database: Path, start: datetime, end: datetime) -> list[tuple[str, st
     return [(str(row[0]), str(row[1]), int(row[2]), int(row[3]), int(row[4] or 0)) for row in rows]
 
 
-def month_bill(databases: Iterable[Path], month: str, *, zone: tzinfo | None = None) -> MonthBill:
+def month_bill(
+    databases: Iterable[Path],
+    month: str,
+    *,
+    zone: tzinfo | None = None,
+    estimate_unlisted: bool = False,
+) -> MonthBill:
+    """``estimate_unlisted``: a model without a listed price is counted at the cautious default
+    (core.cost.UNLISTED_PRICING) instead of as free, and marked so."""
     local = zone or _local_zone()
     start, end = month_bounds(month, local)
     per_model: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0, 0])
@@ -100,7 +116,18 @@ def month_bill(databases: Iterable[Path], month: str, *, zone: tzinfo | None = N
         if not database.is_file():
             continue
         for model, created_at, input_tokens, output_tokens, cached in _calls(database, start, end):
-            cost = estimate_cost_usd(model, input_tokens, output_tokens, min(cached, input_tokens))
+            try:
+                called_on = datetime.fromisoformat(created_at).astimezone(UTC).date()
+            except ValueError:
+                called_on = None
+            cost = estimate_cost_usd(
+                model,
+                input_tokens,
+                output_tokens,
+                min(cached, input_tokens),
+                estimate_unlisted=estimate_unlisted,
+                on=called_on,
+            )
             totals = per_model[model]
             totals[0] += 1
             totals[1] += input_tokens
@@ -122,7 +149,12 @@ def month_bill(databases: Iterable[Path], month: str, *, zone: tzinfo | None = N
                     output_tokens=totals[2],
                     cached_tokens=totals[3],
                     cost_usd=round(model_cost[model], 6),
-                    priced=bool(model) and resolve_pricing(model) is not UNKNOWN_PRICING,
+                    priced=bool(model)
+                    and resolve_pricing(model, estimate_unlisted=estimate_unlisted)
+                    is not UNKNOWN_PRICING,
+                    unlisted=bool(model)
+                    and resolve_pricing(model, estimate_unlisted=estimate_unlisted)
+                    is UNLISTED_PRICING,
                 )
                 for model, totals in per_model.items()
             ),
@@ -140,6 +172,7 @@ def month_bill(databases: Iterable[Path], month: str, *, zone: tzinfo | None = N
         models=models,
         days=tuple(sorted((day, round(cost, 6)) for day, cost in per_day.items())),
         unpriced_calls=sum(item.calls for item in models if not item.priced),
+        unlisted_calls=sum(item.calls for item in models if item.unlisted),
     )
 
 

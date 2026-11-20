@@ -26,7 +26,10 @@
       case "long": return step.label ? t("长按{0}", shortcutQuote(step.label)) : t("长按屏幕位置 ({0}, {1})", step.x, step.y);
       case "type": return t("在{0}里输入{1}", shortcutQuote(step.label), shortcutQuote(step.text));
       case "enter": return t("按确认键");
-      case "scroll": return t("{0}滚动", shortcutDirections[step.direction] || step.direction);
+      case "scroll":
+        if (step.direction === "top") return t("翻到最上面");
+        if (step.direction === "bottom") return t("翻到最下面");
+        return t("{0}滚动", shortcutDirections[step.direction] || step.direction);
       case "swipe": return t("从 ({0}, {1}) 滑到 ({2}, {3})", step.x, step.y, step.x2, step.y2);
       case "launch": return t("打开{0}", shortcutQuote(appName(step.package)));
       case "key": return shortcutKeys[step.key] || step.key;
@@ -311,7 +314,9 @@
   // only catches a damaged code and says nothing about who made it.
   const codePrefix = "AW-SHORTCUT-1.";
   const signedPrefix = "AW-SHORTCUT-2.";
-  const knownAuthorsKey = "agent-share-authors-v1";
+  // Known authors by their whole public key. The first version kept them by the short fingerprint,
+  // which a made-up key could match: those records are not read, so each author is checked again.
+  const knownAuthorsKey = "agent-share-authors-v2";
   function codeChecksum(text) {
     let hash = 0x811c9dc5;  // FNV-1a: catches a damaged or cut-off code (not a signature)
     for (let index = 0; index < text.length; index += 1) { hash ^= text.charCodeAt(index); hash = Math.imul(hash, 0x01000193) >>> 0; }
@@ -353,7 +358,7 @@
       let check = {};
       try { check = JSON.parse(bridge.verifyShareCode(`${signedPrefix}${body}`, signature, key) || "{}"); } catch { check = {}; }
       if (!check.valid) throw new Error(t("签名对不上：分享码在签名后被改动过"));
-      return { shortcut: decodeShortcut(body), signer: { fingerprint: check.fingerprint, own: shareIdentity()?.public_key === key } };
+      return { shortcut: decodeShortcut(body), signer: { fingerprint: check.fingerprint, key, own: shareIdentity()?.public_key === key } };
     }
     const at = code.indexOf(codePrefix);
     if (at < 0) throw new Error(t("这不是快捷操作的分享码"));
@@ -362,21 +367,21 @@
     return { shortcut: decodeShortcut(body), signer: null };
   }
 
-  // Authors whose shortcuts were imported here before (fingerprint → the first one's name).
+  // Authors whose shortcuts were imported here before (public key → the first one's name).
   function knownAuthors() {
     try { return JSON.parse(localStorage.getItem(knownAuthorsKey) || "{}") || {}; } catch { return {}; }
   }
-  function rememberAuthor(fingerprint, name) {
+  function rememberAuthor(key, name) {
     const known = knownAuthors();
-    if (known[fingerprint]) return;
-    known[fingerprint] = { name: String(name).slice(0, 40), at: Date.now() };
+    if (known[key]) return;
+    known[key] = { name: String(name).slice(0, 40), at: Date.now() };
     const kept = Object.entries(known).sort((a, b) => b[1].at - a[1].at).slice(0, 50);
     try { localStorage.setItem(knownAuthorsKey, JSON.stringify(Object.fromEntries(kept))); } catch { /* Only a convenience. */ }
   }
   function signerLine(signer) {
     if (!signer) return t("没有签名：看不出是谁做的，也不能确认没被改过");
     if (signer.own) return t("签名：你自己的");
-    const known = knownAuthors()[signer.fingerprint];
+    const known = knownAuthors()[signer.key];
     return known ? t("签名：指纹 {0}，你导入过这个人的{1}", signer.fingerprint, shortcutQuote(known.name))
       : t("签名：指纹 {0}，第一次见到。可以请对方在「可复用流程」页看自己的指纹，核对一致再装", signer.fingerprint);
   }
@@ -385,7 +390,7 @@
   const sensitivePages = new Set(["accessibility", "security", "developer", "vpn", "apps", "app_details"]);
   const outsidePages = new Set(["url", "map", "web_search", "dial"]);
   // The payment firewall's words (PaymentFirewall.kt): a run stops at such a button.
-  const moneyWords = /支付(?!宝)|付款|买单|转账|提现|充值|免密|提交订单|立即购买|确认购买|确认下单|^pay|payment|checkout|placeorder|buynow|transfer|withdraw|topup/i; // i18n-ignore: words on other apps' buttons
+  const moneyWords = /支付(?!宝)|付款|买单|转账|提现|充值|免密|确认收款|提交订单|立即购买|确认购买|确认下单|立即下单|去下单|一键下单|马上购买|购买(?!记录|须知|说明|历史)|结算|抢购|开通|续费|兑换|打赏|发红包|塞钱进红包|确认收货|pay|checkout|placeorder|ordernow|buy(?!er)|purchase(?!history|d)|subscribe|sendmoney|donate|transfer|withdraw|topup/i; // i18n-ignore: words on other apps' buttons
   function shortcutNeeds(shortcut) {
     const steps = shortcut.steps;
     const list = (items) => items.join(t("、"));
@@ -439,7 +444,7 @@
     try {
       await postShortcut("/mobile/shortcuts", { name: shared.name.slice(0, 40), app: shared.app || null, steps: shared.steps });
       if (disposed) return;
-      if (read.signer && !read.signer.own) rememberAuthor(read.signer.fingerprint, shared.name);
+      if (read.signer && !read.signer.own) rememberAuthor(read.signer.key, shared.name);
       status.textContent = t("已导入{0}", shortcutQuote(shared.name));
       void loadShortcuts();
     } catch (error) { if (!disposed) status.textContent = t("导入失败：{0}", error.message); }

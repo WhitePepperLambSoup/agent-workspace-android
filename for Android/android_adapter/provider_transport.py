@@ -35,12 +35,13 @@ def _credential_name(base_url: str) -> str:
 
 
 def load_extras(base_url: str) -> dict[str, Any]:
-    try:
-        from agent_workspace.credentials import get_credential
+    from agent_workspace.credentials import get_credential
 
-        raw = get_credential(_credential_name(base_url))
+    # A store that cannot be read is not the same as nothing being set: the caller hears of it.
+    raw = get_credential(_credential_name(base_url))
+    try:
         value = json.loads(raw) if raw else {}
-    except Exception:
+    except ValueError:
         value = {}
     headers = value.get("headers") if isinstance(value, dict) else None
     keys = value.get("keys") if isinstance(value, dict) else None
@@ -153,7 +154,9 @@ def patch_providers() -> None:
                 api_key = kwargs.get("api_key", args[2] if len(args) > 2 else None)
                 try:
                     client = client_for(str(base_url), api_key, trust_env=not is_loopback_endpoint(str(base_url)))
-                except Exception:
+                except Exception as error:
+                    # The provider still works without them; the engine log says why they are missing.
+                    print(f"provider headers and backup keys unavailable: {type(error).__name__}", flush=True)
                     client = None
                 if client is not None:
                     kwargs["client"] = client

@@ -14,12 +14,19 @@ from typing import Any
 from uuid import uuid4
 
 from agent_workspace.config import workspace_database_path
+from agent_workspace.tools.base import ToolError
 from agent_workspace.tools.paths import WorkspacePaths
+from agent_workspace.tools.process_worker import _WindowsJob
 
 _MAX_DEFAULT_OUTPUT_BYTES = 512 * 1024
 _MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 _MAX_ARGUMENTS = 256
 _MAX_ARGUMENT_CHARS = 32_767
+_STOP_DRAIN_SECONDS = 1.0
+_PERSIST_INTERVAL_SECONDS = 2.0
+# All of them fit in the 32 that terminal.list returns, with room for the running ones.
+_MAX_FINISHED_RECORDS = 20
+_MAX_FINISHED_SESSIONS = 8
 _STATE_LOCKS: dict[Path, RLock] = {}
 _STATE_LOCKS_GUARD = Lock()
 
@@ -67,6 +74,7 @@ class TerminalSession:
         process_group: int,
         owner: str | None = None,
         state_sink: Callable[[dict[str, object]], None] | None = None,
+        job: _WindowsJob | None = None,
     ) -> None:
         self.session_id = session_id
         self.workspace = workspace
@@ -79,6 +87,7 @@ class TerminalSession:
         self.owner = owner
         self._event_sink = event_sink
         self._state_sink = state_sink
+        self._job = job
         self._output = bytearray()
         self._total_output_bytes = 0
         self._truncated = False
@@ -88,6 +97,9 @@ class TerminalSession:
         self._columns: int | None = None
         self._rows: int | None = None
         self._lock = asyncio.Lock()
+        self._save_lock = asyncio.Lock()
+        self._persist_timer: asyncio.TimerHandle | None = None
+        self._persist_task: asyncio.Task[None] | None = None
         self._reader_task = asyncio.create_task(self._read_output())
         self._wait_task = asyncio.create_task(self._watch_exit())
         self._deadline_task: asyncio.Task[None] | None = None
@@ -125,16 +137,10 @@ class TerminalSession:
             if not chunk:
                 break
             async with self._lock:
-                if len(chunk) >= self.max_output_bytes:
-                    self._output[:] = chunk[-self.max_output_bytes :]
+                self._output += chunk
+                if len(self._output) > self.max_output_bytes:
+                    del self._output[: -self.max_output_bytes]
                     self._truncated = True
-                else:
-                    combined = self._output + chunk
-                    if len(combined) > self.max_output_bytes:
-                        self._output[:] = combined[-self.max_output_bytes :]
-                        self._truncated = True
-                    else:
-                        self._output[:] = combined
                 chunk_start = self._total_output_bytes
                 self._total_output_bytes += len(chunk)
                 text = chunk.decode("utf-8", errors="replace")
@@ -146,7 +152,7 @@ class TerminalSession:
                     truncated=self._truncated,
                     bytes=len(self._output),
                 )
-                self._persist()
+                self._persist_soon()
 
     async def _watch_exit(self) -> None:
         code = await self.process.wait()
@@ -165,7 +171,10 @@ class TerminalSession:
                 reason=self._exit_reason,
                 truncated=self._truncated,
             )
-            self._persist()
+        self._cancel_persist_timer()
+        await self._persist()
+        if self._job is not None:
+            self._job.close()
 
     async def _watch_deadline(self, deadline: float) -> None:
         try:
@@ -216,7 +225,7 @@ class TerminalSession:
             self._columns = columns
             self._rows = rows
             self._emit("terminal.resize", columns=columns, rows=rows)
-            self._persist()
+            self._persist_soon()
 
     async def stop(self, *, reason: str = "stopped") -> TerminalResult:
         async with self._lock:
@@ -224,15 +233,21 @@ class TerminalSession:
                 return self.replay()
             self._state = "stopped"
             self._exit_reason = reason
-            self._persist()
-        if self._deadline_task is not None:
+        # The deadline's own task is the one running this when the deadline expired.
+        if self._deadline_task is not None and self._deadline_task is not asyncio.current_task():
             self._deadline_task.cancel()
-        await _terminate_process_tree(self.process, self.process_group)
-        await self._wait_task
+        # A caller that goes away does not leave the tree half stopped or the exit unrecorded.
+        await asyncio.shield(_terminate_process_tree(self.process, self.process_group, self._job))
+        try:
+            await asyncio.wait_for(asyncio.shield(self._wait_task), timeout=_STOP_DRAIN_SECONDS)
+        except TimeoutError:
+            # Whatever still holds the pipes left the process tree; stop reading from it.
+            self.process._transport.close()  # type: ignore[attr-defined]
+            await asyncio.shield(self._wait_task)
         return self.replay()
 
     async def wait(self) -> TerminalResult:
-        await self._wait_task
+        await asyncio.shield(self._wait_task)
         return self.replay()
 
     def replay(self, offset: int = 0, *, max_bytes: int | None = None) -> TerminalResult:
@@ -264,13 +279,14 @@ class TerminalSession:
     async def aclose(self) -> None:
         if self._state == "running":
             await self.stop(reason="registry_closed")
+        self._cancel_persist_timer()
         for task in (self._reader_task, self._wait_task, self._deadline_task):
             if task is not None and not task.done():
                 task.cancel()
         await asyncio.gather(
             self._reader_task,
             self._wait_task,
-            *(task for task in (self._deadline_task,) if task is not None),
+            *(task for task in (self._deadline_task, self._persist_task) if task is not None),
             return_exceptions=True,
         )
 
@@ -281,13 +297,31 @@ class TerminalSession:
                 "terminal_owner: terminal session belongs to another owner",
             )
 
-    def _persist(self) -> None:
+    def _persist_soon(self) -> None:
+        """Output comes in small chunks: its record is saved now and then, not for each one."""
+        if self._state_sink is not None and self._persist_timer is None:
+            self._persist_timer = asyncio.get_running_loop().call_later(
+                _PERSIST_INTERVAL_SECONDS, self._persist_timer_fired
+            )
+
+    def _persist_timer_fired(self) -> None:
+        self._persist_timer = None
+        self._persist_task = asyncio.create_task(self._persist())
+
+    def _cancel_persist_timer(self) -> None:
+        if self._persist_timer is not None:
+            self._persist_timer.cancel()
+            self._persist_timer = None
+
+    async def _persist(self) -> None:
+        """Save off the event loop, one save at a time, so that the latest state stays."""
         if self._state_sink is None:
             return
-        try:
-            self._state_sink(self.to_document())
-        except Exception:
-            return
+        async with self._save_lock:
+            try:
+                await asyncio.to_thread(self._state_sink, self.to_document())
+            except Exception:
+                return
 
     def to_document(self) -> dict[str, object]:
         replay = self.replay()
@@ -309,38 +343,62 @@ class TerminalSession:
         }
 
 
+def _process_tree_job(pid: int) -> _WindowsJob | None:
+    """What reaches a process's descendants on Windows after it has gone; taskkill /T cannot."""
+    if os.name != "nt":
+        return None
+    try:
+        job = _WindowsJob(limits=False)
+    except ToolError:
+        return None
+    try:
+        job.assign(pid)
+    except ToolError:
+        job.close()
+        return None
+    return job
+
+
 async def _terminate_process_tree(
     process: asyncio.subprocess.Process,
     process_group: int,
+    job: _WindowsJob | None = None,
 ) -> None:
-    if process.returncode is not None:
-        return
+    # Also when the process itself has exited: a descendant can still hold its output pipe.
     if os.name == "nt":
-        # taskkill /T is the most reliable tree kill for a Windows process group
-        # when the child has launched a console shim or another interpreter.
-        proc = await asyncio.create_subprocess_exec(
-            "taskkill",
-            "/PID",
-            str(process.pid),
-            "/T",
-            "/F",
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        await proc.wait()
+        if process.returncode is None:
+            # taskkill /T is the most reliable tree kill for a Windows process group
+            # when the child has launched a console shim or another interpreter.
+            proc = await asyncio.create_subprocess_exec(
+                "taskkill",
+                "/PID",
+                str(process.pid),
+                "/T",
+                "/F",
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            await proc.wait()
+        if job is not None:
+            job.terminate()
     else:
         kill_group = getattr(os, "killpg", None)
         sigterm = getattr(signal, "SIGTERM", signal.SIGINT)
         sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
         if callable(kill_group):
-            with contextlib.suppress(ProcessLookupError):
+            with contextlib.suppress(OSError):
                 kill_group(process_group, sigterm)
-        try:
-            await asyncio.wait_for(process.wait(), timeout=1.0)
-        except TimeoutError:
-            if callable(kill_group):
-                with contextlib.suppress(ProcessLookupError):
+            # The group, not the process: a member that outlived it may ignore SIGTERM too.
+            for _ in range(20):
+                try:
+                    kill_group(process_group, 0)
+                except OSError:
+                    break
+                await asyncio.sleep(0.05)
+            else:
+                with contextlib.suppress(OSError):
                     kill_group(process_group, sigkill)
     if process.returncode is None:
         with contextlib.suppress(ProcessLookupError):
@@ -446,9 +504,10 @@ class TerminalSessionRegistry:
             process_group=process_group,
             owner=owner,
             state_sink=self._record_session,
+            job=_process_tree_job(process.pid),
         )
         self._sessions[session_id] = session
-        self._record_session(session.to_document())
+        session._wait_task.add_done_callback(lambda _task: self._forget_finished_sessions())
         session._emit(
             "terminal.start",
             workspace=str(self.paths.root),
@@ -458,7 +517,18 @@ class TerminalSessionRegistry:
             deadline=deadline,
             processGroup=process_group,
         )
+        await session._persist()
         return session
+
+    def _forget_finished_sessions(self) -> None:
+        """The latest finished sessions stay at hand; older ones are served from their record."""
+        finished = [
+            session_id
+            for session_id, session in self._sessions.items()
+            if session._wait_task.done()
+        ]
+        for session_id in finished[:-_MAX_FINISHED_SESSIONS]:
+            del self._sessions[session_id]
 
     def get(self, session_id: str) -> TerminalSession:
         try:
@@ -605,6 +675,13 @@ class TerminalSessionRegistry:
             # Each host updates only its changed records; a stale peer snapshot
             # must never erase newer output or other conversations' terminals.
             self._refresh_records()
+            finished = [
+                session_id
+                for session_id, record in self._records.items()
+                if record.get("state") != "running"
+            ]
+            for session_id in finished[:-_MAX_FINISHED_RECORDS]:
+                del self._records[session_id]
             try:
                 self.state_path.parent.mkdir(parents=True, exist_ok=True)
                 temporary = self.state_path.with_suffix(self.state_path.suffix + ".tmp")

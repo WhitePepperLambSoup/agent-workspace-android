@@ -350,13 +350,25 @@ object LocalModelBridge {
                 throw RequestError("invalid_request", "Configured context is outside the model limits")
             val weights = privateModelPath(context, root, modelId,
                 File(root, "$modelId/model.gguf").absolutePath)
-            // An idle kept context would otherwise count as used memory and shrink the plan.
-            nativeReleasePromptCache()
+            // Planning only reads. It used to free the kept context so its memory would not shrink
+            // the plan, which threw away the model's reading of the prompt between a task's steps
+            // each time the page asked (every 2 s while a task runs), minutes of work to redo on a
+            // phone. Its memory is counted as usable instead: generation frees it before it
+            // allocates another (generateInternal).
             if (!weights.isFile || weights.length() !in 16L..(3L * 1024 * 1024 * 1024))
                 throw RequestError("model_not_installed", "The selected local Qwen model is not installed")
             val memory = ActivityManager.MemoryInfo()
             (context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).getMemoryInfo(memory)
-            val loaded = JSONObject(status()).optString("loaded_model").takeIf { it in supportedIds }
+            val state = JSONObject(status())
+            val loaded = state.optString("loaded_model").takeIf { it in supportedIds }
+            val kept = state.optJSONObject("prompt_cache")?.let { cache ->
+                val keptModel = cache.optString("model_id").takeIf { it in supportedIds } ?: return@let 0L
+                runCatching {
+                    val keptWeights = privateModelPath(context, root, keptModel, File(root, "$keptModel/model.gguf").absolutePath)
+                    LocalModelMemory.keptContextBytes(keptModel, keptWeights.length(), cache.optInt("context_size"),
+                        installedDigest(keptWeights, keptModel))
+                }.getOrDefault(0L)
+            } ?: 0L
             // Python constructs the provider before a request has any images.
             // Installed vision capability must not reduce its text capacity.
             // Actual image generation independently verifies and budgets the
@@ -374,7 +386,7 @@ object LocalModelBridge {
             val tokenMetadata = JSONObject(countPromptTokens(modelId, " "))
             val installedMaximum = tokenMetadata.optInt("model_max_context_tokens", 0)
                 .takeIf { it >= LocalModelContext.MIN_CONTEXT_TOKENS } ?: 0
-            val usable = usableRamBytes(memory)
+            val usable = usableRamBytes(memory) + kept
             val plan = LocalModelContext.plan(modelId, weights.length(), installedDigest(weights, modelId),
                 loaded, requestedTokens, usable, availableSwapBytes(), memory.lowMemory, memoryMode,
                 projectionBytes, installedMaximum, needsVision)

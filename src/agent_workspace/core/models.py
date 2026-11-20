@@ -150,6 +150,7 @@ class Capability(StrEnum):
     GIT_READ = "git_read"
     GIT_WRITE = "git_write"
     NETWORK_READ = "network_read"
+    NETWORK_WRITE = "network_write"
     TODO = "todo"
     RESEARCH_SOURCE = "research_source"
     CITATION = "citation"
@@ -166,6 +167,7 @@ _CODING_CAPABILITIES = frozenset(
         Capability.GIT_READ,
         Capability.GIT_WRITE,
         Capability.NETWORK_READ,
+        Capability.NETWORK_WRITE,
         Capability.TODO,
         Capability.MEMORY_READ,
         Capability.MEMORY_WRITE,
@@ -547,6 +549,12 @@ class ChatMessage:
         return text
 
     @property
+    def is_empty_assistant_turn(self) -> bool:
+        """An assistant turn with no text and no tool call: what an empty reply, or a stream cut
+        during thinking, leaves in the history. Anthropic and Gemini refuse it there."""
+        return self.role is Role.ASSISTANT and not self.tool_calls and not self.content.strip()
+
+    @property
     def carries_untrusted_data(self) -> bool:
         """True when the message or its appendix holds untrusted data."""
         return self.trust is ContentTrust.UNTRUSTED_DATA or any(
@@ -608,6 +616,13 @@ class ToolSpec:
     capability: Capability | None = None
     provider_input_schema: dict[str, Any] | None = None
     durable_preimage_checkpoint: bool = False
+    # The result holds the user's personal data (contacts, notifications, another app's screen):
+    # it is marked sensitive, so provider egress is approved once per request, never per session.
+    sensitive_result: bool = False
+    # Set only for a workspace extension's tool (an MCP server's or a custom tool): whether its
+    # configuration lets YOLO mode run it (`yolo = true`), which the extension's consent covers.
+    # None for every other tool.
+    yolo_opt_in: bool | None = None
 
     @property
     def advertised_input_schema(self) -> dict[str, Any]:

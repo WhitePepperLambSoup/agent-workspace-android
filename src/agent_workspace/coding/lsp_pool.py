@@ -20,10 +20,14 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar
-from urllib.parse import unquote, urlparse
-from urllib.request import url2pathname
 
-from agent_workspace.tools.lsp import LspClientError, LspDiagnostic, StdioLspClient
+from agent_workspace.tools.lsp import (
+    LspClientError,
+    LspDiagnostic,
+    StdioLspClient,
+    path_from_uri,
+    uri_key,
+)
 
 from .install import install_server
 from .servers import SERVERS, ServerCommand, find_node, find_server, language_id, spec_for
@@ -76,27 +80,6 @@ class NoServerError(RuntimeError):
             f"no language server for {path.suffix or path.name} files"
             + (f" ({spec.name} is not installed)" if spec is not None else "")
         )
-
-
-def path_from_uri(uri: str) -> Path | None:
-    parsed = urlparse(uri)
-    if parsed.scheme != "file":
-        return None
-    if os.name != "nt":
-        return Path(unquote(parsed.path))
-    text = url2pathname(unquote(parsed.path))
-    if len(text) > 1 and text[1] == ":":
-        text = text[0].upper() + text[1:]  # pyright writes file:///c%3A/…
-    return Path(text)
-
-
-def uri_key(uri: str) -> str:
-    """One spelling for the same file: servers write drive letters and colons their own way."""
-    path = path_from_uri(uri)
-    if path is None:
-        return uri
-    text = os.path.normpath(str(path))
-    return text.casefold() if os.name == "nt" else text
 
 
 def utf16_units(text: str, index: int) -> int:
@@ -180,6 +163,17 @@ def _venv_python(root: Path) -> Path | None:
     return None
 
 
+def _venv_packages(root: Path) -> list[Path]:
+    """Where the folder's virtual environment keeps its packages, found without running it."""
+    for folder in (".venv", "venv", "env"):
+        found = [root / folder / "Lib" / "site-packages"]
+        found += sorted((root / folder / "lib").glob("python3*/site-packages"))
+        found = [path for path in found if path.is_dir()]
+        if found:
+            return found
+    return []
+
+
 def _capabilities() -> dict[str, Any]:
     return {
         "textDocument": {
@@ -202,10 +196,13 @@ class LspPool:
         *,
         idle_seconds: float = _IDLE_SECONDS,
         which: Callable[[str], str | None] = shutil.which,
+        runs_folder_code: Callable[[Path], bool] = lambda _root: False,
     ) -> None:
         self.tools_dir = tools_dir
         self._idle_seconds = idle_seconds
         self._which = which
+        # Whether the user accepted that this folder's own programs run (TrustBook.accepted).
+        self._runs_folder_code = runs_folder_code
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._thread_lock = threading.Lock()
@@ -328,11 +325,23 @@ class LspPool:
         server = self.find(path)
         if server is None:
             raise NoServerError(path)
+        if server.spec.waits_for_trust and not self._runs_folder_code(root):
+            # Checked before the failure cache, so it starts as soon as the folder is accepted.
+            raise LspClientError(
+                f"{server.spec.name} starts once this folder's commands are accepted: it runs "
+                "cargo, which follows the folder's own settings"
+            )
         key = (str(root).casefold(), server.spec.id)
         session = self._sessions.get(key)
-        if session is not None and session.client._process is not None:
+        if session is not None and session.client.alive:
             session.last_used = time.monotonic()
             return session
+        if session is not None:
+            # The server exited (a crash): every request to it would fail with "pipe closed",
+            # and each one kept it from being reaped as idle. Started again below.
+            self._sessions.pop(key, None)
+            with suppress(Exception):
+                await session.client.shutdown_exit()
         failed = self._failed.get(key)
         if failed is not None and time.monotonic() - failed[0] < _FAILED_RETRY_SECONDS:
             raise LspClientError(failed[1])
@@ -343,8 +352,15 @@ class LspPool:
         self._starting[key] = future
         try:
             session = await self._start(root, server)
-        except BaseException as error:
-            self._failed[key] = (time.monotonic(), str(error))
+        except asyncio.CancelledError:
+            # Stopped by whoever started it (the turn was stopped): not a failure of the server,
+            # so the next request starts it again instead of reading a cached empty error.
+            future.set_exception(LspClientError(f"starting {server.spec.name} was stopped"))
+            future.exception()
+            raise
+        except Exception as error:
+            reason = str(error) or type(error).__name__
+            self._failed[key] = (time.monotonic(), reason)
             future.set_exception(error)
             future.exception()  # read here, so a start nobody else waited on is not reported
             raise
@@ -355,13 +371,21 @@ class LspPool:
         return session
 
     async def _start(self, root: Path, server: ServerCommand) -> _Session:
-        settings: dict[str, Any] = {"python.analysis": {"diagnosticMode": "openFilesOnly"}}
-        python = _venv_python(root)
-        if python is not None:
-            settings["python"] = {"pythonPath": str(python)}
+        analysis: dict[str, Any] = {"diagnosticMode": "openFilesOnly"}
+        settings: dict[str, Any] = {"python.analysis": analysis}
+        options: dict[str, Any] = {}
+        if self._runs_folder_code(root):
+            python = _venv_python(root)
+            if python is not None:
+                # Pyright runs this interpreter to ask it for its search paths.
+                settings["python"] = {"pythonPath": str(python)}
+        else:
+            analysis["extraPaths"] = [str(path) for path in _venv_packages(root)]
+            options = dict(server.spec.initialization_options)
+            if options:
+                settings["rust-analyzer"] = options
         client = _Client(server.command, extra_environment=server.environment, settings=settings)
         root_uri = root.as_uri()
-        options: dict[str, Any] = dict(server.spec.initialization_options)
         tsserver = self.tools_dir / "node_modules" / "typescript" / "lib" / "tsserver.js"
         if server.spec.id == "typescript" and tsserver.is_file():
             # Our own TypeScript, not one the folder brings along.

@@ -5,6 +5,8 @@ from uuid import uuid4
 
 from agent_workspace.application.ports import EventStore, ToolExecutionContext
 from agent_workspace.core.events import (
+    MAX_RESEARCH_CONTENT_BYTES,
+    MAX_RESEARCH_RESPONSE_BYTES,
     Event,
     validate_event_payload,
     web_fetch_receipt_matches,
@@ -14,7 +16,8 @@ from agent_workspace.core.models import Capability, Citation, ResearchSource, To
 
 from .base import ToolArgumentError, json_result, optional_int, require_string
 
-_MAX_ARTIFACT_BYTES = 128 * 1024
+# The content is bounded in UTF-8 bytes; a string within that has no more characters than bytes.
+_MAX_ARTIFACT_BYTES = MAX_RESEARCH_CONTENT_BYTES
 
 
 class SaveResearchSourceTool:
@@ -36,7 +39,7 @@ class SaveResearchSourceTool:
                 "response_bytes": {
                     "type": "integer",
                     "minimum": 0,
-                    "maximum": _MAX_ARTIFACT_BYTES + 1,
+                    "maximum": MAX_RESEARCH_RESPONSE_BYTES,
                 },
                 "media_type": {"type": "string", "minLength": 1, "maxLength": 255},
                 "fetched_at": {"type": "string", "minLength": 1, "maxLength": 64},
@@ -71,7 +74,7 @@ class SaveResearchSourceTool:
                 "response_bytes": {
                     "type": "integer",
                     "minimum": 0,
-                    "maximum": _MAX_ARTIFACT_BYTES + 1,
+                    "maximum": MAX_RESEARCH_RESPONSE_BYTES,
                 },
                 "media_type": {"type": "string"},
                 "fetched_at": {"type": "string"},

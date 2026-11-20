@@ -217,6 +217,10 @@ class MobileToolchainManager:
         self.rootfs = self.root / "rootfs"
         self.download_dir = self.root / "downloads"
         self.state_file = self.root / "state.json"
+        # The installed tree's manifest (revision, executable and component hashes). The guest runs
+        # as root in the rootfs, so the copy kept there could be rewritten by any command; this one
+        # is outside it, and is the one checked.
+        self.manifest_file = self.root / "manifest.json"
         self._native_status = native_status
         self._runner = probe_runner
         self._lock = threading.RLock()
@@ -226,7 +230,22 @@ class MobileToolchainManager:
         self._executables: dict[str, dict[str, str]] = {}
         self._processes = 0
         self._completed_bytes = 0
-        self._state = self._read_json(self.state_file)
+        self._manifest_problem: str | None = None
+        try:
+            self._state = self._read_json(self.state_file)
+        except ToolchainError:
+            # Without a manager the page could not remove or reinstall anything: the damaged file
+            # is kept aside, named in the reason, and the state starts over.
+            kept = self.state_file.with_name(f"state.json.corrupt-{int(time.time())}")
+            reason = f"The toolchain's saved state was damaged; it was kept as {kept.name}"
+            try:
+                _atomic_replace(self.state_file, kept)
+            except OSError:
+                # Not moved: it stays where it is, and is overwritten only by a later change.
+                self._state = {"reason": "The toolchain's saved state is damaged"}
+            else:
+                self._state = {}
+                self._update(reason=reason)
         native = self._native_status()
         if catalog is None:
             catalogs = json.loads(
@@ -264,10 +283,38 @@ class MobileToolchainManager:
             temporary.write_text(json.dumps(self._state, ensure_ascii=False), "utf-8")
             _atomic_replace(temporary, self.state_file)
 
+    def _write_manifest(self, manifest: dict[str, Any]) -> None:
+        temporary = self.manifest_file.with_suffix(".tmp")
+        temporary.write_text(json.dumps(manifest), "utf-8")
+        _atomic_replace(temporary, self.manifest_file)
+
+    def _manifest(self) -> dict[str, Any]:
+        """The installed tree's manifest; {} when nothing is installed.
+
+        Trees installed before the manifest was kept outside the rootfs have only the guest's copy;
+        it is taken over once, and from then on the guest's copy is only for show.
+        """
+        if self.manifest_file.exists():
+            return self._read_json(self.manifest_file)
+        guest_copy = self.rootfs / ".agent-toolchain.json"
+        if self.rootfs.is_symlink() or guest_copy.is_symlink() or not guest_copy.is_file():
+            return {}
+        manifest = self._read_json(guest_copy)
+        with contextlib.suppress(OSError):
+            self._write_manifest(manifest)
+        return manifest
+
     def _installed(self) -> bool:
         if not self.catalog or self.rootfs.is_symlink():
             return False
-        manifest = self._read_json(self.rootfs / ".agent-toolchain.json")
+        try:
+            manifest = self._manifest()
+        except ToolchainError as error:
+            # A damaged manifest means "not installed" (installing again repairs it), not a
+            # failure of every command that asks whether the toolchain is there.
+            self._manifest_problem = str(error)
+            return False
+        self._manifest_problem = None
         return manifest.get("revision") == self.catalog["revision"]
 
     def snapshot(self) -> dict[str, Any]:
@@ -280,7 +327,10 @@ class MobileToolchainManager:
                 state = "needs_probe"
             if not installed and state in {"ready", "needs_probe", "probe_failed"}:
                 # Installed from an older catalog: installing again downloads what changed.
-                earlier = (self.rootfs / ".agent-toolchain.json").is_file()
+                earlier = (
+                    self.manifest_file.is_file()
+                    or (self.rootfs / ".agent-toolchain.json").is_file()
+                )
                 state = "outdated" if earlier else "not_installed"
             return {
                 **self._state,
@@ -290,7 +340,9 @@ class MobileToolchainManager:
                 "installed": installed,
                 "available": available,
                 "supported": self.catalog is not None and native.get("available") is True,
-                "reason": self._state.get("reason") or native.get("reason"),
+                "reason": self._state.get("reason")
+                or self._manifest_problem
+                or native.get("reason"),
                 "revision": self.catalog.get("revision") if self.catalog else None,
                 "architecture": native.get("architecture"),
                 "download_size": sum(item["size"] for item in self.catalog["artifacts"])
@@ -358,6 +410,7 @@ class MobileToolchainManager:
 
     def _install(self) -> None:
         staging = self.root / "installing"
+        replaced = False
         try:
             assert self.catalog is not None
             self.root.mkdir(parents=True, exist_ok=True)
@@ -413,20 +466,17 @@ class MobileToolchainManager:
                 candidate = staging / relative
                 if candidate.is_file():
                     components[relative] = _sha256(candidate)
-            (staging / ".agent-toolchain.json").write_text(
-                json.dumps(
-                    {
-                        "revision": self.catalog["revision"],
-                        "executables": executables,
-                        "components": components,
-                        "packages": {
-                            item["package"]: {"version": item["version"], "license": item["license"]}
-                            for item, _ in packages
-                        },
-                    }
-                ),
-                "utf-8",
-            )
+            manifest = {
+                "revision": self.catalog["revision"],
+                "executables": executables,
+                "components": components,
+                "packages": {
+                    item["package"]: {"version": item["version"], "license": item["license"]}
+                    for item, _ in packages
+                },
+            }
+            # The guest's copy is for show (what is installed); manifest_file is the one checked.
+            (staging / ".agent-toolchain.json").write_text(json.dumps(manifest), "utf-8")
             if self._cancelled.is_set():
                 raise _Cancelled("Toolchain installation was cancelled")
             previous = self.root / "previous"
@@ -439,6 +489,8 @@ class MobileToolchainManager:
                 if previous.exists():
                     _atomic_replace(previous, self.rootfs)
                 raise
+            replaced = True
+            self._write_manifest(manifest)
             # The guest's home (SSH keys the agent made, for one) outlives a reinstall.
             home = previous / "home/agent"
             if home.is_dir() and not home.is_symlink():
@@ -453,25 +505,42 @@ class MobileToolchainManager:
                             shutil.rmtree(cache)
             self._remove_private_tree(previous)
             self._probed = False
-            self.probe()
+            self._probe()
         except _Cancelled:
-            self._update(
-                state="paused",
-                reason="Installation was cancelled; retry to resume downloaded content",
-            )
+            if not replaced and self._still_usable():
+                # Reinstalling the same revision: the old tree was never touched and stays in use.
+                self._update(state="ready", reason=None)
+            else:
+                self._update(
+                    state="paused",
+                    reason="Installation was cancelled; retry to resume downloaded content",
+                )
             raise
         except Exception as error:
-            self._probed = False
-            self._executables = {}
             reason = (
                 str(error)[:400]
                 if isinstance(error, ToolchainError)
                 else "Toolchain installation failed"
             )
-            self._update(state="failed", reason=reason)
+            if not replaced and self._still_usable():
+                self._update(state="ready", reason=reason)
+            else:
+                self._probed = False
+                self._executables = {}
+                self._update(state="failed", reason=reason)
             raise ToolchainError(reason) from error
         finally:
             self._remove_private_tree(staging)
+            # Left set, a cancel stopped every later probe at its first command.
+            self._cancelled.clear()
+
+    def _still_usable(self) -> bool:
+        """The installed tree passed its probes and is the catalog's revision (a reinstall that
+        stopped before replacing it leaves it so)."""
+        try:
+            return self._probed and self._installed()
+        except ToolchainError:
+            return False
 
     def _download(self, item: dict[str, Any], verify: Any = None) -> Path:
         """The artifact, checked by its pinned SHA-256 or by `verify` (which raises AlpineError).
@@ -876,7 +945,7 @@ class MobileToolchainManager:
             for record in self._executables.values():
                 if record["path"] in used and _sha256(Path(record["path"])) != record["sha256"]:
                     raise ToolchainError("The discovered executable changed after probing")
-            manifest = self._read_json(self.rootfs / ".agent-toolchain.json")
+            manifest = self._manifest()
             for relative, digest in manifest.get("components", {}).items():
                 component = self.rootfs / _safe_relative(relative)
                 if str(component.resolve()) in used and _sha256(component) != digest:
@@ -916,6 +985,13 @@ class MobileToolchainManager:
             self._processes = max(0, self._processes - 1)
 
     def probe(self) -> dict[str, Any]:
+        with self._lock:
+            if self._thread is None or not self._thread.is_alive():
+                # A cancel pressed for an earlier install or probe must not stop this one.
+                self._cancelled.clear()
+        return self._probe()
+
+    def _probe(self) -> dict[str, Any]:
         self._require_native()
         if not self._installed():
             raise ToolchainError("The verified toolchain is not installed")
@@ -924,7 +1000,7 @@ class MobileToolchainManager:
         runner = self._runner or _run_sync
         self._update(state="probing", reason=None, probe_failure=None)
         self._probed = False
-        manifest = self._read_json(self.rootfs / ".agent-toolchain.json")
+        manifest = self._manifest()
         found = {}
         try:
             self.workspace.mkdir(parents=True, exist_ok=True)
@@ -1011,6 +1087,7 @@ class MobileToolchainManager:
                 raise ToolchainError("Stop toolchain installation and processes before removal")
             for name in ("rootfs", "downloads", "installing", "previous", "temporary"):
                 self._remove_private_tree(self.root / name)
+            self.manifest_file.unlink(missing_ok=True)
             self._executables = {}
             self._probed = False
             self._update(state="not_installed", reason=None, downloaded_bytes=0, probes={})

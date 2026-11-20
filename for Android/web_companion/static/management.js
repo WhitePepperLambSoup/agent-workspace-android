@@ -122,6 +122,22 @@
     status(statusId, typeof native?.shareText === "function" ? t("已打开分享") : t("已复制到剪贴板"));
   }
   function stopPolls() { window.clearTimeout(modelPoll); window.clearTimeout(toolchainPoll); window.clearTimeout(servicesPoll); window.clearTimeout(knowledgePoll); window.clearTimeout(computerPoll); modelPoll = toolchainPoll = servicesPoll = knowledgePoll = computerPoll = null; }
+  // Android keeps the page running behind other apps (no pagehide, and the WebView's timers go on),
+  // so a page left on the services, computer or download view kept asking the engine, and the
+  // computer view the computer. A poll that falls due while the app is hidden waits until it is
+  // shown again; the latest one of each kind then runs at once. A wait for a job passes its own
+  // resolve as the kind, so two waits never replace each other.
+  const shownAgain = new Map();
+  function whenShown(kind, poll) {
+    if (document.visibilityState === "hidden") shownAgain.set(kind, poll);
+    else poll();
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") return;
+    const due = [...shownAgain.values()];
+    shownAgain.clear();
+    for (const poll of due) poll();
+  });
   async function post(path, body) { return ui.apiJson(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); }
   function followTask(result, statusId, message) {
     if (ui.adoptTask(result.task)) ui.closeMenu();
@@ -237,7 +253,11 @@
     const android = value.android || {};
     let engine = {};
     try { engine = JSON.parse(native?.getEngineStatus?.() || "{}"); } catch {}
-    terms("doctorSummary", [[t("运行环境"), value.runtime], [t("引擎状态"), engine.state || t("已连接")], [t("系统操作"), android.enabled && android.connected ? t("已连接") : t("需要无障碍权限")], [t("截图"), android.live_screen_active ? t("实时画面") : android.screenshot_supported ? t("支持") : t("不可用")], [t("内存"), android.memory_total_bytes ? `${(android.memory_total_bytes / 1024 ** 3).toFixed(1)} GiB` : t("未测量")]]);
+    // Commands the agent starts run under a guard; on the phone they are refused while it is off.
+    const guard = value.command_guard || {};
+    const guardOff = value.embedded_python && guard.state === "off";
+    terms("doctorSummary", [[t("运行环境"), value.runtime], [t("引擎状态"), engine.state || t("已连接")], [t("系统操作"), android.enabled && android.connected ? t("已连接") : t("需要无障碍权限")], [t("截图"), android.live_screen_active ? t("实时画面") : android.screenshot_supported ? t("支持") : t("不可用")], [t("内存"), android.memory_total_bytes ? `${(android.memory_total_bytes / 1024 ** 3).toFixed(1)} GiB` : t("未测量")],
+      ...(value.embedded_python && guard.state !== "unknown" ? [[t("命令防护"), guardOff ? t("没有开启") : t("已开启")]] : [])]);
     $("liveScreenToggle").checked = !!android.live_screen_active;
     $("liveScreenToggle").disabled = typeof native?.startLiveScreen !== "function";
     $("systemPaused").checked = !!android.paused;
@@ -256,7 +276,8 @@
     $("doctorTools").replaceChildren();
     for (const tool of value.tools || []) $("doctorTools").append(row(tool.name, tool.available ? t("可用") : localizeError(tool.reason) || t("不可用")));
     $("browserSection").hidden = !(value.tools || []).some((tool) => tool.name === "browser_view" && tool.available);
-    status("doctorStatus", localizeError(android.reason) || "");
+    if (guardOff) status("doctorStatus", t("命令防护没有开启，AI 要运行的命令不会执行。它会隔一会儿自动再试；一直这样的话，请重启应用。原因：{0}", guard.reason || ""), true);
+    else status("doctorStatus", localizeError(android.reason) || "");
     let background = {};
     try { background = JSON.parse(native?.getBackgroundStatus?.() || "{}"); } catch {}
     const run = backgroundRunState();
@@ -419,7 +440,7 @@
     const waiting = value.state === "downloading" && value.network_retry;
     status("toolchainStatus", waiting ? t("网络中断，正在重试（第 {0} 次）", value.network_retry) : outdated ? t("工具链有新版本，重新安装后才能使用：点「安装工具链」。") : localizeError(value.reason || value.error) || "");
     window.clearTimeout(toolchainPoll);
-    if (active) toolchainPoll = window.setTimeout(() => { if (!closed && !$("settingsDoctor").hidden && !$("settingsOverlay").hidden) toolchain(isCurrent); }, 2500);
+    if (active) toolchainPoll = window.setTimeout(() => whenShown("toolchain", () => { if (!closed && !$("settingsDoctor").hidden && !$("settingsOverlay").hidden) toolchain(isCurrent); }), 2500);
   }
   // Skills page: packs from GitHub or a file; shown to the user before they are installed.
   let skillsPreview = null;
@@ -485,7 +506,7 @@
     const signed = nativeResult("signShareCode", `${skillCodePrefix}${body}`);
     return `${skillCodePrefix}${body}.${signed.public_key}.${signed.signature}`;
   }
-  /** The skill in a code, and who signed it ({fingerprint, own}). Refuses changed codes. */
+  /** The skill in a code, and who signed it ({fingerprint, key, own}). Refuses changed codes. */
   function readSkillCode(text) {
     const code = String(text || "").replace(/\s+/g, "");
     const at = code.indexOf(skillCodePrefix);
@@ -499,24 +520,24 @@
     try { own = JSON.parse(native.shareIdentity?.() || "{}").public_key === key; } catch {}
     const skill = JSON.parse(fromBase64Url(body));
     if (!skill || typeof skill.name !== "string" || !skill.files || typeof skill.files["SKILL.md"] !== "string") throw new Error(t("分享码里没有技能"));
-    return { skill, signer: { fingerprint: check.fingerprint, own } };
+    return { skill, signer: { fingerprint: check.fingerprint, key, own } };
   }
-  // The same list of known signers as shortcut share codes (87-shortcuts.js).
-  function knownSigner(fingerprint) {
-    try { return JSON.parse(localStorage.getItem("agent-share-authors-v1") || "{}")[fingerprint] || null; } catch { return null; }
+  // The same list of known signers as shortcut share codes (87-shortcuts.js), by whole public key.
+  function knownSigner(key) {
+    try { return JSON.parse(localStorage.getItem("agent-share-authors-v2") || "{}")[key] || null; } catch { return null; }
   }
-  function rememberSigner(fingerprint, name) {
+  function rememberSigner(key, name) {
     try {
-      const known = JSON.parse(localStorage.getItem("agent-share-authors-v1") || "{}");
-      if (!known[fingerprint]) known[fingerprint] = { name: String(name).slice(0, 40), at: Date.now() };
-      localStorage.setItem("agent-share-authors-v1", JSON.stringify(known));
+      const known = JSON.parse(localStorage.getItem("agent-share-authors-v2") || "{}");
+      if (!known[key]) known[key] = { name: String(name).slice(0, 40), at: Date.now() };
+      localStorage.setItem("agent-share-authors-v2", JSON.stringify(known));
     } catch { /* Only a convenience. */ }
   }
   let sharedSigner = null;
   async function skillsJob(job, message) {
     if (message) status("skillsStatus", message);
     for (let attempt = 0; attempt < 300 && !closed; attempt++) {
-      await new Promise((resolve) => window.setTimeout(resolve, 700));
+      await new Promise((resolve) => window.setTimeout(() => whenShown(resolve, resolve), 700));
       const value = await ui.apiJson(`/mobile/skills/job?id=${encodeURIComponent(job.job)}`);
       if (value.state === "running") continue;
       if (value.state === "failed") throw new Error(skillError(value.error) || t("操作失败"));
@@ -532,7 +553,7 @@
       ? t("更新「{0}」：{1} → {2}", preview.name, skillVersion(preview.replaces.version), skillVersion(preview.version))
       : t("安装「{0}」{1}（{2} 个技能）", preview.name, skillVersion(preview.version), preview.skills.length);
     const signer = preview.source?.kind === "shared" ? sharedSigner : null;
-    const known = signer && !signer.own ? knownSigner(signer.fingerprint) : null;
+    const known = signer && !signer.own ? knownSigner(signer.key) : null;
     const mentions = (preview.mentions || []).map((kind) => t(skillMentionLabels[kind] || kind));
     $("skillsPreviewSource").textContent = [preview.official ? "" : t("非官方技能，没有经过本项目测试。请确认来源可信、每个技能的用途都符合预期再安装。"),
       signer ? (signer.own ? t("签名：你自己的") : known ? t("签名：指纹 {0}，你导入过这个人的「{1}」", signer.fingerprint, known.name)
@@ -645,7 +666,7 @@
     }
     $("extensionsList").replaceChildren();
     for (const extension of value.extensions || []) {
-      const item = row(extension.identifier, `${extension.kind} · ${stateNames[extension.status] || extension.status}\n${(extension.command || []).join(" ")}\n${extension.config_source || ""}`);
+      const item = row(extension.identifier, `${extension.kind} · ${stateNames[extension.status] || extension.status}\n${(extension.command || []).join(" ")}\n${extension.config_source || ""}${extension.yolo ? `\n${t("YOLO 模式下直接运行，不再询问")}` : ""}`);
       if (extension.status !== "approved") {
         action(item, "check", t("批准此配置"), () => decide("/mobile/extensions/resolve", { request_id: extension.request_id, digest: extension.digest, allowed: true }));
         action(item, "x", t("拒绝此配置"), () => decide("/mobile/extensions/resolve", { request_id: extension.request_id, digest: extension.digest, allowed: false }));
@@ -760,9 +781,11 @@
     const apps = Array.isArray(value.apps) ? value.apps : [];
     for (const app of apps) {
       const taps = Array.isArray(app.taps) ? app.taps : [];
+      const panel = Array.isArray(app.panel) ? app.panel : [];
       const parts = [];
       if (app.notes?.length) parts.push(t("{0} 条说明", app.notes.length));
       if (taps.length) parts.push(t("{0} 个按钮", taps.length));
+      if (panel.length) parts.push(t("{0} 次控制面板的做法", panel.length));
       const element = row(app.app || app.package_name, [app.app ? app.package_name : "", parts.join(" · ")].filter(Boolean).join("\n"));
       action(element, "trash-2", t("清除这个应用的经验"), async () => {
         if (!window.confirm(t("清除「{0}」的全部经验？", app.app || app.package_name))) return;
@@ -774,6 +797,15 @@
         child.classList.add("management-row-child");
         action(child, "trash-2", t("删除"), async () => {
           await appNotes(undefined, await post("/mobile/app-notes", { action: "delete_note", package_name: app.package_name, id: note.id }));
+        });
+        $("appNotesList").append(child);
+      }
+      // How requests typed into the control panel were done here: told to later panel tasks in this app.
+      for (const record of panel) {
+        const child = row(`“${record.request}”`, t("控制面板的做法：{0}", (record.steps || []).join(" → ")));
+        child.classList.add("management-row-child");
+        action(child, "trash-2", t("删除"), async () => {
+          await appNotes(undefined, await post("/mobile/app-notes", { action: "delete_panel_record", package_name: app.package_name, id: record.id }));
         });
         $("appNotesList").append(child);
       }
@@ -989,9 +1021,9 @@
     const semanticBusy = knowledgeSemantic(value.semantic);
     window.clearTimeout(knowledgePoll);
     if (semanticBusy || allDocuments.some((document) => document.state === "queued" || document.state === "indexing")) {
-      knowledgePoll = window.setTimeout(() => {
+      knowledgePoll = window.setTimeout(() => whenShown("knowledge", () => {
         if (!closed && !$("settingsKnowledge").hidden && !$("settingsOverlay").hidden) knowledge(isCurrent).catch(() => {});
-      }, 1500);
+      }), 1500);
     }
   }
   // Searching by meaning (mobile_semantic): the switch, the model download and how far the
@@ -1255,9 +1287,9 @@
       if (id) serviceLog(id, output).catch(() => {});
     }
     status("servicesStatus", value.running ? t("{0} 个服务正在运行（最多 {1} 个）", value.running, value.max_running || 4) : "");
-    servicesPoll = window.setTimeout(() => {
+    servicesPoll = window.setTimeout(() => whenShown("services", () => {
       if (!closed && !$("settingsServices").hidden && !$("settingsOverlay").hidden) services(isCurrent).catch((error) => status("servicesStatus", error.message, true));
-    }, 3000);
+    }), 3000);
   }
 
   // ---- Notification rules: tasks triggered by notifications from chosen apps (Android) ----
@@ -1337,6 +1369,22 @@
     const declined = ballPermissionAsked && !on;
     ballPermissionAsked = false;
     status("globalEntryStatus", declined ? t("没有获得“显示在其他应用上层”权限，悬浮球未开启") : "");
+    externalEntry();
+  }
+  // Apps allowed to start tasks without being asked (Tasker, Shortcuts); each can be taken back.
+  function externalEntry() {
+    const supported = typeof native?.getExternalEntry === "function" && typeof native?.removeExternalEntry === "function";
+    $("externalEntrySection").hidden = !supported;
+    if (!supported) return;
+    const apps = parsed(native.getExternalEntry());
+    const container = $("externalEntryList");
+    container.replaceChildren();
+    if (!apps.length) container.append(row(t("还没有"), t("每个应用发起任务时都会先问你")));
+    for (const app of apps) {
+      const line = row(app.label || app.package, app.package);
+      action(line, "x", t("移除"), () => { native.removeExternalEntry(app.package); externalEntry(); });
+      container.append(line);
+    }
   }
   window.addEventListener("agent-global-entry-changed", () => {
     if (!closed && !$("settingsGlobalEntry").hidden) globalEntry().catch((error) => status("globalEntryStatus", error.message, true));
@@ -1355,14 +1403,18 @@
   $("btnBackupPage").hidden = typeof native?.createBackup !== "function";
   function backupSize(value) { return Number.isFinite(value) ? (value >= 1024 ** 2 ? `${(value / 1024 ** 2).toFixed(1)} MB` : `${Math.max(1, Math.round(value / 1024))} KB`) : ""; }
   async function backup() { status("backupStatus", ""); }
+  let backupSkipped = 0;
   window.addEventListener("agent-backup", (event) => {
     const detail = event.detail || {};
     const busy = ["creating", "saving", "restoring"].includes(detail.state);
     $("btnCreateBackup").disabled = busy;
     $("btnRestoreBackup").disabled = busy;
     if (detail.state === "creating") status("backupStatus", t("正在创建备份..."));
-    else if (detail.state === "saving") status("backupStatus", t("备份已生成（{0}），请选择保存位置", backupSize(detail.summary?.size)));
-    else if (detail.state === "saved") status("backupStatus", t("备份已保存（{0}）", backupSize(detail.size)));
+    else if (detail.state === "saving") {
+      backupSkipped = detail.summary?.skipped_count || 0;
+      status("backupStatus", t("备份已生成（{0}），请选择保存位置", backupSize(detail.summary?.size)));
+    }
+    else if (detail.state === "saved") status("backupStatus", backupSkipped ? t("备份已保存（{0}）。有 {1} 个文件没有放进去：它们的文件名不能写进压缩包。", backupSize(detail.size), backupSkipped) : t("备份已保存（{0}）", backupSize(detail.size)));
     else if (detail.state === "passphrase_required" || detail.state === "passphrase_wrong") {
       // A locked backup (.awbackup): its passphrase, asked again after a wrong one.
       // "__agent_secret__": the app's dialog hides what is typed (WebUiActivity.onJsPrompt).
@@ -1378,6 +1430,10 @@
       for (const [key, value] of Object.entries(detail.web || {})) {
         if (backupStorageKeys.includes(key) && typeof value === "string") { try { window.localStorage.setItem(key, value); } catch {} }
       }
+      // Full access and LAN HTTP came back at their safe value. The restart reloads this page, so the
+      // page says which once it is back (showStartNotices in app.js).
+      const lowered = Array.isArray(detail.lowered_settings) ? detail.lowered_settings.filter(item => typeof item === "string") : [];
+      if (lowered.length) { try { window.localStorage.setItem("agent-mobile-restore-lowered-v1", JSON.stringify(lowered)); } catch {} }
       status("backupStatus", t("已恢复，正在重启引擎以完成恢复..."));
     }
   });
@@ -1437,7 +1493,8 @@
     $("btnSaveSchedule").disabled = false;
     // Scheduled runs approve their own network requests and tool calls; in workspace mode say
     // what still waits for the user.
-    status("schedulesStatus", mode === "workspace" ? t("定时任务运行时自动允许本任务内的联网和工具调用；删除文件、写入长期记忆、操作其他应用仍会暂停并通知你批准。") : (value.status?.reason || ""));
+    if (value.status?.set_aside) status("schedulesStatus", t("定时任务文件读不出来，已另存为 {0}，下面的列表从空开始。", value.status.set_aside), true);
+    else status("schedulesStatus", mode === "workspace" ? t("定时任务运行时自动允许本任务内的联网和工具调用；删除文件、写入长期记忆、操作其他应用仍会暂停并通知你批准。") : (value.status?.reason || ""));
   }
   // The name a desktop lists this phone under: the model from the WebView's user agent.
   function phoneName() {
@@ -1529,27 +1586,58 @@
     const time = typeof value === "number" ? new Date(value * 1000) : new Date(value || "");
     return Number.isFinite(time.getTime()) ? time.toLocaleString(i18n?.locale, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
   }
+  /**
+   * Fills [list] with one row per entry ({key, signature, build}), for lists read again every few
+   * seconds. A row whose key and signature are unchanged stays the same element, so what the user
+   * expanded stays open and a press under way is not lost; a changed one is built again in its
+   * place with its expanded parts still open; rows that are gone are removed.
+   */
+  function keyedRows(list, entries) {
+    const kept = new Map([...list.children].filter((element) => element.dataset.key).map((element) => [element.dataset.key, element]));
+    const wanted = entries.map((entry) => {
+      const old = kept.get(entry.key);
+      if (old && old.dataset.signature === entry.signature) return old;
+      const element = entry.build();
+      element.dataset.key = entry.key;
+      element.dataset.signature = entry.signature;
+      const opened = old ? [...old.querySelectorAll("details")].map((details) => details.open) : [];
+      [...element.querySelectorAll("details")].forEach((details, index) => { if (opened[index]) details.open = true; });
+      if (old) old.replaceWith(element);
+      return element;
+    });
+    for (const element of [...list.children]) if (!wanted.includes(element)) element.remove();
+    wanted.forEach((element, index) => { if (list.children[index] !== element) list.insertBefore(element, list.children[index] || null); });
+  }
   function textButton(parent, symbol, label, handler, primary = false) {
     const button = namedAction(parent, symbol, label, handler);
     if (primary) button.className = "button-primary model-action";
     return button;
   }
   function requestId(prefix) { return window.crypto?.randomUUID?.() || `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
-  /** A choice to make before something goes to (or comes from) a computer: the risks in words, then buttons. */
-  function choose(title, text, buttons) {
+  /**
+   * A choice to make before something goes to (or comes from) a computer: the risks in words, then
+   * buttons. [place]: whose panel asks, on the page the user is on ("computer" or "relay"). Leaving
+   * that page, or the panel being put away, answers "cancel".
+   */
+  function choose(title, text, buttons, place = "computer") {
     return new Promise((resolve) => {
-      const panel = $("computerConfirm");
-      $("computerConfirmTitle").textContent = title;
-      $("computerConfirmText").textContent = text;
-      $("computerConfirmActions").replaceChildren(...buttons.map(([symbol, label, value, primary]) => {
+      const panel = $(`${place}Confirm`);
+      const shownOn = panel.closest(".settings-page");
+      if (shownOn.hidden) { panel.hidden = true; resolve("cancel"); return; }
+      const done = (value) => { watcher.disconnect(); panel.hidden = true; resolve(value); };
+      const watcher = new MutationObserver(() => { if (panel.hidden || shownOn.hidden) done("cancel"); });
+      $(`${place}ConfirmTitle`).textContent = title;
+      $(`${place}ConfirmText`).textContent = text;
+      $(`${place}ConfirmActions`).replaceChildren(...buttons.map(([symbol, label, value, primary]) => {
         const button = document.createElement("button"); button.type = "button";
         button.className = primary ? "button-primary" : "button-secondary";
         button.innerHTML = icon(symbol);
         const caption = document.createElement("span"); caption.textContent = label; button.append(caption);
-        button.addEventListener("click", () => { panel.hidden = true; resolve(value); });
+        button.addEventListener("click", () => done(value));
         return button;
       }));
       panel.hidden = false;
+      for (const watched of [panel, shownOn]) watcher.observe(watched, { attributes: true, attributeFilter: ["hidden"] });
       panel.scrollIntoView?.({ block: "center" });
     });
   }
@@ -1558,7 +1646,7 @@
     let state = started;
     status(statusId, message);
     for (let tries = 0; state?.state === "running" && tries < 1800 && !closed; tries++) {
-      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      await new Promise((resolve) => window.setTimeout(() => whenShown(resolve, resolve), 1000));
       state = await ui.apiJson(`/mobile/link/operation?id=${encodeURIComponent(state.operation_id)}`);
     }
     if (state?.state === "failed") throw new Error(localizeError(state.error) || t("操作失败"));
@@ -1599,11 +1687,11 @@
     const linked = hosts.filter((host) => host.api === "mobile");
     if (!linked.length) return;
     const unread = linked.some((host) => !host.link?.online && !host.link?.error);
-    connectionsPoll = window.setTimeout(() => {
+    connectionsPoll = window.setTimeout(() => whenShown("connections", () => {
       connectionsPoll = null;
       if (closed || $("settingsOverlay").hidden || $("settingsConnections").hidden) return;
       connections(() => !closed && !$("settingsConnections").hidden, true).catch(() => {});
-    }, unread ? 3000 : 20000);
+    }), unread ? 3000 : 20000);
   }
 
   async function removeComputer(host) {
@@ -1650,11 +1738,11 @@
 
   function pollComputer(isCurrent) {
     window.clearTimeout(computerPoll);
-    computerPoll = window.setTimeout(async () => {
+    computerPoll = window.setTimeout(() => whenShown("computer", async () => {
       if (!isCurrent()) return;
       try { await renderComputer(isCurrent, false); } catch { /* shown on the next successful read */ }
       if (isCurrent()) pollComputer(isCurrent);
-    }, 5000);
+    }), 5000);
   }
 
   async function loadRemoteSessions(isCurrent) {
@@ -1689,17 +1777,18 @@
    * What the user accepts before something goes to a computer, for a task, a whole conversation or
    * files with a request: a conversation there that approves everything by itself (2.1), and ID or
    * bank card numbers, which usually stay with the phone's own model (2.2). [found]: the numbers
-   * ({kind, masked}; kind as the page names it, or the engine's id_card / bank_card). Returns what to
-   * send along ({mask: true} to mask the numbers), or null when the user stops.
+   * ({kind, masked}; kind as the page names it, or the engine's id_card / bank_card). [place]: whose
+   * panel asks (see choose). Returns what to send along ({mask: true} to mask the numbers), or null
+   * when the user stops.
    */
-  async function acceptHandoff(host, autonomy, found) {
+  async function acceptHandoff(host, autonomy, found, place = "computer") {
     const confirmed = {};
     if (broadAutonomy.has(autonomy)) {
       if (!has(host, "autonomy_ack")) throw new Error(t("电脑上的版本还不接受交到这类对话的任务，请先更新电脑上的 Agent Workspace"));
       if (!allowed(host, "broad_autonomy")) throw new Error(t("电脑还没允许这台手机往自动批准的对话交任务；在电脑的「手机连接」里给这台手机勾上这项权限"));
       const choice = await choose(t("电脑会直接执行"),
         t("电脑上这个对话设为「{0}」：交过去的任务里，运行命令、修改和删除文件、联网等操作都会直接在电脑上执行，不会再询问任何人。拿到这台手机配对令牌的人也能这样做。\n确定要交给它吗？", autonomyNames[autonomy]),
-        [["send", t("我了解风险，交给电脑"), "send", true], ["x", t("取消"), "cancel"]]);
+        [["send", t("我了解风险，交给电脑"), "send", true], ["x", t("取消"), "cancel"]], place);
       if (choice !== "send") return null;
       confirmed.accept_autonomy = autonomy;
     }
@@ -1709,7 +1798,7 @@
       const model = host.model ? t("{0}，{1}", host.model.name, host.model.location === "computer" ? t("在这台电脑上运行") : t("云端服务")) : t("电脑当前的模型");
       const choice = await choose(t("这段内容里有个人信息"),
         t("要交给电脑的内容里有：{0}。平时这类内容只交给手机上的模型。交给电脑后，内容会发到电脑，由电脑当前的模型（{1}）处理。", numbers, model),
-        [...(has(host, "private_ack") ? [["send", t("交给电脑"), "send"]] : []), ["shield", t("打码后交给电脑"), "mask", true], ["x", t("取消"), "cancel"]]);
+        [...(has(host, "private_ack") ? [["send", t("交给电脑"), "send"]] : []), ["shield", t("打码后交给电脑"), "mask", true], ["x", t("取消"), "cancel"]], place);
       if (choice === "cancel" || !choice) return null;
       if (choice === "mask") confirmed.mask = true;
       else { confirmed.on_device = true; confirmed.private_accepted = true; }
@@ -1801,52 +1890,68 @@
     const host = selectedHost;
     const approvals = (value.approvals || []).filter((item) => item && item.request_id);
     $("computerApprovals").hidden = !(has(host, "approvals") && allowed(host, "approvals")) || !approvals.length;
-    const list = $("computerApprovalList"); list.replaceChildren();
-    for (const approval of approvals) {
-      const item = row(approval.summary || approval.tool || t("一个操作"), [approval.tool ? t("工具：{0}", approval.tool) : "", remoteSessionTitles.get(approval.session_id) || ""].filter(Boolean).join(" · "));
-      textButton(item, "check", t("允许"), async () => {
-        await post("/mobile/link/approve", { host_id: host.host_id, request_id: approval.request_id, decision: "approve" });
-        status("computerStatus", t("已允许"));
-        await renderComputer(() => true, false);
-      }, true);
-      textButton(item, "x", t("拒绝"), async () => {
-        await post("/mobile/link/approve", { host_id: host.host_id, request_id: approval.request_id, decision: "reject" });
-        status("computerStatus", t("已拒绝"));
-        await renderComputer(() => true, false);
-      });
-      list.append(item);
-    }
+    // Read again every 5 seconds: rows are updated in place, so a press on 允许 is not lost.
+    const context = computerRowContext(host);
+    keyedRows($("computerApprovalList"), approvals.map((approval) => ({
+      key: `approval:${approval.request_id}`,
+      signature: JSON.stringify([context, approval, remoteSessionTitles.get(approval.session_id) || ""]),
+      build: () => {
+        const item = row(approval.summary || approval.tool || t("一个操作"), [approval.tool ? t("工具：{0}", approval.tool) : "", remoteSessionTitles.get(approval.session_id) || ""].filter(Boolean).join(" · "));
+        textButton(item, "check", t("允许"), async () => {
+          await post("/mobile/link/approve", { host_id: host.host_id, request_id: approval.request_id, decision: "approve" });
+          status("computerStatus", t("已允许"));
+          await renderComputer(() => true, false);
+        }, true);
+        textButton(item, "x", t("拒绝"), async () => {
+          await post("/mobile/link/approve", { host_id: host.host_id, request_id: approval.request_id, decision: "reject" });
+          status("computerStatus", t("已拒绝"));
+          await renderComputer(() => true, false);
+        });
+        return item;
+      },
+    })));
+  }
+
+  /** What every row of the computer page also depends on: the computer, what it allows, the language. */
+  function computerRowContext(host) {
+    return [host?.host_id, host?.features, host?.scopes, i18n?.locale];
   }
 
   function renderJobs(value) {
     const host = selectedHost;
     $("computerJobs").hidden = !has(host, "phone_jobs");
     $("computerJobsSetting").value = value.settings?.jobs || "ask";
-    const list = $("computerJobList"); list.replaceChildren();
-    for (const job of value.jobs || []) {
-      const detail = [jobStates[job.state] || job.state, job.title ? t("来自对话「{0}」", job.title) : "", job.operate_phone ? t("要操作手机") : "", when(job.created_at)].filter(Boolean).join(" · ");
-      const item = row(job.prompt.slice(0, 200), [detail, job.state === "failed" ? job.error || "" : ""].filter(Boolean).join("\n"));
-      if (job.state === "waiting") {
-        textButton(item, "x", t("拒绝"), async () => { await post("/mobile/link/job", { host_id: host.host_id, job_id: job.job_id, decision: "reject" }); await renderComputer(() => true, false); });
-        textButton(item, "check", t("允许，每一步询问我"), async () => {
-          await post("/mobile/link/job", { host_id: host.host_id, job_id: job.job_id, decision: "accept" });
-          status("computerStatus", t("已接受，手机正在做"));
-          await renderComputer(() => true, false);
-        }, true);
-        textButton(item, "shield", t("允许，放行这个任务的操作"), async () => {
-          const choice = await choose(t("放行这个任务的操作"), t("这个任务里，点屏幕、在其他应用里输入等操作不再逐条询问。删除文件、发消息、卸载应用仍逐条询问；银行卡号、身份证号、验证码仍会拦下。"),
-            [["check", t("放行并开始"), "go", true], ["x", t("取消"), "cancel"]]);
-          if (choice !== "go") return;
-          await post("/mobile/link/job", { host_id: host.host_id, job_id: job.job_id, decision: "accept", approve_all: true });
-          status("computerStatus", t("已接受，手机正在做"));
-          await renderComputer(() => true, false);
-        });
-      } else if (job.state === "succeeded" && job.result) {
-        const result = document.createElement("details"); const summary = document.createElement("summary"); summary.textContent = t("结果");
-        const body = document.createElement("pre"); body.className = "management-output"; body.textContent = job.result; result.append(summary, body); item.append(result);
-      }
-      list.append(item);
+    const context = computerRowContext(host);
+    keyedRows($("computerJobList"), (value.jobs || []).map((job) => ({
+      key: `job:${job.job_id}`,
+      signature: JSON.stringify([context, job]),
+      build: () => jobRow(host, job),
+    })));
+  }
+
+  function jobRow(host, job) {
+    const detail = [jobStates[job.state] || job.state, job.title ? t("来自对话「{0}」", job.title) : "", job.operate_phone ? t("要操作手机") : "", when(job.created_at)].filter(Boolean).join(" · ");
+    const item = row(job.prompt.slice(0, 200), [detail, job.state === "failed" ? job.error || "" : ""].filter(Boolean).join("\n"));
+    if (job.state === "waiting") {
+      textButton(item, "x", t("拒绝"), async () => { await post("/mobile/link/job", { host_id: host.host_id, job_id: job.job_id, decision: "reject" }); await renderComputer(() => true, false); });
+      textButton(item, "check", t("允许，每一步询问我"), async () => {
+        await post("/mobile/link/job", { host_id: host.host_id, job_id: job.job_id, decision: "accept" });
+        status("computerStatus", t("已接受，手机正在做"));
+        await renderComputer(() => true, false);
+      }, true);
+      textButton(item, "shield", t("允许，放行这个任务的操作"), async () => {
+        const choice = await choose(t("放行这个任务的操作"), t("这个任务里，点屏幕、在其他应用里输入等操作不再逐条询问。删除文件、发消息、卸载应用仍逐条询问；银行卡号、身份证号、验证码仍会拦下。"),
+          [["check", t("放行并开始"), "go", true], ["x", t("取消"), "cancel"]]);
+        if (choice !== "go") return;
+        await post("/mobile/link/job", { host_id: host.host_id, job_id: job.job_id, decision: "accept", approve_all: true });
+        status("computerStatus", t("已接受，手机正在做"));
+        await renderComputer(() => true, false);
+      });
+    } else if (job.state === "succeeded" && job.result) {
+      const result = document.createElement("details"); const summary = document.createElement("summary"); summary.textContent = t("结果");
+      const body = document.createElement("pre"); body.className = "management-output"; body.textContent = job.result; result.append(summary, body); item.append(result);
     }
+    return item;
   }
 
   function renderRunning() {
@@ -1890,47 +1995,65 @@
       ...(value.runs || []).map((item) => ({ kind: "run", at: Date.parse(item.updated_at || item.due_at || "") / 1000 || 0, item })),
       ...(value.turns || []).map((item) => ({ kind: "turn", at: Date.parse(item.finished_at || "") / 1000 || 0, item })),
     ].sort((a, b) => b.at - a.at).slice(0, 60);
-    const list = $("computerInboxList"); list.replaceChildren();
-    if (!entries.length) { list.append(row(t("还没有内容"), t("电脑发来的文件、文字和任务结果会出现在这里"))); return; }
-    for (const { kind, item } of entries) {
-      if (kind === "received") {
-        if (item.state === "failed") {
-          const failed = row(item.name || t("没有收到"), [t("没有收到"), item.error || ""].filter(Boolean).join(" · "));
-          action(failed, "refresh-cw", t("重新接收"), async () => { await post("/mobile/link/retry-transfer", { host_id: host.host_id, transfer_id: item.transfer_id }); status("computerStatus", t("会在下次连上时重新接收")); });
-          list.append(failed);
-        } else if (item.kind === "file") {
-          const received = row(item.name, [t("收到的文件"), when(item.at), item.path].filter(Boolean).join(" · "));
-          textButton(received, "folder-open", t("打开"), async () => openReceived(item.path, item.sha256));
-          list.append(received);
-        } else if (item.kind === "text" || item.kind === "link") {
-          const received = row(item.text.slice(0, 200), [item.kind === "link" ? t("收到的链接") : t("收到的文字"), when(item.at)].join(" · "));
-          textButton(received, "copy", t("复制"), async () => copyText(item.text));
-          if (item.kind === "link" && /^https?:\/\//i.test(item.text.trim()) && typeof native?.openExternal === "function") textButton(received, "globe", t("打开"), async () => { native.openExternal(item.text.trim()); });
-          list.append(received);
-        } else if (item.kind === "conversation") {
-          const received = row(item.name || t("对话"), [t("收到的对话"), when(item.at)].join(" · "));
-          textButton(received, "chevron-right", t("打开对话"), async () => { if (!ui.openSession(item.session_id)) throw new Error(t("目标会话不存在或已删除")); });
-          list.append(received);
-        }
-      } else if (kind === "run") {
-        const done = item.state === "succeeded";
-        const entry = row(t("定时任务「{0}」", item.title || ""), [stateNames[item.state] || item.state, when(item.updated_at || item.due_at)].filter(Boolean).join(" · "));
-        const text = done ? item.result : item.error;
-        if (text) {
-          const details = document.createElement("details"); const summary = document.createElement("summary"); summary.textContent = done ? t("结果") : t("原因");
-          const body = document.createElement("pre"); body.className = "management-output"; body.textContent = text;
-          details.append(summary, body); entry.append(details);
-          details.addEventListener("toggle", () => { if (details.open && has(host, "inbox_read")) void post("/mobile/link/read-runs", { host_id: host.host_id, run_ids: [item.run_id] }).catch(() => {}); });
-          if (done) textButton(entry, "send", t("在手机上继续"), async () => {
-            if (!ui.quickAsk({ text: t("电脑上的定时任务「{0}」的结果：\n{1}\n\n", item.title || "", text.slice(0, 6000)) })) throw new Error(t("请稍后再试"));
-          });
-        }
-        list.append(entry);
-      } else {
-        const entry = row(t("电脑上的任务：{0}", item.title || ""), [stateNames[item.state === "succeeded" ? "completed" : item.state] || item.state, when(item.finished_at), item.summary || ""].filter(Boolean).join(" · "));
-        list.append(entry);
+    const list = $("computerInboxList");
+    // Read again every 5 seconds: rows are updated in place, so an expanded 结果 or 原因 stays open.
+    const context = computerRowContext(host);
+    const ids = { received: "transfer_id", run: "run_id", turn: "turn_id" };
+    const shown = entries.filter(({ kind, item }) => kind !== "received" || item.state === "failed" || ["file", "text", "link", "conversation"].includes(item.kind));
+    keyedRows(list, shown.map(({ kind, item }) => ({
+      key: `${kind}:${item[ids[kind]] ?? JSON.stringify(item)}`,
+      signature: JSON.stringify([context, item]),
+      build: () => inboxRow(host, kind, item),
+    })));
+    if (!shown.length) list.append(row(t("还没有内容"), t("电脑发来的文件、文字和任务结果会出现在这里")));
+  }
+
+  /** One row of the computer's inbox; null for a kind of received item this page does not show. */
+  function inboxRow(host, kind, item) {
+    if (kind === "received") {
+      if (item.state === "failed") {
+        const failed = row(item.name || t("没有收到"), [t("没有收到"), item.error || ""].filter(Boolean).join(" · "));
+        action(failed, "refresh-cw", t("重新接收"), async () => { await post("/mobile/link/retry-transfer", { host_id: host.host_id, transfer_id: item.transfer_id }); status("computerStatus", t("会在下次连上时重新接收")); });
+        return failed;
+      } else if (item.kind === "file") {
+        const received = row(item.name, [t("收到的文件"), when(item.at), item.path].filter(Boolean).join(" · "));
+        textButton(received, "folder-open", t("打开"), async () => openReceived(item.path, item.sha256));
+        return received;
+      } else if (item.kind === "text" || item.kind === "link") {
+        const received = row(item.text.slice(0, 200), [item.kind === "link" ? t("收到的链接") : t("收到的文字"), when(item.at)].join(" · "));
+        textButton(received, "copy", t("复制"), async () => copyText(item.text));
+        if (item.kind === "link" && /^https?:\/\//i.test(item.text.trim()) && typeof native?.openExternal === "function") textButton(received, "globe", t("打开"), async () => { native.openExternal(item.text.trim()); });
+        return received;
+      } else if (item.kind === "conversation") {
+        const received = row(item.name || t("对话"), [t("收到的对话"), when(item.at)].join(" · "));
+        textButton(received, "chevron-right", t("打开对话"), async () => {
+          // True when nothing had to load (or it said the conversation is gone), false while a
+          // switch starts or when the open one cannot be left now.
+          const id = item.session_id;
+          if (ui.openSession(id) || ui.sessionOpening() === id || ui.context().sessionId === id) ui.closeMenu();
+          else throw new Error(t("任务进行中，结束后再打开"));
+        });
+        return received;
       }
+    } else if (kind === "run") {
+      const done = item.state === "succeeded";
+      const entry = row(t("定时任务「{0}」", item.title || ""), [stateNames[item.state] || item.state, when(item.updated_at || item.due_at)].filter(Boolean).join(" · "));
+      const text = done ? item.result : item.error;
+      if (text) {
+        const details = document.createElement("details"); const summary = document.createElement("summary"); summary.textContent = done ? t("结果") : t("原因");
+        const body = document.createElement("pre"); body.className = "management-output"; body.textContent = text;
+        details.append(summary, body); entry.append(details);
+        details.addEventListener("toggle", () => { if (details.open && has(host, "inbox_read")) void post("/mobile/link/read-runs", { host_id: host.host_id, run_ids: [item.run_id] }).catch(() => {}); });
+        if (done) textButton(entry, "send", t("在手机上继续"), async () => {
+          if (!ui.quickAsk({ text: t("电脑上的定时任务「{0}」的结果：\n{1}\n\n", item.title || "", text.slice(0, 6000)) })) throw new Error(t("请稍后再试"));
+        });
+      }
+      return entry;
+    } else {
+      const entry = row(t("电脑上的任务：{0}", item.title || ""), [stateNames[item.state === "succeeded" ? "completed" : item.state] || item.state, when(item.finished_at), item.summary || ""].filter(Boolean).join(" · "));
+      return entry;
     }
+    return null;
   }
 
   function renderSections(value) {
@@ -2470,7 +2593,7 @@
         [t("进程历史峰值 VmHWM"), bytes(run.process_vmhwm_after_bytes)],
         [t("测试覆盖范围"), t("仅上述实际输入长度；完整所选上下文尚未实测")], [t("设置"), t("测试不会修改自定义设置")]] : []);
       status("localDeviceStatus", run.recovery_required ? t("测试预留已过期或释放状态未知，请重启引擎后继续") : run.error || busyReason || planReason || modelReason, !!run.error || !!run.recovery_required || !!planReason);
-      if (running) devicePoll = window.setTimeout(deviceStatus, 750);
+      if (running) devicePoll = window.setTimeout(() => whenShown("device", deviceStatus), 750);
     } catch (error) {
       renderAccelerator(null);
       deviceRecommendation = null; terms("localDeviceRecommendation", []);
@@ -2550,7 +2673,7 @@
     voiceInputSettings();
     status("localModelsStatus", "");
     window.clearTimeout(modelPoll);
-    if (downloading || busy) modelPoll = window.setTimeout(() => { if (!closed && !$("settingsLocalModels").hidden && !$("settingsOverlay").hidden) localModels(isCurrent).catch(error => status("localModelsStatus", error.message, true)); }, 2000);
+    if (downloading || busy) modelPoll = window.setTimeout(() => whenShown("models", () => { if (!closed && !$("settingsLocalModels").hidden && !$("settingsOverlay").hidden) localModels(isCurrent).catch(error => status("localModelsStatus", error.message, true)); }), 2000);
   }
   // The microphone button's recognizer (VoiceInputSettings.kt); only the Android app has one.
   function voiceInputSettings(value = null) {
@@ -3016,11 +3139,11 @@
   let livePoll = null;
   function followLiveScreen(wanted, tries = 0) {
     window.clearTimeout(livePoll);
-    livePoll = window.setTimeout(async () => {
+    livePoll = window.setTimeout(() => whenShown("live-screen", async () => {
       if (closed || $("settingsDoctor").hidden || $("settingsOverlay").hidden) return;
       try { await doctor(); } catch { /* The next look or the refresh button reports it. */ }
       if ($("liveScreenToggle").checked !== wanted && tries < 20) followLiveScreen(wanted, tries + 1);
-    }, 1500);
+    }), 1500);
   }
   on("liveScreenToggle", "change", () => {
     const wanted = $("liveScreenToggle").checked;
@@ -3060,7 +3183,7 @@
     showSkillsPreview(null);
     await skills(undefined, await post("/mobile/skills/install", { token: preview.token }));
     $("skillsGithubInput").value = "";
-    if (preview.source?.kind === "shared" && sharedSigner && !sharedSigner.own) rememberSigner(sharedSigner.fingerprint, preview.name);
+    if (preview.source?.kind === "shared" && sharedSigner && !sharedSigner.own) rememberSigner(sharedSigner.key, preview.name);
     status("skillsStatus", t("已安装「{0}」，新对话里 AI 会按需使用这些技能", preview.name));
   }), "skillsStatus");
   on("btnSkillsCancel", "click", () => { showSkillsPreview(null); status("skillsStatus", ""); }, "skillsStatus");
@@ -3218,8 +3341,12 @@
   on("computerJobsSetting", "change", async () => {
     const host = selectedHost; const choice = $("computerJobsSetting").value;
     if (choice === "auto") {
+      // Over plain HTTP nothing proves the computer that answers is the paired one: said before
+      // its tasks start unasked, with the way to a connection that does.
+      const plain = /^http:/i.test(String(host.url || ""))
+        ? `\n\n${t("这台电脑是用 HTTP 连接的：连接没有加密，手机也无法确认回应的就是这台电脑。换到别的 Wi-Fi 时，同一地址上的其他设备可能冒充它交来任务。建议在电脑的「连接方式」里改用 HTTPS，再在这里重新配对。")}` : "";
       const answer = await choose(t("自动接受电脑交来的任务"),
-        t("{0} 交来的任务会直接在这台手机上开始，不再先问你。每一步仍按手机的审批规则：需要审批的操作会停下来等你，银行卡号、身份证号、验证码仍会拦下。", host.name),
+        t("{0} 交来的任务会直接在这台手机上开始，不再先问你。每一步仍按手机的审批规则：需要审批的操作会停下来等你，银行卡号、身份证号、验证码仍会拦下。", host.name) + plain,
         [["check", t("自动接受"), "auto", true], ["x", t("取消"), "cancel"]]);
       if (answer !== "auto") { $("computerJobsSetting").value = computerState?.settings?.jobs || "ask"; return; }
     }
@@ -3330,9 +3457,9 @@
     // The whole conversation goes: the engine reads it for personal numbers, and the user decides.
     const check = await post("/mobile/link/relay-check", { host_id: hostId, session_id: sessionId, prompt });
     const host = (await ui.apiJson("/mobile/connections")).hosts?.find((item) => item.host_id === hostId) || { host_id: hostId, features: check.private_ack ? ["private_ack"] : [] };
-    const confirmed = await acceptHandoff(host, check.autonomy, check.private || []);
+    const confirmed = await acceptHandoff(host, check.autonomy, check.private || [], "relay");
     if (!confirmed) return;
-    const created = await waitOperation(await post("/mobile/link/relay", { host_id: hostId, session_id: sessionId, prompt, confirmed }), "relayStatus", t("正在发到电脑..."));
+    const created = await waitOperation(await post("/mobile/link/relay",{ host_id: hostId, session_id: sessionId, prompt, confirmed }), "relayStatus", t("正在发到电脑..."));
     $("relayPrompt").value = "";
     status("relayStatus", t("已在电脑上新建对话「{0}」{1}", created?.title || "", created?.delivery ? t("，结果会出现在「待发送与接力」") : ""));
   }, "relayStatus");

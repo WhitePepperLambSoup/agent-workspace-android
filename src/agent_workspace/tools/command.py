@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -12,13 +13,13 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from agent_workspace.core.models import Capability, ToolSpec
 
 from .base import ToolArgumentError, ToolError, json_result, optional_int, require_string
 from .paths import StrPath, WorkspacePaths
-from .process_worker import run_in_process
+from .process_worker import _WindowsJob, run_in_process
 
 if TYPE_CHECKING:
     from agent_workspace.application.ports import ToolExecutionContext
@@ -55,10 +56,57 @@ class _BoundedStream:
 
 def _drain_stream(stream: Any, output: _BoundedStream) -> None:
     try:
-        while chunk := stream.read(_READ_CHUNK_BYTES):
+        # read1: read() keeps what it has until the chunk is full, lost if the pipe never ends.
+        while chunk := stream.read1(_READ_CHUNK_BYTES):
             output.append(chunk)
     except (OSError, ValueError):
         return
+
+
+def _terminate_command_tree(
+    process: subprocess.Popen[bytes],
+    command_job: _WindowsJob | None = None,
+) -> None:
+    """Terminate a command and descendants before closing its pipes.
+
+    A descendant can inherit stdout/stderr and keep the reader threads alive
+    after the command itself exits.  Killing only the direct process therefore
+    makes a timed out or output-limited invocation hang indefinitely.
+    POSIX commands are started in a new process group; Windows uses the
+    command's Job Object, or else the native ``taskkill /T`` tree operation.
+    """
+
+    pid = process.pid
+    if pid is None:
+        return
+    if os.name == "nt" and command_job is not None:
+        command_job.terminate()
+    elif os.name == "nt":
+        system_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR")
+        taskkill = (
+            str(Path(system_root) / "System32" / "taskkill.exe") if system_root else "taskkill"
+        )
+        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            subprocess.run(
+                [taskkill, "/PID", str(pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                shell=False,
+                creationflags=creation_flags,
+                timeout=2,
+            )
+    else:
+        platform_os = cast(Any, os)
+        platform_signal = cast(Any, signal)
+        with contextlib.suppress(OSError):
+            platform_os.killpg(pid, platform_signal.SIGKILL)
+    with contextlib.suppress(OSError, ProcessLookupError):
+        process.kill()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=2)
 
 
 def _safe_environment() -> dict[str, str]:
@@ -90,7 +138,17 @@ def _safe_environment() -> dict[str, str]:
         )
     else:
         result["PATH"] = os.defpath
+    result.update(_chart_defaults())
     return result
+
+
+def _chart_defaults() -> dict[str, str]:
+    """On Windows, any Python's Matplotlib draws Chinese labels as text, not boxes. Unset on
+    Android, which brings its own file; a project's own matplotlibrc comes first either way."""
+    if os.name != "nt":
+        return {}
+    path = Path(__file__).resolve().parent.parent / "science" / "aw_sciplot" / "matplotlibrc"
+    return {"MATPLOTLIBRC": str(path)} if path.is_file() else {}
 
 
 def _resolve_system_shell(kind: str) -> Path:
@@ -213,6 +271,7 @@ def _run_command_sync(
     if not cwd.is_dir():
         raise ToolError(f"command working directory is not a directory: {cwd}")
 
+    arguments: list[str] | str
     if kind == "direct":
         if executable is None:
             raise ToolArgumentError("direct execution requires 'executable'")
@@ -228,8 +287,8 @@ def _run_command_sync(
             else _resolve_system_shell(kind)
         )
         command_digest = hashlib.sha256(command.encode("utf-8")).hexdigest()
-        arguments = (
-            [
+        if kind == "powershell":
+            arguments = [
                 str(resolved_executable),
                 "-NoLogo",
                 "-NoProfile",
@@ -239,9 +298,13 @@ def _run_command_sync(
                 "-Command",
                 command,
             ]
-            if kind == "powershell"
-            else [str(resolved_executable), "/d", "/q", "/s", "/c", command]
-        )
+        elif os.name == "nt":
+            # cmd.exe does not read the backslash escapes a list argument would get ("C:\a b"
+            # becoming \"C:\a b\"); with /s it drops only the outer pair of quotes, so the
+            # command reaches it exactly as written.
+            arguments = f'"{resolved_executable}" /d /q /s /c "{command}"'
+        else:
+            arguments = [str(resolved_executable), "/d", "/q", "/s", "/c", command]
 
     executable_sha256 = _required_executable_sha256(resolved_executable)
     if (
@@ -257,12 +320,18 @@ def _run_command_sync(
     environment = _safe_environment()
     if environment_overrides:
         if any(
-            not name.startswith("GIT_") or not name.isascii() or not value or "\x00" in value
+            not (name.startswith("GIT_") or name == "HOME")
+            or not name.isascii()
+            or not value
+            or "\x00" in value
             for name, value in environment_overrides.items()
         ):
             raise ToolArgumentError("internal process environment override is invalid")
         environment.update(environment_overrides)
+    job: _WindowsJob | None = None
     try:
+        if os.name == "nt":
+            job = _WindowsJob(allow_children=True)
         process = subprocess.Popen(
             arguments,
             cwd=cwd,
@@ -272,9 +341,22 @@ def _run_command_sync(
             stderr=subprocess.PIPE,
             shell=False,
             creationflags=creation_flags,
+            start_new_session=os.name != "nt",
         )
     except OSError as exc:
+        if job is not None:
+            job.close()
         raise ToolError(f"cannot start executable: {resolved_executable}") from exc
+    if job is not None:
+        try:
+            job.assign(process.pid)
+        except ToolError:
+            with contextlib.suppress(OSError):
+                process.kill()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=2)
+            job.close()
+            raise
 
     assert process.stdout is not None
     assert process.stderr is not None
@@ -291,16 +373,20 @@ def _run_command_sync(
         process.wait(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         timed_out = True
-        process.kill()
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            process.wait(timeout=2)
+        _terminate_command_tree(process, job)
     finally:
         for reader in readers:
             reader.join(timeout=1)
-        process.stdout.close()
-        process.stderr.close()
-        for reader in readers:
-            reader.join(timeout=0.2)
+        if any(reader.is_alive() for reader in readers):
+            _terminate_command_tree(process, job)
+            for reader in readers:
+                reader.join(timeout=1)
+        # A reader still blocked in read() holds the stream's lock, and close() would wait for it.
+        for stream, reader in zip((process.stdout, process.stderr), readers, strict=True):
+            if not reader.is_alive():
+                stream.close()
+        if job is not None:
+            job.close()
 
     return json_result(
         {

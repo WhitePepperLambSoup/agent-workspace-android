@@ -4,9 +4,9 @@ Spawns a language server as a subprocess and exchanges Content-Length
 framed JSON-RPC 2.0 messages over stdin/stdout, recording
 ``textDocument/publishDiagnostics`` notifications for the
 ``run_diagnostics`` workspace tool. The server is never started with
-arguments beyond the caller-provided command; the repository bundles no
-language server, so callers pass one explicitly (for example
-``["pyright-langserver", "--stdio"]`` or ``["pylsp"]``).
+arguments beyond the caller-provided command. The tool's caller is the model,
+so the tool takes no command: it picks the server for the file's type from
+the known ones installed outside the folder (coding/servers.py).
 """
 
 from __future__ import annotations
@@ -22,13 +22,17 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
 
 from agent_workspace.application.ports import Tool
+from agent_workspace.coding.servers import find_server, spec_for
 from agent_workspace.core.models import Capability, ToolSpec
 
-from .base import ToolArgumentError, ToolError, json_result, require_string
+from .base import ToolError, json_result, require_string, validate_tool_arguments
 from .command import _safe_environment
 from .filesystem import _workspace_paths
+from .helper_servers import HELPER_SERVER_NEW_SESSION, end_helper_server, helper_server_job
 from .paths import StrPath, WorkspacePaths
 
 _MAX_MESSAGE_BYTES = 16 * 1024 * 1024
@@ -40,7 +44,10 @@ _SHUTDOWN_SECONDS = 5.0
 
 _MAX_FILE_BYTES = 4 * 1024 * 1024
 _MAX_DIAGNOSTICS = 500
-_DIAGNOSTIC_WAIT_SECONDS = 2.0
+# A language server started cold (pyright reading a project) often takes several seconds.
+_DIAGNOSTIC_WAIT_SECONDS = 10.0
+# Some servers publish a quick first pass and the full result after it.
+_DIAGNOSTIC_SETTLE_SECONDS = 0.5
 _DIAGNOSTIC_POLL_SECONDS = 0.05
 
 _LANGUAGE_IDS: dict[str, str] = {
@@ -58,12 +65,26 @@ _LANGUAGE_IDS: dict[str, str] = {
     ".md": "markdown",
 }
 
-_lsp_diagnostics_cache: dict[tuple[tuple[str, ...], str, int, int], str] = {}
-_MAX_LSP_CACHE_ENTRIES = 64
+
+def path_from_uri(uri: str) -> Path | None:
+    parsed = urlparse(uri)
+    if parsed.scheme != "file":
+        return None
+    if os.name != "nt":
+        return Path(unquote(parsed.path))
+    text = url2pathname(unquote(parsed.path))
+    if len(text) > 1 and text[1] == ":":
+        text = text[0].upper() + text[1:]  # pyright writes file:///c%3A/…
+    return Path(text)
 
 
-def clear_lsp_diagnostics_cache() -> None:
-    _lsp_diagnostics_cache.clear()
+def uri_key(uri: str) -> str:
+    """One spelling for the same file: servers write drive letters and colons their own way."""
+    path = path_from_uri(uri)
+    if path is None:
+        return uri
+    text = os.path.normpath(str(path))
+    return text.casefold() if os.name == "nt" else text
 
 
 class LspClientError(ToolError):
@@ -131,6 +152,19 @@ def _infer_language_id(path: Path) -> str:
     return _LANGUAGE_IDS.get(path.suffix.lower(), "plaintext")
 
 
+def _diagnostics_for(client: Any, uri: str) -> Sequence[LspDiagnostic] | None:
+    """The diagnostics a server published for the file, whatever spelling of its URI it used
+    (pyright on Windows writes file:///c%3A/... for Path.as_uri()'s file:///C:/...)."""
+    published: Mapping[str, Sequence[LspDiagnostic]] = client.diagnostics
+    if uri in published:
+        return published[uri]
+    key = uri_key(uri)
+    for name, diagnostics in published.items():
+        if uri_key(name) == key:
+            return diagnostics
+    return None
+
+
 def _lsp_environment() -> dict[str, str]:
     """Environment for LSP server processes.
 
@@ -168,6 +202,7 @@ class StdioLspClient:
         self._extra_environment = dict(extra_environment or {})
         self._workspace_folders: list[dict[str, str]] = []
         self._process: Process | None = None
+        self._job: Any = None
         self._stdin: StreamWriter | None = None
         self._stdout: StreamReader | None = None
         self._stderr: StreamReader | None = None
@@ -177,6 +212,7 @@ class StdioLspClient:
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._request_id = 0
         self._closed = False
+        self._connection_lost = False
         self._capabilities: dict[str, Any] | None = None
         self._diagnostics: dict[str, list[LspDiagnostic]] = {}
 
@@ -184,6 +220,18 @@ class StdioLspClient:
     def diagnostics(self) -> dict[str, list[LspDiagnostic]]:
         """Diagnostics recorded so far, keyed by document URI."""
         return dict(self._diagnostics)
+
+    @property
+    def alive(self) -> bool:
+        """The server is running and its output is still being read: false once it exited or
+        closed its output, though the process handle stays until shutdown_exit."""
+        process = self._process
+        return (
+            process is not None
+            and process.returncode is None
+            and not self._closed
+            and not self._connection_lost
+        )
 
     async def connect(self, initialize_params: dict[str, Any]) -> dict[str, Any]:
         """Start the server and perform the LSP initialize handshake.
@@ -211,10 +259,12 @@ class StdioLspClient:
                 creationflags=creationflags,
                 env=environment,
                 limit=_MAX_MESSAGE_BYTES + 64 * 1024,
+                start_new_session=HELPER_SERVER_NEW_SESSION,
             )
         except OSError as exc:
             raise LspClientError(f"cannot start LSP server {self._command[0]!r}: {exc}") from exc
         self._process = process
+        self._job = helper_server_job(process.pid)
         self._stdin = cast(StreamWriter, process.stdin)
         self._stdout = cast(StreamReader, process.stdout)
         self._stderr = cast(StreamReader, process.stderr)
@@ -351,10 +401,12 @@ class StdioLspClient:
         except asyncio.CancelledError:
             raise
         except (asyncio.IncompleteReadError, OSError):
+            self._connection_lost = True
             self._fail_pending(
                 LspClientError(await self._server_exit_message("LSP server closed the connection"))
             )
         except LspClientError as exc:
+            self._connection_lost = True
             self._fail_pending(exc)
 
     async def _read_frame(self, reader: StreamReader) -> dict[str, Any]:
@@ -477,22 +529,15 @@ class StdioLspClient:
                 await stderr
 
     async def _wait_for_exit(self, process: Process) -> None:
-        if process.returncode is not None:
-            return
-        with suppress(BaseException):
-            await asyncio.wait_for(process.wait(), timeout=_TERMINATE_SECONDS)
-        if process.returncode is not None:
-            return
-        with suppress(BaseException):
-            process.terminate()
-        with suppress(BaseException):
-            await asyncio.wait_for(process.wait(), timeout=_TERMINATE_SECONDS)
-        if process.returncode is not None:
-            return
-        with suppress(BaseException):
-            process.kill()
-        with suppress(BaseException):
-            await process.wait()
+        job, self._job = self._job, None
+        try:
+            if process.returncode is None:
+                with suppress(Exception):
+                    await asyncio.wait_for(process.wait(), timeout=_TERMINATE_SECONDS)
+        finally:
+            # Also after the server exited by itself: what it started (a node behind npx or a
+            # .cmd shim) can still be running.
+            await end_helper_server(process, job, grace_seconds=_TERMINATE_SECONDS)
 
     def _next_id(self) -> int:
         self._request_id += 1
@@ -518,20 +563,13 @@ class LspDiagnosticsTool(Tool):
     _SPEC = ToolSpec(
         name="run_diagnostics",
         description=(
-            "Run a language server over a workspace file and return diagnostics (errors/warnings)."
+            "Run a language server over a workspace file and return diagnostics (errors/warnings). "
+            "The server is chosen by the file's type from those installed on this computer."
         ),
         input_schema={
             "type": "object",
-            "properties": {
-                "path": {"type": "string", "minLength": 1},
-                "command": {
-                    "type": "array",
-                    "items": {"type": "string", "maxLength": 32767},
-                    "minItems": 1,
-                    "maxItems": 256,
-                },
-            },
-            "required": ["path", "command"],
+            "properties": {"path": {"type": "string", "minLength": 1}},
+            "required": ["path"],
             "additionalProperties": False,
         },
         side_effect="process",
@@ -545,31 +583,22 @@ class LspDiagnosticsTool(Tool):
     def spec(self) -> ToolSpec:
         return self._SPEC
 
+    def _server_command(self, path: Path) -> tuple[str, ...]:
+        spec = spec_for(path)
+        found = find_server(spec, None) if spec is not None else None
+        if found is None:
+            raise ToolError(f"no language server for {path.suffix or path.name} files is installed")
+        return found.command
+
     async def execute(self, arguments: dict[str, Any]) -> str:
+        validate_tool_arguments(self._SPEC, arguments)
         path_text = require_string(arguments, "path")
-        raw_command = arguments.get("command")
-        if (
-            not isinstance(raw_command, list)
-            or not raw_command
-            or len(raw_command) > 256
-            or not all(
-                isinstance(item, str) and item and len(item) <= 32_767 and "\x00" not in item
-                for item in raw_command
-            )
-        ):
-            raise ToolArgumentError("'command' must be a bounded array of non-empty strings")
-        command = tuple(raw_command)
 
         path = self.paths.resolve(path_text)
         text = self._read_workspace_file(path)
-        try:
-            metadata = path.stat()
-        except OSError as exc:
-            raise ToolError(f"cannot stat file: {path}") from exc
-        cache_key = (command, str(path), metadata.st_mtime_ns, metadata.st_size)
-        cached = _lsp_diagnostics_cache.get(cache_key)
-        if cached is not None:
-            return cached
+        # Not cached by this file's size and time: its diagnostics also change with the files
+        # it uses (a function's signature changed elsewhere).
+        command = self._server_command(path)
         language_id = _infer_language_id(path)
         uri = path.as_uri()
         relative = self.paths.relative(path)
@@ -579,6 +608,9 @@ class LspDiagnosticsTool(Tool):
             "rootUri": root_uri,
             "workspaceFolders": [{"uri": root_uri, "name": self.paths.root.name or "workspace"}],
         }
+        spec = spec_for(path)
+        if spec is not None and spec.initialization_options:
+            initialize_params["initializationOptions"] = dict(spec.initialization_options)
 
         client = StdioLspClient(command)
         try:
@@ -588,19 +620,14 @@ class LspDiagnosticsTool(Tool):
         finally:
             await client.shutdown_exit()
 
-        diagnostics = self._render_diagnostics(client.diagnostics.get(uri, ()))
-        rendered = json_result(
+        diagnostics = self._render_diagnostics(_diagnostics_for(client, uri) or ())
+        return json_result(
             {
                 "path": relative,
                 "diagnostics": diagnostics,
                 "wait_expired": wait_expired,
             }
         )
-        if not wait_expired:
-            if len(_lsp_diagnostics_cache) >= _MAX_LSP_CACHE_ENTRIES:
-                _lsp_diagnostics_cache.pop(next(iter(_lsp_diagnostics_cache)))
-            _lsp_diagnostics_cache[cache_key] = rendered
-        return rendered
 
     def _read_workspace_file(self, path: Path) -> str:
         try:
@@ -619,15 +646,25 @@ class LspDiagnosticsTool(Tool):
             raise ToolError(f"file is not valid UTF-8: {path}") from exc
 
     async def _wait_for_diagnostics(self, client: StdioLspClient, uri: str) -> bool:
+        """Wait for the file's diagnostics, then for a short quiet spell in case a fuller
+        result follows; True when none came in time."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _DIAGNOSTIC_WAIT_SECONDS
+        last: Sequence[LspDiagnostic] | None = None
+        quiet_until = deadline
         while True:
-            if uri in client.diagnostics:
-                return False
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                return True
-            await asyncio.sleep(min(_DIAGNOSTIC_POLL_SECONDS, remaining))
+            current = _diagnostics_for(client, uri)
+            now = loop.time()
+            if current is not None:
+                # Each publication is a new list: a different object is a newer result.
+                if current is not last:
+                    last = current
+                    quiet_until = now + _DIAGNOSTIC_SETTLE_SECONDS
+                elif now >= quiet_until:
+                    return False
+            if now >= deadline:
+                return current is None
+            await asyncio.sleep(min(_DIAGNOSTIC_POLL_SECONDS, deadline - now))
 
     def _render_diagnostics(self, diagnostics: Sequence[LspDiagnostic]) -> list[dict[str, Any]]:
         rendered = [

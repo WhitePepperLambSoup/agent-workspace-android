@@ -50,6 +50,10 @@
     while (userCard && !(userCard.classList.contains("user") && !userCard.hidden)) userCard = userCard.previousElementSibling;
     if (!userCard) return;
     const sourceId = currentSessionId;
+    // The question goes out again, to the model the user picks: its numbers are asked about first.
+    const question = userCard.dataset.messageText || userCard.dataset.displayText || "";
+    const route = await privacyCheck(question, { cloudOnly: true });
+    if (!route || disposed || activeTask || currentSessionId !== sourceId) return;
     const layer = document.createElement("div");
     layer.className = "action-sheet compare-sheet";
     layer.setAttribute("role", "dialog");
@@ -125,7 +129,7 @@
         const efforts = supportedEfforts(model);
         const effort = efforts.includes(settings.reasoning_effort) ? settings.reasoning_effort : efforts.includes("auto") ? "auto" : efforts[0];
         const submitted = await apiJson("/mobile/tasks", { method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session_id: fork.id, prompt: userCard.dataset.messageText || userCard.dataset.displayText || "",
+          body: JSON.stringify({ session_id: fork.id, prompt: route.text || question,
             model, ...(effort ? { reasoning_effort: effort } : {}), rewind_from_event_id: forked.message_event_id,
             rewind_reason: "regenerate", request_id: window.crypto?.randomUUID?.() || `compare-${Date.now()}` }) });
         taskId = submitted.task.task_id;
@@ -133,7 +137,7 @@
         let state = submitted.task.state;
         while (!closed && !terminalTaskStates.has(state)) {
           other.detail.textContent = t("正在回答...（{0} 秒）", Math.round((Date.now() - started) / 1000));
-          await new Promise((resolve) => setTimeout(resolve, 1500));
+          await pollPause(1500);
           if (closed || disposed) return;
           const snapshot = await apiJson(`/mobile/tasks/${encodeURIComponent(taskId)}`);
           state = snapshot.task.state;

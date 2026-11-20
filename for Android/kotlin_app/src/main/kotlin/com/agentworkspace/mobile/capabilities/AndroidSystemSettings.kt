@@ -4,9 +4,11 @@ import android.app.NotificationManager
 import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.media.AudioManager
 import android.net.Uri
 import android.net.wifi.WifiManager
+import android.os.BatteryManager
 import android.os.Build
 import android.os.SystemClock
 import android.provider.Settings
@@ -77,6 +79,21 @@ object AndroidSystemSettings {
             .put("brightness_access", Settings.System.canWrite(app))
             .put("volumes", volumes)
             .put("music_playing", audio.isMusicActive)
+            .put("battery", battery(app))
+    }
+
+    /** Level, charging and temperature from the battery's sticky broadcast (no receiver kept). */
+    private fun battery(app: Context): Any {
+        val intent = runCatching { app.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) }.getOrNull()
+            ?: return JSONObject.NULL
+        val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+        val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
+        val state = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+        val tenths = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE)
+        return JSONObject()
+            .put("percent", if (level >= 0 && scale > 0) (level * 100.0 / scale).roundToInt() else JSONObject.NULL)
+            .put("charging", state == BatteryManager.BATTERY_STATUS_CHARGING || state == BatteryManager.BATTERY_STATUS_FULL)
+            .put("temperature_c", if (tenths != Int.MIN_VALUE) tenths / 10.0 else JSONObject.NULL)
     }
 
     private fun volume(app: Context, request: JSONObject): JSONObject {

@@ -7,6 +7,8 @@ import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -35,6 +37,7 @@ class ToolActivity : ComponentActivity() {
     private lateinit var webView: WebView
     private lateinit var status: TextView
     private var guard: ScriptHandler? = null
+    private var webViewGone = false
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -70,6 +73,12 @@ class ToolActivity : ComponentActivity() {
                 override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?) = blocked(request?.url)
                 @Deprecated("Deprecated in Java")
                 override fun shouldInterceptRequest(view: WebView?, url: String?) = blocked(Uri.parse(url.orEmpty()))
+                // Unhandled, a tool whose page crashes its renderer (or is reclaimed for memory) ends the
+                // whole app process, the console with it.
+                override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                    rendererGone()
+                    return true
+                }
             }
         }
         container.addView(webView, FrameLayout.LayoutParams(-1, -1))
@@ -97,7 +106,7 @@ class ToolActivity : ComponentActivity() {
         webView.settings.javaScriptEnabled = true
         lifecycleScope.launch {
             val html = withContext(Dispatchers.IO) { runCatching { HomeTools.page(this@ToolActivity, tool.id).readText() }.getOrNull() }
-            if (isFinishing || isDestroyed) return@launch
+            if (isFinishing || isDestroyed || webViewGone) return@launch
             if (html == null) { fail(UiText.of(this@ToolActivity, "读不到这个小工具", "This tool could not be read")); return@launch }
             webView.loadDataWithBaseURL(HomeTools.origin(tool.id) + "/", withPolicy(html), "text/html", "UTF-8", null)
         }
@@ -121,14 +130,26 @@ class ToolActivity : ComponentActivity() {
     private fun fail(message: String) {
         status.text = message
         status.visibility = View.VISIBLE
-        webView.visibility = View.INVISIBLE
+        if (!webViewGone) webView.visibility = View.INVISIBLE
+    }
+
+    /** The WebView cannot be used once its renderer is gone: it is taken out and destroyed. */
+    private fun rendererGone() {
+        if (webViewGone) return
+        webViewGone = true
+        guard = null
+        (webView.parent as? ViewGroup)?.removeView(webView)
+        webView.destroy()
+        fail(UiText.of(this, "这个小工具的页面停止运行了，请重新打开", "This tool's page stopped; open it again"))
     }
 
     override fun onDestroy() {
-        guard?.remove()
-        guard = null
-        webView.stopLoading()
-        webView.destroy()
+        if (!webViewGone) {
+            guard?.remove()
+            guard = null
+            webView.stopLoading()
+            webView.destroy()
+        }
         super.onDestroy()
     }
 

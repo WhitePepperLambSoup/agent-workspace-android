@@ -14,6 +14,7 @@ import re
 import sqlite3
 import threading
 from collections.abc import Awaitable, Mapping, Sequence
+from concurrent.futures import Future
 from contextlib import suppress
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
@@ -121,7 +122,8 @@ class RunCommands(GatewayState):
         self._require_configured()
         self._require_payload(command, set(), optional={"sessionId"})
         self._require_selected_session(command.session_id)
-        assert command.session_id is not None
+        if command.session_id is None:
+            raise GatewayError("invalid_session")
         session_id = command.session_id
         payload_session = command.payload.get("sessionId")
         if payload_session is not None and payload_session != session_id:
@@ -161,7 +163,8 @@ class RunCommands(GatewayState):
         self._require_configured()
         self._require_payload(command, {"content"}, optional={"sessionId", "status", "position"})
         self._require_selected_session(command.session_id)
-        assert command.session_id is not None
+        if command.session_id is None:
+            raise GatewayError("invalid_session")
         session_id = command.session_id
         payload_session = command.payload.get("sessionId")
         if payload_session is not None and payload_session != session_id:
@@ -233,7 +236,8 @@ class RunCommands(GatewayState):
             optional={"sessionId", "content", "status", "position"},
         )
         self._require_selected_session(command.session_id)
-        assert command.session_id is not None
+        if command.session_id is None:
+            raise GatewayError("invalid_session")
         session_id = command.session_id
         payload_session = command.payload.get("sessionId")
         if payload_session is not None and payload_session != session_id:
@@ -315,7 +319,8 @@ class RunCommands(GatewayState):
         self._require_configured()
         self._require_payload(command, {"taskId"}, optional={"sessionId"})
         self._require_selected_session(command.session_id)
-        assert command.session_id is not None
+        if command.session_id is None:
+            raise GatewayError("invalid_session")
         session_id = command.session_id
         payload_session = command.payload.get("sessionId")
         if payload_session is not None and payload_session != session_id:
@@ -352,16 +357,23 @@ class RunCommands(GatewayState):
         )
 
     def _control_service(self) -> AgentControlService:
-        if self._workspace is None:
+        workspace = self._workspace
+        if workspace is None:
             raise GatewayError("runtime_unconfigured")
-        service = self._agent_control
-        if service is None:
+        with self._lock:
+            service = self._agent_control
             try:
-                service = AgentControlService(self._database)
-                service.recover_interrupted_runs(self._workspace)
+                if service is None:
+                    service = AgentControlService(self._database)
+                    self._agent_control = service
+                # Runs a folder had going when the app last stopped are marked interrupted the
+                # first time that folder is used, and only then: by a later visit its runs may
+                # be running here.
+                if workspace not in self._runs_recovered_in:
+                    service.recover_interrupted_runs(workspace)
+                    self._runs_recovered_in.add(workspace)
             except (OSError, sqlite3.DatabaseError, RuntimeError):
                 raise GatewayError("storage_unavailable") from None
-            self._agent_control = service
         return service
 
     @staticmethod
@@ -760,6 +772,8 @@ class RunCommands(GatewayState):
                         system_note=self._system_note,
                         workspace_tools=self._folder_tools,
                         tool_hooks=self._coding.hooks,
+                        tool_guards=True,
+                        long_turns=True,
                     )
                 )
                 entry = _RunHostEntry(
@@ -797,6 +811,78 @@ class RunCommands(GatewayState):
             with self._lock:
                 self._run_preparing.discard(run_id)
                 self._run_prepare_threads.pop(run_id, None)
+
+    def _approval_team(self, entry: _ApprovalEntry) -> str | None:
+        """The conversation an approval's work belongs to: an expert's under the one it serves."""
+        delegation = self._delegations.get(entry.run_id) if entry.run_id is not None else None
+        return delegation.parent_session_id if delegation is not None else entry.session_id
+
+    def _allow_for_team(self, entry: _ApprovalEntry) -> None:
+        """ "Allow in this conversation" given to one covers its experts and lead: what the others
+        are asking now and what they ask later. Each host keeps its own grants, so without this
+        experts asking side by side were answered one by one."""
+        team = self._approval_team(entry)
+        tool = entry.payload.get("tool")
+        if team is None or not isinstance(tool, str) or team in self._team_distrusted:
+            return
+        self._team_grants.setdefault(team, set()).add(tool)
+        for request_id, other in list(self._approval_ledger.items()):
+            if other is not entry and other.state == "pending":
+                self._allow_as_team_did(request_id, other)
+
+    def _allow_as_team_did(self, request_id: str, entry: _ApprovalEntry) -> bool:
+        """Answer a request its team already allowed; False when it is the user's to answer."""
+        team = self._approval_team(entry)
+        host = entry.source_host
+        if (
+            team is None
+            or host is None
+            or team in self._team_distrusted
+            or entry.payload.get("tool") not in self._team_grants.get(team, ())
+            or entry.payload.get("supportsSessionScope") is not True
+        ):
+            return False
+        future = host.resolve_approval(request_id, ApprovalScope.SESSION)
+        if future is None:
+            return False
+        entry.state = "resolving"
+        entry.resolution = future
+        entry.resolution_scope = ApprovalScope.SESSION
+
+        # On a thread: this runs on the host's loop, and the gateway may be waiting for that loop
+        # while it holds the lock the settling needs.
+        def settled(completed: Future[None]) -> None:
+            threading.Thread(
+                target=self._settle_approval_resolution,
+                args=(request_id, entry, completed),
+                name="approval-team",
+                daemon=True,
+            ).start()
+
+        future.add_done_callback(settled)
+        return True
+
+    def _distrust_team(self, team: str) -> None:
+        """Outside content talked to an agent of this conversation: until its next turn every step
+        of the lead and the experts asks, and what was allowed for the team is taken back."""
+        self._team_grants.pop(team, None)
+        self._team_distrusted.add(team)
+        hosts: list[tuple[str, Host | None]] = [(team, self._host_of_session(team))]
+        for run_id, delegation in self._delegations.items():
+            run_entry = self._run_hosts.get(run_id)
+            if delegation.parent_session_id == team and run_entry is not None:
+                hosts.append((run_entry.session_id, run_entry.host))
+        for session_id, host in hosts:
+            distrust = getattr(host, "request_distrust", None)
+            if distrust is not None:
+                with suppress(Exception):
+                    distrust(session_id)
+
+    def _host_of_session(self, session_id: str) -> Host | None:
+        if self._host_session_id == session_id:
+            return self._host
+        context = self._session_hosts.get(session_id)
+        return context.host if context is not None else None
 
     def _run_has_pending_approval(self, run_id: str, service: AgentControlService) -> bool:
         """Keep a pending approval attached to its live host until it is resolved."""
@@ -2298,6 +2384,27 @@ class RunCommands(GatewayState):
                 active_turn_id=str(raw_turn or "active"),
                 active_step_id=run.active_step_id,
             )
+            started = self._delegations.get(run_id)
+            if started is not None and started.parent_session_id in self._team_distrusted:
+                distrust = getattr(entry.host, "request_distrust", None)
+                if distrust is not None:
+                    distrust(entry.session_id)
+            return
+        if event_type == "content.untrusted":
+            found_by = self._delegations.get(run_id)
+            if found_by is not None:
+                self._distrust_team(found_by.parent_session_id)
+                self._pending_host_events.append(
+                    Event(
+                        session_id=found_by.parent_session_id,
+                        type="content.untrusted",
+                        data={
+                            "tool": payload.get("tool"),
+                            "sample": payload.get("sample"),
+                            "subagent": found_by.title,
+                        },
+                    )
+                )
             return
         if event_type == "approval.requested":
             request_id = payload.get("requestId")
@@ -2317,6 +2424,8 @@ class RunCommands(GatewayState):
                     run_id=run_id,
                 ),
             )
+            if self._allow_as_team_did(request_id, self._approval_ledger[request_id]):
+                return
             service.open_attention(
                 run_id=run_id,
                 session_id=entry.session_id,
@@ -2357,6 +2466,7 @@ class RunCommands(GatewayState):
                             "supports_session_scope": approval_payload.get("supportsSessionScope")
                             is True,
                             "subagent": delegation.title,
+                            "note": approval_payload.get("note"),
                         },
                     )
                 )

@@ -29,7 +29,7 @@ object AndroidSystemBridge {
         val state = context?.let { AndroidAutomationControl.readState(it) } ?: JSONObject()
         val enabled = context?.let { isEnabled(it) } ?: false
         val connected = enabled && (service != null || context?.let {
-            AndroidAutomationControl.hasRecentConnection(it)
+            AndroidAutomationControl.hasLiveConnection(it)
         } == true)
         val memory = ActivityManager.MemoryInfo()
         (context?.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)?.getMemoryInfo(memory)
@@ -185,11 +185,18 @@ object AndroidSystemBridge {
     @JvmStatic
     fun execute(requestJson: String): String {
         var background = false
+        var inPerson = false
+        var byUser = false
         val request = try {
             require(requestJson.length in 2..32768)
             JSONObject(requestJson).also {
                 // Set by the engine for conversation tasks: work on the background screen if it is on.
                 background = it.remove("background") == true
+                // Set by the engine when the user started the task on the phone: the background
+                // screen may then be operated while the phone is locked.
+                inPerson = it.remove("in_person") == true
+                // Set by the engine for the app's own route (circling on the screen), never for the model.
+                byUser = it.remove("by_user") == true
                 validateRequest(it)
             }
         } catch (_: Exception) {
@@ -200,7 +207,7 @@ object AndroidSystemBridge {
         }
         val connected = service ?: return failure("service_unavailable",
             "Enable Agent Workspace in Android Accessibility settings and retry in the engine process").toString()
-        return connected.executeRequest(request, background = background).toString()
+        return connected.executeRequest(request, background = background, byUser = byUser, inPerson = inPerson).toString()
     }
 
     // ---- The background screen (Device & tools → Background operation), see BackgroundScreen ----
@@ -281,7 +288,8 @@ object AndroidSystemBridge {
             "launch_app" -> step + setOf("package_name", "app_name")
             "back", "home", "recents", "notifications" -> step
             "batch" -> setOf("snapshot_version", "steps", "expect", "timeout_ms")
-            "repeat" -> setOf("snapshot_version", "steps", "every_ms", "times")
+            // hosted_*: set by the engine for an unattended task, what is left of its hosted limits.
+            "repeat" -> setOf("snapshot_version", "steps", "every_ms", "times", "hosted_ms", "hosted_steps")
             "stop_repeat" -> setOf("snapshot_version")
             "tap_text" -> step + setOf("text", "nth", "confirmed")
             "scroll_to_text" -> setOf("snapshot_version", "text", "direction", "ref", "max_scrolls", "tap", "confirmed")
@@ -291,8 +299,10 @@ object AndroidSystemBridge {
             else -> error("Unsupported action")
         }
         require(request.keys().asSequence().all { it == "action" || it in fields })
-        // The user said yes to pressing a control that deletes, clears or pays (see needs_confirmation).
-        if (request.has("confirmed")) require(request.get("confirmed") is Boolean)
+        // The user said yes to pressing one control that deletes or clears: the token of that refusal
+        // (see needs_confirmation), which the engine hands over after their answer. One press, never a
+        // step of a batch or a repeat.
+        if (request.has("confirmed")) require(!inBatch && !inRepeat && string(request, "confirmed", 64).matches(Regex("[0-9a-f-]{36}")))
         if (!inBatch && !inRepeat && action !in freshActions) string(request, "snapshot_version", 128)
         if (action == "tap_text") {
             string(request, "text", 200)
@@ -350,6 +360,8 @@ object AndroidSystemBridge {
             for (index in 0 until steps.length()) validateRequest(steps.getJSONObject(index), inRepeat = true)
             integer(request, "every_ms", 300, 3_600_000)
             if (request.has("times")) integer(request, "times", 1, 10_000)
+            if (request.has("hosted_ms")) integer(request, "hosted_ms", 0, 24 * 3_600_000)
+            if (request.has("hosted_steps")) integer(request, "hosted_steps", 0, 100_000)
         }
         if (action == "type_text") string(request, "text", 4096)
         if (action == "launch_app") {

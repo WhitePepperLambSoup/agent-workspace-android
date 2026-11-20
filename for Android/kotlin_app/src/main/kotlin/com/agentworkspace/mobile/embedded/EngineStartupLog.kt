@@ -43,3 +43,25 @@ object EngineStartupLog {
             ?.substringAfter("] ", "")?.trim()?.takeIf { it.isNotEmpty() }?.take(160)
     }.getOrNull()
 }
+
+/**
+ * Whether a start-up still counts as working, by the loading screen's own limits: a step logged in
+ * the last minute (the engine logs "still starting" every 15 s while it runs), and six minutes at
+ * most in all. Times are elapsed milliseconds; [mark] is [EngineStartupLog.progressMark].
+ */
+internal class StartupProgress(private val began: Long, private var mark: Long) {
+    private var lastStepAt = began
+
+    fun stillWorking(now: Long, current: Long): Boolean {
+        if (current != mark) {
+            mark = current
+            lastStepAt = now
+        }
+        return now - lastStepAt < IDLE_MS && now - began < LIMIT_MS
+    }
+
+    companion object {
+        const val IDLE_MS = 60_000L
+        const val LIMIT_MS = 360_000L
+    }
+}

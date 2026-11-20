@@ -15,10 +15,11 @@ from agent_workspace.tools.mcp_allowlist import (
     McpAllowlist,
     McpAllowlistError,
 )
-from agent_workspace.tools.mcp_client import McpProxyTool, StdioMcpClient
+from agent_workspace.tools.mcp_client import McpProxyTool, McpToolDefinition, StdioMcpClient
 from agent_workspace.tools.paths import StrPath
 
 _CONNECT_TIMEOUT_SECONDS = 20.0
+_CONNECT_CLEANUP_SECONDS = 5.0
 
 
 class McpHostError(ValueError):
@@ -30,6 +31,8 @@ class McpServerConfig:
     id: str
     command: tuple[str, ...]
     allowlist: McpAllowlist | CompositeMcpAllowlist = field(default_factory=McpAllowlist)
+    # `yolo = true` under the server: YOLO mode runs its tools without asking (off by default).
+    yolo: bool = False
 
 
 def load_mcp_servers(workspace: StrPath) -> tuple[McpServerConfig, ...]:
@@ -59,8 +62,10 @@ def load_mcp_servers(workspace: StrPath) -> tuple[McpServerConfig, ...]:
             raise McpHostError(f"MCP config {path} contains an invalid server entry")
         server_id = entry.get("id")
         command = entry.get("command")
+        yolo = entry.get("yolo", False)
         if (
-            not isinstance(server_id, str)
+            type(yolo) is not bool
+            or not isinstance(server_id, str)
             or not server_id
             or len(server_id) > 64
             or any(
@@ -89,6 +94,7 @@ def load_mcp_servers(workspace: StrPath) -> tuple[McpServerConfig, ...]:
                 server_id,
                 tuple(command),
                 effective_allowlist,
+                yolo,
             )
         )
     return tuple(servers)
@@ -116,10 +122,14 @@ class McpHost:
     the main event loop are bridged onto the host loop afterwards.
     """
 
-    def __init__(self, servers: tuple[McpServerConfig, ...]) -> None:
+    def __init__(self, servers: tuple[McpServerConfig, ...], *, cwd: StrPath | None = None) -> None:
         self._servers = servers
+        # Servers start in the workspace, as their approval says, so a declared
+        # ["python", "server.py"] finds a script kept in the workspace.
+        self._cwd = None if cwd is None else str(cwd)
         self._clients: list[StdioMcpClient] = []
         self._proxies: tuple[McpProxyTool, ...] = ()
+        self._startup_failures: dict[str, str] = {}
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
             target=self._run_loop,
@@ -143,13 +153,16 @@ class McpHost:
         *,
         timeout: float = _CONNECT_TIMEOUT_SECONDS,
     ) -> tuple[McpProxyTool, ...]:
+        """Start every server at the same time, each with ``timeout`` for it; see
+        ``startup_failures`` for the ones left out because they did not make it."""
         if self._connected or self._closed:
             return self._proxies
         self._thread.start()
+        future = asyncio.run_coroutine_threadsafe(self._connect(timeout), self._loop)
         try:
-            future = asyncio.run_coroutine_threadsafe(self._connect(), self._loop)
-            self._proxies = tuple(future.result(timeout=timeout))
+            self._proxies = tuple(future.result(timeout=timeout + _CONNECT_CLEANUP_SECONDS))
         except BaseException:
+            future.cancel()
             self.close_sync()
             raise
         self._connected = True
@@ -157,6 +170,10 @@ class McpHost:
 
     def tools(self) -> tuple[McpProxyTool, ...]:
         return self._proxies
+
+    def startup_failures(self) -> dict[str, str]:
+        """Why each server left out at startup could not start, by server id."""
+        return dict(self._startup_failures)
 
     def health_sync(self, *, timeout: float = 2.0) -> tuple[dict[str, Any], ...]:
         """Ping each connected MCP server on the host loop."""
@@ -283,18 +300,42 @@ class McpHost:
                 )
         return tuple(reports)
 
-    async def _connect(self) -> list[McpProxyTool]:
+    async def _start_server(
+        self, client: StdioMcpClient, timeout: float
+    ) -> tuple[McpToolDefinition, ...]:
+        try:
+            async with asyncio.timeout(timeout):
+                await client.connect()
+                return await client.list_tools()
+        except BaseException:
+            await client.aclose()
+            raise
+
+    async def _connect(self, timeout: float) -> list[McpProxyTool]:
         import re
 
+        # One client for each server from here on: closing the host reaches those still
+        # starting, and the lifecycle methods go through both lists side by side.
+        self._clients.extend(
+            StdioMcpClient(server.command, cwd=self._cwd, init_timeout_seconds=timeout)
+            for server in self._servers
+        )
+        started = await asyncio.gather(
+            *(self._start_server(client, timeout) for client in self._clients),
+            return_exceptions=True,
+        )
         proxies: list[McpProxyTool] = []
         registered_names: set[str] = set()
-        for server in self._servers:
-            client = StdioMcpClient(server.command)
-            await client.connect()
-            self._clients.append(client)
-            definitions = await client.list_tools()
+        for server, client, result in zip(self._servers, self._clients, started, strict=True):
+            if isinstance(result, BaseException):
+                self._startup_failures[server.id] = (
+                    f"did not start within {timeout:g} seconds"
+                    if isinstance(result, TimeoutError)
+                    else " ".join(str(result).split())[:1000] or type(result).__name__
+                )
+                continue
             definitions = tuple(
-                definition for definition in definitions if server.allowlist.allows(definition.name)
+                definition for definition in result if server.allowlist.allows(definition.name)
             )
             for definition in definitions:
                 base_name = "mcp_" + re.sub(r"[^a-zA-Z0-9_-]", "_", definition.name)
@@ -315,6 +356,7 @@ class McpHost:
                         submit=self.submit,
                         server_id=server.id,
                         tool_name=tool_name,
+                        yolo_opt_in=server.yolo,
                     )
                 )
         return proxies
@@ -329,9 +371,9 @@ class McpHost:
         return asyncio.wrap_future(asyncio.run_coroutine_threadsafe(operation, self._loop))
 
     async def aclose(self) -> None:
-        for client in tuple(self._clients):
-            await client.aclose()
+        clients = tuple(self._clients)
         self._clients.clear()
+        await asyncio.gather(*(client.aclose() for client in clients), return_exceptions=True)
 
     def close_sync(self) -> None:
         if self._closed:
@@ -359,7 +401,7 @@ def build_mcp_host(
         servers = load_mcp_servers(workspace)
     if not servers:
         return None
-    host = McpHost(tuple(servers))
+    host = McpHost(tuple(servers), cwd=Path(workspace))
     try:
         host.connect_sync()
     except BaseException as exc:

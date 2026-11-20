@@ -277,6 +277,9 @@ class MobileArtifactScope:
         self.background_job_store: Any | None = None
         self.background_jobs: tuple[tuple[str, str, str], ...] | None = None
         self.background_job_unsafe = False
+        # Attempts holding the workspace for this task: one, or a step's reads run side by side.
+        self._attempts: set[str] = set()
+        self._attempts_read_only = False
         for scope in coordinator.scopes.values():
             scope.overlapped = True
         coordinator.scopes[task_id] = self
@@ -289,16 +292,25 @@ class MobileArtifactScope:
         async with self.coordinator.lock:
             yield
 
-    async def start_tool(self, attempt_id: str, *, file_versions_only: bool = False) -> None:
+    async def start_tool(
+        self, attempt_id: str, *, file_versions_only: bool = False, read_only: bool = False
+    ) -> None:
         active = self.coordinator.tool
         if active is not None and active[0] is self:
-            if active[1] == attempt_id:
+            if attempt_id in self._attempts:
+                return
+            if read_only and self._attempts_read_only:
+                # The runner runs a step's read-only tools side by side: the later ones share
+                # the first one's hold on the workspace and its baseline.
+                self._attempts.add(attempt_id)
                 return
             self.error = "Nested tool output attribution was rejected."
             raise RuntimeError("Nested tool starts are unsupported within one mobile task.")
         await self.coordinator.lock.acquire()
         self.has_tool_events = True
         self.coordinator.tool = (self, attempt_id, None)
+        self._attempts = {attempt_id}
+        self._attempts_read_only = read_only
         try:
             if not file_versions_only:
                 if not self.overlapped:
@@ -316,6 +328,7 @@ class MobileArtifactScope:
                         self.coordinator.tool = (self, attempt_id, baseline)
         except BaseException:
             self.coordinator.tool = None
+            self._attempts = set()
             self.coordinator.lock.release()
             raise
 
@@ -343,9 +356,16 @@ class MobileArtifactScope:
             return True
         if active[0] is not self:
             return False
-        if attempt_id is not None and active[1] != attempt_id:
-            self.error = "A tool settlement did not match this task's active tool."
-            return False
+        if attempt_id is not None:
+            if attempt_id not in self._attempts:
+                self.error = "A tool settlement did not match this task's active tool."
+                return False
+            self._attempts.discard(attempt_id)
+            if self._attempts:
+                # Other reads of the step are still running: the workspace stays held, and
+                # the last one to finish takes the checkpoint.
+                return False
+        self._attempts = set()
         try:
             if active[2] is not None and self.overlapped:
                 checkpoint = await asyncio.to_thread(
@@ -385,6 +405,7 @@ class MobileArtifactScope:
         active = self.coordinator.tool
         if active is not None and active[0] is self:
             self.coordinator.tool = None
+            self._attempts = set()
             self.coordinator.lock.release()
         self.coordinator.scopes.pop(self.task_id, None)
 

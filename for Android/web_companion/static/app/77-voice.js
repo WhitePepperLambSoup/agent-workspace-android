@@ -6,6 +6,9 @@
   let voiceConversation = false;
   // The next message was said, not typed: its reply continues the voice conversation.
   let voiceTurnPending = false;
+  // Voice input is open for the conversation: only text arriving now is speech to send. Text shared
+  // from another app comes the same way (receiveSharedText) and waits in the composer.
+  let voiceListening = false;
   let speakingId = null;
 
   async function stopReading() {
@@ -24,7 +27,7 @@
       speakingId = id;
       // Wait for the end of the speech (bounded), then go on.
       for (let tries = 0; tries < 600 && speakingId === id && !disposed; tries += 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, 500));
+        await pollPause(500);
         let state = "";
         try { state = (await apiJson(`/mobile/speech/status?id=${encodeURIComponent(id)}`)).state || ""; } catch { break; }
         if (["completed", "failed", "stopped", "cancelled", "interrupted", "unknown"].includes(state)) break;
@@ -36,9 +39,17 @@
 
   function listenAgain() {
     if (!voiceConversation || disposed || activeTask) return;
-    if (typeof bridge?.requestVoiceInput === "function") bridge.requestVoiceInput();
+    if (typeof bridge?.requestVoiceInput === "function") { voiceListening = true; bridge.requestVoiceInput(); }
     else voiceConversation = false;
   }
+
+  // Voice input closed without text (the app says so): cancelling it ends the conversation.
+  window.addEventListener("agent-voice-input", () => {
+    voiceListening = false;
+    if (!voiceConversation || disposed) return;
+    voiceConversation = false;
+    notice(t("已结束连续语音对话"), "info");
+  });
 
   // After a reply in a voice conversation: read it, then listen for the next thing said.
   function continueVoiceConversation(task) {
@@ -58,6 +69,6 @@
 
   $("btnVoiceConversation")?.addEventListener("click", () => {
     closeAttachMenu();
-    if (voiceConversation) { voiceConversation = false; void stopReading(); notice(t("已结束连续语音对话"), "info"); }
+    if (voiceConversation) { voiceConversation = false; voiceListening = false; void stopReading(); notice(t("已结束连续语音对话"), "info"); }
     else startVoiceConversation();
   });

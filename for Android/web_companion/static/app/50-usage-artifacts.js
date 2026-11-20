@@ -190,7 +190,9 @@
     if (days) query.set("days", days);
     pageStatus(elements.usageStatus, t("加载中..."));
     try {
-      const data = await apiJson(scopedUrl(`/mobile/usage${query.size ? `?${query}` : ""}`));
+      // Not query.size: WebViews before Chromium 113 have none, and the filters were left off.
+      const filters = query.toString();
+      const data = await apiJson(scopedUrl(`/mobile/usage${filters ? `?${filters}` : ""}`));
       if (generation !== usageGeneration || settingsPage !== "usage" || (scope === "session" && sessionId !== currentSessionId)) return;
       usageData = data;
       renderUsage(data);

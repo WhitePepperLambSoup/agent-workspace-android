@@ -25,8 +25,8 @@ android {
         applicationId = "com.agentworkspace.mobile" + (providers.environmentVariable("AGENT_TEST_APP_SUFFIX").orNull ?: "")
         minSdk = 26
         targetSdk = 36
-        versionCode = 20800
-        versionName = "2.8.0"
+        versionCode = 20900
+        versionName = "2.9.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Local test builds can inspect the console page over adb (chrome://inspect) while keeping
@@ -146,12 +146,16 @@ chaquopy {
         version = "3.12"
         embeddedBuildPython?.let { buildPython(it) }
         pip {
+            // The shared core's own versions (pyproject.toml, uv.lock), so the phone runs the core
+            // on what the desktop and the tests run it on; tests/test_android_python_pins.py checks
+            // that each pin meets the core's range. jsonschema is the one exception, below.
             options("--only-binary=:all:")
             install("httpx==0.28.1")
             install("websockets==17.0.1")
-            install("pypdf==6.16.1")
+            install("pypdf==6.21.4")
             install("tomli-w==1.2.0")
-            // This release supports Draft 2020-12 without an unavailable Rust Android wheel.
+            // Below the core's range (>=4.23): later releases need rpds-py, a Rust library with no
+            // Android wheel. This release supports Draft 2020-12, which the core uses.
             install("jsonschema==4.17.3")
             install("pyrsistent==0.20.0")
             install("attrs==25.4.0")
@@ -180,14 +184,26 @@ val prepareAndroidToolchainLaunchers by tasks.registering(Exec::class) {
     commandLine(pythonCommand + listOf(file("../prepare_android_toolchain.py").absolutePath))
 }
 
+// The same pinned, SHA-256 checked inputs build_release.py --prepare-only gets: a build from
+// Android Studio or ./gradlew (also after ./gradlew clean) used to miss the OpenCL headers archive
+// CMake needs for arm64, its license, and the offline speech runtime, and an APK built that way
+// quietly had no offline speech.
 val prepareAndroidNativeSources by tasks.registering(Exec::class) {
     workingDir = file("..")
     val pythonCommand = embeddedBuildPython?.let { listOf(it) }
         ?: if (System.getProperty("os.name").startsWith("Windows")) listOf("py", "-3.12")
         else listOf("python3")
     commandLine(pythonCommand + listOf("-c",
-        "from build_release import prepare_native_source, prepare_license_assets; " +
-        "prepare_native_source(); prepare_license_assets()"))
+        "from build_release import prepare_native_source, prepare_opencl_headers, prepare_license_assets; " +
+        "prepare_native_source(); prepare_opencl_headers(); prepare_license_assets()"))
+}
+
+val prepareSpeechRuntime by tasks.registering(Exec::class) {
+    workingDir = file("..")
+    val pythonCommand = embeddedBuildPython?.let { listOf(it) }
+        ?: if (System.getProperty("os.name").startsWith("Windows")) listOf("py", "-3.12")
+        else listOf("python3")
+    commandLine(pythonCommand + listOf("-c", "from prepare_speech_runtime import prepare; prepare()"))
 }
 
 tasks.configureEach {
@@ -197,7 +213,7 @@ tasks.configureEach {
 }
 
 tasks.named("preBuild") {
-    dependsOn(prepareAndroidAssets, prepareAndroidToolchainLaunchers, prepareAndroidNativeSources)
+    dependsOn(prepareAndroidAssets, prepareAndroidToolchainLaunchers, prepareAndroidNativeSources, prepareSpeechRuntime)
 }
 
 dependencies {

@@ -39,7 +39,7 @@ SETTINGS: dict[str, dict[str, Any]] = {
         "title": "执行模式",
         "choices": {"workspace": "仅工作区（改文件、联网等先问你）", "yolo": "YOLO（大部分操作不再询问）", "full_access": "完全访问（几乎不再询问）"},
         "page": "permission",
-        "risk": {"yolo": "AI 改文件、运行命令时大多不再先问你。", "full_access": "AI 可以不经询问访问手机上的更多内容并执行操作。"},
+        "risk": {"yolo": "AI 改文件、运行命令时大多不再先问你；操作其他应用、发消息仍会先问。", "full_access": "AI 可以不经询问访问手机上的更多内容并执行操作。"},
     },
     "floating_ball": {"title": "悬浮球", "choices": _ON_OFF, "page": "globalEntry"},
     "task_notifications": {"title": "任务完成通知", "choices": _ON_OFF, "page": "notifications"},

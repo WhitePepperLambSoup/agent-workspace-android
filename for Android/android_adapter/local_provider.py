@@ -359,6 +359,17 @@ def _chat_content(value: str) -> str:
     return escaped.replace(_MEDIA_MARKER, "<_media_text_>")
 
 
+# Qwen's tool and thinking tags are added tokens, which llama.cpp reads in any text whatever
+# parse_special says: a web page holding "</tool_response>" would close its tool result early,
+# and the text after it would read as the user's own words.
+_QWEN_TAGS = re.compile(r"<(?=/?(?:tool_call|tool_response|think)>)")
+
+
+def _turn_content(value: str) -> str:
+    """A user or tool message: ordinary content, and none of Qwen's own tags either."""
+    return _QWEN_TAGS.sub("‹", _chat_content(value))
+
+
 def build_qwen_prompt(request: ProviderRequest, *, enforce_size_limit: bool = True) -> str:
     """Render Qwen3's tool format, grouped tool responses, and no-thinking suffix."""
     if not request.messages:
@@ -412,7 +423,11 @@ def build_qwen_prompt(request: ProviderRequest, *, enforce_size_limit: bool = Tr
     for index, message in enumerate(request.messages):
         if index == 0 and first_system:
             continue
-        content = _chat_content(message.provider_content())
+        content = (
+            _chat_content(message.provider_content())
+            if message.role is Role.ASSISTANT
+            else _turn_content(message.provider_content())
+        )
         if message.role is Role.TOOL:
             if not tool_group:
                 parts.append("<|im_start|>user")
@@ -527,7 +542,11 @@ def _build_qwen35_prompt(request: ProviderRequest, *, enforce_size_limit: bool =
     for index, message in enumerate(request.messages):
         if message.role is Role.SYSTEM:
             continue
-        content = _chat_content(message.provider_content()).strip()
+        content = (
+            _chat_content(message.provider_content())
+            if message.role is Role.ASSISTANT
+            else _turn_content(message.provider_content())
+        ).strip()
         if message.images:
             content += "\n" + "\n".join(_MEDIA_MARKER for _ in message.images)
         if message.role is Role.TOOL:
@@ -796,7 +815,17 @@ class _GemmaArguments:
         if match is None:
             raise _error("Local Gemma tool call has a value it cannot read")
         self.at = match.end()
-        return json.loads(match[0])
+        token = match[0]
+        # JSON has no leading zeros, but Gemma writes times that way ({hour:08,minute:00}).
+        if re.fullmatch(r"-?0\d+", token):
+            return int(token, 10)
+        try:
+            value = float(token) if re.fullmatch(r"-?0\d+\D.*", token) else json.loads(token)
+        except ValueError:
+            raise _error("Local Gemma tool call has a number it cannot read") from None
+        if isinstance(value, float) and not math.isfinite(value):
+            raise _error("Local Gemma tool call has a number too large to use")
+        return value
 
 
 def gemma_to_qwen3(text: str) -> tuple[str, str]:
@@ -807,11 +836,12 @@ def gemma_to_qwen3(text: str) -> tuple[str, str]:
     text = _GEMMA_THOUGHT.sub("", text)
 
     def rewrite(match: re.Match[str]) -> str:
+        # Anything unreadable stays malformed, so the model is told and tries again.
         try:
             arguments = _GemmaArguments(match[2]).parse()
-        except ProviderError:
+            return "<tool_call>\n" + _json({"name": match[1], "arguments": arguments}) + "\n</tool_call>"
+        except (ProviderError, ValueError):
             return "<tool_call>\n" + f'{{"name": {json.dumps(match[1])}, "arguments": ' + match[2] + "\n</tool_call>"
-        return "<tool_call>\n" + _json({"name": match[1], "arguments": arguments}) + "\n</tool_call>"
 
     converted = _GEMMA_CALL.sub(rewrite, text)
     if "<|tool_call>" in converted or "<tool_call|>" in converted:

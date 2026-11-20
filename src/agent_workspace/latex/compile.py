@@ -40,6 +40,32 @@ _UNICODE_PACKAGES = re.compile(
 )
 _INCLUDES = re.compile(r"\\(?:input|include|subfile|import\{[^}]*\})\s*\{([^}]+)\}")
 _CREATE_NO_WINDOW = 0x08000000
+# A confined compile (the agent's) reads the document's folder and below, and the distribution's
+# own files: nothing else on this computer by an absolute or ".." path. TeX Live (kpathsea) and
+# MiKTeX each take this from the environment; Tectonic and Biber follow neither, so the agent's
+# tool also checks the source first (outside_reads).
+_CONFINED_ENVIRONMENT = {
+    "openin_any": "p",
+    "openout_any": "p",
+    "MIKTEX_CORE_ALLOWUNSAFEINPUTFILES": "f",
+    "MIKTEX_CORE_ALLOWUNSAFEOUTPUTFILES": "f",
+}
+# How each engine says it kept a file back: MiKTeX, then TeX Live.
+_REFUSED_FILE = re.compile(
+    r"file not readable for security reasons:\s*(\S[^\r\n]*?)\s*$"
+    r"|Not reading from (\S[^\r\n]*?) \(openin_any = p\)",
+    re.MULTILINE,
+)
+# Commands that name a file to read, with their braced arguments (after any [options]).
+_FILE_COMMANDS = re.compile(
+    r"\\(input|include|subfile|includeonly|includegraphics|includepdf|includesvg|"
+    r"includestandalone|bibliography|addbibresource|addglobalbib|addsectionbib|verbatiminput|"
+    r"VerbatimInput|lstinputlisting|inputminted|InputIfFileExists|IfFileExists|usepackage|"
+    r"RequirePackage|documentclass|LoadClass|import|subimport|includefrom|subincludefrom|"
+    r"inputfrom|subinputfrom)\*?\s*(?:\[[^\]]*\]\s*)*((?:\{[^{}]*\}\s*){1,2})"
+)
+_BARE_INPUT = re.compile(r"\\input\s+([^\s{}\\%]+)")
+_COMMENT = re.compile(r"(?<!\\)%[^\n]*")
 
 
 class CompileError(Exception):
@@ -100,7 +126,9 @@ def _windows_tex_directories() -> list[Path]:
 def _which(name: str, extra: list[Path]) -> str | None:
     found = shutil.which(name)
     if found:
-        return str(Path(found).resolve())
+        # Absolute, but not resolved: TeX Live's pdflatex is a link to pdftex, which picks its
+        # format by the name it is run as, and run as pdftex it is plain TeX.
+        return os.path.abspath(found)
     suffix = ".exe" if sys.platform == "win32" else ""
     for directory in extra:
         candidate = directory / f"{name}{suffix}"
@@ -138,7 +166,8 @@ def detect_engines(data_dir: Path | None = None, *, fresh: bool = False) -> Engi
         else:
             engines.tectonic = _which("tectonic", [])
         first = next(iter(engines.programs.values()), "")
-        if "miktex" in first.lower():
+        # The distribution shows in where a link on PATH leads (/usr/bin/pdflatex → MiKTeX).
+        if "miktex" in f"{first} {os.path.realpath(first) if first else ''}".lower():
             engines.distribution = "miktex"
         elif first:
             engines.distribution = "texlive"
@@ -203,6 +232,58 @@ def _inside(folder: Path, path: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+# What each command's names are relative to: the including file (subfiles, \subimport), the
+# folder it names (\import), or else the document's folder, where the engine runs.
+_RELATIVE_TO_SOURCE = frozenset({"subfile", "subimport", "subinputfrom", "subincludefrom"})
+_FOLDER_AND_FILE = frozenset(
+    {"import", "subimport", "inputfrom", "subinputfrom", "includefrom", "subincludefrom"}
+)
+_SOURCES = frozenset(
+    {"input", "include", "subfile", *_FOLDER_AND_FILE, "InputIfFileExists", "includestandalone"}
+)
+
+
+def outside_reads(folder: Path, main: Path, *, max_files: int = 200) -> list[str]:
+    """The files the document, or a source it includes, names outside ``folder`` (by an absolute
+    or ".." path, or through a link), as written. Names built by macros are left to the engine's
+    own limit."""
+    root = Path(os.path.abspath(folder))
+    found: list[str] = []
+    seen: set[Path] = set()
+    queue = [Path(os.path.abspath(main))]
+    while queue and len(seen) < max_files:
+        source = queue.pop()
+        if source in seen:
+            continue
+        seen.add(source)
+        text = _COMMENT.sub("", _read_text(source)[: 4 * 1024 * 1024])
+        named = [("input", match.group(1)) for match in _BARE_INPUT.finditer(text)]
+        for match in _FILE_COMMANDS.finditer(text):
+            command = match.group(1)
+            groups = re.findall(r"\{([^{}]*)\}", match.group(2))
+            if command in _FOLDER_AND_FILE and len(groups) == 2:
+                named.append((command, groups[0].strip().rstrip("/") + "/" + groups[1].strip()))
+                named.append(("folder", groups[0]))
+            else:
+                named.extend((command, item) for group in groups for item in group.split(","))
+        for command, raw in named:
+            name = raw.strip()
+            if not name or any(mark in name for mark in ("\\", "#", "://")):
+                continue
+            base = source.parent if command in _RELATIVE_TO_SOURCE else main.parent
+            # "/x" is a path on the current drive; a link inside the folder can lead out too.
+            target = Path(os.path.normpath(base / os.path.expanduser(name)))
+            if not _inside(root, target):
+                if name not in found:
+                    found.append(name)
+            elif command in _SOURCES:
+                for candidate in (target, target.with_name(target.name + ".tex")):
+                    if candidate.suffix.lower() == ".tex" and candidate.is_file():
+                        queue.append(candidate)
+                        break
+    return found
 
 
 _SKIPPED_DIRECTORIES = frozenset(
@@ -354,8 +435,11 @@ def compile_document(
     cancel: threading.Event | None = None,
     installer: bool = True,
     progress: Callable[[str], None] | None = None,
+    confined: bool = False,
 ) -> CompileResult:
-    """Compile ``main`` (a document inside ``folder``) and read what went wrong."""
+    """Compile ``main`` (a document inside ``folder``) and read what went wrong. ``confined``: the
+    engine reads only the document's folder and below and the distribution's own files (the
+    agent's compiles; the user's own from the LaTeX editor read what the document names)."""
     main = main.resolve()
     if not main.is_file():
         raise CompileError("document_missing")
@@ -369,6 +453,8 @@ def compile_document(
     started = time.monotonic()
     runner = _Runner(cancel, started + TOTAL_SECONDS)
     env = dict(os.environ)
+    if confined:
+        env.update(_CONFINED_ENVIRONMENT)
     if program == "tectonic":
         assert engines.tectonic is not None
         passes, output = _run_tectonic(runner, engines.tectonic, main, build, env, progress)
@@ -381,6 +467,21 @@ def compile_document(
     issues = latex_log.parse_log(log_text) if log_text else []
     if program == "tectonic":
         _relocate_from_stderr(issues, output)
+    # A file the engine kept back is named first: the log only says it was not found.
+    for path in dict.fromkeys(
+        next(part for part in match.groups() if part)
+        for match in _REFUSED_FILE.finditer(output[1] if output is not None else "")
+    ):
+        issues.insert(
+            0,
+            Issue(
+                "error",
+                "outside_file",
+                f"not read: {path} — the compile reads only files in the document's folder "
+                "and below, and the TeX packages; copy the file next to the document",
+                params={"path": path},
+            ),
+        )
     exit_ok = output is not None and output[0] == 0
     pdf = build / f"{stem}.pdf"
     produced = pdf.is_file() and pdf.stat().st_size > 0

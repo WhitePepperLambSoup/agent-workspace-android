@@ -7,7 +7,9 @@ import android.os.Bundle
 import android.text.TextUtils
 import android.view.View
 import android.view.Gravity
+import android.view.ViewGroup
 import android.webkit.ConsoleMessage
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -126,6 +128,7 @@ class WorkspaceHtmlPreviewActivity : ComponentActivity() {
     private lateinit var webView: WebView
     private lateinit var status: TextView
     private var documentStartScript: ScriptHandler? = null
+    private var webViewGone = false
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -187,6 +190,13 @@ class WorkspaceHtmlPreviewActivity : ComponentActivity() {
                 @Suppress("DEPRECATION")
                 override fun shouldInterceptRequest(view: WebView?, url: String?): WebResourceResponse? =
                     blockedResource(Uri.parse(url.orEmpty()))
+
+                // Unhandled, a generated page that crashes its renderer (or is reclaimed for memory)
+                // ends the whole app process, the console with it.
+                override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                    rendererGone()
+                    return true
+                }
             }
         }
         container.addView(webView, FrameLayout.LayoutParams(-1, -1))
@@ -242,7 +252,7 @@ class WorkspaceHtmlPreviewActivity : ComponentActivity() {
                     }
                     bytes.toString(Charsets.UTF_8)
                 }
-                if (isFinishing || isDestroyed) return@launch
+                if (isFinishing || isDestroyed || webViewGone) return@launch
                 if (webView.settings.javaScriptEnabled) status.visibility = View.GONE
                 else {
                     status.text = "Static preview: this WebView cannot safely run interactive HTML"
@@ -262,15 +272,28 @@ class WorkspaceHtmlPreviewActivity : ComponentActivity() {
     private fun fail(message: String) {
         status.text = message
         status.visibility = View.VISIBLE
-        if (::webView.isInitialized) webView.visibility = View.INVISIBLE
+        if (::webView.isInitialized && !webViewGone) webView.visibility = View.INVISIBLE
+    }
+
+    /** The WebView cannot be used once its renderer is gone: it is taken out and destroyed. */
+    private fun rendererGone() {
+        if (webViewGone) return
+        webViewGone = true
+        documentStartScript = null
+        (webView.parent as? ViewGroup)?.removeView(webView)
+        webView.destroy()
+        status.layoutParams = FrameLayout.LayoutParams(-1, -1)
+        fail("This preview stopped (its page used too much memory or crashed); open it again")
     }
 
     override fun onDestroy() {
-        documentStartScript?.remove()
-        documentStartScript = null
-        if (::webView.isInitialized) {
-            webView.stopLoading()
-            webView.destroy()
+        if (!webViewGone) {
+            documentStartScript?.remove()
+            documentStartScript = null
+            if (::webView.isInitialized) {
+                webView.stopLoading()
+                webView.destroy()
+            }
         }
         super.onDestroy()
     }

@@ -21,6 +21,7 @@ from uuid import uuid4
 
 from agent_workspace.core.events import (
     CURRENT_EVENT_SCHEMA_VERSION,
+    MAX_RESEARCH_CONTENT_BYTES,
     Event,
     validate_event_payload,
 )
@@ -28,13 +29,17 @@ from agent_workspace.core.models import Autonomy, BinaryArtifact, Mode
 from agent_workspace.core.session import Session
 from agent_workspace.storage.durable import durable_publish_new, durable_replace, fsync_directory
 from agent_workspace.storage.lock import ProcessWriteLock
+from agent_workspace.storage.slow_work import simulate_long_check, watch_connection
 from agent_workspace.storage.sqlite import (
     CURRENT_SCHEMA_MIGRATIONS,
     CURRENT_SCHEMA_VERSION,
     SCHEMA_DEFINITIONS_BY_VERSION,
+    SEARCH_PAIRS_SCHEMA_VERSION,
+    STREAM_COMPACTION_SCHEMA_VERSION,
     SQLiteEventStore,
     normalize_schema_definition,
 )
+from agent_workspace.storage.stream_compaction import CompactionAudit, restore_compacted_text
 
 _BACKUP_FORMAT_VERSION = 1
 _DEFAULT_BACKUP_MAX_AGE_DAYS = 30
@@ -49,7 +54,7 @@ _MAX_SESSION_ARCHIVE_MANIFEST_BYTES = 1024 * 1024
 _MAX_SESSION_ARCHIVE_EVENT_BYTES = 2 * 1024 * 1024
 _MAX_SESSION_ARCHIVE_EVENTS = 100_000
 _MAX_SESSION_ARCHIVE_JSON_BYTES = 16 * 1024 * 1024
-_MAX_SESSION_ARTIFACT_BYTES = 128 * 1024
+_MAX_SESSION_ARTIFACT_BYTES = MAX_RESEARCH_CONTENT_BYTES
 _MAX_SANDBOX_ARTIFACT_BYTES = 16 * 1024 * 1024
 _MAX_IMPORTED_ACTIVE_BACKGROUND_JOBS = 4
 _REDACTED = "<redacted>"
@@ -96,6 +101,14 @@ class BackupValidationError(RuntimeError):
     pass
 
 
+class BackupCorruptError(BackupValidationError):
+    """The backup is shown not to be what its manifest says, so retention may delete it.
+
+    A check that could not finish (no disk space for its temporary copies, an I/O error) or rules
+    newer than the backup raise plain BackupValidationError: such a backup may be the good one.
+    """
+
+
 class SessionExportError(RuntimeError):
     """Raised when a session cannot be safely exported as a versioned archive."""
 
@@ -132,7 +145,8 @@ class _VerifiedSessionArchive:
 
 
 def session_checkpoint_report(database: str | Path, session_id: str) -> list[dict[str, str]]:
-    """List active file-write checkpoints that block safe session export."""
+    """List the file-write checkpoints kept for this session: active ones, which block a session
+    export until they are settled, and those of writes whose outcome stayed unknown."""
     rows = SQLiteEventStore.list_file_checkpoints_read_only(database, session_id)
     return [{"attempt_id": attempt_id, "path": relative_path} for attempt_id, relative_path in rows]
 
@@ -286,18 +300,20 @@ def _verify_backup(backup: str | Path) -> tuple[DatabaseValidation, str]:
     manifest_path = _manifest_path(backup_path)
     try:
         raw_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+    except OSError:
         raise BackupValidationError("backup manifest is missing or invalid") from None
+    except (UnicodeError, json.JSONDecodeError):
+        raise BackupCorruptError("backup manifest is missing or invalid") from None
     if not isinstance(raw_manifest, dict):
-        raise BackupValidationError("backup manifest is invalid")
+        raise BackupCorruptError("backup manifest is invalid")
     manifest = cast(dict[str, object], raw_manifest)
     format_version = manifest.get("format_version")
     if type(format_version) is not int or format_version != _BACKUP_FORMAT_VERSION:
         raise BackupValidationError("backup format version is unsupported")
     if not _is_timezone_aware_timestamp(manifest.get("created_at")):
-        raise BackupValidationError("backup creation timestamp is invalid")
+        raise BackupCorruptError("backup creation timestamp is invalid")
     if manifest.get("database_file") != backup_path.name:
-        raise BackupValidationError("backup manifest does not match the database file")
+        raise BackupCorruptError("backup manifest does not match the database file")
     lineage = manifest.get("lineage")
     if (
         not isinstance(lineage, str)
@@ -305,7 +321,7 @@ def _verify_backup(backup: str | Path) -> tuple[DatabaseValidation, str]:
         or any(character not in "0123456789abcdef" for character in lineage)
         or not backup_path.name.startswith(f"agent-{lineage}-")
     ):
-        raise BackupValidationError("backup lineage metadata is invalid")
+        raise BackupCorruptError("backup lineage metadata is invalid")
     expected_size = manifest.get("size")
     expected_digest = manifest.get("sha256")
     if (
@@ -316,22 +332,22 @@ def _verify_backup(backup: str | Path) -> tuple[DatabaseValidation, str]:
         or len(expected_digest) != 64
         or any(character not in "0123456789abcdef" for character in expected_digest)
     ):
-        raise BackupValidationError("backup manifest metadata is invalid")
+        raise BackupCorruptError("backup manifest metadata is invalid")
     backup_kind = manifest.get("backup_kind")
     parent_sha256 = manifest.get("parent_sha256")
     if backup_kind not in {"full", "incremental"}:
-        raise BackupValidationError("backup kind metadata is invalid")
+        raise BackupCorruptError("backup kind metadata is invalid")
     if parent_sha256 is not None and not _is_sha256(parent_sha256):
-        raise BackupValidationError("backup parent digest metadata is invalid")
+        raise BackupCorruptError("backup parent digest metadata is invalid")
     if backup_kind == "full" and parent_sha256 is not None:
-        raise BackupValidationError("full backup cannot reference a parent")
+        raise BackupCorruptError("full backup cannot reference a parent")
     try:
         actual_size = backup_path.stat().st_size
         actual_digest = _sha256_file(backup_path)
     except OSError:
         raise BackupValidationError("backup database is missing or unreadable") from None
     if actual_size != expected_size or actual_digest != expected_digest:
-        raise BackupValidationError("backup hash or size does not match its manifest")
+        raise BackupCorruptError("backup hash or size does not match its manifest")
     validation = validate_database(backup_path)
     raw_validation = manifest.get("validation")
     if not _validation_matches(raw_validation, validation):
@@ -427,6 +443,26 @@ def _normalize_legacy_event_payload(event_type: str, data: dict[str, Any]) -> di
     return data
 
 
+def _checked_event_data(row: sqlite3.Row) -> dict[str, Any]:
+    """The replay's one parse of an event, which is also where its stored form is checked."""
+    if row["schema_version"] != CURRENT_EVENT_SCHEMA_VERSION:
+        raise BackupValidationError(f"event {row['id']} uses an unsupported schema version")
+    try:
+        data = json.loads(cast(str, row["data_json"]))
+    except (TypeError, UnicodeError, json.JSONDecodeError):
+        raise BackupValidationError(f"event {row['id']} contains invalid JSON") from None
+    if not isinstance(data, dict):
+        raise BackupValidationError(f"event {row['id']} data is not a JSON object")
+    try:
+        validate_event_payload(
+            cast(str, row["type"]),
+            _normalize_legacy_event_payload(cast(str, row["type"]), dict(data)),
+        )
+    except ValueError as exc:
+        raise BackupValidationError(f"event {row['id']} is invalid: {exc}") from None
+    return cast(dict[str, Any], data)
+
+
 def validate_database(database: str | Path) -> DatabaseValidation:
     database_path = Path(database).expanduser().resolve()
     uri = f"{database_path.as_uri()}?mode=ro"
@@ -435,6 +471,8 @@ def validate_database(database: str | Path) -> DatabaseValidation:
     except sqlite3.Error:
         raise BackupValidationError("database cannot be opened") from None
     connection.row_factory = sqlite3.Row
+    watch_connection(connection)
+    simulate_long_check()
     try:
         # All integrity and replay queries must observe the same WAL snapshot.
         connection.execute("BEGIN")
@@ -527,28 +565,34 @@ def validate_database(database: str | Path) -> DatabaseValidation:
                 raise BackupValidationError(
                     f"session {row['id']} contains an unsupported mode or autonomy"
                 ) from None
-        for row in connection.execute("SELECT id, type, data_json, schema_version FROM events"):
-            if row["schema_version"] != CURRENT_EVENT_SCHEMA_VERSION:
-                raise BackupValidationError(f"event {row['id']} uses an unsupported schema version")
-            try:
-                data = json.loads(cast(str, row["data_json"]))
-            except (TypeError, UnicodeError, json.JSONDecodeError):
-                raise BackupValidationError(f"event {row['id']} contains invalid JSON") from None
-            if not isinstance(data, dict):
-                raise BackupValidationError(f"event {row['id']} data is not a JSON object")
-            try:
-                validate_event_payload(
-                    cast(str, row["type"]),
-                    _normalize_legacy_event_payload(cast(str, row["type"]), data),
-                )
-            except ValueError as exc:
-                raise BackupValidationError(f"event {row['id']} is invalid: {exc}") from None
+        # A chunk blanked by stream compaction must be one its turn's message holds.
+        audit = CompactionAudit() if schema_version >= STREAM_COMPACTION_SCHEMA_VERSION else None
+
+        def read_event_data(row: sqlite3.Row) -> dict[str, Any]:
+            data = _checked_event_data(row)
+            if audit is not None:
+                audit.note(row, data)
+            return data
+
         try:
-            replay_error = SQLiteEventStore.projection_replay_error(connection, schema_version)
+            replay_error = SQLiteEventStore.projection_replay_error(
+                connection, schema_version, read_event_data
+            )
         except (sqlite3.Error, ValueError) as exc:
             raise BackupValidationError(f"event projection replay failed: {exc}") from None
         if replay_error is not None:
             raise BackupValidationError(replay_error)
+        if audit is not None:
+            compaction_problem = audit.problem(
+                connection.execute(
+                    """
+                    SELECT session_id, correlation_id, text_chunks, reasoning_chunks, characters
+                    FROM compacted_turns
+                    """
+                )
+            )
+            if compaction_problem is not None:
+                raise BackupValidationError(compaction_problem)
         if schema_version >= 6:
             checkpoint_mismatch = connection.execute(
                 """
@@ -648,6 +692,8 @@ def validate_database(database: str | Path) -> DatabaseValidation:
                         f"workspace file checkpoint {row['attempt_id']} is invalid"
                     )
         if schema_version >= 5:
+            # Each document's token is checked against its text here; the index, every term,
+            # is compared with one built again from the documents by _validate_search_terms.
             search_index_mismatch = connection.execute(
                 """
                 WITH missing AS (
@@ -663,21 +709,6 @@ def validate_database(database: str | Path) -> DatabaseValidation:
                 SELECT 1 FROM missing
                 UNION ALL
                 SELECT 1 FROM unexpected
-                UNION ALL
-                SELECT 1
-                FROM search_documents AS d
-                LEFT JOIN session_search_vocab AS v
-                  ON v.doc = d.rowid
-                 AND v.col = 'integrity_token'
-                 AND v.term = d.integrity_token
-                WHERE v.doc IS NULL
-                UNION ALL
-                SELECT 1
-                FROM session_search_vocab AS v
-                LEFT JOIN search_documents AS d
-                  ON d.rowid = v.doc
-                 AND d.integrity_token = v.term
-                WHERE v.col = 'integrity_token' AND d.rowid IS NULL
                 LIMIT 1
                 """
             ).fetchone()
@@ -690,7 +721,7 @@ def validate_database(database: str | Path) -> DatabaseValidation:
                     raise BackupValidationError(
                         f"session search document {row['id']} has an invalid integrity token"
                     )
-            _validate_search_terms(connection)
+            _validate_search_terms(connection, schema_version)
         if schema_version >= 11:
             for artifact in connection.execute(
                 "SELECT sha256, content, byte_count FROM binary_artifacts"
@@ -711,10 +742,11 @@ def validate_database(database: str | Path) -> DatabaseValidation:
                 LEFT JOIN sandbox_change_artifacts AS r
                   ON r.artifact_sha256 = a.sha256
                 WHERE r.artifact_sha256 IS NULL
-                  AND NOT EXISTS (
-                      SELECT 1 FROM events AS e
+                  AND a.sha256 NOT IN (
+                      SELECT json_extract(e.data_json, '$.sha256')
+                      FROM events AS e
                       WHERE e.type = 'image.attached'
-                        AND json_extract(e.data_json, '$.sha256') = a.sha256
+                        AND json_type(e.data_json, '$.sha256') = 'text'
                   )
                 LIMIT 1
                 """
@@ -814,11 +846,16 @@ def export_session(
         session = SQLiteEventStore.get_session_read_only(snapshot_path, session_id)
         if session is None:
             raise KeyError(f"unknown session: {session_id}")
-        events = SQLiteEventStore.list_events_read_only(snapshot_path, session_id)
+        # The archive carries the text of streamed chunks this database has blanked.
+        events = restore_compacted_text(
+            SQLiteEventStore.list_events_read_only(snapshot_path, session_id)
+        )
         _validate_event_sequence(events)
+        # An unknown outcome has ended and is on record; it can never be settled by resuming.
         active_checkpoints = SQLiteEventStore.list_file_checkpoints_read_only(
             snapshot_path,
             session_id,
+            include_unknown=False,
         )
         if active_checkpoints:
             detail = ", ".join(path for _, path in active_checkpoints)
@@ -1130,6 +1167,8 @@ def fork_session(
             in_turn = False
     if in_turn:
         raise ValueError("the conversation is in the middle of a turn at that point")
+    # The copy keeps the text of streamed chunks this database has blanked.
+    chosen = restore_compacted_text(chosen)
     forked_session_id = str(uuid4())
     event_ids = {event.id: str(uuid4()) for event in chosen}
     # The copy is numbered from 1 again; a rewind names the point it went back to by number.
@@ -2080,10 +2119,7 @@ def _prune_backups(
                 _check_backup_manifest_facts(backup, manifest)
             else:
                 _verify_backup(backup)
-            raw_manifest = json.loads(manifest.read_text(encoding="utf-8"))
-            created_at = datetime.fromisoformat(cast(str, raw_manifest["created_at"]))
-            pair_size = backup.stat().st_size + manifest.stat().st_size
-        except BackupValidationError:
+        except BackupCorruptError:
             try:
                 backup.unlink(missing_ok=True)
                 _remove_sqlite_sidecars(backup)
@@ -2092,6 +2128,14 @@ def _prune_backups(
                 continue
             changed = True
             continue
+        except BackupValidationError:
+            pass  # not shown to be damaged: it stays, and counts toward the retention below
+        try:
+            raw_manifest = json.loads(manifest.read_text(encoding="utf-8"))
+            if not _is_timezone_aware_timestamp(raw_manifest["created_at"]):
+                continue
+            created_at = datetime.fromisoformat(cast(str, raw_manifest["created_at"]))
+            pair_size = backup.stat().st_size + manifest.stat().st_size
         except (KeyError, OSError, TypeError, ValueError):
             continue
         candidates.append((created_at, manifest, backup, pair_size))
@@ -2140,15 +2184,17 @@ def _check_backup_manifest_facts(backup: Path, manifest: Path) -> None:
     try:
         document = json.loads(manifest.read_text(encoding="utf-8"))
         size = backup.stat().st_size
-    except (OSError, UnicodeError, json.JSONDecodeError):
+    except OSError:
         raise BackupValidationError("backup manifest is missing or invalid") from None
+    except (UnicodeError, json.JSONDecodeError):
+        raise BackupCorruptError("backup manifest is missing or invalid") from None
     if (
         not isinstance(document, dict)
         or document.get("database_file") != backup.name
         or not _is_timezone_aware_timestamp(document.get("created_at"))
         or document.get("size") != size
     ):
-        raise BackupValidationError("backup manifest does not match the database file")
+        raise BackupCorruptError("backup manifest does not match the database file")
 
 
 def _redact_sensitive(value: object) -> object:
@@ -2241,7 +2287,13 @@ def _validation_matches(raw: object, validation: DatabaseValidation) -> bool:
     return raw == asdict(validation)
 
 
-def _validate_search_terms(connection: sqlite3.Connection) -> None:
+def _validate_search_terms(connection: sqlite3.Connection, schema_version: int) -> None:
+    # Version 27 indexes search_text alone; earlier versions the text and its integrity token.
+    columns = (
+        ("search_text",)
+        if schema_version >= SEARCH_PAIRS_SCHEMA_VERSION
+        else ("text", "integrity_token")
+    )
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=".agent-search-validation-",
         suffix=".db",
@@ -2254,10 +2306,9 @@ def _validate_search_terms(connection: sqlite3.Connection) -> None:
         expected.execute("PRAGMA synchronous = OFF")
         expected.execute("PRAGMA temp_store = FILE")
         expected.execute(
-            """
+            f"""
             CREATE VIRTUAL TABLE expected_search USING fts5(
-                text,
-                integrity_token,
+                {", ".join(columns)},
                 tokenize='unicode61 remove_diacritics 2'
             )
             """
@@ -2265,29 +2316,21 @@ def _validate_search_terms(connection: sqlite3.Connection) -> None:
         expected.execute(
             "CREATE VIRTUAL TABLE expected_vocab USING fts5vocab(expected_search, 'instance')"
         )
+        names = ", ".join(columns)
+        marks = ", ".join("?" for _ in columns)
         expected.executemany(
-            "INSERT INTO expected_search(rowid, text, integrity_token) VALUES (?, ?, ?)",
-            connection.execute(
-                "SELECT rowid, text, integrity_token FROM search_documents ORDER BY rowid"
-            ),
+            f"INSERT INTO expected_search(rowid, {names}) VALUES (?, {marks})",
+            connection.execute(f"SELECT rowid, {names} FROM search_documents ORDER BY rowid"),
         )
-        actual_terms = connection.execute(
-            """
-            SELECT term, doc, col, offset
-            FROM session_search_vocab
-            ORDER BY term, doc, col, offset
-            """
-        )
-        expected_terms = expected.execute(
-            """
-            SELECT term, doc, col, offset
-            FROM expected_vocab
-            ORDER BY term, doc, col, offset
-            """
-        )
+        # An instance vocabulary comes in the order of its index (term, doc, col, offset): sorting
+        # took most of this comparison. Plain tuples spare a sqlite3.Row per term.
+        actual_terms = connection.cursor()
+        actual_terms.row_factory = None
+        actual_terms.execute("SELECT term, doc, col, offset FROM session_search_vocab")
+        expected_terms = expected.execute("SELECT term, doc, col, offset FROM expected_vocab")
         try:
             for actual, rebuilt in zip_longest(actual_terms, expected_terms):
-                if actual is None or rebuilt is None or tuple(actual) != tuple(rebuilt):
+                if actual is None or rebuilt is None or actual != rebuilt:
                     raise BackupValidationError("session search index terms are inconsistent")
         finally:
             actual_terms.close()

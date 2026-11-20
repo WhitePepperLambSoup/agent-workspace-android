@@ -111,6 +111,11 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def local_now() -> datetime:
+    """This computer's local time, with the offset in force now."""
+    return datetime.now().astimezone()
+
+
 @dataclass
 class TaskRunRecord:
     task_id: str
@@ -283,6 +288,20 @@ class ScheduledTaskStateStore:
     def completed_one_time_task_ids(self) -> set[str]:
         return {rec.task_id for rec in self._records.values() if rec.state == "completed"}
 
+    def last_trigger(self, task_id: str) -> datetime | None:
+        """The latest trigger of the task with a run recorded, whatever became of the run."""
+        found: datetime | None = None
+        for record in self._records.values():
+            if record.task_id != task_id:
+                continue
+            try:
+                moment = datetime.fromisoformat(record.trigger_at)
+            except ValueError:
+                continue
+            if moment.tzinfo is not None and (found is None or moment > found):
+                found = moment
+        return found
+
     def get_pending_retries(self) -> list[TaskRunRecord]:
         return [rec for rec in self._records.values() if rec.state == "retry"]
 
@@ -300,8 +319,11 @@ class ScheduledTaskHost:
         state_store: ScheduledTaskStateStore | None = None,
         state_path: Path | None = None,
         max_concurrency: int = 4,
+        local_clock: bool = False,
     ) -> None:
-        self._now = utc_now if now is None else now
+        # local_clock (the desktop): cron fields are this computer's local time, and a trigger
+        # missed while the app was closed runs once when it starts (only the latest one).
+        self._now = (local_now if local_clock else utc_now) if now is None else now
         self._task_defs = {task.id: task for task in tasks}
         if state_store is not None:
             self._state_store = state_store
@@ -322,7 +344,16 @@ class ScheduledTaskHost:
                 if task.cron is not None
             ),
             now=self._now,
+            # After a sleep, an every-5-minutes prompt runs once, not once per missed trigger.
+            latest_only=True,
         )
+        if local_clock:
+            # Counted from each task's last recorded run: the most recent trigger missed since
+            # then runs once. A task that never ran (a new one, a first start) waits for its next.
+            for task in tasks:
+                last = self._state_store.last_trigger(task.id) if task.cron is not None else None
+                if last is not None:
+                    self._scheduler.catch_up_from(task.id, last)
         self._one_time_scheduler = OneTimeTaskScheduler(
             (
                 OneTimeTask(
@@ -425,12 +456,15 @@ class ScheduledTaskHost:
 def build_scheduled_host(
     workspace: StrPath,
     run_prompt: Callable[[str], Any],
+    tasks: tuple[ScheduledTaskDefinition, ...] | None = None,
     *,
     now: Callable[[], datetime] | None = None,
     poll_seconds: float = 30.0,
     state_path: Path | None = None,
+    local_clock: bool = False,
 ) -> ScheduledTaskHost | None:
-    tasks = load_scheduled_tasks(workspace)
+    if tasks is None:
+        tasks = load_scheduled_tasks(workspace)
     if not tasks:
         return None
     default_state_path = (
@@ -442,4 +476,5 @@ def build_scheduled_host(
         now=now,
         poll_seconds=poll_seconds,
         state_path=default_state_path,
+        local_clock=local_clock,
     )

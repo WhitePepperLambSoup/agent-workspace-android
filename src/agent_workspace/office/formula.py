@@ -9,9 +9,9 @@ stored value; the office suite works it out.
 
 from __future__ import annotations
 
-import math
 import re
 from collections.abc import Callable
+from decimal import ROUND_DOWN, ROUND_HALF_UP, ROUND_UP, Decimal, InvalidOperation
 from typing import Any
 
 from agent_workspace.office.tables import column_index
@@ -167,18 +167,61 @@ class _Parser:
             self.take()
             return values
         while True:
-            values.append(self.comparison())
+            start = self.index
+            try:
+                values.append(self.comparison())
+            except Unsupported as error:
+                # An Excel error (#DIV/0! …) in one argument matters only if the function uses
+                # that argument: IF(B2=0,"-",A2/B2) is "-" when B2 is 0.
+                if not str(error).startswith("#"):
+                    raise
+                self.skip_argument(start)
+                values.append(_Failed(str(error)))
             token = self.take()[1]
             if token == ")":
                 return values
             if token != ",":
                 raise Unsupported("argument list")
 
+    def skip_argument(self, start: int) -> None:
+        """Moves to the , or ) that ends the argument beginning at token start."""
+        depth = 0
+        self.index = start
+        while self.peek()[0] != "end":
+            value = self.peek()[1]
+            if value == "(":
+                depth += 1
+            elif value == ")":
+                if depth == 0:
+                    return
+                depth -= 1
+            elif value == "," and depth == 0:
+                return
+            self.index += 1
+
     def call(self, name: str) -> Any:
-        function = _FUNCTIONS.get(name.upper())
+        upper = name.upper()
+        function = _FUNCTIONS.get(upper)
         if function is None:
             raise Unsupported(name)
-        return function(self.arguments())
+        values = self.arguments()
+        if upper not in _PICKING:
+            for value in values:
+                _value(value)
+        return function(values)
+
+
+class _Failed:
+    """An argument whose value is an Excel error."""
+
+    def __init__(self, error: str) -> None:
+        self.error = error
+
+
+def _value(value: Any) -> Any:
+    if isinstance(value, _Failed):
+        raise Unsupported(value.error)
+    return value
 
 
 def _cell(text: str) -> tuple[int, int]:
@@ -232,6 +275,11 @@ def _text(value: Any) -> str:
 
 
 def _compare(left: Any, right: Any, op: str) -> bool:
+    # An empty cell is 0 next to a number and "" next to text, as in Excel (A1=0 is TRUE).
+    if left is None:
+        left = 0.0 if isinstance(right, int | float) else ""
+    if right is None:
+        right = 0.0 if isinstance(left, int | float) else ""
     if isinstance(left, int | float) and isinstance(right, int | float):
         a, b = float(left), float(right)
     else:
@@ -284,23 +332,37 @@ def _conditional(arguments: list[Any], kind: str) -> Any:
     return sum(numbers) / len(numbers)
 
 
+def _decimal(value: float, digits: int, rounding: str) -> Decimal:
+    """value rounded in decimal, the way Excel does: from its 15 significant digits, so 1.005
+    becomes 1.01 although the float is a little below 1.005."""
+    try:
+        return Decimal(f"{value:.15g}").quantize(Decimal(1).scaleb(-digits), rounding=rounding)
+    except InvalidOperation:
+        raise Unsupported("#NUM!") from None
+
+
 def _round(arguments: list[Any], mode: str) -> float:
     value = _num(arguments[0])
     digits = int(_num(arguments[1])) if len(arguments) > 1 else 0
-    factor = 10**digits
-    if mode == "up":
-        return math.copysign(math.ceil(abs(value) * factor - 1e-9) / factor, value)
-    if mode == "down":
-        return math.copysign(math.floor(abs(value) * factor + 1e-9) / factor, value)
-    return math.copysign(math.floor(abs(value) * factor + 0.5) / factor, value)
+    # ROUND_UP and ROUND_DOWN go away from and towards zero, like ROUNDUP and ROUNDDOWN.
+    rounding = {"up": ROUND_UP, "down": ROUND_DOWN}.get(mode, ROUND_HALF_UP)
+    return float(_decimal(value, digits, rounding))
+
+
+# Only plain number formats are worked out here; dates ("yyyy年m月d日"), "0.##" and the like
+# are left to the office suite.
+_NUMBER_FORMAT = re.compile(r"(#,##)?0(\.0+)?%?")
 
 
 def _text_format(arguments: list[Any]) -> str:
     value, pattern = _num(arguments[0]), _text(arguments[1])
+    if not _NUMBER_FORMAT.fullmatch(pattern):
+        raise Unsupported(f"TEXT format {pattern}")
     decimals = len(pattern.split(".")[1].rstrip("%")) if "." in pattern else 0
-    if pattern.endswith("%"):
-        return f"{value * 100:.{decimals}f}%"
-    return f"{value:,.{decimals}f}" if "," in pattern else f"{value:.{decimals}f}"
+    percent = pattern.endswith("%")
+    number = _decimal(value * 100 if percent else value, decimals, ROUND_HALF_UP)
+    text = f"{number:,.{decimals}f}" if "," in pattern else f"{number:.{decimals}f}"
+    return text + "%" if percent else text
 
 
 def _average(arguments: list[Any]) -> float:
@@ -324,9 +386,10 @@ _FUNCTIONS: dict[str, Callable[[list[Any]], Any]] = {
     "ROUNDUP": lambda a: _round(a, "up"),
     "ROUNDDOWN": lambda a: _round(a, "down"),
     "ABS": lambda a: abs(_num(a[0])),
-    "IF": lambda a: (
-        (a[1] if len(a) > 1 else True) if _truth(a[0]) else (a[2] if len(a) > 2 else False)
+    "IF": lambda a: _value(
+        (a[1] if len(a) > 1 else True) if _truth(_value(a[0])) else (a[2] if len(a) > 2 else False)
     ),
+    "IFERROR": lambda a: _value(a[1]) if isinstance(a[0], _Failed) else a[0],
     "AND": lambda a: all(_truth(value) for value in _flat(a)),
     "OR": lambda a: any(_truth(value) for value in _flat(a)),
     "NOT": lambda a: not _truth(a[0]),
@@ -337,6 +400,10 @@ _FUNCTIONS: dict[str, Callable[[list[Any]], Any]] = {
 }
 
 
+# These use only some of their arguments, so an error in another one does not matter.
+_PICKING = {"IF", "IFERROR"}
+
+
 def _truth(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -345,17 +412,77 @@ def _truth(value: Any) -> bool:
     return bool(value)
 
 
+# Functions Excel added after 2007 are stored in the file under a "_xlfn." prefix. Written without
+# it, Excel takes them for unknown names and shows #NAME? (and it recalculates on open).
+_FUTURE = """
+ACOT ACOTH AGGREGATE ARABIC ARRAYTOTEXT BASE BETA.DIST BETA.INV BINOM.DIST BINOM.DIST.RANGE
+BINOM.INV BITAND BITLSHIFT BITOR BITRSHIFT BITXOR CEILING.MATH CEILING.PRECISE CHISQ.DIST
+CHISQ.DIST.RT CHISQ.INV CHISQ.INV.RT CHISQ.TEST COMBINA CONCAT CONFIDENCE.NORM CONFIDENCE.T COT
+COTH COVARIANCE.P COVARIANCE.S CSC CSCH DAYS DECIMAL ERF.PRECISE ERFC.PRECISE EXPON.DIST F.DIST
+F.DIST.RT F.INV F.INV.RT F.TEST FILTERXML FLOOR.MATH FLOOR.PRECISE FORECAST.ETS
+FORECAST.ETS.CONFINT FORECAST.ETS.SEASONALITY FORECAST.ETS.STAT FORECAST.LINEAR FORMULATEXT GAMMA
+GAMMA.DIST GAMMA.INV GAMMALN.PRECISE GAUSS HYPGEOM.DIST IFNA IFS IMCOSH IMCOT IMCSC IMCSCH IMSEC
+IMSECH IMSINH IMTAN ISFORMULA ISOMITTED ISOWEEKNUM LOGNORM.DIST LOGNORM.INV MAXIFS MINIFS
+MODE.MULT MODE.SNGL MUNIT NEGBINOM.DIST NORM.DIST NORM.INV NORM.S.DIST NORM.S.INV NUMBERVALUE
+PDURATION PERCENTILE.EXC PERCENTILE.INC PERCENTRANK.EXC PERCENTRANK.INC PERMUTATIONA PHI
+POISSON.DIST QUARTILE.EXC QUARTILE.INC RANK.AVG RANK.EQ RRI SEC SECH SHEET SHEETS SKEW.P STDEV.P
+STDEV.S SWITCH T.DIST T.DIST.2T T.DIST.RT T.INV T.INV.2T T.TEST TEXTAFTER TEXTBEFORE TEXTJOIN
+UNICHAR UNICODE VALUETOTEXT VAR.P VAR.S WEBSERVICE WEIBULL.DIST XLOOKUP XMATCH XOR Z.TEST
+"""
+# These return a list that spills into the neighbouring cells in Excel 365. That needs array
+# metadata this writer does not make, so Excel shows such a formula as one value (=@FILTER(..)).
+_SPILLING = """
+CHOOSECOLS CHOOSEROWS DROP EXPAND FILTER HSTACK RANDARRAY SEQUENCE SORT SORTBY TAKE TEXTSPLIT
+TOCOL TOROW UNIQUE VSTACK WRAPCOLS WRAPROWS
+"""
+_PREFIX = {name: "_xlfn." for name in (_FUTURE + _SPILLING).split()} | {
+    "FILTER": "_xlfn._xlws.",
+    "SORT": "_xlfn._xlws.",
+}
+
+
+def _names(names: list[str]) -> re.Pattern[str]:
+    alternatives = "|".join(re.escape(name) for name in sorted(names, key=len, reverse=True))
+    return re.compile(rf"(?<![\w.])({alternatives})(?=\s*\()", re.IGNORECASE)
+
+
+_FUTURE_CALL = _names(list(_PREFIX))
+_SPILLING_CALL = _names(_SPILLING.split())
+_QUOTED = re.compile(r"\"(?:[^\"]|\"\")*\"|'(?:[^']|'')*'")
+
+
+def _outside_quotes(text: str, change: Callable[[str], str]) -> str:
+    """Text and sheet names in quotes are left as they are."""
+    out: list[str] = []
+    position = 0
+    for match in _QUOTED.finditer(text):
+        out.append(change(text[position : match.start()]))
+        out.append(match.group())
+        position = match.end()
+    out.append(change(text[position:]))
+    return "".join(out)
+
+
+def stored(formula: str) -> str:
+    """The formula as an .xlsx file stores it: without the leading = and with the prefix Excel
+    expects on functions newer than Excel 2007."""
+    text = formula[1:] if formula.startswith("=") else formula
+    return _outside_quotes(
+        text,
+        lambda part: _FUTURE_CALL.sub(
+            lambda match: _PREFIX[match.group(1).upper()] + match.group(1).upper(), part
+        ),
+    )
+
+
+def spills(formula: str) -> bool:
+    """Whether the formula uses a function whose list Excel 365 would spill into other cells."""
+    return bool(_SPILLING_CALL.search(_QUOTED.sub('""', formula)))
+
+
 def evaluate(formula: str, sheet: str, get: Getter) -> Any:
     """The formula's value, or raises Unsupported."""
     text = formula[1:] if formula.startswith("=") else formula
-    match = re.fullmatch(r"\s*IFERROR\s*\((.*),([^,]*)\)\s*", text, re.IGNORECASE | re.DOTALL)
-    if match:
-        try:
-            return evaluate(match.group(1), sheet, get)
-        except Unsupported as error:
-            if str(error).startswith("#"):
-                return evaluate(match.group(2), sheet, get)
-            raise
     value = _Parser(text, sheet, get).parse()
     if isinstance(value, list):
         raise Unsupported("a range is not a value")
@@ -364,4 +491,4 @@ def evaluate(formula: str, sheet: str, get: Getter) -> Any:
     return value
 
 
-__all__ = ["Unsupported", "evaluate"]
+__all__ = ["Unsupported", "evaluate", "spills", "stored"]

@@ -10,7 +10,6 @@ from typing import Any
 from uuid import uuid4
 
 from agent_workspace.ui_gateway.device_link import DeviceLinkError, PairedDevice, TaskOptions
-from agent_workspace.ui_gateway.gateway_common import GatewayReply
 from agent_workspace.ui_gateway.gateway_state import GatewayState
 from agent_workspace.ui_gateway.protocol import CommandEnvelope
 
@@ -95,20 +94,23 @@ class DeviceReviewCommands(GatewayState):
 
     def _as_window(
         self,
-        handler: Callable[[CommandEnvelope], GatewayReply],
         command_type: str,
         payload: dict[str, Any],
         session_id: str | None = None,
     ) -> dict[str, Any]:
-        """The window's handler for a command, its refusals as the endpoint's."""
+        """The window's command, its refusals as the endpoint's. It goes through the gateway's
+        own entry (execute), as approvals from the phone do: the handlers that expect the
+        gateway lock get it there (starting a follow-up run checks and adds to the runs the
+        window thread also changes), and the reply takes no sequence number of the window's."""
         envelope = CommandEnvelope(
             1, f"phone-{uuid4().hex[:12]}", command_type, payload, session_id
         )
-        reply = self._refusing(handler, envelope)
+        with self._unsent():
+            reply = self._refusing(self.execute, envelope)
         return dict(reply.payload)
 
     def device_changes(self, device: PairedDevice) -> dict[str, object]:
-        diff = self._as_window(self._get_git_diff, "workspace.git.diff", {})
+        diff = self._as_window("workspace.git.diff", {})
         files = diff.get("files") or []
         return {
             "git": diff.get("isGitRepo") is True,
@@ -126,7 +128,7 @@ class DeviceReviewCommands(GatewayState):
         }
 
     def device_change_diff(self, device: PairedDevice, path: str) -> dict[str, object]:
-        diff = self._as_window(self._get_git_diff, "workspace.git.diff", {})
+        diff = self._as_window("workspace.git.diff", {})
         found = next(
             (item for item in diff.get("files") or [] if item.get("filePath") == path), None
         )
@@ -136,9 +138,7 @@ class DeviceReviewCommands(GatewayState):
         return {"path": path, "status": found.get("status"), "hunks": hunks, "truncated": cut}
 
     def device_reviews(self, device: PairedDevice) -> dict[str, object]:
-        listed = self._as_window(
-            self._list_review_snapshots, "workspace.review.list", {"limit": MAX_SNAPSHOTS}
-        )
+        listed = self._as_window("workspace.review.list", {"limit": MAX_SNAPSHOTS})
         return {
             "snapshots": [
                 {
@@ -156,9 +156,7 @@ class DeviceReviewCommands(GatewayState):
         }
 
     def device_review(self, device: PairedDevice, snapshot_id: str) -> dict[str, object]:
-        details = self._as_window(
-            self._get_review_snapshot, "workspace.review.get", {"snapshotId": snapshot_id}
-        )
+        details = self._as_window("workspace.review.get", {"snapshotId": snapshot_id})
         return self._review_document(details)
 
     def _review_document(self, details: dict[str, Any]) -> dict[str, object]:
@@ -196,7 +194,6 @@ class DeviceReviewCommands(GatewayState):
     ) -> dict[str, object]:
         """Freeze the folder's changes, under the conversation named or the window's own."""
         details = self._as_window(
-            self._create_review_snapshot,
             "workspace.review.create",
             {},
             _session(payload),
@@ -218,7 +215,6 @@ class DeviceReviewCommands(GatewayState):
         ):
             raise DeviceLinkError("invalid_comment")
         created = self._as_window(
-            self._create_review_comment,
             "workspace.review.comments.create",
             {
                 "snapshotId": snapshot_id,
@@ -246,9 +242,7 @@ class DeviceReviewCommands(GatewayState):
         body: dict[str, Any] = {"commentId": comment_id, "start": True}
         if session_id:
             body["sessionId"] = session_id
-        started = self._as_window(
-            self._followup_review_comment, "workspace.review.comments.followup", body
-        )
+        started = self._as_window("workspace.review.comments.followup", body)
         run = started.get("run") or {}
         self._device_hub.log(device, "review_followup", str(run.get("id") or ""))
         return {

@@ -308,27 +308,24 @@ async def semantic_rank(
     )
     if len(keys) != len(documents):
         raise ValueError("embedding item id count must match documents")
-    cached: list[list[float] | None] = []
+    cached: list[list[float] | None] = [None] * len(documents)
     if index is not None:
-        for key, document in zip(keys, documents, strict=True):
+        for position, (key, document) in enumerate(zip(keys, documents, strict=True)):
             record = index.get(key)
-            cached.append(
-                list(record.vector)
-                if record is not None and index.is_current(key, document)
-                else None
-            )
-    missing = any(vector is None for vector in cached)
-    if index is not None and not missing:
-        query_vectors = await client.embed([query])
-        vectors = [query_vectors[0], *[vector for vector in cached if vector is not None]]
-    else:
-        vectors = await client.embed([query, *documents])
+            if record is not None and index.is_current(key, document):
+                cached[position] = list(record.vector)
+    missing = [position for position, vector in enumerate(cached) if vector is None]
+    # The query goes with the documents that have no current vector, in requests of at most
+    # one batch each: more candidates than one batch holds used to fail the whole search.
+    texts = [query, *(documents[position] for position in missing)]
+    vectors: list[list[float]] = []
+    for start in range(0, len(texts), _MAX_EMBEDDING_BATCH):
+        vectors.extend(await client.embed(texts[start : start + _MAX_EMBEDDING_BATCH]))
+    for position, vector in zip(missing, vectors[1:], strict=True):
+        cached[position] = vector
         if index is not None:
-            for key, (document, vector) in zip(
-                keys, zip(documents, vectors[1:], strict=True), strict=True
-            ):
-                index.upsert(key, document, vector)
-    return rank_by_embeddings(vectors[0], vectors[1:])
+            index.upsert(keys[position], documents[position], vector)
+    return rank_by_embeddings(vectors[0], [vector or [] for vector in cached])
 
 
 def parse_embeddings_key() -> str | None:

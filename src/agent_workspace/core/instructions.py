@@ -5,7 +5,9 @@ from pathlib import Path
 from agent_workspace.tools.paths import StrPath, WorkspacePathError, WorkspacePaths
 
 # Files discovered at the workspace root and injected as project instructions,
-# in priority order. Content is bounded and treated as untrusted context.
+# in priority order. Content is bounded but not marked untrusted: it goes into the
+# system prompt as the project's own instructions, so whoever writes these files
+# (or .agent/skills) instructs every later conversation in the workspace.
 INSTRUCTION_FILENAMES = ("AGENTS.md", "CLAUDE.md", ".cursorrules", ".agent/instructions.md")
 
 MAX_INSTRUCTION_BYTES = 64 * 1024

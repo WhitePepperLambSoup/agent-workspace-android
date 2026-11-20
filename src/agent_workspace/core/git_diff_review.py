@@ -204,25 +204,33 @@ def _parse_single_hunk(
     i = start_idx + 1
     curr_old = old_start
     curr_new = new_start
+    # The header's counts say where the hunk ends: a removed line that reads "-- note" shows
+    # as "--- note" and must not be taken for the next file's header.
+    old_left = old_count
+    new_left = new_count
 
     while i < len(lines):
         line = lines[i]
-        if line.startswith("diff --git ") or line.startswith("@@ ") or line.startswith("--- "):
+        if line.startswith("\\ No newline at end of file"):
+            diff_lines.append(DiffLine("marker", line))
+        elif old_left <= 0 and new_left <= 0:
             break
-        if line.startswith("+"):
+        elif line.startswith("+"):
             diff_lines.append(DiffLine("add", line[1:], old_lineno=None, new_lineno=curr_new))
             curr_new += 1
+            new_left -= 1
         elif line.startswith("-"):
             diff_lines.append(DiffLine("delete", line[1:], old_lineno=curr_old, new_lineno=None))
             curr_old += 1
+            old_left -= 1
         elif line.startswith(" "):
             diff_lines.append(
                 DiffLine("context", line[1:], old_lineno=curr_old, new_lineno=curr_new)
             )
             curr_old += 1
             curr_new += 1
-        elif line.startswith("\\ No newline at end of file"):
-            diff_lines.append(DiffLine("marker", line))
+            old_left -= 1
+            new_left -= 1
         else:
             break
         i += 1
@@ -558,6 +566,8 @@ class GitDiffReviewService:
 
         if not new_hunk_lines:
             return False
+        if len(old_hunk_lines) != hunk.old_count or len(new_hunk_lines) != hunk.new_count:
+            return False  # an incomplete hunk would be put back only in part
 
         hunk_len = len(new_hunk_lines)
         exact_start = max(0, hunk.new_start - 1)

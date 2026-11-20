@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import importlib.util
 import json
 import multiprocessing
@@ -21,10 +22,10 @@ from agent_workspace.application.runtime import ApplicationRuntime, build_runtim
 from agent_workspace.config import (
     ProviderConfig,
     ProviderProtocol,
+    database_writer_lock_path,
     default_backup_dir,
     default_data_dir,
     default_database_path,
-    default_writer_lock_path,
 )
 from agent_workspace.core.agents import find_agent, load_agents
 from agent_workspace.core.approval_batch import ApprovalBatchDecision, ApprovalBatchReviewer
@@ -76,7 +77,9 @@ from agent_workspace.credentials import credential_target
 from agent_workspace.policy import (
     ApprovalRequiredError,
     ApprovalResult,
+    ExtensionApprovalRequiredError,
     ProviderEgressDeniedError,
+    WorkspaceExtensionRequest,
 )
 from agent_workspace.policy.approval_display import approval_display_arguments
 from agent_workspace.providers import ProviderError, create_provider
@@ -127,6 +130,9 @@ def _start_shutdown_watchdog(
 
 _WRITE_LOCK_EXIT = 4
 _APPROVAL_REQUIRED_EXIT = 3
+# `run --verify` whose command still fails after the last fix.
+_VERIFY_FAILED_EXIT = 5
+_CREDENTIAL_METADATA = "credential-metadata.json"
 
 
 class ConsoleRenderer:
@@ -166,16 +172,28 @@ class ConsoleRenderer:
             print(f"[tool failed] {event.data.get('error')}", file=sys.stderr, flush=True)
 
 
+# Parallel tool calls and serve's concurrent runs can ask at the same moment: one question at a
+# time on the console, so a "y" answers the request printed just above it and no other.
+_CONSOLE_PROMPT_LOCK = threading.Lock()
+
+
+def _ask_console(lines: list[str], question: str) -> str:
+    with _CONSOLE_PROMPT_LOCK:
+        for line in lines:
+            print(line, file=sys.stderr)
+        return input(question)
+
+
 async def _console_approval(tool: ToolSpec, arguments: dict[str, Any]) -> ApprovalResult:
     if not sys.stdin.isatty():
         raise ApprovalRequiredError(f"approval required for tool: {tool.name}")
-    print(f"\nApproval required: {tool.name}", file=sys.stderr)
-    print(
-        json.dumps(approval_display_arguments(tool, arguments), ensure_ascii=False, indent=2),
-        file=sys.stderr,
-    )
+    details = json.dumps(approval_display_arguments(tool, arguments), ensure_ascii=False, indent=2)
     try:
-        answer = await asyncio.to_thread(input, "Allow once? [y/N] ")
+        answer = await asyncio.to_thread(
+            _ask_console,
+            [f"\nApproval required: {tool.name}", details],
+            f"Allow {tool.name} once? [y/N] ",
+        )
     except EOFError as exc:
         raise ApprovalRequiredError(f"approval required for tool: {tool.name}") from exc
     allowed = answer.strip().lower() in {"y", "yes"}
@@ -191,10 +209,15 @@ async def _console_egress_approval(request: ProviderEgressRequest) -> ApprovalRe
         raise ApprovalRequiredError(
             f"Provider egress approval required for endpoint: {request.endpoint}"
         )
-    print(f"\nProvider egress approval required: {request.endpoint}", file=sys.stderr)
-    print(f"Data categories: {', '.join(request.data_categories)}", file=sys.stderr)
     try:
-        answer = await asyncio.to_thread(input, "Allow for this session? [y/N] ")
+        answer = await asyncio.to_thread(
+            _ask_console,
+            [
+                f"\nProvider egress approval required: {request.endpoint}",
+                f"Data categories: {', '.join(request.data_categories)}",
+            ],
+            "Allow sending to this provider for this session? [y/N] ",
+        )
     except EOFError as exc:
         raise ApprovalRequiredError(
             f"Provider egress approval required for endpoint: {request.endpoint}; "
@@ -206,6 +229,27 @@ async def _console_egress_approval(request: ProviderEgressRequest) -> ApprovalRe
         "user decision",
         ApprovalScope.SESSION if allowed else None,
     )
+
+
+def _console_extension_approval(request: WorkspaceExtensionRequest) -> bool:
+    # Called by the synchronous build_runtime, before anything else is running.
+    if not sys.stdin.isatty():
+        raise ExtensionApprovalRequiredError(
+            f"workspace {request.kind} {request.identifier} requires authorization; "
+            "run in an interactive terminal"
+        )
+    print(f"\nWorkspace {request.kind}: {request.identifier}", file=sys.stderr)
+    if request.command:
+        print(" ".join(request.command), file=sys.stderr)
+    if request.yolo:
+        print("Its configuration lets YOLO mode run its tools without asking.", file=sys.stderr)
+    try:
+        answer = input("Allow it for this run? [y/N] ")
+    except EOFError as exc:
+        raise ExtensionApprovalRequiredError(
+            f"workspace {request.kind} {request.identifier} requires authorization"
+        ) from exc
+    return answer.strip().lower() in {"y", "yes"}
 
 
 def _provider_config(args: argparse.Namespace) -> ProviderConfig:
@@ -255,11 +299,15 @@ async def _open_runtime(
         autonomy=autonomy,
         approval_callback=_console_approval,
         egress_approval_callback=_console_egress_approval,
+        extension_approval_callback=_console_extension_approval,
         event_listener=renderer.handle,
         parallel_tool_calls=bool(getattr(args, "parallel_tool_calls", False)),
         profile_turns=bool(getattr(args, "profile_turns", False)),
         sqlite_synchronous=os.getenv("AGENT_WORKSPACE_SQLITE_SYNCHRONOUS", "FULL"),
     )
+    if runtime.mcp is not None:
+        for server_id, error in runtime.mcp.startup_failures().items():
+            print(f"MCP server {server_id} is unavailable: {error}", file=sys.stderr)
     return runtime, config
 
 
@@ -364,14 +412,17 @@ async def _run_verification(workspace: str, command: str) -> tuple[int, str]:
     from agent_workspace.tools.command import _run_command_sync
     from agent_workspace.tools.process_worker import run_in_process
 
+    # PowerShell on Windows; elsewhere (Linux, macOS, Termux) the system shell.
+    shell: tuple[str, str | None, list[str], str | None] = (
+        ("powershell", None, [], command)
+        if os.name == "nt"
+        else ("direct", "/bin/sh", ["-c", command], None)
+    )
     document = json.loads(
         await run_in_process(
             _run_command_sync,
             workspace,
-            "powershell",
-            None,
-            [],
-            command,
+            *shell,
             ".",
             110,
             None,
@@ -424,12 +475,24 @@ async def _run_once(args: argparse.Namespace) -> int:
             run_options["summarize_history"] = True
         await runtime.service.run(session, args.prompt, config.model, **run_options)
         verify_command = cast(str | None, getattr(args, "verify", None))
-        fix_limit = cast(int, getattr(args, "fix_loop", 0))
-        if verify_command and fix_limit > 0:
-            for _iteration in range(fix_limit):
+        fix_limit = max(0, cast(int, getattr(args, "fix_loop", 0)))
+        if verify_command:
+            # Verify, fix, verify again: the last fix is checked too, and the exit code says
+            # whether the workspace passed (a CI step must not read a failure as success).
+            for attempt in range(fix_limit + 1):
                 exit_code, output = await _run_verification(workspace, verify_command)
                 if exit_code == 0:
                     break
+                if attempt == fix_limit:
+                    if not args.json:
+                        print()
+                    print(
+                        f"verification failed with exit code {exit_code}"
+                        + (f" after {fix_limit} fix attempts" if fix_limit else "")
+                        + f":\n{output}",
+                        file=sys.stderr,
+                    )
+                    return _VERIFY_FAILED_EXIT
                 await runtime.service.continue_run(
                     session,
                     config.model,
@@ -547,7 +610,10 @@ def _run_sessions(args: argparse.Namespace) -> int:
         if args.output is not None or args.limit != 50:
             raise ValueError("--output and --limit are not valid for session import")
         database.parent.mkdir(parents=True, exist_ok=True)
-        with ProcessWriteLock(default_writer_lock_path()), SQLiteEventStore(database) as store:
+        with (
+            ProcessWriteLock(database_writer_lock_path(database)),
+            SQLiteEventStore(database) as store,
+        ):
             imported = import_session_archive(store, args.session_value, args.workspace)
         payload = {
             "id": imported.id,
@@ -572,7 +638,10 @@ def _run_sessions(args: argparse.Namespace) -> int:
             raise ValueError("session id and --comment are required for commenting")
         from agent_workspace.core.comments import add_comment
 
-        with ProcessWriteLock(default_writer_lock_path()), SQLiteEventStore(database) as store:
+        with (
+            ProcessWriteLock(database_writer_lock_path(database)),
+            SQLiteEventStore(database) as store,
+        ):
             comment_id = add_comment(store, args.session_value, args.comment, "cli")
         print(comment_id)
         return 0
@@ -596,7 +665,10 @@ def _run_sessions(args: argparse.Namespace) -> int:
 
         with _tempfile.TemporaryDirectory(prefix="agent-workspace-fork-") as temporary:
             archive = export_session(database, args.session_value, Path(temporary) / "fork.zip")
-            with ProcessWriteLock(default_writer_lock_path()), SQLiteEventStore(database) as store:
+            with (
+                ProcessWriteLock(database_writer_lock_path(database)),
+                SQLiteEventStore(database) as store,
+            ):
                 forked = import_session_archive(store, archive, args.workspace)
         if getattr(args, "snapshot", False):
             from agent_workspace.storage import snapshot_workspace_tree
@@ -755,7 +827,7 @@ def _todo_mutation(args: argparse.Namespace) -> int:
             raise ValueError("Todo content may not be empty")
         if len(args.content) > 10_000:
             raise ValueError("Todo content exceeds 10000 characters")
-    lock = ProcessWriteLock(default_writer_lock_path())
+    lock = ProcessWriteLock(database_writer_lock_path(database))
     with lock, SQLiteEventStore(database) as store:
         session = store.get_session(args.session)
         if session is None:
@@ -818,7 +890,8 @@ def _run_backups(args: argparse.Namespace) -> int:
         print(json.dumps(asdict(verify_backup(args.backup)), sort_keys=True))
         return 0
     if args.backups_command == "restore":
-        with ProcessWriteLock(default_writer_lock_path()):
+        # The lock of the database being written, as the app and other commands take it.
+        with ProcessWriteLock(database_writer_lock_path(args.destination)):
             print(restore_verified_backup(args.backup, args.destination))
         return 0
     raise AssertionError(f"unsupported backups command: {args.backups_command}")
@@ -903,7 +976,10 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--verify",
         metavar="COMMAND",
-        help="PowerShell verification command for the auto-fix loop",
+        help=(
+            "Verification command (PowerShell on Windows, /bin/sh elsewhere) run after the "
+            "agent; the exit code is 5 when it still fails"
+        ),
     )
     parser.add_argument(
         "--fix-loop",
@@ -956,6 +1032,12 @@ def _provider_list(args: argparse.Namespace) -> int:
                 f"{marker} {row['id']}\t{row['protocol']}\t{row['model'] or '<model unset>'}"
                 f"\t{credential}\t{row['base_url']}"
             )
+    # Entries the file could not read are left out of the list, and kept in the file.
+    for entry in settings.invalid_profiles:
+        print(
+            f"! {entry.id or '<no id>'}\tcannot be read ({store.path}): {entry.error}",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -976,8 +1058,25 @@ def _provider_set(args: argparse.Namespace) -> int:
         credential_target=target,
     )
     store.upsert(profile, secret=secret, make_default=args.default)
+    if secret is not None:
+        _note_credential_stored(store, profile.id)
     print(f"saved provider profile: {profile.id}")
     return 0
+
+
+def _note_credential_stored(store: ProviderSettingsStore, provider_id: str) -> None:
+    """For `credentials status`. The key is saved by now, so a metadata fault is only a warning."""
+    from agent_workspace.core.credential_rotation import (
+        CredentialRotationError,
+        CredentialRotationManager,
+    )
+
+    try:
+        CredentialRotationManager(store, store.path.with_name(_CREDENTIAL_METADATA)).record_stored(
+            provider_id
+        )
+    except (CredentialRotationError, OSError) as error:
+        print(f"warning: the key's age was not recorded: {error}", file=sys.stderr)
 
 
 def _provider_delete(args: argparse.Namespace) -> int:
@@ -1498,8 +1597,15 @@ def _queue_run(args: argparse.Namespace) -> int:
     if args.queue_command == "enqueue" and not database.exists():
         database.parent.mkdir(parents=True, exist_ok=True)
 
+    # Changes to the queue are writes to the database: under its writer lock, as the app's.
+    writer = (
+        contextlib.nullcontext()
+        if args.queue_command == "list"
+        else ProcessWriteLock(database_writer_lock_path(database))
+    )
+
     async def execute() -> int:
-        with SQLiteEventStore(database) as store:
+        with writer, SQLiteEventStore(database) as store:
             queue = DurableRunQueue(store)
             if args.queue_command == "enqueue":
                 task = await queue.enqueue(
@@ -1776,10 +1882,9 @@ def _inspect_prompt_run(args: argparse.Namespace) -> int:
 
 def _credentials_run(args: argparse.Namespace) -> int:
     from agent_workspace.core.credential_rotation import CredentialRotationManager
-    from agent_workspace.credentials import default_credential_store
 
-    metadata = default_data_dir() / "credential-metadata.json"
-    manager = CredentialRotationManager(default_credential_store(), metadata)
+    store = _provider_settings_store()
+    manager = CredentialRotationManager(store, store.path.with_name(_CREDENTIAL_METADATA))
     if args.credential_command == "status":
         status = manager.status(args.provider)
         if status is None:
@@ -1834,8 +1939,14 @@ def _plans_run(args: argparse.Namespace) -> int:
     if args.plan_command == "create" and not database.exists():
         database.parent.mkdir(parents=True, exist_ok=True)
 
+    writer = (
+        contextlib.nullcontext()
+        if args.plan_command in {"list", "steps"}
+        else ProcessWriteLock(database_writer_lock_path(database))
+    )
+
     async def execute() -> int:
-        with SQLiteEventStore(database) as store:
+        with writer, SQLiteEventStore(database) as store:
             manager = PlanManager(store)
             if args.plan_command == "create":
                 await manager.create_goal(args.session, args.goal_id, args.title)
@@ -1886,8 +1997,14 @@ def _pipelines_run(args: argparse.Namespace) -> int:
     if args.pipeline_command == "create" and not database.exists():
         database.parent.mkdir(parents=True, exist_ok=True)
 
+    writer = (
+        contextlib.nullcontext()
+        if args.pipeline_command == "list"
+        else ProcessWriteLock(database_writer_lock_path(database))
+    )
+
     async def execute() -> int:
-        with SQLiteEventStore(database) as store:
+        with writer, SQLiteEventStore(database) as store:
             manager = PipelineManager(store)
             if args.pipeline_command == "create":
                 document = json.loads(Path(args.definition).read_text(encoding="utf-8"))
@@ -2137,6 +2254,7 @@ async def _bench_run(args: argparse.Namespace) -> int:
             autonomy=Autonomy.WORKSPACE,
             approval_callback=_console_approval,
             egress_approval_callback=_console_egress_approval,
+            extension_approval_callback=_console_extension_approval,
         )
         primary_error: BaseException | None = None
         try:

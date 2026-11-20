@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Android APK 一键打包与构建辅助工具 (One-click APK Build Helper)。
+"""Android APK 一键构建 (One-step debug APK build).
 
-功能:
-1. 运行 package_apk_assets.py 完成 Web 前端与 Python 源码的资产同步;
-2. 运行 test_android_stack.py 校验 Python 适配层运行健全性;
-3. 检测系统环境中的 JDK 17+ 与 Android SDK;
-4. 若环境就绪, 自动调用 Gradle 编译生成 Debug APK;
-5. 若本地环境未安装 JDK/Android SDK, 生成详细的 Android Studio / CI 构建指引。
+1. 运行 build_release.py --prepare-only: 打包 Web 页面与 Python 源码, 准备原生源码、
+   工具链与许可文件 (与 README 和 CI 相同的准备步骤);
+2. 检查 JDK 17+、Android SDK 与 Gradle wrapper, 缺少时给出指引并以退出码 2 结束;
+3. 运行 Gradle assembleDebug, 以它的退出码结束。
+
+任何一步失败, 进程都以非零退出码结束, 脚本和 CI 不会把失败当成成功。
 """
 
 from __future__ import annotations
@@ -79,73 +79,70 @@ def run_cmd(cmd: list[str], cwd: Path) -> int:
     return res.returncode
 
 
-def main() -> None:
-    print("=" * 70)
-    print("      Agent Workspace for Android: 一键构建与打包流水线")
-    print("=" * 70)
+def android_sdk() -> str | None:
+    """Where Gradle finds the Android SDK: ANDROID_HOME, ANDROID_SDK_ROOT or local.properties."""
+    for name in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
+        if os.environ.get(name):
+            return os.environ[name]
+    properties = KOTLIN_APP_DIR / "local.properties"
+    if properties.is_file():
+        for line in properties.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.strip().startswith("sdk.dir="):
+                return line.split("=", 1)[1].strip()
+    return None
 
-    # 第一步: 打包 APK 内置资产 (Web UI + Agent Code + Bootstrap Rootfs)
-    print("\n>>> [步骤 1/3] 同步与打包 APK Assets...")
-    asset_packer = THIS_DIR / "package_apk_assets.py"
-    ret = run_cmd([sys.executable, str(asset_packer)], cwd=THIS_DIR)
-    if ret != 0:
-        print("[!] 资产打包失败，终止构建。")  # noqa: RUF001
-        sys.exit(ret)
 
-    # 第二步: 运行全栈单元与集成测试
-    print("\n>>> [步骤 2/3] 验证 Android 适配层与 Web 伴侣健全性...")
-    test_runner = THIS_DIR / "test_android_stack.py"
-    ret = run_cmd([sys.executable, str(test_runner)], cwd=THIS_DIR)
-    if ret != 0:
-        print("[!] 适配层测试未完全通过，终止构建。")  # noqa: RUF001
-        sys.exit(ret)
-
-    # 第三步: 检查 Gradle 与 Java 环境并尝试编译
-    print("\n>>> [步骤 3/3] 检查 Android 编译环境并生成 APK...")
-    java_cmd = java_command()
-    has_supported_java = java_cmd is not None and is_supported_java(java_cmd)
-    is_windows = sys.platform.startswith("win")
-    gradle_wrapper = KOTLIN_APP_DIR / ("gradlew.bat" if is_windows else "gradlew")
-
-    if has_supported_java and gradle_wrapper.exists():
-        print("[+] 检测到 JDK 17+，尝试直接调用 Gradle 构建 APK...")  # noqa: RUF001
-        cmd = [str(gradle_wrapper), "assembleDebug"]
-        try:
-            ret = subprocess.run(cmd, cwd=KOTLIN_APP_DIR).returncode
-            if ret == 0:
-                print("\n" + "=" * 70)
-                print(">>> 恭喜! APK 构建成功完成! <<<")
-                print(f"APK 输出目录: {KOTLIN_APP_DIR / 'build' / 'outputs' / 'apk' / 'debug'}")
-                print("=" * 70)
-                return
-            else:
-                print(f"[!] Gradle 构建退出码: {ret}")
-        except Exception as e:
-            print(f"[!] 启动 Gradle 失败: {e}")
-
-    if java_cmd is not None and not has_supported_java:
-        print(f"[!] 检测到 {java_cmd}，但版本低于 JDK 17；当前构建不会调用 Gradle。")  # noqa: RUF001
-
-    # 若未直接完成, 输出标准构建指导
+def print_guide(is_windows: bool) -> None:
     print("\n" + "=" * 70)
-    print(">>> 提示: 本地未配置全局 JDK 17 / Android SDK 或构建需要图形化 IDE <<<")
-    print("=" * 70)
-    print("你现在可以通过以下两种方式在 1 分钟内完成 APK 最终打包输出：\n")  # noqa: RUF001
-    print("【方法 A：使用 Android Studio (最简单推荐)】")  # noqa: RUF001
-    print("  1. 打开 Android Studio；")  # noqa: RUF001
-    print(f"  2. 点击 'Open' 选择工程目录: {KOTLIN_APP_DIR.resolve()}；")  # noqa: RUF001
-    print(
-        "  3. 等待 Gradle 同步完成，点击菜单 "  # noqa: RUF001
-        "'Build' -> 'Build Bundle(s) / APK(s)' -> 'Build APK(s)'；"  # noqa: RUF001
-    )
-    print("  4. 构建完成即可将安装包直接部署到真实手机或模拟器！\n")  # noqa: RUF001
-    print("【方法 B：命令行 Gradle (适合 CI/CD 或终端高手)】")  # noqa: RUF001
-    print("  确保已安装 JDK 17+ 并配置 ANDROID_HOME 环境变量，随后在终端执行：")  # noqa: RUF001
+    print("【方法 A：Android Studio】")  # noqa: RUF001
+    print(f"  先运行 python build_release.py --prepare-only, 再在 Android Studio 打开 {KOTLIN_APP_DIR.resolve()}")
+    print("  并选择 Build -> Build Bundle(s) / APK(s) -> Build APK(s)。")
+    print("【方法 B：命令行】")  # noqa: RUF001
+    print("  安装 JDK 17+ 并设置 ANDROID_HOME 后执行：")  # noqa: RUF001
+    print("  python build_release.py --prepare-only")
     if is_windows:
         print(f'  cd "{KOTLIN_APP_DIR}" && .\\gradlew.bat assembleDebug')
     else:
         print(f'  cd "{KOTLIN_APP_DIR}" && ./gradlew assembleDebug')
     print("=" * 70 + "\n")
+
+
+def main() -> None:
+    print("=" * 70)
+    print("      Agent Workspace for Android: 一键构建 Debug APK")
+    print("=" * 70)
+
+    # 第一步: 与 README、CI 相同的准备 (Web 页面、Python 源码、原生源码、工具链、许可文件)。
+    print("\n>>> [步骤 1/2] 准备 APK 所需的资源...")
+    ret = run_cmd([sys.executable, str(THIS_DIR / "build_release.py"), "--prepare-only"], cwd=THIS_DIR)
+    if ret != 0:
+        print("[!] 准备步骤失败，终止构建。")  # noqa: RUF001
+        sys.exit(ret)
+
+    # 第二步: 检查编译环境并调用 Gradle; 它的退出码就是本脚本的退出码。
+    print("\n>>> [步骤 2/2] 检查编译环境并生成 APK...")
+    java_cmd = java_command()
+    has_supported_java = java_cmd is not None and is_supported_java(java_cmd)
+    is_windows = sys.platform.startswith("win")
+    gradle_wrapper = KOTLIN_APP_DIR / ("gradlew.bat" if is_windows else "gradlew")
+    missing = []
+    if not has_supported_java:
+        missing.append(f"JDK 17+（找到的是 {java_cmd}）" if java_cmd else "JDK 17+")  # noqa: RUF001
+    if android_sdk() is None:
+        missing.append("Android SDK（ANDROID_HOME 或 kotlin_app/local.properties 的 sdk.dir）")  # noqa: RUF001
+    if not gradle_wrapper.exists():
+        missing.append(f"Gradle wrapper {gradle_wrapper}")
+    if missing:
+        print(f"[!] 缺少：{'、'.join(missing)}；没有构建 APK。")  # noqa: RUF001
+        print_guide(is_windows)
+        sys.exit(2)
+    ret = run_cmd([str(gradle_wrapper), "assembleDebug"], cwd=KOTLIN_APP_DIR)
+    if ret != 0:
+        print(f"[!] Gradle 构建失败，退出码 {ret}。")  # noqa: RUF001
+        sys.exit(ret)
+    print("\n" + "=" * 70)
+    print(f"APK 输出目录: {KOTLIN_APP_DIR / 'build' / 'outputs' / 'apk' / 'debug'}")
+    print("=" * 70)
 
 
 if __name__ == "__main__":

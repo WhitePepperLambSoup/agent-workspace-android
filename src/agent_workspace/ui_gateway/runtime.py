@@ -70,11 +70,13 @@ from agent_workspace.ui_gateway.device_review import DeviceReviewCommands
 from agent_workspace.ui_gateway.gateway_code import CODE_COMMANDS, CodeCommands
 from agent_workspace.ui_gateway.gateway_common import (
     _APPROVAL_DISPLAY_FIELDS,
+    _APPROVAL_NOTES,
     _BACKUP_CHECK_SECONDS,
     _BACKUP_FIRST_CHECK_SECONDS,
     _BOOTSTRAP_RESERVED_BYTES,
     _COMMAND_TIMEOUT_SECONDS,
     _COMPACT_CHANGE_EVENTS,
+    _COMPACTION_INTERVAL_SECONDS,
     _CURRENT_SESSION,
     _DEVICE_COMMANDS,
     _FILE_BATCH_COMMANDS,
@@ -141,6 +143,7 @@ from agent_workspace.ui_gateway.gateway_usage import UsageCommands
 from agent_workspace.ui_gateway.gateway_workspace import WorkspaceCommands
 from agent_workspace.ui_gateway.latex_desk import LatexDesk
 from agent_workspace.ui_gateway.protocol import (
+    _EVENT_TYPES,
     MAX_MESSAGE_BYTES,
     PROTOCOL_VERSION,
     CommandEnvelope,
@@ -185,6 +188,7 @@ _UNLOCKED_HANDLERS: Final = _handler_table(
     (["provider.health"], "_health_saved_provider"),
     (["workspace.git.deliver"], "_deliver_git_changes"),
     (["session.history"], "_session_history"),
+    (["session.reply.read"], "_session_reply_read"),
     (["events.replay"], "_events_replay"),
     (_SCHEDULE_COMMANDS, "_schedules_command"),
     (["workspace.queue.list", "workspace.queue.get"], "_queue_command"),
@@ -385,6 +389,7 @@ class GatewayRuntime(
         async_workspace_switch: bool | None = None,
         orchestration_runtime: object | None = None,
         daily_backup: Callable[[Path], object] | None = None,
+        stream_compaction: Callable[[Path], object] | None = None,
     ) -> None:
         self.epoch = str(uuid4())
         self._database = Path(database or default_database_path()).expanduser().resolve()
@@ -440,6 +445,10 @@ class GatewayRuntime(
         self._git_delivery_in_progress = False
         self._runtime_state = "unconfigured"
         self._approval_ledger: dict[str, _ApprovalEntry] = {}
+        # "Allow in this conversation" by tool, for a conversation and its experts together; and
+        # the conversations whose current turn read outside content that talked to the agent.
+        self._team_grants: dict[str, set[str]] = {}
+        self._team_distrusted: set[str] = set()
         self._pending_host_events: list[Event] = []
         self._durable_cutoffs: dict[str, int] = {}
         self._snapshot_pending_event_ids: set[str] = set()
@@ -459,6 +468,8 @@ class GatewayRuntime(
         except WorkspaceCatalogError:
             self._workspace_catalog = None
         self._agent_control: AgentControlService | None = None
+        self._runs_recovered_in: set[Path] = set()
+        self._unlisted_event_types: set[str] = set()
         self._review_workflow: ReviewWorkflowService | None = None
         self._review_delivery_in_progress: set[str] = set()
         self._run_hosts: dict[str, _RunHostEntry] = {}
@@ -486,7 +497,7 @@ class GatewayRuntime(
         self._workspace_activation_target: tuple[Path, ProviderConfig] | None = None
         self._autonomy_switch_thread: threading.Thread | None = None
         self._autonomy_switch_generation = 0
-        self._pending_autonomy_request: tuple[str, Autonomy] | None = None
+        self._collect_failure: str | None = None
         # A replacement host emits runtime.started before the lifecycle worker
         # has persisted autonomy and published runtime.autonomy_applied. Keep
         # the gateway unavailable for turns until that commit event is queued.
@@ -496,6 +507,10 @@ class GatewayRuntime(
         self._daily_backup = daily_backup
         self._backup_next_check = clock() + _BACKUP_FIRST_CHECK_SECONDS
         self._backup_thread: threading.Thread | None = None
+        # The day's blanking of old streamed chunks (storage.stream_compaction), after the
+        # backup in the same thread; None turns it off (tests, embedders).
+        self._stream_compaction = stream_compaction
+        self._compaction_next_run = clock() + _BACKUP_FIRST_CHECK_SECONDS
         self._load_session_presentation()
         # Phones paired with this desktop (device_link). The endpoint stays off until the user
         # turns it on; tasks handed over run in sessions of this gateway.
@@ -656,17 +671,23 @@ class GatewayRuntime(
             # has finished. Keep command admission closed until the previous
             # policy has a host that is actually ready.
             self._autonomy_apply_pending = True
-            with suppress(Exception), SQLiteEventStore(self._database) as store:
-                store.append(
-                    Event(
-                        session_id=session_id,
-                        type="autonomy.changed",
-                        data={"from_autonomy": attempted.value, "to_autonomy": previous.value},
+            recovery_reason: str | None = None
+            try:
+                with SQLiteEventStore(self._database) as store:
+                    store.append(
+                        Event(
+                            session_id=session_id,
+                            type="autonomy.changed",
+                            data={"from_autonomy": attempted.value, "to_autonomy": previous.value},
+                        )
                     )
-                )
+            except Exception as error:
+                # The conversation stays stored with the policy that failed, and would start with
+                # it next time.
+                _LOGGER.exception("the failed change of autonomy could not be undone in the store")
+                recovery_reason = f"{type(error).__name__}: {error}"
 
         restored = False
-        recovery_reason: str | None = None
         try:
             with self._lifecycle_lock:
                 if self._host is not None:
@@ -801,39 +822,6 @@ class GatewayRuntime(
                         data={"session_id": session.id, "activated": True},
                     )
                 )
-                pending = self._pending_autonomy_request
-                if pending is not None and pending[0] == session.id:
-                    self._pending_autonomy_request = None
-                    pending_autonomy = pending[1]
-                    previous_autonomy = self._autonomy
-                    if pending_autonomy is not previous_autonomy:
-                        self._autonomy = pending_autonomy
-                        self._autonomy_apply_pending = True
-                        self._runtime_state = "switching"
-                        self._autonomy_switch_generation += 1
-                        autonomy_generation = self._autonomy_switch_generation
-                        changed = Event(
-                            session_id=session.id,
-                            type="autonomy.changed",
-                            data={
-                                "from_autonomy": previous_autonomy.value,
-                                "to_autonomy": pending_autonomy.value,
-                            },
-                        )
-                        worker = threading.Thread(
-                            target=self._apply_autonomy_in_background,
-                            args=(
-                                session.id,
-                                previous_autonomy,
-                                pending_autonomy,
-                                changed,
-                                autonomy_generation,
-                            ),
-                            name="autonomy-switch-after-session",
-                            daemon=True,
-                        )
-                        self._autonomy_switch_thread = worker
-                        worker.start()
         except GatewayError as error:
             with self._lock:
                 if generation != self._session_switch_generation:
@@ -1251,12 +1239,24 @@ class GatewayRuntime(
 
     def drain_events(self) -> list[dict[str, object]]:
         with self._lock:
-            self._collect_host_events()
-            self._collect_shell_output()
-            self._collect_debug_events()
+            documents: list[dict[str, object]] = []
+            try:
+                self._collect_host_events()
+                self._collect_shell_output()
+                self._collect_debug_events()
+            except Exception as error:
+                # What was collected still goes out and the next poll tries again. Events may be
+                # lost, so the window reads the state again, once for a fault that repeats.
+                if repr(error) != self._collect_failure:
+                    self._collect_failure = repr(error)
+                    _LOGGER.exception("collecting runtime events failed")
+                    documents.append(
+                        self._truncation_document("desktop", "runtime events were not collected")
+                    )
+            else:
+                self._collect_failure = None
             raw = self._pending_host_events
             self._pending_host_events = []
-            documents: list[dict[str, object]] = []
             for event in raw:
                 cutoff = self._durable_cutoffs.get(event.session_id, 0)
                 if event.sequence is not None and event.sequence <= cutoff:
@@ -1265,7 +1265,16 @@ class GatewayRuntime(
                         continue
                     if event.type != "turn.started" and event.type not in _TERMINAL_TURN_EVENTS:
                         continue
-                documents.append(self._event_document(event))
+                try:
+                    document = self._event_document(event)
+                    if document is not None:
+                        documents.append(document)
+                except Exception:
+                    # One event must not take the rest of this batch with it.
+                    _LOGGER.exception("event %s could not be sent to the window", event.type)
+                    documents.append(
+                        self._truncation_document(event.session_id, "event could not be sent")
+                    )
                 if event.sequence is not None:
                     self._durable_cutoffs[event.session_id] = event.sequence
             return documents
@@ -2063,6 +2072,9 @@ class GatewayRuntime(
                 self._submit_host_turn(
                     next_prompt, exclude_image_digests, reasoning_effort, images=images
                 )
+                # A queued turn never has the expert team (one is only asked at once).
+                if session_id is not None:
+                    self._team_turns.pop(session_id, None)
             except (GatewayError, RuntimeError) as error:
                 if self._selected_session_id is not None and self._database.is_file():
                     with suppress(Exception), SQLiteEventStore(self._database) as store:
@@ -2691,34 +2703,9 @@ class GatewayRuntime(
             if command.session_id is None:
                 raise GatewayError("invalid_session")
             self._require_selected_session(command.session_id)
-            previous = self._autonomy
-            if autonomy is not previous:
-                try:
-                    with SQLiteEventStore(self._database) as store:
-                        store.append(
-                            Event(
-                                session_id=command.session_id,
-                                type="autonomy.changed",
-                                data={
-                                    "from_autonomy": previous.value,
-                                    "to_autonomy": autonomy.value,
-                                },
-                            )
-                        )
-                except (OSError, sqlite3.DatabaseError, ValueError):
-                    raise GatewayError("storage_unavailable") from None
-            self._pending_autonomy_request = (command.session_id, autonomy)
-            return self._reply(
-                "runtime.autonomy.set.result",
-                {
-                    "epoch": self.epoch,
-                    "applied": False,
-                    "pending": True,
-                    "autonomy": autonomy.value,
-                    "restarted": True,
-                },
-                session_id=command.session_id,
-            )
+            # The host being started has its policy already. A change now would be stored without
+            # reaching it, leaving the task on a policy the user just moved away from.
+            raise GatewayError("runtime_busy")
         self._require_configured()
         if command.session_id is None:
             raise GatewayError("invalid_session")
@@ -2915,7 +2902,7 @@ class GatewayRuntime(
         return self._reply(
             "approval.resolve.result",
             {"epoch": self.epoch, "resolved": True},
-            session_id=entry.session_id,
+            session_id=command.session_id,
         )
 
     def _settle_approval_resolution(
@@ -2981,6 +2968,8 @@ class GatewayRuntime(
                 )
         if entry.turn_terminal:
             del self._approval_ledger[request_id]
+        if scope is ApprovalScope.SESSION:
+            self._allow_for_team(entry)
 
     def _start_host(self, *, session_id: str | None, deadline: float | None = None) -> None:
         with self._lock:
@@ -3006,6 +2995,8 @@ class GatewayRuntime(
                 turn_files=start_turn_watch,
                 workspace_tools=self._folder_tools,
                 tool_hooks=self._coding.hooks,
+                tool_guards=True,
+                long_turns=True,
             )
         host: Host | None = None
         try:
@@ -3249,7 +3240,15 @@ class GatewayRuntime(
         }
         self._run_preparing.intersection_update(self._run_prepare_threads)
 
-    def _event_document(self, event: Event) -> dict[str, object]:
+    def _event_document(self, event: Event) -> dict[str, object] | None:
+        """The window's copy of an event; None for a type the window does not know."""
+        if event.type not in _EVENT_TYPES:
+            # Left out, and noted once per type, rather than taken for an oversized event:
+            # that would make the window read everything again each time one is recorded.
+            if event.type not in self._unlisted_event_types:
+                self._unlisted_event_types.add(event.type)
+                _LOGGER.warning("events of type %s are not sent to the window", event.type)
+            return None
         try:
             payload = self._event_payload(event)
         except GatewayError:
@@ -3396,8 +3395,9 @@ class GatewayRuntime(
         self._tick_backup()
 
     def _tick_backup(self) -> None:
-        """Start the day's database backup when one is due (gateway lock held, so no work here)."""
-        if self._daily_backup is None or self._closing:
+        """Start the day's database backup and stream compaction when due (gateway lock held, so
+        no work here)."""
+        if (self._daily_backup is None and self._stream_compaction is None) or self._closing:
             return
         now = self._clock()
         if now < self._backup_next_check:
@@ -3417,6 +3417,15 @@ class GatewayRuntime(
         except Exception:
             # The next check tries again; a failed backup must not disturb the window.
             _LOGGER.exception("daily database backup failed")
+        compaction = self._stream_compaction
+        if compaction is None or self._clock() < self._compaction_next_run:
+            return
+        try:
+            compaction(self._database)
+            self._compaction_next_run = self._clock() + _COMPACTION_INTERVAL_SECONDS
+        except Exception:
+            # Chunks stay as they are until the next check; nothing is lost.
+            _LOGGER.exception("stream compaction failed")
 
     def _queue_host_events(
         self,
@@ -3454,41 +3463,46 @@ class GatewayRuntime(
                 # stale events to the UI; they describe a host that is no
                 # longer authoritative.
                 continue
-            if run_id is None and event.type == TURN_FILES_EVENT:
-                self._after_turn_files(event)
-            elif (
-                run_id is None
-                and event.type == "message.created"
-                and (event.data.get("role") == "user")
-            ):
-                self._note_user_turn(event)
             display_event = event
-            if run_id is not None:
-                display_event = Event(
-                    session_id=event.session_id,
-                    type=event.type,
-                    data={**event.data, "run_id": run_id},
-                    id=event.id,
-                    schema_version=event.schema_version,
-                    sequence=event.sequence,
-                    causation_id=event.causation_id,
-                    correlation_id=event.correlation_id,
-                    created_at=event.created_at,
-                )
-            else:
-                display_event = self._note_device_turn(event)
             try:
-                payload = self._event_payload(display_event)
-            except GatewayError:
-                pass
-            else:
-                self._project_event(
-                    event.type,
-                    payload,
-                    event.session_id,
-                    source_host=source_host,
-                    run_id=run_id,
-                )
+                if run_id is None and event.type == TURN_FILES_EVENT:
+                    self._after_turn_files(event)
+                elif (
+                    run_id is None
+                    and event.type == "message.created"
+                    and (event.data.get("role") == "user")
+                ):
+                    self._note_user_turn(event)
+                if run_id is not None:
+                    display_event = Event(
+                        session_id=event.session_id,
+                        type=event.type,
+                        data={**event.data, "run_id": run_id},
+                        id=event.id,
+                        schema_version=event.schema_version,
+                        sequence=event.sequence,
+                        causation_id=event.causation_id,
+                        correlation_id=event.correlation_id,
+                        created_at=event.created_at,
+                    )
+                else:
+                    display_event = self._note_device_turn(event)
+                try:
+                    payload = self._event_payload(display_event)
+                except GatewayError:
+                    pass
+                else:
+                    self._project_event(
+                        event.type,
+                        payload,
+                        event.session_id,
+                        source_host=source_host,
+                        run_id=run_id,
+                    )
+            except Exception:
+                # The host's queue is already emptied: bookkeeping that fails for one event (a
+                # busy database, say) must not lose it or the events after it.
+                _LOGGER.exception("bookkeeping for event %s failed", event.type)
             self._pending_host_events.append(display_event)
 
     def _record_finished_turn(
@@ -3541,6 +3555,9 @@ class GatewayRuntime(
             subagent = _approval_display_text(event.data.get("subagent"))
             if subagent:
                 payload["subagent"] = subagent
+            # Why the card asks (a fixed word the window puts in the user's language).
+            if event.data.get("note") in _APPROVAL_NOTES:
+                payload["note"] = event.data["note"]
             if event.data.get("kind") == "provider_egress":
                 # Its address without path or query, for "always allow this provider".
                 endpoint = event.data.get("endpoint")
@@ -3750,7 +3767,10 @@ class GatewayRuntime(
                 self._selected_session_id = raw_id
                 if source_host is self._host and self._host_session_id is None:
                     self._host_session_id = raw_id
+        elif event_type == "content.untrusted":
+            self._distrust_team(session_id)
         elif event_type == "turn.started":
+            self._team_distrusted.discard(session_id)
             raw_turn = payload.get("turnId") or payload.get("correlationId")
             self._active_turn = str(raw_turn or "active")
             if self._active_queue_id is not None:
@@ -3765,6 +3785,8 @@ class GatewayRuntime(
             prev_active_turn = self._active_turn
             self._active_turn = None
             self._turn_requested = False
+            # The expert team was this turn's; a turn queued behind it is a plain one.
+            self._team_turns.pop(session_id, None)
             raw_corr = payload.get("correlationId")
             corr_str = str(raw_corr) if raw_corr else None
             queue_turn_id = (
@@ -3821,6 +3843,9 @@ class GatewayRuntime(
                         },
                         source_host=source_host,
                     ),
+                )
+                self._allow_as_team_did(
+                    approval_request_id, self._approval_ledger[approval_request_id]
                 )
         elif event_type == "runtime.mode_applied":
             raw_mode = payload.get("mode")

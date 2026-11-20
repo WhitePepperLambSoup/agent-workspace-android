@@ -3,23 +3,33 @@
 a list of what changed (for Word and PDF files alike).
 
 The redline is the newer document with the older text marked as deleted where it differs:
-unchanged paragraphs keep their formatting; a changed paragraph is rewritten word by word (one
-character at a time for Chinese) in the formatting of its first run.
+unchanged paragraphs keep their formatting; in a changed paragraph the differing words (one
+character at a time for Chinese) are marked on its own runs, the older words in the format of
+the text beside them.
 """
 
 from __future__ import annotations
 
 import copy
 import difflib
+import hashlib
+import html
 import io
 import re
 from dataclasses import dataclass, field
+from typing import cast
 from xml.etree import ElementTree as ET
 
 from pypdf import PdfReader
 
-from agent_workspace.office.ooxml import OfficeError, W, clean, q
-from agent_workspace.office.word import DOCUMENT, Revisions, body_paragraphs, open_docx
+from agent_workspace.office.ooxml import OfficeError, Package, R, W, q
+from agent_workspace.office.word import (
+    DOCUMENT,
+    Paragraph,
+    Revisions,
+    body_paragraphs,
+    open_docx,
+)
 
 _TOKEN = re.compile(r"[㐀-鿿豈-﫿]|[A-Za-z0-9_]+|\s+|[^\sA-Za-z0-9_㐀-鿿豈-﫿]")
 _P, _R, _T, _PPR, _RPR = q(W, "p"), q(W, "r"), q(W, "t"), q(W, "pPr"), q(W, "rPr")
@@ -78,7 +88,7 @@ def compare_docx(old: bytes, new: bytes, author: str = "Agent Workspace") -> Com
         pairs = min(i2 - i1, j2 - j1) if tag == "replace" else 0
         for offset in range(pairs):
             old_text, target = old_texts[i1 + offset], new_paragraphs[j1 + offset]
-            _rewrite(revisions, target.element, old_text, target.text)
+            _rewrite(revisions, target, old_text)
             result.changes.append(
                 Change("changed", old_text, target.text, f"paragraph {j1 + offset + 1}")
             )
@@ -108,6 +118,7 @@ def compare_docx(old: bytes, new: bytes, author: str = "Agent Workspace") -> Com
                 )
             for index in removed:
                 element = copy.deepcopy(old_paragraphs[index].element)
+                _carry_over(old_package, new_package, element)
                 _mark_paragraph(revisions, element, inserted=False)
                 parent.insert(position, element)
                 position += 1
@@ -127,57 +138,20 @@ def _parent(root: ET.Element, element: ET.Element) -> ET.Element:
     raise OfficeError("the paragraph is not in the document")
 
 
-def _rewrite(revisions: Revisions, paragraph: ET.Element, old: str, new: str) -> None:
-    """The paragraph's runs replaced by the word diff of old and new, in its first run's format."""
-    first = next(paragraph.iter(_R), None)
-    properties = (
-        copy.deepcopy(first.find(_RPR))
-        if first is not None and first.find(_RPR) is not None
-        else None
-    )
-    keep = [child for child in paragraph if child.tag == _PPR]
-    # Pictures and other non-text runs stay; text runs are rebuilt.
-    others = [child for child in paragraph if child.tag != _PPR and not _is_text(child)]
-    for child in list(paragraph):
-        paragraph.remove(child)
-    for child in keep:
-        paragraph.append(child)
-
-    def run(text: str, tag: str = "t") -> ET.Element:
-        element = ET.Element(_R)
-        if properties is not None:
-            element.append(copy.deepcopy(properties))
-        text_element = ET.SubElement(element, q(W, tag))
-        text_element.text = clean(text)
-        text_element.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-        return element
-
-    old_tokens, new_tokens = tokens(old), tokens(new)
+def _rewrite(revisions: Revisions, paragraph: Paragraph, old: str) -> None:
+    """The word diff of old and the paragraph's text marked on the paragraph's own runs, so
+    links, fields, content controls, pictures and others' revisions stay where they are. The
+    changes go in from the end, so the offsets of the earlier ones still hold."""
+    old_tokens, new_tokens = tokens(old), tokens(paragraph.text)
+    starts = [0]
+    for token in new_tokens:
+        starts.append(starts[-1] + len(token))
     matcher = difflib.SequenceMatcher(None, old_tokens, new_tokens, autojunk=False)
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            paragraph.append(run("".join(new_tokens[j1:j2])))
-            continue
-        if i2 > i1:
-            deleted = revisions.mark(q(W, "del"))
-            deleted.append(run("".join(old_tokens[i1:i2]), "delText"))
-            paragraph.append(deleted)
-        if j2 > j1:
-            inserted = revisions.mark(q(W, "ins"))
-            inserted.append(run("".join(new_tokens[j1:j2])))
-            paragraph.append(inserted)
-    for child in others:
-        paragraph.append(child)
-
-
-def _is_text(element: ET.Element) -> bool:
-    if element.tag != _R:
-        return element.tag in {q(W, "hyperlink"), q(W, "ins"), q(W, "del"), q(W, "smartTag")}
-    return any(child.tag in {_T, q(W, "tab"), q(W, "br")} for child in element) and not any(
-        child.tag
-        in {q(W, "drawing"), q(W, "pict"), q(W, "object"), q(W, "fldChar"), q(W, "instrText")}
-        for child in element
-    )
+    for tag, i1, i2, j1, j2 in reversed(matcher.get_opcodes()):
+        if tag != "equal":
+            paragraph = revisions.mark_change(
+                paragraph, starts[j1], starts[j2], "".join(old_tokens[i1:i2])
+            )
 
 
 def _mark_paragraph(revisions: Revisions, paragraph: ET.Element, inserted: bool) -> None:
@@ -191,16 +165,141 @@ def _mark_paragraph(revisions: Revisions, paragraph: ET.Element, inserted: bool)
     if run_properties is None:
         run_properties = ET.SubElement(properties, _RPR)
     run_properties.append(revisions.mark(tag))
-    for child in list(paragraph):
+    _mark_runs(revisions, paragraph, tag, inserted)
+
+
+# Run containers whose runs are marked one by one: w:ins and w:del may hold runs, not a link or
+# a content control, so the wrappers go inside them.
+_RUN_CONTAINERS = frozenset(
+    q(W, name) for name in ("hyperlink", "smartTag", "fldSimple", "customXml", "sdtContent")
+)
+
+
+def _mark_runs(revisions: Revisions, container: ET.Element, tag: str, inserted: bool) -> None:
+    for child in list(container):
+        if child.tag == q(W, "sdt"):
+            content = child.find(q(W, "sdtContent"))
+            if content is not None:
+                _mark_runs(revisions, content, tag, inserted)
+            continue
+        if child.tag in _RUN_CONTAINERS:
+            _mark_runs(revisions, child, tag, inserted)
+            continue
         if child.tag != _R:
             continue
         wrapper = revisions.mark(tag)
-        paragraph.insert(list(paragraph).index(child), wrapper)
-        paragraph.remove(child)
+        container.insert(list(container).index(child), wrapper)
+        container.remove(child)
         if not inserted:
             for text in child.iter(_T):
                 text.tag = q(W, "delText")
+            for code in child.iter(q(W, "instrText")):
+                code.tag = q(W, "delInstrText")
         wrapper.append(child)
+
+
+# Marks that point into the older document's other parts by number (its comments, notes and
+# bookmarks): in the newer one the same numbers are someone else's, or nobody's.
+_FOREIGN_MARKS = frozenset(
+    q(W, name)
+    for name in (
+        "bookmarkStart",
+        "bookmarkEnd",
+        "commentRangeStart",
+        "commentRangeEnd",
+        "commentReference",
+        "footnoteReference",
+        "endnoteReference",
+    )
+)
+
+
+def _carry_over(old: Package, new: Package, element: ET.Element) -> None:
+    """A paragraph of the older document made sound in the newer one, where it goes back as
+    deleted text. Its r:id/r:embed name the older document's relationships: a link's address
+    and a picture's file are added to the newer document under new ids; a reference that
+    cannot be carried (a chart, an embedded object with parts of its own) is removed with its
+    element, rather than showing another picture or a broken one."""
+    relations = _relationship_details(old, DOCUMENT)
+    carried: dict[str, str | None] = {}
+    for parent in list(element.iter()):
+        for child in list(parent):
+            if child.tag in _FOREIGN_MARKS:
+                parent.remove(child)
+                continue
+            for attribute, rid in list(child.attrib.items()):
+                if not attribute.startswith("{" + R + "}"):
+                    continue
+                if rid not in carried:
+                    carried[rid] = _carry_relationship(old, new, relations.get(rid))
+                if carried[rid] is None:
+                    _drop_reference(element, child)
+                    break
+                child.set(attribute, cast(str, carried[rid]))
+
+
+def _drop_reference(paragraph: ET.Element, node: ET.Element) -> None:
+    """Remove what holds a reference that cannot be carried: the drawing, picture or object
+    of a run, or the node itself."""
+    holders = {q(W, "drawing"), q(W, "pict"), q(W, "object")}
+    for run in paragraph.iter(_R):
+        for holder in list(run):
+            if holder.tag in holders and (holder is node or node in holder.iter()):
+                run.remove(holder)
+                return
+    for parent in paragraph.iter():
+        if node in list(parent):
+            parent.remove(node)
+            return
+
+
+def _relationship_details(package: Package, part: str) -> dict[str, tuple[str, str, bool]]:
+    """id -> (type, target, external) of a part's relationships."""
+    name = Package.rels_name(part)
+    if name not in package.parts:
+        return {}
+    details: dict[str, tuple[str, str, bool]] = {}
+    for match in re.finditer(r"<Relationship\b([^>]*)/?>", package.text(name)):
+        attributes = dict(re.findall(r'(\w+)="([^"]*)"', match.group(1)))
+        details[attributes.get("Id", "")] = (
+            attributes.get("Type", ""),
+            html.unescape(attributes.get("Target", "")),
+            attributes.get("TargetMode", "") == "External",
+        )
+    return details
+
+
+def _carry_relationship(
+    old: Package, new: Package, relation: tuple[str, str, bool] | None
+) -> str | None:
+    """The newer document's id for one of the older document's relationships, or None."""
+    if relation is None:
+        return None
+    kind, target, external = relation
+    name = kind.rsplit("/", 1)[-1]
+    if external:
+        return new.add_relationship(DOCUMENT, name, target, external=True)
+    if name != "image":
+        return None
+    source = Package.resolve(DOCUMENT, target)
+    data = old.parts.get(source)
+    if data is None or Package.rels_name(source) in old.parts:
+        return None
+    folder, _, base = source.rpartition("/")
+    copied = f"{folder}/compared-{hashlib.sha256(data).hexdigest()[:12]}-{base}"
+    if copied not in new.parts:
+        new.set(copied, data)
+    extension = base.rpartition(".")[2].lower()
+    content_type = re.search(
+        rf'<Default Extension="{re.escape(extension)}" ContentType="([^"]+)"',
+        old.text("[Content_Types].xml"),
+        re.IGNORECASE,
+    )
+    if content_type:
+        new.default_type(extension, content_type.group(1))
+    document_folder = DOCUMENT.rpartition("/")[0]
+    relative = copied[len(document_folder) + 1 :] if copied.startswith(document_folder) else copied
+    return new.add_relationship(DOCUMENT, "image", relative)
 
 
 def pdf_lines(data: bytes) -> list[tuple[int, str]]:

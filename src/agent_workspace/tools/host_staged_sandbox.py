@@ -16,19 +16,23 @@ import hashlib
 import json
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from uuid import uuid4
 
 from agent_workspace.core.models import BinaryArtifact
 
 from .base import ToolArgumentError, ToolError, json_result
-from .command import _required_executable_sha256, _resolve_executable, _safe_environment
+from .command import (
+    _required_executable_sha256,
+    _resolve_executable,
+    _safe_environment,
+    _terminate_command_tree,
+)
 from .native_isolation import inspect_native_isolation
 from .paths import StrPath, WorkspacePaths
 from .process_worker import _WindowsJob, run_in_process
@@ -90,13 +94,13 @@ class HostStagedSandboxBackend:
     """Run structured argv in a disposable host-side workspace copy.
 
     The class deliberately does not implement a network or filesystem
-    boundary.  Callers must opt into it by selecting ``host-staged`` and must
-    keep it out of YOLO mode.  The process worker supplies Windows Job Object
-    limits and kills the child tree when the worker is cancelled.
+    boundary, so the policy asks before it runs outside YOLO, where running
+    without asking is what the user selected.  The process worker supplies
+    Windows Job Object limits and kills the child tree when the worker is
+    cancelled.
     """
 
     backend_id = "host-staged"
-    requires_explicit_approval = True
     # Every run works in a copy without these (.git), so they do not count as sensitive paths
     # it would see.
     staging_exclusions = STAGING_EXCLUSIONS
@@ -188,7 +192,7 @@ class HostStagedSandboxBackend:
             available=True,
             reason=(
                 "host staged execution is available; network and host filesystem access "
-                "are not isolated and explicit approval is required"
+                "are not isolated and it asks for approval outside YOLO"
             ),
             image=None,
             executable=str(executable),
@@ -201,7 +205,7 @@ class HostStagedSandboxBackend:
                 "bounded_output",
                 "network_not_isolated",
                 "host_filesystem_visible",
-                "explicit_approval_required",
+                "approval_required_outside_yolo",
             ),
             fallback="none",
             actions=(),
@@ -281,6 +285,16 @@ class HostStagedSandboxBackend:
                     "changes": changes,
                 }
             )
+            if staging.left_out_count:
+                # The command did not see these: a missing tool or module may be one of them.
+                result_document["left_out"] = {
+                    "note": (
+                        "links, junctions and special files are not copied into the sandbox's "
+                        "copy of the workspace; the command ran without them"
+                    ),
+                    "count": staging.left_out_count,
+                    "paths": list(staging.left_out),
+                }
             expected_files: list[tuple[str, int, str]] = []
             for change in changes.get("changes", []):
                 if not isinstance(change, dict) or change.get("after_type") != "file":
@@ -418,13 +432,13 @@ def _run_host_command_sync(
             process.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
             timed_out = True
-            _terminate_host_process_tree(process, command_job)
+            _terminate_command_tree(process, command_job)
         if process.returncode is not None and any(reader.is_alive() for reader in readers):
-            _terminate_host_process_tree(process, command_job)
+            _terminate_command_tree(process, command_job)
         while not all(not reader.is_alive() for reader in readers):
             if stdout.overflow or stderr.overflow:
                 output_limit_exceeded = True
-                _terminate_host_process_tree(process, command_job)
+                _terminate_command_tree(process, command_job)
                 break
             for reader in readers:
                 reader.join(timeout=0.05)
@@ -449,52 +463,6 @@ def _run_host_command_sync(
     finally:
         if command_job is not None:
             command_job.close()
-
-
-def _terminate_host_process_tree(
-    process: subprocess.Popen[bytes],
-    command_job: _WindowsJob | None = None,
-) -> None:
-    """Terminate a host command and descendants before closing its pipes.
-
-    A descendant can inherit stdout/stderr and keep the reader threads alive
-    after the command itself exits.  Killing only the direct process therefore
-    makes a timed out or output-limited sandbox invocation hang indefinitely.
-    POSIX commands are started in a new process group; Windows uses the native
-    ``taskkill /T`` tree operation.
-    """
-
-    pid = process.pid
-    if pid is None:
-        return
-    if os.name == "nt" and command_job is not None:
-        command_job.terminate()
-    elif os.name == "nt":
-        system_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR")
-        taskkill = (
-            str(Path(system_root) / "System32" / "taskkill.exe") if system_root else "taskkill"
-        )
-        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-            subprocess.run(
-                [taskkill, "/PID", str(pid), "/T", "/F"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                shell=False,
-                creationflags=creation_flags,
-                timeout=2,
-            )
-    else:
-        platform_os = cast(Any, os)
-        platform_signal = cast(Any, signal)
-        with contextlib.suppress(OSError):
-            platform_os.killpg(pid, platform_signal.SIGKILL)
-    with contextlib.suppress(OSError, ProcessLookupError):
-        process.kill()
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        process.wait(timeout=2)
 
 
 def _drain_stream(stream: Any, output: _BoundedStream) -> None:

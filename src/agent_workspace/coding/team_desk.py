@@ -30,8 +30,8 @@ _MORE_TOOLS: dict[str, tuple[str, ...]] = {
     "backend": ("run_wsl",),
     "devops": ("run_wsl",),
 }
-# Papers and references are not what a software engineer works from; run_diagnostics needs the
-# language server's command, which code_diagnostics finds itself.
+# Papers and references are not what a software engineer works from; run_diagnostics starts a
+# language server for one file, where code_diagnostics keeps the folder's running.
 _NOT_FOR_CODE = frozenset(
     {
         "paper_search",

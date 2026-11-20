@@ -12,6 +12,7 @@ import contextlib
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import threading
@@ -105,6 +106,23 @@ class DebugpyHome:
         if _run([python, "-c", "import debugpy"]).returncode == 0:
             return ""
         return None
+
+    def find_in_files(self, python: str) -> Path | str | None:
+        """find() for a virtual environment of the folder, from its files: just looking at the
+        debugger's state must not run a program the folder brought along."""
+        environment = Path(python).parent.parent
+        try:
+            config = (environment / "pyvenv.cfg").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            config = ""
+        version = re.search(r"(?im)^version(?:_info)?\s*=\s*(\d+)\.(\d+)", config)
+        if version is not None:
+            folder = self.base / f"py{version[1]}{version[2]}"
+            if (folder / "debugpy" / "__init__.py").is_file():
+                return folder
+        own = [environment / "Lib" / "site-packages"]
+        own += (environment / "lib").glob("python3*/site-packages")
+        return "" if any((path / "debugpy" / "__init__.py").is_file() for path in own) else None
 
     def install(self, python: str) -> Path:
         folder = self.folder(python)
@@ -579,7 +597,10 @@ class DebugDesk:
 
     def status(self, root: Path) -> dict[str, object]:
         python = project_python(root)
-        found = self.home.find(python) if python else None
+        found: Path | str | None = None
+        if python:
+            in_folder = Path(python).is_relative_to(root)
+            found = self.home.find_in_files(python) if in_folder else self.home.find(python)
         session = self.session
         return {
             "python": python,

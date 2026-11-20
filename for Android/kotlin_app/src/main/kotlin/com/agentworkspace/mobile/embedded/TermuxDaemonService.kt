@@ -39,6 +39,7 @@ class TermuxDaemonService : Service() {
         const val EXTRA_REASON = "engine-reason"
         const val STARTUP_FAILURE_FILE = "engine.failed"
         private const val NOTIFICATION_ID = 2001
+        private const val HEARTBEAT_MILLIS = 30_000L
         private val engineMutex = Mutex()
 
         /**
@@ -219,10 +220,14 @@ class TermuxDaemonService : Service() {
                     }
                     File(filesDir, "serve.token").delete()
                     activeProviderConfiguration = configuration
+                    // A debuggable build (never published) offers the evaluation scenarios that work
+                    // this app's own screens (mobile_evaluation, AgentAccessibilityService.keptAway).
+                    val engineConfiguration = if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE == 0) configuration
+                        else runCatching { org.json.JSONObject(configuration).put("debug_build", true).toString() }.getOrDefault(configuration)
                     engineJob = serviceScope.launch {
                         try {
                             Python.getInstance().getModule("mobile_embedded")
-                                .callAttr("run", filesDir.absolutePath, configuration)
+                                .callAttr("run", filesDir.absolutePath, engineConfiguration)
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {
@@ -260,13 +265,21 @@ class TermuxDaemonService : Service() {
     }
 
     private suspend fun awaitReadyEngine() {
-        repeat(120) {
+        // A first start after an update checks every record and can take minutes. This used to stop
+        // after 60 s, and nothing else set engineReady: no task notifications, widget updates, wake
+        // lock or schedule reconciling until the next restart. It now waits as long as the engine
+        // runs. While start-up steps keep coming, "starting" is kept fresh, so the status does not
+        // turn into "paused by the system" and recovery does not replace a start that is working.
+        val progress = StartupProgress(android.os.SystemClock.elapsedRealtime(), EngineStartupLog.progressMark(this))
+        while (true) {
             if (engineJob?.isActive != true || File(filesDir, STARTUP_FAILURE_FILE).isFile) return
             val token = runCatching { File(filesDir, "serve.token").readText().trim() }
                 .getOrNull()
             if (!token.isNullOrEmpty()) {
-                val healthy = runCatching {
-                    val connection = URL("${EngineAddress.baseUrl(filesDir)}/health").openConnection() as HttpURLConnection
+                val base = EngineAddress.baseUrl(filesDir)
+                // A token left by a killed engine, and another app on the port: it gets nothing.
+                val healthy = EngineIdentity.answers(base, token) && runCatching {
+                    val connection = URL("$base/health").openConnection() as HttpURLConnection
                     try {
                         connection.setRequestProperty("Authorization", "Bearer $token")
                         connection.connectTimeout = 1000
@@ -285,6 +298,9 @@ class TermuxDaemonService : Service() {
                         .onFailure { if (it is CancellationException) throw it }
                     return
                 }
+            }
+            if (progress.stillWorking(android.os.SystemClock.elapsedRealtime(), EngineStartupLog.progressMark(this))) {
+                reportEngineState("starting")
             }
             delay(500)
         }
@@ -352,7 +368,9 @@ class TermuxDaemonService : Service() {
         val now = System.currentTimeMillis()
         val services = runningServices
         val key = "$state:$services:${detail.orEmpty()}"
-        if (key != lastReportedState || now - lastStateHeartbeat >= 15000) {
+        // Each heartbeat is a locked, fsynced file write. Readers call the engine gone after 90 s
+        // without one (EngineLifecycleState.statusJson), so 30 s still leaves two to miss.
+        if (key != lastReportedState || now - lastStateHeartbeat >= HEARTBEAT_MILLIS) {
             lifecycleState.mark(state)
             lastReportedState = key
             lastStateHeartbeat = now

@@ -189,6 +189,17 @@ class ScheduleWakeReceiver : BroadcastReceiver() {
             MobileScheduleCoordinator(context).restoreAlarms()
             if (!EngineLifecycleState(context).isManuallyStopped()) {
                 EngineRecovery.ensurePeriodic(context)
+                // Android lets the receiver of these broadcasts start a foreground service (specialUse is
+                // not among the types Android 15 holds back after boot). Started 60 s later from
+                // WorkManager instead, that leave had run out: Android 12+ refused the start without a
+                // battery exemption, the app was marked as needing to be opened, and automatic recovery
+                // stopped until then. The service still skips the start after the user's Stop; the
+                // delayed check stays as the fallback.
+                runCatching {
+                    context.startForegroundService(Intent(context, TermuxDaemonService::class.java)
+                        .setAction(EngineRecovery.ACTION_RECOVER)
+                        .putExtra(TermuxDaemonService.EXTRA_REASON, "phone restarted or app updated"))
+                }.onFailure { EngineStartupLog.append(context, "boot: engine start refused: ${it.javaClass.simpleName}") }
                 EngineRecovery.enqueue(context, 60)
             }
             return

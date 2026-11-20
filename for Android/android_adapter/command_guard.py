@@ -4,12 +4,16 @@ A command runs as the app's own Linux user. Unguarded it could read the engine's
 with it call the engine: resolve approvals, work the phone), the conversations' database, the
 settings and the engine's Python code, and through Binder ask Android for anything the app may do:
 its contacts permission, its own unexported receivers, Shizuku. Every command the agent starts
-therefore runs under the packaged PRoot over the phone's own root, with the app's private folders
-and Binder covered by empty ones, and the workspace and the temporary folder shown again.
+therefore runs under the packaged PRoot over the phone's own root, with the app's private folders,
+shared storage and Binder covered by empty ones, and the workspace and the temporary folder shown
+again.
 
 PRoot translates paths; it is not an OS sandbox, and a program written to get out of it could. What
 it stops is a command reaching those files or services by name, which is what a page that talks the
 agent into running something would try.
+
+On the phone a command the guard cannot cover is refused, not run as the app: a probe that fails is
+tried again after a while, and the state shows on 设备与工具 (runtime_capabilities).
 """
 
 from __future__ import annotations
@@ -19,14 +23,23 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
+from agent_workspace.tools.base import ToolError
+
 _BINDER_NODES = ("binder", "hwbinder", "vndbinder")
 _PROBE_SECONDS = 15
+# Waits before the next probe after a failed one, the last one repeating: a phone too busy for the
+# probe once (the on-device model running) gets its commands back without an engine restart.
+_RETRY_SECONDS = (30, 120, 600)
+NOT_ON_ANDROID = "not on Android"
 _LOCK = threading.Lock()
-# Probed once per engine: {"state": "on", "mode": "seccomp" | "ptrace"} or {"state": "off", ...}.
+# {"state": "on", "mode": "seccomp" | "ptrace"}, kept for the engine, or {"state": "off", "reason": ...}.
 _STATE: dict[str, Any] | None = None
+_failed_probes = 0
+_next_probe = 0.0
 
 
 def _data_dir() -> Path | None:
@@ -49,6 +62,21 @@ def private_folders(data_dir: Path) -> list[Path]:
     ]
     found: list[Path] = []
     for candidate in candidates:
+        real = Path(os.path.realpath(candidate))
+        if real.is_dir() and not any(real == seen or real.is_relative_to(seen) for seen in found):
+            found.append(real)
+    return found
+
+
+# Shared storage. The app asks for all-files access when a workspace lives there, and a command runs
+# as the app: uncovered it would read and change the photos, the downloads and the other workspaces.
+_SHARED_STORAGE = ("/storage", "/sdcard", "/mnt/user", "/mnt/media_rw", "/data/media")
+
+
+def shared_storage() -> list[Path]:
+    """Shared storage as Android resolves it, each tree once."""
+    found: list[Path] = []
+    for candidate in _SHARED_STORAGE:
         real = Path(os.path.realpath(candidate))
         if real.is_dir() and not any(real == seen or real.is_relative_to(seen) for seen in found):
             found.append(real)
@@ -101,7 +129,12 @@ def _command(
     shown: list[Path],
     mode: str,
 ) -> tuple[list[str], dict[str, str]]:
-    hidden = [(folder, True) for folder in private_folders(data_dir)] + binder_nodes()
+    storage = shared_storage()
+    folders = storage + [
+        folder for folder in private_folders(data_dir)
+        if not any(folder.is_relative_to(tree) for tree in storage)
+    ]
+    hidden = [(folder, True) for folder in folders] + binder_nodes()
     bindings = _covers(data_dir, hidden)
     for folder in shown:
         real = os.path.realpath(folder)
@@ -142,14 +175,17 @@ def _native() -> dict[str, Any]:
 
 
 def _probe(native: dict[str, Any], data_dir: Path) -> dict[str, Any]:
-    """Run a command that looks for a file in the app's folder and for a shown folder."""
+    """Run a command that looks for a file in the app's folder, for Binder and for a shown folder."""
     root = Path(data_dir) / "command-guard"
     root.mkdir(parents=True, exist_ok=True)
     marker = root / "probe-marker"
     marker.write_text("private", "utf-8")
     shown = root / "probe-shown"
     shown.mkdir(exist_ok=True)
-    script = f'test -e "{marker}" && echo seen || echo hidden; test -d "{shown}" && echo shown'
+    script = (
+        f'test -e "{marker}" && echo seen || echo hidden; test -d "{shown}" && echo shown; '
+        'for node in /dev/binder /dev/binderfs/binder; do test -c "$node" && echo binder; done'
+    )
     failure = ""
     for mode in ("seccomp", "ptrace"):
         argv, environment = _command(native, data_dir, ["/system/bin/sh", "-c", script], shown, [shown], mode)
@@ -173,21 +209,41 @@ def _probe(native: dict[str, Any], data_dir: Path) -> dict[str, Any]:
 
 
 def status() -> dict[str, Any]:
-    """Whether commands are guarded on this phone; probed on the first command."""
-    global _STATE
+    """Whether commands are guarded on this phone; probed on the first command, and again from time
+    to time while the answer is no. A probe can take half a minute: not on the event loop."""
+    global _STATE, _failed_probes, _next_probe
     with _LOCK:
-        if _STATE is None:
+        retry = (
+            _STATE is not None
+            and _STATE["state"] == "off"
+            and _STATE.get("reason") != NOT_ON_ANDROID
+            and time.monotonic() >= _next_probe
+        )
+        if _STATE is None or retry:
             data_dir = _data_dir()
             if os.getenv("AGENT_WORKSPACE_EMBEDDED_PYTHON") != "chaquopy" or data_dir is None:
-                _STATE = {"state": "off", "reason": "not on Android"}
+                _STATE = {"state": "off", "reason": NOT_ON_ANDROID}
             else:
                 try:
                     _STATE = _probe(_native(), data_dir)
                 except Exception as error:
                     _STATE = {"state": "off", "reason": str(error)[:300]}
                 if _STATE["state"] != "on":
+                    _next_probe = time.monotonic() + _RETRY_SECONDS[min(_failed_probes, len(_RETRY_SECONDS) - 1)]
+                    _failed_probes += 1
                     print(f"command guard off: {_STATE.get('reason')}", flush=True)
         return dict(_STATE)
+
+
+def known() -> dict[str, Any]:
+    """What was last found, without probing: {"state": "unknown"} before the first probe."""
+    with _LOCK:
+        return dict(_STATE) if _STATE is not None else {"state": "unknown"}
+
+
+def failed(state: dict[str, Any]) -> bool:
+    """Whether this state means commands are refused (away from the phone there is no guard to fail)."""
+    return state["state"] == "off" and state.get("reason") != NOT_ON_ANDROID
 
 
 def guard(
@@ -195,10 +251,20 @@ def guard(
 ) -> tuple[list[str], dict[str, str]] | None:
     """argv under the guard, with the environment PRoot needs; None runs it as it is.
 
-    A program that cannot be found is left to start as it is, so its caller says what is missing.
+    A program that cannot be found is left to start as it is, so its caller says what is missing
+    (the same PATH finds nothing to start). On the phone a command is refused while the guard is off.
     """
     state = status()
-    if not argv or state["state"] != "on":
+    if not argv:
+        return None
+    if failed(state):
+        raise ToolError(
+            "This command was not run: the command guard that keeps commands away from the app's own "
+            f"files and Android's services is not on ({state.get('reason')}). It is checked again "
+            "automatically, so try again in a few minutes. Tell the user. If it stays off, restarting "
+            "the app checks it at once, and Menu > 设备与工具 shows its state."
+        )
+    if state["state"] != "on":
         return None
     executable = argv[0]
     if "/" not in executable:
@@ -216,9 +282,11 @@ def guard(
 
 
 def _reset_for_tests() -> None:
-    global _STATE
+    global _STATE, _failed_probes, _next_probe
     with _LOCK:
         _STATE = None
+        _failed_probes = 0
+        _next_probe = 0.0
 
 
-__all__ = ["binder_covers", "guard", "private_folders", "status"]
+__all__ = ["binder_covers", "failed", "guard", "known", "private_folders", "status"]

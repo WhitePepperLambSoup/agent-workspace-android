@@ -15,19 +15,26 @@ from .egress import (
     egress_dry_run,
 )
 from .permissions import (
+    DEFAULT_YOLO_RULES,
+    WORKSPACE_FILE_KINDS,
     ApprovalCallback,
     ApprovalResult,
     ExtensionApprovalCallback,
     ExtensionApprovalRequiredError,
     WorkspaceExtensionRequest,
     WorkspacePolicy,
+    YoloRules,
     build_custom_tool_extension_request,
     build_mcp_extension_request,
     compute_extension_digest,
+    workspace_file_decision,
+    workspace_file_requests,
 )
 from .spend_approval import SpendApprovalPolicy, SpendEvaluation
 
 __all__ = [
+    "DEFAULT_YOLO_RULES",
+    "WORKSPACE_FILE_KINDS",
     "ApprovalCallback",
     "ApprovalRequiredError",
     "ApprovalResult",
@@ -46,8 +53,11 @@ __all__ = [
     "ToolArgumentRuleError",
     "WorkspaceExtensionRequest",
     "WorkspacePolicy",
+    "YoloRules",
     "build_custom_tool_extension_request",
     "build_mcp_extension_request",
     "compute_extension_digest",
     "egress_dry_run",
+    "workspace_file_decision",
+    "workspace_file_requests",
 ]

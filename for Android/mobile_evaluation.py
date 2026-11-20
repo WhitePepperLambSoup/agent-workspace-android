@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import re
 import time
 from pathlib import Path
@@ -185,6 +186,14 @@ _CASES = (
     ),
 )
 
+
+def _cases():
+    """The catalog this build offers. The workspace cases work Agent Workspace's own screens, which the
+    agent may not read or operate in a published build (KB-004): only a debuggable one offers them."""
+    if os.getenv("AGENT_WORKSPACE_DEBUG_BUILD") == "1":
+        return _CASES
+    return tuple(item for item in _CASES if item[2] != "workspace")
+
 _VISIBLE_VALUES = {
     "settings-version": {"version": r"Android\s*(?:\u7248\u672c\s*)?\d+(?:\.\d+){0,2}\b"},
     "settings-battery": {
@@ -290,12 +299,12 @@ class MobileEvaluations:
                     "no pending task; benchmark-fixture session"
                 ),
             }
-            for item in _CASES
+            for item in _cases()
         ]
 
     def record(self, payload):
         scenario_id = payload.get("scenario_id")
-        if scenario_id not in {item[0] for item in _CASES}:
+        if scenario_id not in {item[0] for item in _cases()}:
             raise ValueError("unknown evaluation scenario")
         metadata = validate_metadata(payload.get("metadata"))
         outcome = payload.get("outcome")
@@ -381,7 +390,7 @@ class MobileEvaluations:
             "format": "agent-workspace.android-evaluations",
             "schema_version": 1,
             "exported_at": time.time(),
-            "catalog_count": len(_CASES),
+            "catalog_count": len(_cases()),
             "measured_runs": measured,
             "reviewed_records": reviewed,
             "summary": {
@@ -407,8 +416,8 @@ class MobileEvaluations:
         if not isinstance(payload, dict):
             raise ValueError("evaluation plan requires an object")
         metadata = validate_metadata(payload.get("metadata"))
-        scenarios = payload.get("scenario_ids", [item[0] for item in _CASES])
-        available = {item[0] for item in _CASES}
+        scenarios = payload.get("scenario_ids", [item[0] for item in _cases()])
+        available = {item[0] for item in _cases()}
         if (
             not isinstance(scenarios, list)
             or not scenarios

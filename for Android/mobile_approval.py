@@ -48,13 +48,14 @@ APPROVAL_SCOPES = frozenset({"once", "session", "task"})
 _ALWAYS = "always"
 # What the approval shelf may send (mobile_gateway).
 RESOLVE_SCOPES = APPROVAL_SCOPES | {_ALWAYS}
-# A task-wide approval never covers deleting files, changing long-term memory (app notes too),
-# operating other apps, removing an app or taking back its powers (manage_app), or sending a
-# message as the user: those still ask each time. The exception is a task the user started from
-# the phone control panel to operate the phone: there "allow for this task" covers its taps and
-# typing (never a reply sent from a notification).
+# A task-wide approval never covers deleting files, changing long-term memory (app notes too, and
+# replacing one of the user's skills), operating other apps, removing an app or taking back its
+# powers (manage_app), or sending a message as the user: those still ask each time. The exception
+# is a task the user started from the phone control panel to operate the phone: there "allow for
+# this task" covers its taps and typing (never a reply sent from a notification).
 _ALWAYS_ASK_TOOLS = frozenset(
-    {"delete_path", "memory_write", "app_note", "android_action", "notification_reply", "manage_app",
+    {"delete_path", "memory_write", "app_note", "save_skill", "android_action",
+     "notification_reply", "manage_app",
      # Sends the task's words to the paired computer, each call (android_adapter.computer_tools).
      "ask_computer"}
 )
@@ -216,9 +217,10 @@ class MobileApprovalBroker:
     def trust_active_task(self, task_id: str) -> bool:
         """Grant the "task" scope in advance, as for a schedule the user set up to run alone.
 
-        The always-ask tools still ask. Applies only to the task that is running.
+        The always-ask tools still ask. Applies only to the task that is running, and not to one
+        that has read instructions in outside content.
         """
-        if not task_id or task_id != self._active_task_id:
+        if not task_id or task_id != self._active_task_id or self.distrusted(task_id):
             return False
         self._trusted_task_id = task_id
         return True

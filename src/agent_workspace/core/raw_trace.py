@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+_LOGGER = logging.getLogger(__name__)
 _DEFAULT_MAX_FILE_BYTES = 8 * 1024 * 1024
 _DEFAULT_MAX_FILES = 4
 _SAFE_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -171,13 +173,15 @@ class RawConversationTrace:
         self._lock = threading.Lock()
         # session id -> (fingerprint of each message, of the tool schemas) of its last request.
         self._last_requests: dict[str, tuple[list[str], str]] = {}
-        if enabled and (max_total_bytes is not None or max_age_days is not None):
+        if enabled:
             self._prune_directory()
 
     @classmethod
     def for_database(cls, database: str | Path) -> RawConversationTrace:
-        raw = os.environ.get("AGENT_WORKSPACE_RAW_TRACE", "1").strip().lower()
-        enabled = raw not in {"0", "false", "off", "no"}
+        # Off unless the host turns it on: a trace holds whole conversations in clear text. On the
+        # phone nothing reads it, and it would grow with every model request.
+        raw = os.environ.get("AGENT_WORKSPACE_RAW_TRACE", "").strip().lower()
+        enabled = raw not in {"", "0", "false", "off", "no"}
         directory = os.environ.get("AGENT_WORKSPACE_RAW_TRACE_DIR")
         deltas = os.environ.get("AGENT_WORKSPACE_RAW_TRACE_REQUEST_DELTAS", "").strip().lower()
         return cls(
@@ -223,6 +227,7 @@ class RawConversationTrace:
                 self.directory.mkdir(parents=True, exist_ok=True)
                 if path.is_file() and path.stat().st_size + encoded_size > self.max_file_bytes:
                     self._rotate_locked(path)
+                    self._prune_directory()
                     self._last_requests.pop(session_id, None)
                 with path.open("a", encoding="utf-8", newline="\n") as stream:
                     stream.write(line)
@@ -244,6 +249,7 @@ class RawConversationTrace:
                 # Rotate before writing, so the request that starts a file is complete.
                 if path.is_file() and path.stat().st_size >= self.max_file_bytes:
                     self._rotate_locked(path)
+                    self._prune_directory()
                     self._last_requests.pop(session_id, None)
                 previous = self._last_requests.get(session_id)
                 start = 0
@@ -278,8 +284,22 @@ class RawConversationTrace:
         except OSError:
             return
 
+    def delete_sessions(self, session_ids: Iterable[str]) -> None:
+        """Remove these conversations' traces, including ones an earlier run wrote with tracing
+        on: a trace is a copy of the conversation and goes when the user deletes it."""
+        with self._lock:
+            for session_id in session_ids:
+                self._last_requests.pop(session_id, None)
+                for path in self._trace_paths(session_id):
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError as error:
+                        _LOGGER.warning("trace %s stays after its deletion: %s", path.name, error)
+
     def _prune_directory(self) -> None:
         """Drop the oldest trace files beyond the age and total-size limits."""
+        if self.max_total_bytes is None and self.max_age_days is None:
+            return
         try:
             files = [
                 (path.stat().st_mtime, path.stat().st_size, path)

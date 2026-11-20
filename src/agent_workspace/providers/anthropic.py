@@ -24,9 +24,11 @@ from agent_workspace.providers.base import (
     encode_json_request,
     provider_http_client,
     provider_request_error,
+    provider_stream_error,
     response_http_error,
     stream_request_timeout,
     stream_with_retries,
+    with_reported_usage,
 )
 from agent_workspace.providers.reasoning import supported_reasoning_efforts
 from agent_workspace.providers.streaming import append_event_data, iter_bounded_lines
@@ -58,6 +60,16 @@ class _UsageParts:
     cached_tokens: int = 0
     cache_creation_tokens: int = 0
     seen: bool = False
+
+
+def _reported_usage(usage: _UsageParts) -> Usage | None:
+    if not usage.seen:
+        return None
+    return Usage(
+        input_tokens=usage.input_tokens + usage.cache_creation_tokens + usage.cached_tokens,
+        output_tokens=usage.output_tokens,
+        cached_tokens=usage.cached_tokens,
+    )
 
 
 class AnthropicProvider:
@@ -153,9 +165,15 @@ class AnthropicProvider:
                     event = _decode_object(data, status_code=status_code, label="SSE event")
                     raw_type = event.get("type")
                     if sse_type == "error" or raw_type == "error" or event.get("error") is not None:
-                        raise ProviderError(
-                            "provider returned an error",
+                        # Busy hours bring overloaded_error here, after the 200: one to try again.
+                        raw_error = event.get("error")
+                        error = raw_error if isinstance(raw_error, dict) else {}
+                        detail = error.get("message")
+                        raise provider_stream_error(
+                            detail if isinstance(detail, str) else None,
                             status_code=status_code,
+                            code=error.get("type"),
+                            api_key=self._api_key,
                         )
                     if not isinstance(raw_type, str) or not raw_type:
                         raise ProviderError(
@@ -272,21 +290,13 @@ class AnthropicProvider:
                         status_code=status_code,
                     )
 
-                for tool_call in _finish_tool_calls(blocks, status_code=status_code):
+                for tool_call in _finish_tool_calls(
+                    blocks, status_code=status_code, finish_reason=finish_reason
+                ):
                     yield ProviderDelta(kind=DeltaKind.TOOL_CALL, tool_call=tool_call)
-                if usage.seen:
-                    yield ProviderDelta(
-                        kind=DeltaKind.USAGE,
-                        usage=Usage(
-                            input_tokens=(
-                                usage.input_tokens
-                                + usage.cache_creation_tokens
-                                + usage.cached_tokens
-                            ),
-                            output_tokens=usage.output_tokens,
-                            cached_tokens=usage.cached_tokens,
-                        ),
-                    )
+                reported = _reported_usage(usage)
+                if reported is not None:
+                    yield ProviderDelta(kind=DeltaKind.USAGE, usage=reported)
                 content_order = _content_order(blocks)
                 provider_metadata: dict[str, Any] = {_CONTENT_ORDER_KEY: content_order}
                 if any(
@@ -299,22 +309,30 @@ class AnthropicProvider:
                     finish_reason=finish_reason,
                     provider_metadata=provider_metadata,
                 )
-        except ProviderError:
+        except ProviderError as exc:
+            # message_start already said what the input cost: kept when the stream fails later.
+            with_reported_usage(exc, _reported_usage(usage))
             raise
         except httpx.RequestError as exc:
-            raise provider_request_error(exc, status_code=status_code) from None
+            raise with_reported_usage(
+                provider_request_error(exc, status_code=status_code), _reported_usage(usage)
+            ) from None
 
     @staticmethod
     def _request_body(request: ProviderRequest) -> dict[str, Any]:
+        # A context summary is a system message holding untrusted data: it keeps its wrapper here,
+        # as it does with the other providers.
         system_messages = [
-            message.content for message in request.messages if message.role is Role.SYSTEM
+            message.provider_content()
+            for message in request.messages
+            if message.role is Role.SYSTEM
         ]
         body: dict[str, Any] = {
             "model": request.model,
             "messages": [
                 _message_to_anthropic(message, target_model=request.model)
                 for message in request.messages
-                if message.role is not Role.SYSTEM
+                if message.role is not Role.SYSTEM and not message.is_empty_assistant_turn
             ],
             "max_tokens": (
                 request.max_output_tokens
@@ -452,7 +470,7 @@ def _message_to_anthropic(
 
     if message.role is Role.ASSISTANT and message.tool_calls:
         content: list[dict[str, Any]] = []
-        if message.content:
+        if message.content.strip():
             content.append({"type": "text", "text": message.content})
         content.extend(
             {
@@ -536,6 +554,9 @@ def _ordered_assistant_content(message: ChatMessage, raw_order: object) -> list[
             if block_type == "text":
                 block["text"] = source[start:end]
                 text_offset = end
+                if not block["text"].strip():
+                    # A block the stream opened and left empty; the API refuses it on replay.
+                    continue
             else:
                 signature = raw_block.get("signature")
                 if not isinstance(signature, str) or not signature:
@@ -853,6 +874,7 @@ def _finish_tool_calls(
     blocks: dict[int, _ContentBlockParts],
     *,
     status_code: int,
+    finish_reason: str | None = None,
 ) -> list[ToolCall]:
     result: list[ToolCall] = []
     seen_ids: set[str] = set()
@@ -861,25 +883,46 @@ def _finish_tool_calls(
         if block.block_type != "tool_use":
             continue
         arguments = block.initial_input
+        argument_error: str | None = None
         if block.input_fragments:
             if block.initial_input:
                 raise ProviderError(
                     "provider sent conflicting tool input",
                     status_code=status_code,
                 )
-            arguments = cast(
-                dict[str, Any],
-                _decode_object(
-                    "".join(block.input_fragments),
-                    status_code=status_code,
-                    label="tool input",
-                ),
-            )
+            try:
+                arguments = cast(
+                    dict[str, Any],
+                    _decode_object(
+                        "".join(block.input_fragments),
+                        status_code=status_code,
+                        label="tool input",
+                    ),
+                )
+            except ProviderError:
+                # The output limit can end a call inside its input (a large file to write). Like
+                # the other providers, the model is told and tries again in smaller steps.
+                arguments = {}
+                argument_error = (
+                    f"Provider ended the tool call with {finish_reason!r} before its arguments "
+                    "were complete. Retry the tool call with one complete JSON object, in "
+                    "smaller steps if it is large."
+                    if finish_reason == "max_tokens"
+                    else "Provider returned invalid JSON tool arguments. Retry with one complete "
+                    "JSON object."
+                )
         if block.call_id in seen_ids:
             raise ProviderError(
                 "provider returned duplicate tool call ids",
                 status_code=status_code,
             )
         seen_ids.add(block.call_id)
-        result.append(ToolCall(id=block.call_id, name=block.name, arguments=arguments))
+        result.append(
+            ToolCall(
+                id=block.call_id,
+                name=block.name,
+                arguments=arguments,
+                argument_error=argument_error,
+            )
+        )
     return result

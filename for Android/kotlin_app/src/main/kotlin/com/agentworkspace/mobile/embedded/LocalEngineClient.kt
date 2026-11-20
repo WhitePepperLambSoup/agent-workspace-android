@@ -20,6 +20,9 @@ class LocalEngineClient @JvmOverloads constructor(context: Context,
         require(token.isNotEmpty()) { "The engine token is unavailable" }
         val body = payload?.toString()?.toByteArray(Charsets.UTF_8)
         val base = baseUrl ?: EngineAddress.baseUrl(tokenFile.absoluteFile.parentFile ?: File("."))
+        // Before connecting, so a refusal cannot have applied anything: the token goes only to the
+        // engine that proves it holds it, not to another app on the port (EngineIdentity).
+        EngineIdentity.require(base, token, 5000)
         val connection = URL(base + path).openConnection() as HttpURLConnection
         var mayHaveSubmitted = false
         var rejected = false
@@ -58,6 +61,7 @@ class LocalEngineClient @JvmOverloads constructor(context: Context,
                 JSONObject(value.toString())
             }
         } catch (failure: Exception) {
+            if (failure is java.net.ConnectException) EngineIdentity.forget(base, token)
             if (mayHaveSubmitted && !rejected)
                 throw RequestOutcomeUnknown("The local request may have been applied, but its reply could not be confirmed", failure)
             throw failure

@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from typing import Any
 from xml.sax.saxutils import escape
 
+from agent_workspace.office import formula
+
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 _CJK = re.compile(r"[⺀-鿿豈-﫿＀-￯]")
 
@@ -204,6 +206,9 @@ def markdown_docx(content: str, title: str = "") -> bytes:
     lines = content.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     index = 0
     paragraph: list[str] = []
+    # The numbered list open at each indent level. Blank lines, explanations and code between its
+    # items do not end it ("1. a", blank, "2. b" is one list, as models often write it); a heading,
+    # a table, a quote, a rule or a page break does, and an item numbered 1 starts a new one.
     lists: dict[int, int] = {}
 
     def flush() -> None:
@@ -228,6 +233,7 @@ def markdown_docx(content: str, title: str = "") -> bytes:
         heading = re.match(r"^(#{1,6})\s+(.*?)\s*#*\s*$", line)
         if heading:
             flush()
+            lists.clear()
             document.paragraph(heading.group(2), f"Heading{len(heading.group(1))}")
             index += 1
             continue
@@ -237,6 +243,7 @@ def markdown_docx(content: str, title: str = "") -> bytes:
             and _TABLE_RULE.match(lines[index + 1])
         ):
             flush()
+            lists.clear()
             rows = [_cells(line)]
             aligns = [
                 "center"
@@ -257,7 +264,7 @@ def markdown_docx(content: str, title: str = "") -> bytes:
             flush()
             level = len(item.group(1).replace("\t", "    ")) // 2
             if item.group(2)[0].isdigit():
-                if level not in lists:
+                if level not in lists or int(item.group(2)[:-1]) == 1:
                     document.numbered += 1
                     lists[level] = 2 + document.numbered
                 list_id = lists[level]
@@ -270,6 +277,7 @@ def markdown_docx(content: str, title: str = "") -> bytes:
             continue
         if stripped.startswith(">"):
             flush()
+            lists.clear()
             quote = []
             while index < len(lines) and lines[index].strip().startswith(">"):
                 quote.append(lines[index].strip()[1:].strip())
@@ -278,6 +286,7 @@ def markdown_docx(content: str, title: str = "") -> bytes:
             continue
         if re.match(r"^\s*(-{3,}|\*{3,}|_{3,})\s*$", line):
             flush()
+            lists.clear()
             document.body.append(
                 '<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" '
                 'w:color="999999"/></w:pBdr></w:pPr></w:p>'
@@ -286,12 +295,12 @@ def markdown_docx(content: str, title: str = "") -> bytes:
             continue
         if stripped in ("\\newpage", "\\pagebreak", "<!-- pagebreak -->"):
             flush()
+            lists.clear()
             document.body.append('<w:p><w:r><w:br w:type="page"/></w:r></w:p>')
             index += 1
             continue
         if not stripped:
             flush()
-            lists.clear()
             index += 1
             continue
         paragraph.append(line)
@@ -557,7 +566,7 @@ def _cell_xml(reference: str, value: Any, style: str = "") -> str:
     if isinstance(value, int | float):
         return f'<c r="{reference}"{style}><v>{value!r}</v></c>'
     if isinstance(value, str) and value.startswith("=") and len(value) > 1:
-        return f'<c r="{reference}"{style}><f>{_xml(value[1:])}</f></c>'
+        return f'<c r="{reference}"{style}><f>{_xml(formula.stored(value))}</f></c>'
     text = _xml(str(value))
     return (
         f'<c r="{reference}" t="inlineStr"{style}><is><t xml:space="preserve">{text}</t></is></c>'

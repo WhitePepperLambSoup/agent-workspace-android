@@ -2,9 +2,9 @@
 
 The desktop scans each watched folder when it starts and every half hour. Supported files that
 are new or changed since the last scan are added to that folder's knowledge base; the store skips
-content it already holds. A file changed within the last minute may still be downloading, so it
-waits for the next scan. Folders offered for watching: where WeChat and QQ keep received files,
-when they exist on this computer.
+content it already holds, and a changed file's new version replaces the old one. A file changed
+within the last minute may still be downloading, so it waits for the next scan. Folders offered
+for watching: where WeChat and QQ keep received files, when they exist on this computer.
 """
 
 from __future__ import annotations
@@ -240,6 +240,8 @@ class FolderWatch:
             if metadata.st_mtime > settled_before or added >= budget:
                 waiting += 1
                 continue
+            # A changed file replaces what it added before, or searches find both versions.
+            earlier = self.store.watched_versions(name, folder.collection_id)
             try:
                 result = self.store.add_file(
                     path,
@@ -259,7 +261,20 @@ class FolderWatch:
             except OSError:
                 failed += 1  # locked or vanished; try again next scan
                 continue
-            folder.seen[name] = identity
+            kept = 0
+            for document in earlier:
+                if document["id"] == result.get("id"):
+                    continue
+                try:
+                    self.store.delete(document["id"])
+                except KeyError:
+                    continue
+                except KnowledgeError:
+                    kept += 1  # still being indexed
+            # An old version still being indexed stays for now: the file then still counts as
+            # changed, and the next scan removes it.
+            if not kept:
+                folder.seen[name] = identity
             if not result.get("duplicate"):
                 added += 1
         folder.seen = {name: value for name, value in folder.seen.items() if name in present}

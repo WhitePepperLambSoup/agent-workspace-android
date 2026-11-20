@@ -11,7 +11,7 @@ from agent_workspace.core.models import (
     ToolSpec,
 )
 from agent_workspace.tools.base import ToolError, json_result, require_string
-from agent_workspace.tools.paths import StrPath, WorkspacePaths
+from agent_workspace.tools.paths import StrPath, WorkspacePaths, open_checked
 
 if TYPE_CHECKING:
     from agent_workspace.application.ports import ToolExecutionContext
@@ -176,7 +176,8 @@ class AttachImageTool:
         try:
             if path.is_dir():
                 raise ToolError(f"path is a directory: {path}")
-            data = path.read_bytes()
+            with open_checked(path) as stream:
+                data = stream.read(MAX_IMAGE_BYTES + 1)
         except OSError as exc:
             raise ToolError(f"cannot read image: {path}") from exc
         if not data:

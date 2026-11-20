@@ -21,6 +21,11 @@
     { id: "gemini", name: "Gemini (Google)", note: t("需要能访问 Google 的网络。"), protocol: "gemini",
       base_url: "https://generativelanguage.googleapis.com/v1beta", model: "gemini-3.8-flash", key_url: "https://aistudio.google.com/apikey" },
   ];
+  // Cloud services that cannot answer without a key (these and the others the engine knows,
+  // entrypoint._MODEL_FAMILIES_BY_ENDPOINT). A server of the user's own (LM Studio on mypc.local,
+  // a gateway that signs in with its own headers) may need none, and says so if it does.
+  const keyedHosts = new Set([...setupProviders.map((provider) => hostOf(provider.base_url)),
+    "api.x.ai", "dashscope-intl.aliyuncs.com", "api.moonshot.ai", "api.moonshot.cn", "api.z.ai"]);
   // On the phone, in order of preference: the small one answers in seconds once prepared.
   const setupLocalModels = ["qwen3.5-0.8b-q4-k-m", "qwen3.5-2b-q4-k-m"];
   const setupActiveDownload = ["queued", "downloading", "waiting_network", "verifying"];
@@ -36,9 +41,8 @@
   /** Why no model can answer yet ("" when one can, or when this page cannot tell). */
   function setupNeeded() {
     if (!settingsAvailable || typeof bridge?.saveQuickProvider !== "function" || isLocalModel()) return "";
-    const host = hostOf(settings.base_url);
-    // Ollama and other services on this phone or the home network need no key.
-    if (settings.protocol === "ollama" || /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host)) return "";
+    // Ollama and other services of the user's own may need no key.
+    if (settings.protocol === "ollama" || !keyedHosts.has(hostOf(settings.base_url))) return "";
     return settings.has_api_key ? "" : "no_key";
   }
 
@@ -311,4 +315,5 @@
   $("btnSetupSave").addEventListener("click", () => void saveSetupCloud());
   $("btnSetupMore").addEventListener("click", () => { closeSetup(); bridge?.openSettings?.(); });
   $("btnSetupLocalGo").addEventListener("click", () => void startSetupLocal());
-  $("btnSetupLocalMore").addEventListener("click", () => { closeSetup(); openMenu(); setSettingsPage("localModels"); });
+  // Through the menu entry (openSettingsPage): only that loads the page's list of models.
+  $("btnSetupLocalMore").addEventListener("click", () => { closeSetup(); openSettingsPage("localModels"); });

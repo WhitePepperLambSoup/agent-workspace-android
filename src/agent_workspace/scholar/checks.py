@@ -171,11 +171,26 @@ def check_reference(reference: Reference, fetch: Fetcher, timeout: int) -> dict[
     identifier = _identifiers(reference)
     found: Work | None = None
     problems: list[str] = []
+    registered = False
     try:
         if identifier is not None:
             found = sources.lookup(*identifier, fetch=fetch, timeout=timeout)
             if found is None and identifier[0] == "doi":
-                problems.append(f"the DOI {identifier[1]} does not exist")
+                # Not in Crossref or OpenAlex is not the same as not existing: doi.org knows.
+                known = sources.doi_registered(identifier[1], fetch, timeout)
+                registered = known is True
+                if known is False:
+                    problems.append(f"the DOI {identifier[1]} does not exist")
+                elif known:
+                    problems.append(
+                        f"the DOI {identifier[1]} is registered, but not with Crossref or "
+                        "OpenAlex, so its record cannot be checked here"
+                    )
+                else:
+                    problems.append(
+                        f"the DOI {identifier[1]} is in neither Crossref nor OpenAlex, and "
+                        "doi.org could not be asked"
+                    )
         if found is None:
             by_text = sources.lookup("query", _query_text(reference), fetch=fetch, timeout=timeout)
             if by_text is not None:
@@ -191,7 +206,7 @@ def check_reference(reference: Reference, fetch: Fetcher, timeout: int) -> dict[
         report.update(status="error", problems=[f"the databases could not be reached: {exc}"[:300]])
         return report
     if found is None:
-        report["status"] = "unverifiable" if cjk else "not_found"
+        report["status"] = "unverifiable" if cjk or registered else "not_found"
         report["problems"] = problems or (
             ["Chinese databases (CNKI, Wanfang) cannot be searched here; check it there"]
             if cjk

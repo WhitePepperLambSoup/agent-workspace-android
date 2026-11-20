@@ -22,9 +22,11 @@ from agent_workspace.providers.base import (
     encode_json_request,
     provider_http_client,
     provider_request_error,
+    provider_stream_error,
     response_http_error,
     stream_request_timeout,
     stream_with_retries,
+    with_reported_usage,
 )
 from agent_workspace.providers.streaming import append_event_data, iter_bounded_lines
 
@@ -132,9 +134,14 @@ class GeminiProvider:
 
                     chunk = _decode_object(data, status_code=status_code, label="SSE event")
                     if chunk.get("error") is not None:
-                        raise ProviderError(
-                            "provider returned an error",
+                        raw_error = chunk.get("error")
+                        error = raw_error if isinstance(raw_error, dict) else {}
+                        detail = raw_error if isinstance(raw_error, str) else error.get("message")
+                        raise provider_stream_error(
+                            detail if isinstance(detail, str) else None,
                             status_code=status_code,
+                            code=error.get("code", error.get("status")),
+                            api_key=self._api_key,
                         )
 
                     raw_usage = chunk.get("usageMetadata")
@@ -311,10 +318,14 @@ class GeminiProvider:
                     finish_reason=finish_reason,
                     provider_metadata=provider_metadata,
                 )
-        except ProviderError:
+        except ProviderError as exc:
+            # Usage that came before the failure is still what the request cost.
+            with_reported_usage(exc, usage)
             raise
         except httpx.RequestError as exc:
-            raise provider_request_error(exc, status_code=status_code) from None
+            raise with_reported_usage(
+                provider_request_error(exc, status_code=status_code), usage
+            ) from None
 
 
 def _request_body(request: ProviderRequest) -> dict[str, Any]:
@@ -326,7 +337,8 @@ def _request_body(request: ProviderRequest) -> dict[str, Any]:
 
     for message in request.messages:
         if message.role is Role.SYSTEM:
-            system_parts.append({"text": message.content})
+            # A context summary holds untrusted data and keeps its wrapper, as elsewhere.
+            system_parts.append({"text": message.provider_content()})
             continue
 
         if message.role is Role.TOOL:
@@ -344,19 +356,31 @@ def _request_body(request: ProviderRequest) -> dict[str, Any]:
             if remote_id is not None:
                 response["id"] = remote_id
             response_part = {"functionResponse": response}
+            # A screenshot or a rendered page goes after the responses of the round as image
+            # parts; a function response itself holds only JSON.
+            image_parts = [
+                {"inline_data": {"mime_type": image.media_type, "data": image.base64}}
+                for image in message.images
+            ]
             if (
                 contents
                 and contents[-1].get("role") == "user"
                 and all(
-                    isinstance(part, dict) and "functionResponse" in part
+                    isinstance(part, dict) and ("functionResponse" in part or "inline_data" in part)
                     for part in contents[-1].get("parts", [])
                 )
+                and any("functionResponse" in part for part in contents[-1].get("parts", []))
             ):
-                contents[-1]["parts"].append(response_part)
+                parts = contents[-1]["parts"]
+                responses = sum(1 for part in parts if "functionResponse" in part)
+                parts.insert(responses, response_part)
+                parts.extend(image_parts)
             else:
-                contents.append({"role": "user", "parts": [response_part]})
+                contents.append({"role": "user", "parts": [response_part, *image_parts]})
             continue
 
+        if message.is_empty_assistant_turn:
+            continue
         role = "model" if message.role is Role.ASSISTANT else "user"
         parts = _message_parts(
             message,
@@ -420,8 +444,11 @@ def _message_parts(
             status_code=None,
         )
     if raw_order is None:
+        # Only the assistant's own text goes as it is: a user message carries its appendix, and
+        # untrusted data its wrapper.
+        text = message.content if message.role is Role.ASSISTANT else message.provider_content()
         default_parts: list[dict[str, Any]] = (
-            [{"text": message.content}] if message.content or not message.tool_calls else []
+            [{"text": text}] if text or not message.tool_calls else []
         )
         default_parts.extend(
             _function_call_part(
@@ -492,7 +519,10 @@ def _message_parts(
                     )
                 if signatures_compatible:
                     part["thoughtSignature"] = thought_signature
-            if block_type != "reasoning" or signatures_compatible:
+            # A stream can end on an empty text part. Only one with a signature is worth sending.
+            if (block_type != "reasoning" or signatures_compatible) and (
+                part["text"] or "thoughtSignature" in part
+            ):
                 ordered_parts.append(part)
             continue
         if block_type == "tool_call" and set(raw_block) == {"type", "id"}:

@@ -250,11 +250,14 @@ class ScheduleBook:
         self._runs = directory / "runs.db"
         self._lock = threading.RLock()
         self._schedules: dict[str, Schedule] | None = None
+        # Entries this version cannot read (an older title limit, an autonomy since removed):
+        # written back as they were rather than erased by the next save.
+        self._unreadable: list[object] = []
         self._next_due: dict[str, tuple[tuple[str, str], datetime | None]] = {}
 
     # ---- catalog ----------------------------------------------------------------------------
 
-    def _load(self) -> dict[str, Schedule]:
+    def _load(self, *, for_update: bool = False) -> dict[str, Schedule]:
         if self._schedules is not None:
             return self._schedules
         schedules: dict[str, Schedule] = {}
@@ -262,13 +265,38 @@ class ScheduleBook:
             raw = json.loads(self._catalog.read_text("utf-8"))
         except FileNotFoundError:
             raw = {"schedules": []}
-        except (OSError, ValueError):
+        except OSError:
+            # Held by a scanner or a backup for a moment, say. Neither remembered as empty nor
+            # written over, which would drop every schedule.
+            if for_update:
+                raise
+            return {}
+        except ValueError:
+            raw = None
+        if not isinstance(raw, dict) or not isinstance(raw.get("schedules"), list):
+            # Not a catalog at all: kept beside it, and the list starts again.
+            try:
+                self._catalog.replace(
+                    self._catalog.with_name(
+                        f"{self._catalog.name}.corrupt-{int(self._clock().timestamp())}"
+                    )
+                )
+            except FileNotFoundError:
+                pass
+            except OSError:
+                if for_update:
+                    raise
+                return {}
             raw = {"schedules": []}
-        for entry in raw.get("schedules", []) if isinstance(raw, dict) else []:
+        unreadable: list[object] = []
+        for entry in raw["schedules"]:
             schedule = self._from_record(entry)
             if schedule is not None:
                 schedules[schedule.id] = schedule
+            else:
+                unreadable.append(entry)
         self._schedules = schedules
+        self._unreadable = unreadable
         return schedules
 
     @staticmethod
@@ -294,7 +322,10 @@ class ScheduleBook:
 
     def _save(self, schedules: dict[str, Schedule]) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
-        document = {"version": 1, "schedules": [item.record() for item in schedules.values()]}
+        document = {
+            "version": 1,
+            "schedules": [*(item.record() for item in schedules.values()), *self._unreadable],
+        }
         temporary = self._catalog.with_name(f"{self._catalog.name}.{uuid4().hex}.tmp")
         temporary.write_text(json.dumps(document, ensure_ascii=False, indent=2), "utf-8")
         temporary.replace(self._catalog)
@@ -313,7 +344,7 @@ class ScheduleBook:
         if not isinstance(raw, dict):
             raise ScheduleRuleError("invalid_schedule")
         with self._lock:
-            schedules = dict(self._load())
+            schedules = dict(self._load(for_update=True))
             schedule_id = raw.get("id")
             existing = schedules.get(schedule_id) if isinstance(schedule_id, str) else None
             if schedule_id is not None and existing is None:
@@ -371,7 +402,7 @@ class ScheduleBook:
 
     def delete(self, schedule_id: str) -> bool:
         with self._lock:
-            schedules = dict(self._load())
+            schedules = dict(self._load(for_update=True))
             if schedules.pop(schedule_id, None) is None:
                 return False
             self._save(schedules)
@@ -381,7 +412,7 @@ class ScheduleBook:
         self, schedule_id: str, moment: datetime, *, enabled: bool | None = None
     ) -> None:
         with self._lock:
-            schedules = dict(self._load())
+            schedules = dict(self._load(for_update=True))
             schedule = schedules.get(schedule_id)
             if schedule is None:
                 return

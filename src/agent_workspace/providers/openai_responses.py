@@ -24,6 +24,7 @@ from agent_workspace.providers.base import (
     provider_stream_error,
     response_http_error,
     stream_request_timeout,
+    with_reported_usage,
 )
 from agent_workspace.providers.streaming import append_event_data, iter_bounded_lines
 
@@ -128,6 +129,7 @@ class OpenAIResponsesAdapter:
         state = _StreamState()
         terminal: dict[str, Any] | None = None
         event_type: str | None = None
+        reported: Usage | None = None
         try:
             async with self._client.stream(
                 "POST",
@@ -149,10 +151,16 @@ class OpenAIResponsesAdapter:
                             "provider sent an invalid response event", status_code=status_code
                         )
                     if event_type == "error":
-                        raise provider_stream_error(_error_detail(event), status_code=status_code)
+                        raise provider_stream_error(
+                            _error_detail(event), status_code=status_code, api_key=self._api_key
+                        )
                     if event_type == "response.failed":
                         failed = _object(event.get("response"), status_code=status_code)
-                        raise provider_stream_error(_error_detail(failed), status_code=status_code)
+                        if failed.get("usage") is not None:
+                            reported = _parse_usage(failed["usage"], status_code=status_code)
+                        raise provider_stream_error(
+                            _error_detail(failed), status_code=status_code, api_key=self._api_key
+                        )
                     if event_type in {"response.completed", "response.incomplete"}:
                         terminal = _object(event.get("response"), status_code=status_code)
                         break
@@ -179,7 +187,11 @@ class OpenAIResponsesAdapter:
                         status_code=status_code,
                         retryable=bool(state.text or state.reasoning or state.items),
                     )
-                finish_reason = _finish_reason(terminal, event_type, status_code=status_code)
+                if terminal.get("usage") is not None:
+                    reported = _parse_usage(terminal["usage"], status_code=status_code)
+                finish_reason = _finish_reason(
+                    terminal, event_type, status_code=status_code, api_key=self._api_key
+                )
                 raw_output = terminal.get("output")
                 if not isinstance(raw_output, list):
                     raise ProviderError(
@@ -203,11 +215,8 @@ class OpenAIResponsesAdapter:
                         yield ProviderDelta(kind=kind, text=suffix)
                 for call in output.calls:
                     yield ProviderDelta(kind=DeltaKind.TOOL_CALL, tool_call=call)
-                if terminal.get("usage") is not None:
-                    yield ProviderDelta(
-                        kind=DeltaKind.USAGE,
-                        usage=_parse_usage(terminal["usage"], status_code=status_code),
-                    )
+                if reported is not None:
+                    yield ProviderDelta(kind=DeltaKind.USAGE, usage=reported)
                 if finish_reason == "stop":
                     finish_reason = (
                         "content_filter"
@@ -223,10 +232,14 @@ class OpenAIResponsesAdapter:
                         _OUTPUT_KEY: output.order,
                     },
                 )
-        except ProviderError:
+        except ProviderError as exc:
+            # A failed or refused response still reports what it cost.
+            with_reported_usage(exc, reported)
             raise
         except httpx.RequestError as exc:
-            raise provider_request_error(exc, status_code=status_code) from None
+            raise with_reported_usage(
+                provider_request_error(exc, status_code=status_code), reported
+            ) from None
 
 
 def _request_input(request: ProviderRequest) -> list[dict[str, Any]]:
@@ -650,12 +663,20 @@ def _tool_arguments(raw: str, finish_reason: str) -> tuple[dict[str, Any], str |
     return value, None
 
 
-def _finish_reason(response: dict[str, Any], event_type: str | None, *, status_code: int) -> str:
+def _finish_reason(
+    response: dict[str, Any],
+    event_type: str | None,
+    *,
+    status_code: int,
+    api_key: str | None = None,
+) -> str:
     expected = "completed" if event_type == "response.completed" else "incomplete"
     if response.get("status") != expected:
         raise ProviderError("provider sent a conflicting response status", status_code=status_code)
     if response.get("error") is not None:
-        raise provider_stream_error(_error_detail(response), status_code=status_code)
+        raise provider_stream_error(
+            _error_detail(response), status_code=status_code, api_key=api_key
+        )
     if expected == "completed":
         return "stop"
     details = _object(response.get("incomplete_details"), status_code=status_code)

@@ -18,6 +18,7 @@ from xml.etree import ElementTree as ET
 
 from agent_workspace.office import xlsx
 from agent_workspace.office.ooxml import A, OfficeError, P, Package, R, escape_attr, escape_text, q
+from agent_workspace.office.pdf import jpeg_orientation
 
 _REL_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
 _PRESENTATION = "ppt/presentation.xml"
@@ -311,16 +312,45 @@ def _free_text(shape_id: int, box: tuple[int, int, int, int], paragraphs: str) -
     )
 
 
-def _picture(shape_id: int, rid: str, box: tuple[int, int, int, int], size: tuple[int, int]) -> str:
+# EXIF orientation of a photo: the turn (in 60000ths of a degree) and flips that show it
+# upright. PowerPoint does not apply EXIF to a picture it is given in the file.
+_TURNS = {
+    2: (0, True, False),
+    3: (10800000, False, False),
+    4: (0, False, True),
+    5: (16200000, True, False),
+    6: (5400000, False, False),
+    7: (5400000, True, False),
+    8: (16200000, False, False),
+}
+
+
+def _picture(
+    shape_id: int,
+    rid: str,
+    box: tuple[int, int, int, int],
+    size: tuple[int, int],
+    orientation: int = 1,
+) -> str:
     x, y, cx, cy = box
-    width, height = size
+    width, height = (size[1], size[0]) if orientation >= 5 else size
     scale = min(cx / width, cy / height)
     draw_w, draw_h = int(width * scale), int(height * scale)
     left, top = x + (cx - draw_w) // 2, y + (cy - draw_h) // 2
+    turn, flip_h, flip_v = _TURNS.get(orientation, (0, False, False))
+    if orientation >= 5:
+        # Laid out as stored, then turned a quarter about its centre into the upright box.
+        left, top = left + (draw_w - draw_h) // 2, top + (draw_h - draw_w) // 2
+        draw_w, draw_h = draw_h, draw_w
+    turned = (
+        (f' rot="{turn}"' if turn else "")
+        + (' flipH="1"' if flip_h else "")
+        + (' flipV="1"' if flip_v else "")
+    )
     return (
         f'<p:pic><p:nvPicPr><p:cNvPr id="{shape_id}" name="Picture {shape_id}"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr>'
         f'<p:blipFill><a:blip r:embed="{rid}"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>'
-        f'<p:spPr><a:xfrm><a:off x="{left}" y="{top}"/><a:ext cx="{draw_w}" cy="{draw_h}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>'
+        f'<p:spPr><a:xfrm{turned}><a:off x="{left}" y="{top}"/><a:ext cx="{draw_w}" cy="{draw_h}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>'
     )
 
 
@@ -485,7 +515,7 @@ def build(
             package.default_type(extension, _IMAGE_TYPES[extension])
             rid = package.add_relationship(part, "image", f"../media/aw_image{media}.{extension}")
             box = picture_box or _full_box(package)
-            shapes.append(_picture(shape_id, rid, box, _image_size(data)))
+            shapes.append(_picture(shape_id, rid, box, _image_size(data), jpeg_orientation(data)))
             shape_id += 1
         if chart:
             rid = _add_chart(package, part, chart)

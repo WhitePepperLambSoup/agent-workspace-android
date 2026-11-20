@@ -86,11 +86,12 @@
     return "\n\n" + t("本机模型第一次回答要先处理一遍工具说明，可能要十几分钟；之后每次几十秒。");
   }
 
-  /** "local", "mask", "send" or "cancel" for a message holding personal numbers. */
-  function askPrivacy(found, local) {
+  /** "local", "mask", "send" or "cancel" for a message holding personal numbers. [cloudOnly]: no on-device model can answer this one. */
+  function askPrivacy(found, local, cloudOnly = false) {
     const numbers = found.map((item) => `${item.kind} ${item.masked}`).join(t("、"));
     return askSheet(t("这条消息里有个人信息"), local
       ? t("要发给云端模型的内容里有：{0}。可以让手机上的 {1} 回答，内容不出手机；或者遮盖后发给云端，AI 只看到前后几位。", numbers, (local.title || local.local_model).split(" · ")[0]) + localFirstNote()
+      : cloudOnly ? t("要发给云端模型的内容里有：{0}。遮盖后 AI 只看到前后几位。", numbers)
       : t("要发给云端模型的内容里有：{0}。遮盖后 AI 只看到前后几位。下载一个本机模型后，这类消息可以在手机上回答。", numbers), [
       ...(local ? [["cpu", t("用本机模型回答"), "local"]] : []),
       ["shield", t("遮盖后发送"), "mask"],
@@ -116,35 +117,45 @@
   }
 
   /**
-   * Before a typed message goes out: false when the user cancelled, else how to send it
-   * ({onDevice} or {waitForNetwork}, or nothing special). May mask the composer's text.
+   * Before a message goes out: false when the user cancelled, else how to send it ({onDevice} or
+   * {waitForNetwork}, {asIs} when the user keeps the numbers, or nothing special). May mask the
+   * composer's text. [given]: a message not typed just now (a retry, a regenerate, a card's button),
+   * whose masked text comes back as {text}. [earlier]: what was decided when it first went ({onDevice}
+   * or {asIs} is not asked again), or {cloudOnly} when only a cloud model can answer it.
    */
-  async function privacyCheck() {
-    const text = elements.promptInput.value;
+  async function privacyCheck(given = null, earlier = null) {
+    const text = given ?? elements.promptInput.value;
     if (privacyAsking) return false;
+    if (earlier?.onDevice) return { onDevice: true };
+    if (earlier?.asIs) return { asIs: true };
     if (!text.trim() || !cloudModel()) return {};
     const found = privateParts(text);
-    const offline = navigator.onLine === false;
+    const offline = given === null && navigator.onLine === false;
     if (!found.length && !offline) return {};
     privacyAsking = true;
     try {
-      const local = await localRoute();
+      const local = earlier?.cloudOnly ? null : await localRoute();
       const choice = routeChoice();
+      const route = {};
       if (found.length) {
-        const decision = choice.numbers === "local" && local ? "local" : choice.numbers === "mask" ? "mask" : await askPrivacy(found, local);
+        const decision = choice.numbers === "local" && local ? "local" : choice.numbers === "mask" ? "mask" : await askPrivacy(found, local, earlier?.cloudOnly);
         if (disposed || decision === "cancel") return false;
         if (decision === "local") return { onDevice: true };
+        if (decision === "send") route.asIs = true;
         if (decision === "mask") {
           let masked = text;
           for (const item of found) masked = masked.split(item.value).join(item.masked);
-          elements.promptInput.value = masked;
-          elements.promptInput.dispatchEvent(new Event("input", { bubbles: true }));
+          if (given !== null) route.text = masked;
+          else {
+            elements.promptInput.value = masked;
+            elements.promptInput.dispatchEvent(new Event("input", { bubbles: true }));
+          }
         }
       }
-      if (!offline) return {};
+      if (!offline) return route;
       const next = choice.offline === "wait" ? "wait" : choice.offline === "local" && local ? "local" : await askOffline(local);
       if (disposed || next === "cancel") return false;
-      return next === "local" ? { onDevice: true } : { waitForNetwork: true };
+      return next === "local" ? { onDevice: true } : { ...route, waitForNetwork: true };
     } finally { privacyAsking = false; }
   }
 
@@ -163,7 +174,7 @@
   window.addEventListener("online", () => {
     if (disposed || activeTask || !retryTask?.offlineFailure || !retryTask.inputText) return;
     retryTask.offlineFailure = false;
-    void sendPrompt(retryTask.inputText, retryTask.attachments);
+    void sendPrompt(retryTask.inputText, retryTask.attachments, retryTask.route);
   });
 
   // A reply the on-device model gave says so above it.

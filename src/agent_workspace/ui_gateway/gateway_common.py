@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
@@ -71,6 +72,9 @@ _HISTORY_MINIMUM_USER_TURNS = 8
 _HISTORY_MAX_EVENTS = 1001
 _HISTORY_ENTRY_BYTES = 24 * 1024
 _HISTORY_ASSISTANT_ENTRY_BYTES = 256 * 1024
+# A reply past that limit travels in pieces: the first in its entry, the others when the window
+# asks. Each also fits the 256 KB the window buffers of messages that arrive out of order.
+_REPLY_PIECE_BYTES = 64 * 1024
 _HISTORY_TOTAL_BYTES = 512 * 1024
 _MAX_BOOTSTRAP_APPROVALS = 32
 _MAX_BOOTSTRAP_STRING_CHARS = 2_048
@@ -182,6 +186,9 @@ _SCHEDULE_RESULT_CHARS = 4000
 # The daily backup is looked at this long after the sidecar starts, then every hour.
 _BACKUP_FIRST_CHECK_SECONDS = 60.0
 _BACKUP_CHECK_SECONDS = 3600.0
+# Old streamed chunks are blanked once a day, starting at the first backup check; a pass that
+# failed is tried again at the next hourly check.
+_COMPACTION_INTERVAL_SECONDS = 24 * 3600.0
 # Office files larger than this are not previewed in the window.
 _DOCUMENT_PREVIEW_BYTES = 64 * 1024 * 1024
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -278,8 +285,11 @@ _SAFE_HISTORY_TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
     "phone_task": frozenset({"task", "operate_phone", "device"}),
 }
 _APPROVAL_DISPLAY_FIELDS = frozenset(
-    {"tool", "toolName", "name", "summary", "supportsSessionScope", "plan", "planTotal"}
+    {"tool", "toolName", "name", "summary", "supportsSessionScope", "plan", "planTotal", "note"}
 )
+# Why an approval asks, said by the window in the user's language: a write to a file every later
+# conversation reads as instructions, after outside content talked to the agent.
+_APPROVAL_NOTES = frozenset({"instruction_file"})
 _COMPACT_CHANGE_EVENTS = frozenset(
     {"sandbox.changeset.created", "sandbox.change.applied", "sandbox.change.reviewed"}
 )
@@ -311,6 +321,17 @@ def _plan_text(value: object) -> str | None:
     return text if Redactor().redact(text) == text else None
 
 
+def _listed_count(items: list[object]) -> int:
+    """How many items a list of call arguments held; a large call reaches the approval
+    prompt with its first items and a closing ``{"omitted_items": n}``."""
+    last = items[-1] if items else None
+    if isinstance(last, Mapping) and set(last) == {"omitted_items"}:
+        omitted = last["omitted_items"]
+        if isinstance(omitted, int) and not isinstance(omitted, bool) and omitted > 0:
+            return len(items) - 1 + omitted
+    return len(items)
+
+
 def _approval_plan(data: Mapping[str, object]) -> tuple[list[dict[str, str]], int] | None:
     """Every change of a file batch, for the user to read before approving it."""
     tool = data.get("tool") or data.get("toolName") or data.get("name")
@@ -333,7 +354,7 @@ def _approval_plan(data: Mapping[str, object]) -> tuple[list[dict[str, str]], in
         if target is not None:
             item["to"] = target
         plan.append(item)
-    return (plan, len(operations)) if plan else None
+    return (plan, _listed_count(operations)) if plan else None
 
 
 def _approval_summary(data: Mapping[str, object]) -> str | None:
@@ -353,7 +374,7 @@ def _approval_summary(data: Mapping[str, object]) -> str | None:
             command = name or "program"
             argv = args.get("argv")
             if isinstance(argv, list):
-                command += f" ({len(argv)} arguments)"
+                command += f" ({_listed_count(argv)} arguments)"
         elif kind == "powershell" or kind == "cmd":
             command = f"{kind} (contents hidden)"
         else:
@@ -363,7 +384,7 @@ def _approval_summary(data: Mapping[str, object]) -> str | None:
     if tool == "organize_files":
         operations = args.get("operations")
         if isinstance(operations, list) and operations:
-            return f"Organize files: {len(operations)} changes"
+            return f"Organize files: {_listed_count(operations)} changes"
     if tool == "delegate_tasks":
         tasks = args.get("tasks")
         if isinstance(tasks, list) and tasks:
@@ -373,10 +394,12 @@ def _approval_summary(data: Mapping[str, object]) -> str | None:
                 if isinstance(task, Mapping)
                 and (title := _approval_display_text(task.get("title")))
             ]
-            text = f"Sub-agents ({len(tasks)}): " + ", ".join(titles)
+            text = f"Sub-agents ({_listed_count(tasks)}): " + ", ".join(titles)
             return text if len(text) <= 160 else text[:157] + "..."
     if tool == "phone_task":
         task = args.get("task")
+        if isinstance(task, Mapping):
+            task = task.get("preview")  # a very long request reaches here as its start
         if isinstance(task, str) and task.strip():
             # The whole request is shown on the phone; the window shows its start.
             line = " ".join(task.split())
@@ -960,3 +983,21 @@ def _json_safe(
     finally:
         seen.discard(identity)
     raise GatewayError("invalid_payload")
+
+
+def _reply_piece(text: str) -> str:
+    """The longest start of ``text`` that takes at most _REPLY_PIECE_BYTES on the wire, which
+    escapes it to ASCII: from one byte a character up to twelve."""
+    fits, too_long = 0, min(len(text), _REPLY_PIECE_BYTES) + 1
+    while too_long - fits > 1:
+        middle = (fits + too_long) // 2
+        if len(json.dumps(text[:middle], ensure_ascii=True)) <= _REPLY_PIECE_BYTES:
+            fits = middle
+        else:
+            too_long = middle
+    return text[:fits]
+
+
+def _utf16_units(text: str) -> bytes:
+    """Reply text as the window counts it, so that an offset means the same on both sides."""
+    return text.encode("utf-16-le", "surrogatepass")

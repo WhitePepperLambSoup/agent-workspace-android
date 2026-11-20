@@ -16,17 +16,28 @@ from typing import Any
 from uuid import uuid4
 
 from agent_workspace.policy import (
+    WORKSPACE_FILE_KINDS,
     WorkspaceExtensionRequest,
+    YoloRules,
     build_custom_tool_extension_request,
     build_mcp_extension_request,
+    workspace_file_requests,
 )
 from agent_workspace.tools.base import ToolError
 from agent_workspace.tools.custom import load_custom_tool_definitions
 from agent_workspace.tools.mcp_host import load_mcp_servers
+from agent_workspace.tools.openapi import OpenApiHttpTool
 
+_KINDS = frozenset({"mcp", "custom_tool"}) | WORKSPACE_FILE_KINDS
 _MAX_ITEMS = 256
 _MAX_STRING = 4096
 _SECRET_ARG = re.compile(r"(?i)(token|secret|password|passwd|api[-_]?key|credential|auth)")
+# The phone has no run_sandbox: YOLO runs its commands in the guarded toolchain without asking, and
+# still asks before operating other apps, sending messages or using Shizuku, and before deleting or
+# replacing what the user kept (memories, app notes, skills: the memory_write effect).
+_YOLO_RULES = YoloRules(
+    host_process=True, ask_effects=frozenset({"external", "destructive", "memory_write"})
+)
 
 
 def _safe(value: object, limit: int = _MAX_STRING) -> str:
@@ -52,7 +63,7 @@ def canonical_extension_digest(
 ) -> str:
     root = Path(workspace).resolve(strict=True)
     source = Path(request.config_source).expanduser().resolve()
-    if request.kind not in {"mcp", "custom_tool"} or not request.identifier:
+    if request.kind not in _KINDS or not request.identifier:
         raise ValueError("unsupported extension identity")
     try:
         source.relative_to(root / ".agent")
@@ -190,7 +201,7 @@ class MobileExtensionConsentStore:
             records = raw["extensions"]
             if len(records) > _MAX_ITEMS or any(
                 not isinstance(item, dict)
-                or item.get("kind") not in {"mcp", "custom_tool"}
+                or item.get("kind") not in _KINDS
                 or item.get("status") not in {"pending", "approved", "denied", "revoked"}
                 or not isinstance(item.get("digest"), str)
                 or re.fullmatch(r"[0-9a-f]{64}", item["digest"]) is None
@@ -234,11 +245,17 @@ class MobileExtensionConsentStore:
             "cwd": _safe(str(Path(request.cwd).resolve()), 1024),
             "config_source": _safe(request.config_source, 1024),
             "executable_sha256": _safe(request.executable_sha256, 128),
+            # Shown with the request: YOLO mode would run its tools without asking.
+            "yolo": request.yolo is True,
         }
 
     def _current_digest(self, record: dict[str, Any]) -> str | None:
         try:
-            if str(record.get("kind")) == "mcp":
+            if str(record.get("kind")) in WORKSPACE_FILE_KINDS:
+                for request in workspace_file_requests(self.workspace):
+                    if request.identifier == record.get("identifier"):
+                        return canonical_extension_digest(request, self.workspace)
+            elif str(record.get("kind")) == "mcp":
                 for server in load_mcp_servers(self.workspace):
                     if server.id == record.get("identifier"):
                         return canonical_extension_digest(
@@ -350,10 +367,20 @@ class MobileExtensionConsentStore:
         for record in self._records:
             if record.get("status") != "approved":
                 continue
+            # A file of .agent took effect when the runtime was built; only a restart undoes it.
+            if (
+                record["kind"] in WORKSPACE_FILE_KINDS
+                and record["identifier"] in self._startup_approved
+            ):
+                self._active.add(record["request_id"])
             for name, tool in tuple(tools.items()):
-                matches = (record["kind"] == "custom_tool" and name == record["identifier"]) or (
-                    record["kind"] == "mcp"
-                    and getattr(tool, "_server_id", None) == record["identifier"]
+                matches = (
+                    (record["kind"] == "custom_tool" and name == record["identifier"])
+                    or (
+                        record["kind"] == "mcp"
+                        and getattr(tool, "_server_id", None) == record["identifier"]
+                    )
+                    or (record["kind"] == "openapi" and isinstance(tool, OpenApiHttpTool))
                 )
                 if matches:
                     tools[name] = _ConsentGuardTool(
@@ -387,6 +414,10 @@ class MobileExtensionConsentStore:
         """Discover new declarations and invalidate approvals whose configuration changed."""
         self._configuration_errors = []
         requests = []
+        try:
+            requests.extend(workspace_file_requests(self.workspace))
+        except OSError:
+            self._configuration_errors.append("Files of .agent could not be read")
         try:
             requests.extend(
                 build_mcp_extension_request(server, self.workspace)
@@ -456,6 +487,7 @@ class MobileExtensionConsentStore:
                     "config_source",
                 )
             }
+            item["yolo"] = record.get("yolo") is True
             was_active = record.get("request_id") in self._active
             item["active"] = was_active and record.get("status") == "approved"
             item["restart_required"] = (record.get("status") == "approved" and not was_active) or (
@@ -493,6 +525,26 @@ async def build_mobile_runtime_async(
 
     previous_mcp = core_runtime.load_mcp_servers
     previous_custom = core_runtime.load_custom_tool_definitions
+    # An approved file that turns out broken is reported on the page; the engine still starts.
+    file_loaders = {
+        "_load_model_optimizer": None,
+        "_load_prompt_assembler": None,
+        "load_scheduled_tasks": (),
+        "load_openapi_file": (),
+    }
+    previous_loaders = {name: getattr(core_runtime, name) for name in file_loaders}
+
+    def suppressing(name: str) -> Any:
+        def load(*arguments: Any) -> Any:
+            try:
+                return previous_loaders[name](*arguments)
+            except Exception:
+                extension_consents._configuration_errors.append(
+                    "A file of .agent is invalid and was suppressed at startup"
+                )
+                return file_loaders[name]
+
+        return load
 
     def mcp_servers(root: Any) -> Any:
         try:
@@ -514,12 +566,15 @@ async def build_mobile_runtime_async(
 
     options.pop("extension_approval_callback", None)
     options.pop("allow_workspace_extensions", None)
+    options["yolo_rules"] = _YOLO_RULES
     core_runtime.load_mcp_servers = mcp_servers
     core_runtime.load_custom_tool_definitions = custom_tools
+    for name in file_loaders:
+        setattr(core_runtime, name, suppressing(name))
     extension_consents.refresh()
     try:
         try:
-            return await core_runtime.build_runtime_async(
+            runtime = await core_runtime.build_runtime_async(
                 workspace,
                 database,
                 provider_config,
@@ -527,6 +582,14 @@ async def build_mobile_runtime_async(
                 allow_workspace_extensions=False,
                 **options,
             )
+            # The core leaves out a server that cannot start, and keeps the others.
+            if runtime.mcp is not None:
+                for identifier in runtime.mcp.startup_failures():
+                    extension_consents._runtime_errors[identifier] = (
+                        "Extension startup failed; verify its executable and MCP handshake, "
+                        "then restart"
+                    )
+            return runtime
         except ToolError:
             if not extension_consents._startup_approved:
                 raise
@@ -535,6 +598,7 @@ async def build_mobile_runtime_async(
                     "Extension startup failed; verify its executable and MCP handshake, "
                     "then restart"
                 )
+            extension_consents._startup_approved.clear()
             return await core_runtime.build_runtime_async(
                 workspace,
                 database,
@@ -546,6 +610,8 @@ async def build_mobile_runtime_async(
     finally:
         core_runtime.load_mcp_servers = previous_mcp
         core_runtime.load_custom_tool_definitions = previous_custom
+        for name, loader in previous_loaders.items():
+            setattr(core_runtime, name, loader)
 
 
 __all__ = [

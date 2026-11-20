@@ -40,6 +40,12 @@ _FINGERPRINT = re.compile(r"[0-9a-f]{64}")
 _LINK = re.compile(r"agentworkspace://pair\?[^\s<>\"']+", re.IGNORECASE)
 _CODE_CHARACTERS = re.compile(r"[A-Z0-9]{8}")
 _DESKTOP_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}")
+# Shown on the page in the user's language (web_companion/static/i18n.js).
+OTHER_COMPUTER = "another computer was paired at this address; remove it here, then pair again"
+NOT_THIS_COMPUTER = (
+    "the computer at this address is not the one paired with this phone; if it was set up again, "
+    "remove it here and pair again"
+)
 _MAX_ADDRESSES = 8
 _RESPONSE_BYTES = 4 * 1024 * 1024
 # What a desktop's runtime document may tell; kept with the host so pages can show the right controls.
@@ -432,6 +438,16 @@ class MobileConnections:
     def _runtime_subset(runtime: dict[str, Any]) -> dict[str, Any]:
         return {key: runtime[key] for key in _RUNTIME_KEYS if key in runtime}
 
+    def _other_computer_at(self, url: str, desktop_id: object) -> bool:
+        """Whether a different computer was paired at this address. A router can give the address to
+        another computer later: that one must not take over the first one's entry and settings (such
+        as running its requests without asking)."""
+        existing = next((host for host in self.list() if host["url"] == url), None)
+        return bool(
+            existing and existing.get("desktop_id") and isinstance(desktop_id, str) and desktop_id
+            and existing["desktop_id"] != desktop_id
+        )
+
     async def _store(
         self,
         name: str,
@@ -466,6 +482,8 @@ class MobileConnections:
         if api == "mobile":
             known += runtime.get("addresses") if isinstance(runtime.get("addresses"), list) else []
         kept_addresses = checked_addresses(known, url)
+        if self._other_computer_at(url, desktop_id):
+            raise ValueError(OTHER_COMPUTER)
         existing = next((host for host in self.list() if host["url"] == url), None)
         if existing is None and desktop_id:
             # The same desktop paired again at another address: keep one entry for it.
@@ -520,6 +538,8 @@ class MobileConnections:
             target = pairing_target(payload.get("url"), payload.get("code"), payload.get("fingerprint"))
         device_name = " ".join(str(payload.get("device_name") or "").split())[:60] or "Android"
         fingerprint = target["fingerprint"]
+        if self._other_computer_at(str(target["url"]), target.get("desktop_id")):
+            raise ValueError(OTHER_COMPUTER)  # Said before the computer gives out a token.
         unreachable = "could not reach the computer; check that both are on the same network or Tailscale"
         # The link's other addresses of the computer (another network adapter, Tailscale): tried in
         # turn when the first cannot be reached. A certificate that does not match stops it.
@@ -663,6 +683,13 @@ class MobileConnections:
         reported = runtime.get("addresses") if isinstance(runtime.get("addresses"), list) else []
         kept = self._json(host["addresses"], [])
         desktop_id = runtime.get("desktop_id")
+        if (
+            host["desktop_id"] and isinstance(desktop_id, str) and _DESKTOP_ID.fullmatch(desktop_id)
+            and desktop_id != host["desktop_id"]
+        ):
+            # Something else answers at its address (another network, a device given the same IP):
+            # nothing it sends is taken as this computer's, and the stored id stays.
+            raise ValueError(NOT_THIS_COMPUTER)
         with connection_database(self.path) as db:
             db.execute(
                 "UPDATE mobile_hosts SET runtime=?, runtime_at=?, addresses=?, desktop_id=COALESCE(?, desktop_id) "
@@ -728,7 +755,8 @@ class MobileConnections:
         token = self._credentials().get(self._key(host_id))
         if not token:
             raise ValueError("host credential is unavailable; pair the host again")
-        partial = target.with_name(f".{target.name}.part")
+        # Its own partial file: two downloads of one name must not write into the same one.
+        partial = target.with_name(f".{target.name}.{uuid4().hex[:12]}.part")
         failure: BaseException | None = None
         for url in self._candidates(host):
             try:

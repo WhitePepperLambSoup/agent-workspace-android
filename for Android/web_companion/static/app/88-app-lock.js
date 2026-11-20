@@ -10,7 +10,7 @@
     $("appLockDelay").disabled = value.enabled !== true;
     $("appLockHint").textContent = value.available === true
       ? t("对话、记忆和 API 设置都存在这台手机上。开启后，重新打开应用或从后台回来时需要解锁；悬浮球、圈选提问这些快捷入口不受影响。")
-      : t("这台手机没有设置锁屏密码（或系统低于 Android 9），无法使用应用锁。");
+      : t("这台手机没有设置锁屏密码（或系统低于 Android 10），无法使用应用锁。");
   }
 
   if (typeof bridge?.getAppLock === "function") {
@@ -18,13 +18,6 @@
     $("appLockToggle").addEventListener("change", () => bridge.setAppLock($("appLockToggle").checked, Number($("appLockDelay").value)));
     $("appLockDelay").addEventListener("change", () => bridge.setAppLock(true, Number($("appLockDelay").value)));
     window.addEventListener("agent-app-lock-changed", (event) => syncAppLock(event.detail));
-  }
-
-  // Tasks from other apps (Tasker, Shortcuts): asked about each time until this is on.
-  if (typeof bridge?.getExternalEntry === "function") {
-    $("externalEntrySection").hidden = false;
-    $("externalEntryToggle").checked = bridge.getExternalEntry() === true;
-    $("externalEntryToggle").addEventListener("change", () => bridge.setExternalEntry($("externalEntryToggle").checked));
   }
 
   // Contacts and location for the personal-info tools (Device & tools page).

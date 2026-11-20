@@ -56,7 +56,9 @@ class CompileLatexTool:
                 "for the bibliography. Pass the main document or any file it includes. Writes "
                 "<name>.pdf beside the document; build files go to .latex-build/. Engine: auto "
                 "picks XeLaTeX for Chinese (ctex) or fontspec documents, else pdfLaTeX; a "
-                "'% !TEX program = ...' comment overrides it. MiKTeX installs no packages here: "
+                "'% !TEX program = ...' comment overrides it. It reads only the document's folder "
+                "and below and the TeX packages: a file named by an absolute or '..' path is not "
+                "read. MiKTeX installs no packages here: "
                 "a missing .sty is reported as a missing file. Use another package, or tell the "
                 "user to install it in MiKTeX Console (or to compile once from the LaTeX editor, "
                 "which offers to install it)."
@@ -103,11 +105,28 @@ class CompileLatexTool:
                 "no TeX engine on this computer: install MiKTeX or TeX Live, or Tectonic "
                 "from the app's LaTeX editor"
             )
+        # The compile reads the workspace and the TeX packages, nothing else on this computer:
+        # the engine is held to the document's folder, and names it would not check are refused
+        # here first.
+        outside = latex_compile.outside_reads(root, main)
+        if outside:
+            raise ToolError(
+                f"not compiled: {self.paths.relative(main)} reads {outside[0]}, which is outside "
+                "the workspace. The compile reads only files in the workspace and the TeX "
+                "packages; copy the file into the workspace and refer to it there"
+                + (f" (also: {', '.join(outside[1:4])})" if len(outside) > 1 else "")
+            )
         try:
             # MiKTeX's install prompt is a window of its own: in a turn nobody may be there to
             # answer it, and the compile would wait for it until the time is up.
             return latex_compile.compile_document(
-                root, main, engines=engines, preference=engine, cancel=cancel, installer=False
+                root,
+                main,
+                engines=engines,
+                preference=engine,
+                cancel=cancel,
+                installer=False,
+                confined=True,
             )
         except latex_compile.CompileError as error:
             raise ToolError(f"cannot compile: {error}") from None

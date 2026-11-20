@@ -96,6 +96,7 @@ class KnowledgeSearchTool:
         },
         side_effect="none",
         capability=Capability.MEMORY_READ,
+        sensitive_result=True,
     )
 
     @property

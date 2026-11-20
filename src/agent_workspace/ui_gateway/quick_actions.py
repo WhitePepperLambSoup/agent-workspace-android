@@ -19,7 +19,9 @@ from agent_workspace.office.ooxml import OfficeError
 from agent_workspace.providers import create_provider
 
 MAX_TEXT = 20_000
-MAX_IMAGE_BYTES = 6 * 1024 * 1024
+# The screenshot travels as base64 inside one message of the window's protocol (1 MiB with its
+# envelope): 700 KiB of PNG is about 0.93 MiB of base64. The window shrinks a larger one to fit.
+MAX_IMAGE_BYTES = 700 * 1024
 TIMEOUT_SECONDS = 120
 
 _INSTRUCTIONS = {

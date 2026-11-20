@@ -22,6 +22,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+import mobile_private_numbers
+
 MAX_ITEMS = 500
 MAX_CHARS = 200
 PROMPT_BUDGET_CHARS = 2000
@@ -44,10 +46,24 @@ _TOPIC_WORDS = {
 _SECRET = re.compile(
     r"(?i)(?:sk-[a-z0-9_-]{12,}"
     r"|(?:api[_ -]?key|password|passwd|密码|口令|验证码|token)\s*(?:[:=：]|是|为)\s*\S{4,}"
+    # "my password is hunter22", "my pin is 1234".
+    r"|(?<![a-z])(?:password|passwd|pwd|pin|passcode)\s+is\s+\S{4,}"
+    # "我的密码 123456", "wifi密码12345678": a value with a digit in it right after the word. Only
+    # ASCII, so "密码学的课" and "password manager" are not taken for one.
+    r"|(?:(?<![a-z])(?:password|passwd|pwd)|密码|口令)\s*(?=[!-~]*\d)[!-~]{4,}"
     # "验证码 386201", "动态码386201", "PIN 1234": a code right after its name, without "是" or ":".
     r"|(?:验证码|校验码|动态码|动态密码|短信码|支付密码|(?<![a-z])(?:pin|otp|passcode))\s*\d{4,8}(?!\d)"
+    # "386201 是您的验证码": the code before its name.
+    r"|(?<!\d)\d{4,8}\s*(?:是|为)?\s*(?:你的|您的)?(?:验证码|校验码|动态码|动态密码|短信码)"
     r"|(?<!\d)\d{15,19}(?!\d)|(?<!\d)\d{17}[xX](?![\dxX]))"
 )
+# Digits written in groups ("6222 0212 3456 7890", "110101 19900307 123X") joined for the number check.
+_DIGIT_GAP = re.compile(r"(?<=\d)[ -]+(?=[\dXx])")
+
+
+def has_secret(text: str) -> bool:
+    """A password, key, code, or ID or card number (with a valid check digit) in [text]."""
+    return _SECRET.search(text) is not None or bool(mobile_private_numbers.find(_DIGIT_GAP.sub("", text)))
 
 
 class MemoryChangeError(ValueError):
@@ -116,7 +132,7 @@ def _clean(content: object) -> str:
         raise MemoryChangeError(
             f"keep each memory to one short fact of at most {MAX_CHARS} characters"
         )
-    if _SECRET.search(text):
+    if has_secret(text):
         raise MemoryChangeError(
             "memories must not contain passwords, keys, codes or ID/card numbers"
         )
@@ -135,10 +151,14 @@ class MobileMemoryStore:
             document = json.loads(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             document = {}
-        except (OSError, ValueError):
-            # A damaged file must not take the engine down; start empty but keep the old copy.
+        except ValueError:
+            # A damaged file must not take the engine down; start empty but keep the old copy,
+            # under its own name so a later damaged file does not replace it. Only for content
+            # that cannot be read: a read that failed once (EIO, too many open files) raises
+            # instead of setting a good file aside.
+            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
             with contextlib.suppress(OSError):
-                self.path.replace(self.path.with_suffix(".damaged.json"))
+                self.path.replace(self.path.with_name(f"{self.path.stem}.damaged-{stamp}.json"))
             document = {}
         items = []
         for item in document.get("items", []) if isinstance(document, dict) else []:
@@ -171,9 +191,12 @@ class MobileMemoryStore:
     def _write(self, document: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(
-            json.dumps({"version": 1, **document}, ensure_ascii=False, indent=1), encoding="utf-8"
-        )
+        # On disk before it replaces the old file: after a power cut the rename can otherwise
+        # land without the content, and the empty file read back as damaged.
+        with temporary.open("w", encoding="utf-8") as output:
+            output.write(json.dumps({"version": 1, **document}, ensure_ascii=False, indent=1))
+            output.flush()
+            os.fsync(output.fileno())
         os.replace(temporary, self.path)
 
     # ---- queries -----------------------------------------------------------------------------

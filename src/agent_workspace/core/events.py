@@ -18,7 +18,11 @@ from agent_workspace.core.models import (
 )
 
 CURRENT_EVENT_SCHEMA_VERSION = 1
-_MAX_RESEARCH_ARTIFACT_BYTES = 128 * 1024
+# What web_fetch can hand back, so that any page it fetched can be saved as a source: up to 60000
+# characters of a page's readable text (up to 4 bytes each in UTF-8) after reading up to 1 MiB of
+# the page, or up to 128 KiB of a raw response. The database checks the same bounds.
+MAX_RESEARCH_CONTENT_BYTES = 60_000 * 4
+MAX_RESEARCH_RESPONSE_BYTES = 1024 * 1024 + 1
 _RESEARCH_MEDIA_TYPES = frozenset(
     {
         "application/json",
@@ -145,14 +149,14 @@ def _validate_research_source(data: dict[str, Any]) -> None:
         or len(url) > 4096
         or (title is not None and (not isinstance(title, str) or len(title) > 500))
         or not isinstance(content, str)
-        or len(content_bytes) > _MAX_RESEARCH_ARTIFACT_BYTES
+        or len(content_bytes) > MAX_RESEARCH_CONTENT_BYTES
         or not _is_sha256(artifact_sha256)
         or hashlib.sha256(content_bytes).hexdigest() != artifact_sha256
         or not _is_sha256(response_sha256)
         or not isinstance(response_bytes, int)
         or isinstance(response_bytes, bool)
         or response_bytes < 0
-        or response_bytes > _MAX_RESEARCH_ARTIFACT_BYTES + 1
+        or response_bytes > MAX_RESEARCH_RESPONSE_BYTES
         or not isinstance(media_type, str)
         or (
             media_type not in _RESEARCH_MEDIA_TYPES
@@ -336,10 +340,16 @@ def _validate_turn_event(event_type: str, data: dict[str, Any]) -> None:
 
 
 def _validate_model_output_delta(data: dict[str, Any]) -> None:
+    # A chunk whose text its turn's final message holds is blanked a month after the turn ended,
+    # keeping how many characters it had (storage.stream_compaction).
+    compacted = data.get("compacted", 1)
     if (
         data.get("kind") not in {"text", "reasoning"}
         or not isinstance(data.get("text"), str)
         or len(data["text"].encode("utf-8")) > 1024 * 1024
+        or type(compacted) is not int
+        or compacted < 1
+        or ("compacted" in data and data["text"] != "")
     ):
         raise ValueError("model.output.delta contains invalid delta metadata")
 

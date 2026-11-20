@@ -1,5 +1,129 @@
 # Changelog
 
+## 2.9.0 — 2026-11-21
+
+2.9.0 集中修复一次全面代码审查发现的问题：手机操作的防护、隐私、权限、备份恢复和稳定性；回复改为边写边显示。升级后不能装回旧版，有几项需要重新确认，见「升级前请看」。Agent Workspace 2.9.0 fixes the problems a full code review found in the phone-control guards, privacy, permissions, backup and restore, and stability, and replies now appear as they are written. After the update the app cannot go back to an older version, and a few things are asked again; see "Before you update".
+
+电脑版 / Desktop app: https://github.com/WhitePepperLambSoup/agent-workspace-desktop
+
+### 中文
+
+**升级前请看**
+
+- 数据库升级到新格式，第一次打开可能比平时多等几十秒。升级后不能再装回 2.8.0 或更早的版本，旧版打不开新数据库。升级前的数据库会留一份副本；存储空间不够放副本时照常升级，并提示一次。
+- YOLO 模式下，MCP 服务器和自定义工具要在它的配置里写 `yolo = true` 才会运行；没写的会被拒绝，并提示改用「仅工作区」模式逐次批准。
+- 手机上的 YOLO 模式以前会拒绝运行命令和操作手机；现在命令直接运行，操作其他应用、发消息和 Shizuku 操作先询问。
+- 其他应用（例如 Tasker）发来的任务按应用和签名证书允许，操作手机每次都问。以前选过「以后都允许」的，要按应用再确认一次。
+- 从备份恢复时，「完全访问」恢复为「仅工作区」，「允许局域网 HTTP」保持关闭，恢复后页面会提示哪些设置被调低，需要时再自己打开。
+- 删除记忆或应用笔记、改写你自己写的记忆、替换你的技能前，每次都先问（完全访问模式除外）。
+- 一轮任务读到网页等外部内容里对 AI 下的指令后，不能再写工作区的说明文件（AGENTS.md 等）。
+
+**手机操作的防护**
+
+- 支付防火墙和删除确认按手指实际落下的位置判断，补上了之前漏掉的按钮；网页里的列表和浏览器里画出来的结账页也能识别。
+- 列表滚动后复用的行，不会再被当成 AI 之前看到的那个控件。
+- 点了「显示密码」的密码框，AI 仍然不读也不输入。
+- 不让 AI 碰的应用，在分屏和小窗里也不让碰；AI 不读取也不操作 Agent Workspace 本身。
+- 手机锁着时，定时任务、通知规则、电脑和其他应用发起的任务在后台屏幕上只能看、不能操作；在手机上输入的任务不受影响。
+- 后台屏幕按它自己的尺寸计算坐标，手机横屏时也不会点偏。
+- 审批卡片显示要输入的文字，以及一批操作里的每一步。
+- 长辈模式：不让 AI 打开开发者选项、调试和屏幕共享，也不打开诈骗常用的页面、不按相关的按钮；任何输入框里的银行卡号和身份证号都会拒绝；设置里的权限开关不能按。
+- 「演示一遍」不记录输入的文字、PIN 和金额。
+- 控制面板里每个应用的记录可以查看和删除。
+
+**隐私和安全**
+
+- 用本机模型回答的那几轮，之后换成云端模型时不会随历史发出去。
+- 通知里的验证码不管写在什么位置都会打码，取件码照常显示；通知里的银行卡号和身份证号不交给模型；通知里有对 AI 下指令的内容时，规则不会不经询问就执行。
+- 回复里来自其他网站的图片，点开之前不加载；Mermaid 图以图片显示。
+- 卡片上的按钮把请求放进输入框，由你发出，不再直接发送。
+- 一个任务不能不经询问就清空记忆或改写所有技能。
+- 手机上的 MCP 服务器和自定义工具也在命令防护下启动；受防护的命令看不到共享存储里的其他文件。
+- AI 用的浏览器不能打开引擎的端口，工作区里的网页读不到机密文件；只有应用自己的控制台页面能读剪贴板。
+- 应用的各个部分发送连接令牌前，先验证对方确实是本应用的引擎，其他应用占用端口时拿不到令牌。
+- 连接电脑：同一地址换成另一台电脑时，不会被当成已配对的那台；通过 HTTP 连接时打开「自动接受」会先提示；自动接受的请求不再告诉模型是你同意的；电脑换了地址也能重新找到。
+- 分享码的指纹加长到 80 位。
+- 设置备份包含不让 AI 操作的应用列表，恢复时只增不减。
+
+**稳定性和其他修复**
+
+- 手机重启或应用更新后，引擎自己启动，不再要求先打开应用。
+- 启动超过一分钟的引擎仍被认作已启动；页面渲染进程崩溃或被系统回收时，应用不再跟着退出；Android 9 上打开应用锁不再崩溃。
+- 回复按模型写出的速度显示，以前 64 KB 以内的回复要等整段写完才出现。很长的回复在停止和重新加载后保持完整。
+- 模型回复中途没有动静时会重试，不再一直等；429 和 5xx 错误等一会儿再发；超出模型窗口的回合裁剪后继续，不再失败。
+- 两个进程能读到对方保存的模型设置和凭据，不再互相覆盖；服务商的自定义请求头和备用 Key 现在能用。
+- 没有网络时发出的消息，引擎重启后仍会发出。
+- 恢复备份：应用做的备份换了文件名也能恢复，设置类型保持不变，不会在几天后把数据回滚。
+- 重装工具链被取消或失败时，保留原来能用的那份。
+- 本机模型：上下文 8192 及以下用精简提示词，32768 及以上单次回复上限恢复为 8192；取消全部生成或卸载模型不再丢失；查看本机模型设置不再清掉模型保留的上下文。
+- 导出、分叉、撤销、教程和回放在所有工作区都能用。
+- 删除对话时，一并删除它的设置和它的子任务、专家对话。
+- 日文、韩文和繁体中文的新对话按第一条消息命名；日文、韩文界面补齐了几处英文。
+- 后台更省电：应用在后台时设置页不再请求引擎，对话里的任务每 5 秒读一次（原来 0.5 秒），无障碍服务不再每 2 秒写一次心跳，任务安静时控制面板少问。
+- 文件：新建 Word 文档的编号列表跨空行继续计数；LaTeX 转 PDF 保留代码和网址里的 % 和缩进；手机照片放进 PDF 和幻灯片时方向正确。
+- 共享核心：同步了电脑版的修复，包括 Word、Excel 和发票文件的处理、Git 工具、MCP 服务器的启动和关闭、用量统计。
+- 安装包里的许可说明带上了每个打包的 npm 包和 CPython 的许可证全文。
+- 覆盖安装即可，数据会保留。
+
+### English
+
+**Before you update**
+
+- The database moves to a new format, so the first start may take some tens of seconds longer than usual. After the update the app cannot go back to 2.8.0 or earlier: older versions cannot open the new database. A copy of the database from before the update is kept; if there is not enough storage for the copy, the update goes ahead and says so once.
+- In YOLO mode, an MCP server or custom tool runs only if its configuration sets `yolo = true`; otherwise it is refused, with a hint to use Workspace mode and approve each run.
+- YOLO mode on the phone used to refuse commands and phone control; now commands run, and operating other apps, sending messages and Shizuku actions are asked first.
+- Tasks from other apps (Tasker, for example) are allowed per app and signing certificate, and operating the phone is asked every time. If you chose "Always allow" before, confirm again for each app.
+- Restoring a backup sets Full access back to Workspace and leaves "Allow LAN HTTP" off; the page then says which settings were lowered, and you can turn them on again yourself.
+- Deleting a memory or app note, rewriting a memory you wrote, or replacing one of your skills is asked every time (except in Full access mode).
+- Once a turn has read instructions to the AI in outside content such as a web page, it can no longer write the workspace's instruction files (AGENTS.md and the like).
+
+**Phone-control guards**
+
+- The payment firewall and the delete check go by where the finger actually lands, and catch buttons they missed before; lists in web pages and checkout pages drawn in a browser are recognised too.
+- A list row reused after scrolling is no longer taken for the control the AI saw earlier.
+- A password field shown with its eye button is still neither read nor typed into.
+- An app kept from the AI is kept from it in split screen and small windows too, and the AI neither reads nor operates Agent Workspace itself.
+- While the phone is locked, tasks started by a schedule, a notification rule, a computer or another app can only look at the background screen, not act on it; tasks you typed on the phone are not affected.
+- The background screen is measured as itself, so taps land in place while the phone is in landscape.
+- The approval card shows the text to be typed and every step of a batch.
+- Elder mode keeps the AI from developer options, debugging and screen sharing, and from the pages and buttons scams rely on; it refuses a card or ID number in any field, and a press on a permission switch in Settings.
+- "Show it once" records no typed text, PIN digits or amounts.
+- The control panel's per-app records can be listed and deleted.
+
+**Privacy and security**
+
+- Turns the on-device model answered are not sent with the history when you switch to a cloud model later.
+- Verification codes in notifications are masked wherever they stand, while pickup codes stay readable; card and ID numbers in notifications do not reach the model; a notification that talks to the AI no longer runs a rule without asking.
+- A picture from another site in a reply loads nothing until you tap it; Mermaid diagrams are shown as pictures.
+- A card's button puts its request in the message box for you to send, instead of sending it unseen.
+- A single task can no longer empty the memory or rewrite every skill without asking.
+- MCP servers and custom tools on the phone start under the command guard, and guarded commands no longer see the rest of shared storage.
+- The AI's browser cannot open the engine's port, and pages in the workspace cannot read secret files; only the app's own console page can read the clipboard.
+- Each part of the app checks that it is talking to the app's own engine before sending the connection token, so another app holding the port gets nothing.
+- Computers: a different computer at a paired computer's address is not taken for it; turning on auto-accept for a computer reached over HTTP warns first; a request accepted automatically no longer tells the model you agreed; a computer that comes back on a new address is found.
+- Share-code fingerprints are now 80 bits.
+- A settings backup includes the apps the AI may not operate, and a restore only adds to that list.
+
+**Stability and other fixes**
+
+- After a reboot or an app update the engine starts by itself instead of asking you to open the app.
+- An engine that takes over a minute to start is still seen as ready; the app no longer closes when its page renderer crashes or is reclaimed; turning on the app lock no longer crashes Android 9.
+- Replies appear as the model writes them; before, a reply under 64 KB showed up only once it was complete. Very long replies stay whole after being stopped and after a reload.
+- A model stream that goes silent is tried again instead of waiting for ever; 429 and 5xx answers are sent again after a wait; a turn that outgrows the model's window is cut to fit instead of failing.
+- Both of the app's processes read the model settings and credentials the other saved, without overwriting them; a provider's custom request headers and backup keys now work.
+- A message sent with no network still goes out after an engine restart.
+- Restoring a backup: a backup the app made can be restored whatever its file name, setting types are kept, and the data is no longer rolled back days later.
+- A cancelled or failed toolchain reinstall keeps the working one.
+- On-device models: contexts of 8192 and below get the compact prompt, and 32768 and above get 8192-token replies again; cancelling all generations or unloading the model is no longer lost; looking at the on-device model settings no longer throws away the model's kept context.
+- Export, fork, undo, the tutorial and replay work in every workspace.
+- Deleting a conversation also deletes its settings and its sub-task and expert conversations.
+- New conversations in Japanese, Korean and Traditional Chinese are named after their first message, and a few English strings in the Japanese and Korean interface are translated.
+- Less battery in the background: settings pages stop asking the engine while the app is in the background, a conversation's task is read every 5 s instead of every 0.5 s, the accessibility service no longer writes a heartbeat every 2 s, and the control panel asks less often while a task is quiet.
+- Files: numbered lists in new Word documents keep counting across blank lines; LaTeX to PDF keeps % signs and indentation in code and web addresses; phone photos go upright into PDFs and slides.
+- Shared core: the desktop app's fixes, including Word, Excel and invoice handling, the Git tools, starting and closing MCP servers, and usage accounting.
+- The notices in the APK carry the full license text of every bundled npm package and of CPython.
+- Install over the existing app; your data is kept.
+
 ## 2.8.0 — 2026-11-02
 
 2.8.0 新增任务回放短片、桌面工作室小组件、「演示一遍」录快捷操作和「以后都这样做」；运行中的任务显示计划步骤和用时；AI 运行的命令碰不到应用自己的数据。Agent Workspace 2.8.0 adds task replay films, a studio widget for the home screen, recording a shortcut by showing it once, and turning an answer into a scheduled task; a running task shows its plan and the time taken, and the commands the AI runs can no longer reach the app's own data.

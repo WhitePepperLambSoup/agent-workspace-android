@@ -21,6 +21,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import mobile_private_numbers
+
 _LOCK = threading.Lock()
 _PIN = re.compile(r"\d{4,6}")
 _PHONE = re.compile(r"\+?[0-9][0-9 -]{2,19}")
@@ -144,15 +146,41 @@ def update(changes: Any) -> dict[str, Any]:
 
 
 # Apps that let someone else see and use the phone: 向日葵, ToDesk, TeamViewer, AnyDesk, RustDesk,
-# Splashtop, Microsoft Remote Desktop (also kept from the agent's screen by ElderGuard.kt).
+# Splashtop, Microsoft Remote Desktop, AirDroid, Chrome Remote Desktop, RealVNC, and meetings whose
+# screen sharing such scams use: 腾讯会议, Zoom, 钉钉 (also kept from the agent's screen by ElderGuard.kt).
 _REMOTE_CONTROL = ("com.oray.sunlogin", "youqu.android.todesk", "com.teamviewer.", "com.anydesk.",
-                   "com.carriez.flutter_hbb", "com.splashtop.", "com.microsoft.rdc.")  # fmt: skip
-_REMOTE_NAMES = re.compile(r"向日葵|todesk|teamviewer|anydesk|rustdesk|远程控制|远程协助", re.IGNORECASE)
+                   "com.carriez.flutter_hbb", "com.splashtop.", "com.microsoft.rdc.", "com.sand.airdroid",
+                   "com.google.chromeremotedesktop", "com.realvnc.", "com.tencent.wemeet.", "us.zoom.",
+                   "com.alibaba.android.rimet")  # fmt: skip
+_REMOTE_NAMES = re.compile(
+    r"向日葵|todesk|teamviewer|anydesk|rustdesk|远程控制|远程协助|远程桌面|airdroid|vnc|腾讯会议|zoom|钉钉|屏幕共享",
+    re.IGNORECASE,
+)
 _ID_WEIGHTS = (7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2)
 # A code on its own in a message (4 to 8 digits): what scams ask an older person to pass on.
 _CODE = re.compile(r"(?<!\d)\d{4,8}(?!\d)")
+# A number said with its unit is not a code: a year, an amount, a room, a date or a time ("2026 年",
+# "1500 元", "¥1500", "1203室"), nor the year of a written date ("2026-11-05"). Unless the message
+# also names a code (mobile_notification_journal.names_code), when every such number counts.
+_UNIT_AFTER = re.compile(r"\s?(?:年|元|块|圆|角|号|室|楼|层|栋|单元|月|日|点|时|分|秒|米|斤|公斤|克|岁|个|人|次|路|万|千|百)")
+_UNIT_BEFORE = re.compile(r"(?:[¥￥$€£]|第|No\.?)\s?$", re.IGNORECASE)
+_DATE = re.compile(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}")
 _NOT_DONE = "Not done (elder mode): "
 _TELL = " Tell them plainly that you did not do it and why, and that a family member can help if it is really needed."
+# Where an app is given power over the phone: what someone on the line asks an older person to turn
+# on first. manage_app opens these for one app, open_page the system's own pages.
+_POWER_APP_PAGES = frozenset({"accessibility", "device_admin", "install_others", "notification_access", "overlay", "usage_access"})
+# The list of apps and an app's own page lead to the same grants and to removing apps.
+_POWER_SYSTEM_PAGES = frozenset({"accessibility", "security", "developer", "apps", "app_details"})
+# A control that deletes or hands something over. Saying no is not one (不允许, 取消授权, Don't allow).
+_POWER_CONTROL = re.compile(
+    r"删除|卸载|清除数据|恢复出厂|(?<![不未])允许|(?<![不未消])授权|激活|"
+    r"\b(?:delete|uninstall|clear (?:data|storage)|factory reset|authori[sz]e|activate)\b|"
+    r"(?<!don't )(?<!don’t )(?<!not )\ballow\b",
+    re.IGNORECASE,
+)
+# A longer text is a row or a headline that mentions the word, not such a control.
+_MAX_CONTROL_TEXT = 24
 
 
 def _valid_id(value: str) -> bool:
@@ -189,30 +217,69 @@ def _texts(arguments: dict[str, Any]) -> list[str]:
     return [value for value in found if isinstance(value, str) and value]
 
 
-def _launches(arguments: dict[str, Any]) -> list[dict[str, Any]]:
-    steps = [step for step in arguments.get("steps") or [] if isinstance(step, dict)]
-    return [item for item in [arguments, *steps] if item.get("action") == "launch_app"]
+def _actions(arguments: dict[str, Any]) -> list[dict[str, Any]]:
+    """The action and the steps of a batch or a repeat, each of which is an action of its own."""
+    return [arguments, *(step for step in arguments.get("steps") or [] if isinstance(step, dict))]
+
+
+def _carries_code(text: str) -> bool:
+    """Whether a message to send has what could be a verification code in it."""
+    from mobile_notification_journal import names_code
+
+    if names_code(text):
+        return _CODE.search(text) is not None
+    dates = [match.span() for match in _DATE.finditer(text)]
+    for match in _CODE.finditer(text):
+        if any(start <= match.start() < end for start, end in dates):
+            continue
+        if _UNIT_AFTER.match(text, match.end()) or _UNIT_BEFORE.search(text, 0, match.start()):
+            continue
+        return True
+    return False
+
+
+def _names_power_control(text: Any) -> bool:
+    return isinstance(text, str) and len(text) <= _MAX_CONTROL_TEXT and _POWER_CONTROL.search(text) is not None
 
 
 def elder_refusal(tool: str, arguments: Any) -> str | None:
     """Why 长辈模式 refuses this step without asking, for the model; None when it goes ahead.
 
     Only what scams on older people need, or what cannot be undone: card and ID numbers typed or
-    sent anywhere, a code sent in a message, remote-control apps, deleting files, removing apps."""
+    sent anywhere, a code sent in a message, remote-control apps, giving an app power over the
+    phone, deleting files, removing apps, and pressing what deletes or grants."""
     arguments = arguments if isinstance(arguments, dict) else {}
     if tool == "delete_path":
         return _NOT_DONE + "files are not deleted." + _TELL
     if tool == "manage_app" and arguments.get("page") == "uninstall":
         return _NOT_DONE + "apps are not removed." + _TELL
-    for launch in _launches(arguments):
-        name = str(launch.get("package_name") or "")
-        if name.startswith(_REMOTE_CONTROL) or _REMOTE_NAMES.search(str(launch.get("app_name") or "")):
-            return (_NOT_DONE + "remote-control apps let someone else use the phone, which is how many scams "
-                    "work." + _TELL)  # fmt: skip
-    texts = _texts(arguments)
-    if any(personal_numbers(text) for text in texts):
+    if tool == "manage_app" and arguments.get("page") in _POWER_APP_PAGES:
+        return (_NOT_DONE + "this page gives an app power over the phone, which is how many scams take it "
+                "over." + _TELL)  # fmt: skip
+    for action in _actions(arguments):
+        kind = action.get("action")
+        if kind == "launch_app":
+            name = str(action.get("package_name") or "")
+            if name.startswith(_REMOTE_CONTROL) or _REMOTE_NAMES.search(str(action.get("app_name") or "")):
+                return (_NOT_DONE + "remote-control apps let someone else use the phone, which is how many scams "
+                        "work." + _TELL)  # fmt: skip
+        if kind == "open_page" and action.get("page") in _POWER_SYSTEM_PAGES:
+            return (_NOT_DONE + "these settings give apps power over the phone, which is how many scams take it "
+                    "over." + _TELL)  # fmt: skip
+        # needs_confirmation stops a tap on what deletes, clears or uninstalls until confirmed=true;
+        # here nobody is asked, so nothing confirms it.
+        if action.get("confirmed") is True:
+            return _NOT_DONE + "a control that deletes, clears, uninstalls or stops an app is not pressed." + _TELL
+        if (kind == "tap_text" or (kind == "scroll_to_text" and action.get("tap") is True)) and _names_power_control(
+            action.get("text")
+        ):
+            return _NOT_DONE + "a control that deletes something or grants a permission is not pressed." + _TELL
+    # Any field: a search query, a web address, a calendar title and a note carry a number off as
+    # well as typed text does.
+    if any(personal_numbers(text) for text in mobile_private_numbers.strings(arguments)):
         return _NOT_DONE + "bank card and ID numbers are never typed or sent." + _TELL
-    if tool in {"notification_reply", "compose_sms"} and any(_CODE.search(text) for text in texts):
+    texts = _texts(arguments)
+    if tool in {"notification_reply", "compose_sms"} and any(_carries_code(text) for text in texts):
         return (_NOT_DONE + "a message with a code in it is not sent: passing on verification codes is how "
                 "many scams work." + _TELL)  # fmt: skip
     return None
@@ -264,11 +331,15 @@ def elder_session(session_id: Any) -> bool:
     return value.get("enabled") is True and value.get("session_id") == session_id
 
 
-def elder_system_suffix() -> str:
-    """The system prompt section while the mode is on; empty otherwise."""
-    value = _load()
-    if value.get("enabled") is not True:
+def elder_system_suffix(session_id: Any) -> str:
+    """The system prompt section for a task in the mode's own conversation; empty otherwise.
+
+    Like the approval rules, it is for that conversation only: schedules, notification rules and
+    other conversations still ask before acting and may use tables, code and links."""
+    if not elder_session(session_id):
         return ""
+    with _LOCK:
+        value = _load()
     family = value.get("family_name") or ""
     who = f" ({family})" if family else ""
     return (

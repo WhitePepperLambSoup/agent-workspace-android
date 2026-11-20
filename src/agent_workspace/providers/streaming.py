@@ -23,13 +23,17 @@ async def iter_bounded_lines(
         )
     buffer = bytearray()
     total = 0
-    async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+    # No chunk_size: httpx would hold the data back until that much had arrived, and a reply would
+    # reach the reader all at once at its end. A read never returns more than 64 KB anyway.
+    async for chunk in response.aiter_bytes():
         total += len(chunk)
         if total > MAX_STREAM_BYTES:
             raise ProviderError("provider stream exceeded its size limit", status_code=status_code)
+        # Reads can be small now, so a long line is not searched again from its start each time.
+        scanned = len(buffer)
         buffer.extend(chunk)
         while True:
-            newline = buffer.find(b"\n")
+            newline = buffer.find(b"\n", scanned)
             if newline < 0:
                 if len(buffer) > MAX_LINE_BYTES:
                     raise ProviderError(
@@ -39,6 +43,7 @@ async def iter_bounded_lines(
                 break
             raw_line = bytes(buffer[:newline])
             del buffer[: newline + 1]
+            scanned = 0
             if raw_line.endswith(b"\r"):
                 raw_line = raw_line[:-1]
             yield _decode_line(raw_line, status_code=status_code)

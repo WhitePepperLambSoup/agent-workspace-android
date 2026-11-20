@@ -43,30 +43,44 @@ internal object PhoneMemory {
     }
 
     // ---- How requests in an app were done -------------------------------------------------------
+    // Listed and deleted with the app's notes (Settings → App notes, mobile_app_notes.py), off when
+    // app notes are off, and sent to the agent as records from earlier tasks, not as instructions.
+
+    private val LONG_NUMBER = Regex("\\d{4,}")
+
+    /** A request or step as kept: long numbers (codes, phone numbers, amounts) taken out. */
+    fun readable(text: String): String = LONG_NUMBER.replace(text, "…")
+
+    /** Whether the user turned app notes off (agent-data/app-notes.json, written by the engine). */
+    private fun appNotesOff(context: Context): Boolean = runCatching {
+        !JSONObject(File(context.filesDir, "agent-data/app-notes.json").readText()).optBoolean("enabled", true)
+    }.getOrDefault(false)
 
     /** The last few requests done in [packageName] and their steps, as one line for the agent. */
     @Synchronized
     fun tips(context: Context, packageName: String?): String? {
-        if (packageName == null) return null
+        if (packageName == null || appNotesOff(context)) return null
         val entries = runCatching { JSONObject(read(context, TIPS) ?: "{}").optJSONArray(packageName) }.getOrNull() ?: return null
         val lines = (0 until entries.length()).mapNotNull { entries.optJSONObject(it) }.map { entry ->
             val steps = entry.optJSONArray("steps") ?: JSONArray()
-            "“${entry.optString("request").take(80)}”: " + (0 until steps.length()).joinToString(" → ") { steps.optString(it) }
+            "“${readable(entry.optString("request")).take(80)}”: " +
+                (0 until steps.length()).joinToString(" → ") { readable(steps.optString(it)) }
         }
         return lines.joinToString("; ").take(1800).ifEmpty { null }
     }
 
     @Synchronized
     fun rememberTip(context: Context, packageName: String?, request: String?, steps: List<String>) {
-        if (packageName == null || request.isNullOrBlank() || steps.isEmpty()) return
+        if (packageName == null || request.isNullOrBlank() || steps.isEmpty() || appNotesOff(context)) return
         val all = runCatching { JSONObject(read(context, TIPS) ?: "{}") }.getOrDefault(JSONObject())
         val previous = all.optJSONArray(packageName) ?: JSONArray()
-        val kept = JSONArray().put(JSONObject().put("request", request.take(200))
-            .put("steps", JSONArray(steps.take(20).map { it.take(60) })).put("at", System.currentTimeMillis()))
+        val asked = readable(request).take(200)
+        val kept = JSONArray().put(JSONObject().put("request", asked)
+            .put("steps", JSONArray(steps.take(20).map { readable(it).take(60) })).put("at", System.currentTimeMillis()))
         for (index in 0 until previous.length()) {
             val entry = previous.optJSONObject(index) ?: continue
             if (kept.length() >= TIPS_PER_APP) break
-            if (entry.optString("request") != request.take(200)) kept.put(entry)
+            if (entry.optString("request") != asked) kept.put(entry)
         }
         all.put(packageName, kept)
         // At most a hundred apps are remembered: the oldest go.
@@ -137,7 +151,8 @@ internal object PhoneMemory {
 
     private val PACKAGE = Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)+")
     private val KEYS = setOf("back", "home", "recents", "notifications")
-    private val DIRECTIONS = setOf("up", "down", "left", "right")
+    // As the scroll action takes them (AndroidSystemBridge): top and bottom go all the way.
+    private val DIRECTIONS = setOf("up", "down", "left", "right", "top", "bottom")
 
     /** Steps as AgentAccessibilityService records them (at most 60), with nothing else kept. */
     fun cleanSteps(steps: JSONArray): List<JSONObject> = (0 until minOf(steps.length(), 60)).map { index ->

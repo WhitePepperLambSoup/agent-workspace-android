@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -171,27 +172,51 @@ def included_file(relative):
     return relative.suffix in _SOURCE_SUFFIXES or name in {"gradlew", ".gitattributes"}
 
 
-def export_source(source_root, output):
+def _git_files(source_root, *, untracked=False):
+    """The files git tracks under what is exported (untracked: the ones it does not track and does
+    not ignore), or None when the source is not a git checkout."""
+    roots = ["src/agent_workspace", "for Android", ".github/workflows/android.yml", *sorted(_ROOT_FILES)]
+    command = ["git", "-C", str(source_root), "ls-files", "-z"]
+    if untracked:
+        command += ["--others", "--exclude-standard"]
+    try:
+        result = subprocess.run([*command, "--", *roots], capture_output=True, check=True, timeout=300)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return [source_root / name for name in sorted(result.stdout.decode("utf-8").split("\0")) if name]
+
+
+def export_source(source_root, output, *, include_untracked=False):
+    """Export the Android source. In a git checkout only what git tracks goes in (with
+    include_untracked, also files it neither tracks nor ignores, named in the manifest): walking
+    the folder took in ignored local files (logs saved as .txt, notes, upload folders). A source
+    tree without git (an export unpacked again) is walked."""
     source_root, output = Path(source_root).resolve(), Path(output).resolve()
     files = []
-    paths = [source_root / name for name in sorted(_ROOT_FILES)]
-    paths.append(source_root / ".github/workflows/android.yml")
-    for relative_root in (Path("src/agent_workspace"), Path("for Android")):
-        directory_root = source_root / relative_root
-        if not directory_root.is_dir() or any(
-            (source_root / Path(*relative_root.parts[:count])).is_symlink()
-            for count in range(1, len(relative_root.parts) + 1)
-        ):
-            continue
-        for directory, directories, names in os.walk(directory_root, followlinks=False):
-            directories[:] = sorted(
-                name
-                for name in directories
-                if name.lower() not in _EXCLUDED_DIRS
-                and name != "assets"
-                and not (Path(directory) / name).is_symlink()
-            )
-            paths.extend(Path(directory) / name for name in sorted(names))
+    untracked = []
+    paths = _git_files(source_root)
+    if paths is not None and include_untracked:
+        untracked = _git_files(source_root, untracked=True) or []
+        paths = sorted({*paths, *untracked})
+    if paths is None:
+        paths = [source_root / name for name in sorted(_ROOT_FILES)]
+        paths.append(source_root / ".github/workflows/android.yml")
+        for relative_root in (Path("src/agent_workspace"), Path("for Android")):
+            directory_root = source_root / relative_root
+            if not directory_root.is_dir() or any(
+                (source_root / Path(*relative_root.parts[:count])).is_symlink()
+                for count in range(1, len(relative_root.parts) + 1)
+            ):
+                continue
+            for directory, directories, names in os.walk(directory_root, followlinks=False):
+                directories[:] = sorted(
+                    name
+                    for name in directories
+                    if name.lower() not in _EXCLUDED_DIRS
+                    and name != "assets"
+                    and not (Path(directory) / name).is_symlink()
+                )
+                paths.extend(Path(directory) / name for name in sorted(names))
     for path in paths:
         relative = path.relative_to(source_root)
         if (
@@ -218,6 +243,12 @@ def export_source(source_root, output):
             for name, data in files
         },
     }
+    exported = {name for name, _data in files}
+    added = sorted(
+        name for name in (path.relative_to(source_root).as_posix() for path in untracked) if name in exported
+    )
+    if added:
+        manifest["untracked_files"] = added
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + ".tmp")
     with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -239,8 +270,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--source", type=Path, default=Path(__file__).resolve().parent.parent)
+    parser.add_argument(
+        "--include-untracked",
+        action="store_true",
+        help="also export files git neither tracks nor ignores (each is listed)",
+    )
     arguments = parser.parse_args()
-    manifest = export_source(arguments.source, arguments.output)
+    manifest = export_source(arguments.source, arguments.output, include_untracked=arguments.include_untracked)
+    for name in manifest.get("untracked_files", []):
+        print(f"not tracked by git: {name}")
     print(
         f"Exported {len(manifest['files'])} source files; "
         "inspect the archive before public distribution"

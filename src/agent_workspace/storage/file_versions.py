@@ -13,6 +13,7 @@ import os
 import re
 import tempfile
 import time
+from collections.abc import Container
 from pathlib import Path
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -63,8 +64,22 @@ class FileVersions:
             return None
         return data if hashlib.sha256(data).hexdigest() == digest else None
 
-    def prune(self, *, now: float | None = None) -> int:
-        """Remove versions past the age limit, then the oldest beyond the size budget."""
+    def prune(
+        self,
+        *,
+        now: float | None = None,
+        keep: Container[str] | None = None,
+        grace_seconds: float = 0.0,
+        keep_for_seconds: float | None = None,
+    ) -> int:
+        """Remove versions past the age limit, then the oldest beyond the size budget.
+
+        ``keep``: digests something still needs (an undo, a change list); they are never removed
+        and still count towards the budget. ``keep_for_seconds``: they are kept only while they
+        were kept or used within this long; older ones go like any other once past the age limit
+        or the budget, oldest first. ``grace_seconds``: versions kept or used more recently stay,
+        such as one a tool call has kept but not yet recorded.
+        """
         if not self.root.is_dir():
             return 0
         moment = time.time() if now is None else now
@@ -78,16 +93,45 @@ class FileVersions:
         removed = 0
         kept: list[tuple[float, int, Path]] = []
         for modified, size, path in entries:
-            if moment - modified > self.max_age_seconds:
+            if moment - modified > self.max_age_seconds and self._removable(
+                path, modified, moment, keep, grace_seconds, keep_for_seconds
+            ):
                 path.unlink(missing_ok=True)
                 removed += 1
             else:
                 kept.append((modified, size, path))
         total = sum(size for _, size, _ in kept)
-        for _, size, path in sorted(kept):
+        for modified, size, path in sorted(kept):
             if total <= self.max_bytes:
                 break
+            if not self._removable(path, modified, moment, keep, grace_seconds, keep_for_seconds):
+                continue
             path.unlink(missing_ok=True)
             total -= size
             removed += 1
         return removed
+
+    @staticmethod
+    def _removable(
+        path: Path,
+        modified: float,
+        moment: float,
+        keep: Container[str] | None,
+        grace_seconds: float,
+        keep_for_seconds: float | None = None,
+    ) -> bool:
+        if (
+            keep is not None
+            and path.stem in keep
+            and (keep_for_seconds is None or moment - modified < keep_for_seconds)
+        ):
+            return False
+        if grace_seconds <= 0:
+            return True
+        if moment - modified < grace_seconds:
+            return False
+        try:
+            # Kept again (keep() touches it) since the listing: in use.
+            return path.stat().st_mtime == modified
+        except OSError:
+            return False

@@ -337,6 +337,21 @@ def crossref_lookup(doi: str, fetch: Fetcher, timeout: int) -> Work | None:
     return crossref_work(message) if isinstance(message, dict) else None
 
 
+def doi_registered(doi: str, fetch: Fetcher, timeout: int) -> bool | None:
+    """Whether doi.org knows the DOI, or None when it could not be asked. Crossref holds only the
+    DOIs it registered: those of DataCite, mEDRA, JaLC or ISTIC (most Chinese journals) are
+    missing there, and OpenAlex does not have all of them either."""
+    try:
+        document = json.loads(fetch(f"https://doi.org/api/handles/{quote(doi, safe='/')}", timeout))
+    except ToolError as exc:
+        return False if "status 404" in str(exc) else None
+    except ValueError:
+        return None
+    if not isinstance(document, dict):
+        return None
+    return document.get("responseCode") == 1
+
+
 def crossref_match(citation: str, fetch: Fetcher, timeout: int, rows: int = 3) -> list[Work]:
     parameters = {"query.bibliographic": citation[:500], "rows": rows}
     document = json.loads(fetch("https://api.crossref.org/works?" + urlencode(parameters), timeout))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
@@ -60,6 +61,8 @@ from .web_search import WebSearchTool
 
 if TYPE_CHECKING:
     from agent_workspace.application.background_jobs import BackgroundJobManager
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _offered(tool: Tool) -> bool:
@@ -189,6 +192,20 @@ class ToolRegistry:
             raise ValueError(f"checkpointed tool must accept execution context: {name}")
         check_tool_schema(tool.spec)
         self._tools[name] = tool
+
+    def register_unless_taken(self, tool: Tool) -> bool:
+        """Register a tool a workspace declares (``.agent/tools``) unless its name is taken.
+
+        Registered after the built-in, MCP and OpenAPI tools: a custom tool called read_file
+        is left out with a warning instead of failing every runtime start of the workspace.
+        """
+        if tool.spec.name in self._tools:
+            _LOGGER.warning(
+                "custom tool %r is not available: a built-in tool has that name", tool.spec.name
+            )
+            return False
+        self.register(tool)
+        return True
 
     def get(self, name: str) -> Tool:
         try:

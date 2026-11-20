@@ -8,7 +8,7 @@ from uuid import uuid4
 from agent_workspace.application.ports import EventStore, ToolExecutionContext
 from agent_workspace.core.events import Event, validate_event_payload
 from agent_workspace.core.models import Capability, MemoryItem, ToolSpec
-from agent_workspace.core.ranking import rank_by_bm25
+from agent_workspace.core.ranking import bm25_scores, tokenize
 
 from .base import ToolArgumentError, json_result, optional_int, require_string
 
@@ -20,9 +20,11 @@ async def _rank_memories(
     *,
     workspace: str | None = None,
 ) -> list[MemoryItem]:
-    if not query.strip() or len(memories) <= 1:
+    if not query.strip() or not memories:
         return memories[:limit]
     documents = [memory.content for memory in memories]
+    if len(memories) == 1:
+        return _keyword_matches(query, memories, limit)
     try:
         from agent_workspace.core.embeddings import (
             EmbeddingIndexError,
@@ -53,8 +55,23 @@ async def _rank_memories(
                 await client.aclose()
     except ImportError:
         pass
-    order = rank_by_bm25(query, documents)
-    return [memories[index] for index in order][:limit]
+    return _keyword_matches(query, memories, limit)
+
+
+def _keyword_matches(query: str, memories: list[MemoryItem], limit: int) -> list[MemoryItem]:
+    """Memories that share a word (or, in Chinese, two characters) with the query or its tags,
+    best first; a query with no such word falls back to a plain text match."""
+    texts = [" ".join((memory.content, *memory.tags)) for memory in memories]
+    if not tokenize(query):
+        wanted = query.casefold()
+        return [
+            memory
+            for memory, text in zip(memories, texts, strict=True)
+            if wanted in text.casefold()
+        ][:limit]
+    scores = bm25_scores(query, texts)
+    order = sorted(range(len(memories)), key=lambda index: (-scores[index], index))
+    return [memories[index] for index in order if scores[index] > 0][:limit]
 
 
 class MemorySearchTool:
@@ -98,7 +115,10 @@ class MemorySearchTool:
         if not isinstance(query, str) or len(query) > 512:
             raise ToolArgumentError("'query' must be a string of at most 512 characters")
         limit = optional_int(arguments, "limit", 20, minimum=1, maximum=100)
-        memories = self._store.list_memories(session.workspace, query=query, limit=100)
+        # The newest 500 are all candidates and the ranking picks among them: filtering on the
+        # whole query as one substring first made "what coffee do I drink" miss "I like
+        # americanos" and left the semantic ranking nothing to rank.
+        memories = self._store.list_memories(session.workspace, limit=500)
         ranked = await _rank_memories(query, memories, limit, workspace=session.workspace)
         return json_result({"memories": [_memory_data(memory) for memory in ranked]})
 

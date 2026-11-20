@@ -110,18 +110,24 @@ def classify_prompt_injection(
 ) -> PromptInjectionAssessment:
     if not isinstance(text, str):
         raise ValueError("prompt text must be a string")
-    allowed = {instruction.casefold() for instruction in allowlisted_instructions}
-    for safe in _SAFE_TERMS:
-        if safe in text.casefold():
-            allowed.add(safe)
+    lowered = text.casefold()
+    allowed = {instruction.casefold() for instruction in allowlisted_instructions if instruction}
+    allowed.update(_SAFE_TERMS)
+    # A safe phrase only excuses the words it covers. Excusing every match that
+    # happens to be a substring of it would let one harmless sentence anywhere
+    # in a page clear "ignore previous instructions" everywhere else.
+    safe_spans = [
+        (found.start(), found.end())
+        for safe in allowed
+        for found in re.finditer(re.escape(safe), lowered)
+    ]
     triggered: list[str] = []
     matched: list[str] = []
     scores: list[float] = []
-    lowered = text.casefold()
     for pattern, score, rule in _RULES:
-        for match in re.finditer(pattern, lowered, flags=re.IGNORECASE):
+        for match in re.finditer(pattern, lowered, flags=re.IGNORECASE | re.MULTILINE):
             matched_text = match.group(0)
-            if any(matched_text in instruction for instruction in allowed):
+            if any(start <= match.start() and match.end() <= end for start, end in safe_spans):
                 continue
             triggered.append(rule)
             matched.append(matched_text)

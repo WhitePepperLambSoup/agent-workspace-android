@@ -128,7 +128,8 @@ class Ran:
 
 def _drain(stream: Any, kept: _Kept) -> None:
     try:
-        while chunk := stream.read(65536):
+        # read1: read() keeps what it has until the pipe ends, which an ssh master can put off.
+        while chunk := stream.read1(65536):
             kept.add(chunk)
     except (OSError, ValueError):
         return

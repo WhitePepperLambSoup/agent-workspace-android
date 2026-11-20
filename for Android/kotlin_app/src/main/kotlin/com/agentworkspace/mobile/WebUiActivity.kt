@@ -85,7 +85,6 @@ class WebUiActivity : ComponentActivity() {
     companion object {
         /** Start-up help (logs, updates, model settings) shows after this long on the loading screen. */
         private const val STARTUP_HELP_DELAY_MS = 8000L
-        private val IDENTITY_CONTEXT = "agent-workspace-mobile-identity-v1\n".toByteArray(Charsets.US_ASCII)
         /** Consecutive failed identity checks (about 0.5–1.5 s each) before the engine process is replaced. */
         private const val ENGINE_UNRESPONSIVE_ATTEMPTS = 16
         /** Waits (0.5 s each) for a start-up to publish its token before the engine process is replaced. */
@@ -107,6 +106,8 @@ class WebUiActivity : ComponentActivity() {
     private lateinit var rootLayout: FrameLayout
     private var pageDark = false
     private lateinit var webView: WebView
+    /** The console's renderer crashed or was reclaimed; the activity is being built again. */
+    private var rendererGone = false
     private lateinit var loadingContainer: FrameLayout
     private lateinit var startupAnimation: StartupAnimationView
     private lateinit var startupInfo: LinearLayout
@@ -482,6 +483,9 @@ class WebUiActivity : ComponentActivity() {
     }
 
     private fun readClipboardText(): String {
+        // The clipboard can hold a code or a password: only the app's own console page may read it,
+        // as only it may pair, pick files or look for computers.
+        if (!trustedWorkspacePage || isDestroyed || isFinishing) return JSONObject().put("ok", false).put("text", "").toString()
         val clip = runCatching { getSystemService(android.content.ClipboardManager::class.java)?.primaryClip }.getOrNull()
         val text = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString()?.take(65536)
         return JSONObject().put("ok", text != null).put("text", text ?: "").toString()
@@ -739,11 +743,17 @@ class WebUiActivity : ComponentActivity() {
     }
 
     private val voiceInputLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        MobileVoiceInput.draftFromResult(result.resultCode, result.data)?.let {
-            sharedTexts.addLast(it)
+        val text = MobileVoiceInput.draftFromResult(result.resultCode, result.data)
+        if (text == null) voiceInputEnded()
+        else {
+            sharedTexts.addLast(text)
             deliverSharedText()
         }
     }
+
+    /** Voice input closed without text (cancelled, nothing heard, could not start): a voice
+     * conversation on the page ends there, and text shared later is not taken for speech. */
+    private fun voiceInputEnded() = dispatchPageEvent("agent-voice-input", JSONObject().put("ended", true))
 
     private val notificationPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
         notificationPermissionInFlight = false
@@ -787,6 +797,7 @@ class WebUiActivity : ComponentActivity() {
             showOfflineVoiceInput()
             return@registerForActivityResult
         }
+        voiceInputEnded()
         android.widget.Toast.makeText(this, UiText.of(this, "离线语音输入需要麦克风权限", "Offline voice input needs microphone access"),
             android.widget.Toast.LENGTH_LONG).show()
         // After "don't ask again" the system shows nothing; its app settings page still can.
@@ -803,7 +814,7 @@ class WebUiActivity : ComponentActivity() {
 
     private fun showOfflineVoiceInput() {
         if (isFinishing || isDestroyed || voiceDialog?.isShowing == true) return
-        voiceDialog = VoiceInputDialog(this) { text ->
+        voiceDialog = VoiceInputDialog(this, onClosed = { voiceInputEnded() }) { text ->
             sharedTexts.addLast(text)
             deliverSharedText()
         }.also { it.show() }
@@ -1099,6 +1110,18 @@ class WebUiActivity : ComponentActivity() {
                         showRetry()
                     }
                 }
+
+                // Unhandled, a renderer that crashed or was reclaimed for memory (the 3D studio, a large
+                // diagram) ends the whole app process, a backup or file export under way with it. This
+                // WebView cannot be used again: take it out and build the console afresh.
+                override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
+                    Log.w("AgentWebUI", "console renderer gone (crashed: ${detail?.didCrash()})")
+                    rendererGone = true
+                    trustedWorkspacePage = false
+                    (view?.parent as? ViewGroup)?.removeView(view)
+                    if (!isFinishing && !isDestroyed) recreate()
+                    return true
+                }
             }
         }
 
@@ -1222,11 +1245,18 @@ class WebUiActivity : ComponentActivity() {
         queueComputer(intent)
         pendingQuickAsk = savedInstanceState?.getString("pending-quick-ask")
         if (savedInstanceState == null) queueQuickAsk(intent)
-        queueTeamShare(intent)
+        // The expert-team share and the voice entry act once. A recreation (dark mode, language,
+        // font size) or the system bringing the activity back hands it the same intent again,
+        // which used to open another expert-team conversation or voice prompt each time.
+        pendingTeamShare = savedInstanceState?.getString("pending-team-share")
+        val firstDelivery = EntryDelivery.first(savedInstanceState != null, intent?.flags ?: 0)
+        if (firstDelivery) queueTeamShare(intent)
         if (!queueComputerShare(intent)) shareInbox.captureIntent(intent, incomingShareBatchId)
-        voicePending = intent?.getBooleanExtra("voice_input", false) == true || intent?.action in listOf(Intent.ACTION_ASSIST, Intent.ACTION_VOICE_COMMAND)
+        voicePending = savedInstanceState?.getBoolean("voice-pending", false)
+            ?: (firstDelivery && MobileVoiceInput.requestedBy(intent))
+        consumeEntryIntent(intent)
         QuickEntry.publishShortcuts(this)
-        initAndLaunchEngine()
+        initAndLaunchEngine(restart = backups.finishInterrupted())
         appSupport.autoCheckAtStart(freshStart = savedInstanceState == null)
         warnIfWebViewTooOld()
     }
@@ -1330,8 +1360,22 @@ class WebUiActivity : ComponentActivity() {
         incomingShareBatchId = UUID.randomUUID().toString()
         queueTeamShare(intent)
         if (!queueComputerShare(intent)) shareInbox.captureIntent(intent, incomingShareBatchId)
-        if (intent.getBooleanExtra("voice_input", false) || intent.action in listOf(Intent.ACTION_ASSIST, Intent.ACTION_VOICE_COMMAND)) {
+        if (MobileVoiceInput.requestedBy(intent)) {
             if (webView.visibility == View.VISIBLE) launchVoiceInput() else voicePending = true
+        }
+        consumeEntryIntent(intent)
+    }
+
+    /**
+     * Marks the expert-team share and the voice request of [incoming] as handled, as queueQuickAsk
+     * does for its own: the activity's intent is what a recreation sees. The share inbox keeps
+     * the intent's content (its capture is idempotent by batch), so only these two are cleared.
+     */
+    private fun consumeEntryIntent(incoming: Intent?) {
+        if (incoming == null) return
+        incoming.removeExtra(MobileVoiceInput.EXTRA_VOICE_INPUT)
+        if (incoming.action == Intent.ACTION_ASSIST || incoming.action == Intent.ACTION_VOICE_COMMAND) {
+            incoming.action = Intent.ACTION_MAIN
         }
     }
 
@@ -1348,6 +1392,8 @@ class WebUiActivity : ComponentActivity() {
         outState.putBoolean("share-inbox-picker-pending", shareInboxPickerPending)
         outState.putString("pending-session-id", pendingSessionId)
         outState.putString("pending-quick-ask", pendingQuickAsk)
+        outState.putString("pending-team-share", pendingTeamShare)
+        outState.putBoolean("voice-pending", voicePending)
         outState.putStringArrayList("pending-shared-texts", ArrayList(sharedTexts))
         outState.putBoolean("workspace-folder-picking", workspaceFolderPicking)
         outState.putBoolean("workspace-folder-awaiting-storage", workspaceFolderAwaitingStorage)
@@ -1444,6 +1490,8 @@ class WebUiActivity : ComponentActivity() {
             deliverTeamShare()
             deliverComputer()
             deliverPageEvents()
+            // A restore that became ready while no screen was there to finish it.
+            if (initializationJob?.isActive != true && backups.finishInterrupted()) initAndLaunchEngine(restart = true)
             checkEngineOnResume()
             // Back from the overlay permission screen: show the ball now that it may draw.
             FloatingBallService.onAppResumed(this)
@@ -1452,7 +1500,7 @@ class WebUiActivity : ComponentActivity() {
     }
 
     override fun onPause() {
-        if (::webView.isInitialized) webView.onPause()
+        if (::webView.isInitialized && !rendererGone) webView.onPause()
         super.onPause()
     }
 
@@ -1861,17 +1909,22 @@ class WebUiActivity : ComponentActivity() {
                 saveButton.isEnabled = false
                 activityScope.launch {
                     try {
+                        val save: () -> Unit = {
+                            MobileProviderSettings.save(this@WebUiActivity, selectedProtocol,
+                                selectedBase, selectedModel, selectedKey, deleteKey, selectedEffort, selectedAutonomy,
+                                allowLanHttp = selectedLanHttp)
+                        }
                         // Finish the reserved save/restart even if the Activity closes during weight hashing.
-                        withContext(Dispatchers.IO + NonCancellable) {
-                            ProviderSettingsChange.apply(this@WebUiActivity,
-                                selectedBase.trimEnd('/') == MobileProviderSettings.EMBEDDED_QWEN_BASE_URL) {
-                                MobileProviderSettings.save(this@WebUiActivity, selectedProtocol,
-                                    selectedBase, selectedModel, selectedKey, deleteKey, selectedEffort, selectedAutonomy,
-                                    allowLanHttp = selectedLanHttp)
+                        val savedWithoutEngine = withContext(Dispatchers.IO + NonCancellable) {
+                            // No engine serving (it failed to start or is still trying): saved at once.
+                            ProviderSettingsChange.saveWithoutEngine(this@WebUiActivity, save).also { saved ->
+                                if (!saved) ProviderSettingsChange.apply(this@WebUiActivity,
+                                    selectedBase.trimEnd('/') == MobileProviderSettings.EMBEDDED_QWEN_BASE_URL, save)
                             }
                         }
                         dialog.dismiss()
-                        initAndLaunchEngine(previousEngineToken = ProviderSettingsChange.previousEngineToken())
+                        if (savedWithoutEngine) initAndLaunchEngine(restart = true, reason = "model settings saved while the engine was not serving")
+                        else initAndLaunchEngine(previousEngineToken = ProviderSettingsChange.previousEngineToken())
                     } catch (error: CancellationException) {
                         throw error
                     } catch (error: Exception) {
@@ -2172,39 +2225,10 @@ class WebUiActivity : ComponentActivity() {
     /**
      * Challenge-response with the engine before the token leaves the app: another process holding
      * the engine's port cannot compute the HMAC because it never sees the private serve.token.
+     * Always asks now (no remembered answer): it also tells whether the engine still answers.
      */
-    private fun verifyEngineIdentity(token: String): Boolean {
-        val challenge = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
-            .let { android.util.Base64.encodeToString(it, android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING) }
-        val conn = URL("$baseUrl/mobile/identity?challenge=$challenge").openConnection() as HttpURLConnection
-        return try {
-            conn.connectTimeout = 1000
-            conn.readTimeout = 1000
-            conn.instanceFollowRedirects = false
-            if (conn.responseCode != 200) return false
-            val body = conn.inputStream.use { input ->
-                val buffer = ByteArray(4096)
-                var size = 0
-                while (size < buffer.size) {
-                    val count = input.read(buffer, size, buffer.size - size)
-                    if (count < 0) break
-                    size += count
-                }
-                String(buffer, 0, size, Charsets.UTF_8)
-            }
-            val proof = JSONObject(body).optString("proof")
-            val mac = javax.crypto.Mac.getInstance("HmacSHA256")
-            mac.init(javax.crypto.spec.SecretKeySpec(token.toByteArray(Charsets.UTF_8), "HmacSHA256"))
-            val expected = mac.doFinal(IDENTITY_CONTEXT + challenge.toByteArray(Charsets.US_ASCII))
-                .joinToString("") { "%02x".format(it) }
-            java.security.MessageDigest.isEqual(expected.toByteArray(), proof.toByteArray())
-        } catch (e: Exception) {
-            Log.d("AgentWebUI", "Local Agent identity check failed", e)
-            false
-        } finally {
-            conn.disconnect()
-        }
-    }
+    private fun verifyEngineIdentity(token: String): Boolean =
+        com.agentworkspace.mobile.embedded.EngineIdentity.answers(baseUrl, token, 1000)
 
     /** The latest engine start-up step (from engine-startup.log) in words for the loading screen. */
     private fun startupStepText(step: String?): String? {
@@ -2250,10 +2274,14 @@ class WebUiActivity : ComponentActivity() {
                     "No speech recognition service is available on this phone. Download the offline speech model in Menu → Local models")
             else UiText.of(this, "手机没有可用的语音识别服务", "No speech recognition service is available on this phone")
             android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_LONG).show()
+            voiceInputEnded()
             return
         }
         runCatching { voiceInputLauncher.launch(MobileVoiceInput.recognizerIntent()) }
-            .onFailure { android.widget.Toast.makeText(this, UiText.of(this@WebUiActivity, "无法启动语音识别", "Could not start speech recognition"), android.widget.Toast.LENGTH_SHORT).show() }
+            .onFailure {
+                android.widget.Toast.makeText(this, UiText.of(this@WebUiActivity, "无法启动语音识别", "Could not start speech recognition"), android.widget.Toast.LENGTH_SHORT).show()
+                voiceInputEnded()
+            }
     }
 
     private fun isLocalConsoleUrl(url: String): Boolean = runCatching {
@@ -2281,9 +2309,12 @@ class WebUiActivity : ComponentActivity() {
         shareHandler.removeCallbacksAndMessages(null)
         if (::webView.isInitialized) {
             (webView.parent as? ViewGroup)?.removeView(webView)
-            webView.stopLoading()
-            webView.onPause()
-            webView.removeJavascriptInterface("AndroidBridge")
+            // After its renderer is gone a WebView may only be destroyed.
+            if (!rendererGone) {
+                webView.stopLoading()
+                webView.onPause()
+                webView.removeJavascriptInterface("AndroidBridge")
+            }
             webView.destroy()
         }
         super.onDestroy()

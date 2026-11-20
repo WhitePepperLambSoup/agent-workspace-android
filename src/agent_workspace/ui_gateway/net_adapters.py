@@ -202,4 +202,29 @@ def reachable_addresses(
     )
 
 
-__all__ = ["Adapter", "default_route_address", "reachable_addresses", "windows_adapters"]
+def tailscale_present(adapters: list[Adapter] | None = None) -> bool:
+    """Whether Tailscale's own adapter is up here with an address in 100.64.0.0/10. Only then is
+    that range this computer's tailnet; otherwise it is a carrier's shared addresses (RFC 6598),
+    other customers of the same provider or hotspot."""
+    if adapters is None:
+        adapters = windows_adapters()
+    if adapters is None:
+        # Not Windows: Linux names the interface tailscale0.
+        with suppress(OSError, AttributeError):
+            return any("tailscale" in name.lower() for _index, name in socket.if_nameindex())
+        return False
+    return any(
+        adapter.up
+        and "tailscale" in f"{adapter.name} {adapter.description}".lower()
+        and any(_usable(address) == "tailscale" for address in adapter.addresses)
+        for adapter in adapters
+    )
+
+
+__all__ = [
+    "Adapter",
+    "default_route_address",
+    "reachable_addresses",
+    "tailscale_present",
+    "windows_adapters",
+]

@@ -56,6 +56,8 @@ object AndroidClockCalendar {
             .put("time", now.format(DateTimeFormatter.ofPattern("HH:mm")))
             .put("weekday", now.dayOfWeek.value)
             .put("zone", now.zone.id)
+            // Python on the phone has no time zone database to look the zone up in.
+            .put("offset_seconds", now.offset.totalSeconds)
             .toString()
     }
 

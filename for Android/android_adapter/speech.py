@@ -23,6 +23,12 @@ def _bridge() -> Any:
     return _speech_bridge
 
 
+def _speaking_seconds(text: str) -> float:
+    """Room to read ``text`` aloud: Chinese runs at about four or five characters a second, so
+    the longest text allowed (2000 characters) takes several minutes."""
+    return 30 + len(text) / 3
+
+
 def speech_status() -> dict[str, Any]:
     try:
         report = json.loads(str(_bridge().getStatusJson()))
@@ -52,6 +58,11 @@ class AndroidSpeakTool:
     def spec(self) -> ToolSpec:
         return self._SPEC
 
+    def execution_timeout_seconds(self, arguments: dict[str, Any]) -> float:
+        """Past the runner's two-minute default for a long text (read by the runner)."""
+        text = arguments.get("text")
+        return _speaking_seconds(text if isinstance(text, str) else "") + 15
+
     async def execute(self, arguments: dict[str, Any]) -> str:
         text = require_string(arguments, "text")
         if len(text) > 2000 or "\x00" in text:
@@ -65,7 +76,7 @@ class AndroidSpeakTool:
             started = json.loads(str(bridge.startSpeak(request_id, text)))
             if not started.get("accepted"):
                 raise ToolError(str(started.get("reason") or "Android TTS could not start"))
-            async with asyncio.timeout(120):
+            async with asyncio.timeout(_speaking_seconds(text)):
                 while True:
                     result = json.loads(str(bridge.getUtteranceStatus(request_id)))
                     state = result.get("state")

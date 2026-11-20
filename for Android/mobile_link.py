@@ -25,7 +25,7 @@ import socket
 import sqlite3
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -46,8 +46,11 @@ RECEIVED_FOLDER = "来自电脑"
 STAGING_FOLDER = "to-computer"
 _POLL_SECONDS = 20.0
 _BACKOFF_SECONDS = (60.0, 60.0, 300.0)
+# How often a computer that stays away is looked for on the network.
+_REFIND_SECONDS = 600.0
 _RUNTIME_SECONDS = 600.0
 _KNOWLEDGE_SECONDS = 6 * 3600.0
+_KNOWLEDGE_SYNC_SECONDS = 3600.0
 _WAKE_SECONDS = 120.0
 _ASK_SECONDS = 1800.0
 _ASK_POLL_SECONDS = 5.0
@@ -89,14 +92,15 @@ def safe_filename(value: object) -> str:
     return name[:200] or "file"
 
 
-def unique_path(folder: Path, name: str) -> Path:
-    """``name`` in ``folder``, or "name (2).ext" and so on when it is taken."""
+def unique_path(folder: Path, name: str, claimed: Collection[Path] = ()) -> Path:
+    """``name`` in ``folder``, or "name (2).ext" and so on when it is taken (or ``claimed`` by a
+    download still under way)."""
     target = folder / name
     stem, dot, suffix = name.rpartition(".")
     if not dot:
         stem, suffix = name, ""
     number = 2
-    while target.exists():
+    while target.exists() or target in claimed:
         target = folder / (f"{stem} ({number}).{suffix}" if suffix else f"{stem} ({number})")
         number += 1
     return target
@@ -161,10 +165,19 @@ class MobileLink:
         self.clock = clock
         self._next: dict[str, float] = {}
         self._failures: dict[str, int] = {}
+        # When each computer was last looked for, and the address last offered to the user.
+        self._refound: dict[str, float] = {}
+        self._offered: dict[str, str] = {}
         self._transfer_attempts: dict[tuple[str, str], int] = {}
         # Files from each computer waiting for its receiver (one at a time, beside the rounds).
         self._file_queue: dict[str, dict[str, dict[str, Any]]] = {}
         self._file_receivers: dict[str, asyncio.Task] = {}
+        # The periodic knowledge sync of each computer, beside the rounds (one at a time).
+        self._knowledge_syncs: dict[str, asyncio.Task] = {}
+        self._knowledge_locks: dict[str, asyncio.Lock] = {}
+        # Names in the received-files folder taken by downloads still under way: a push from
+        # another computer or the user's own download must not pick the same one.
+        self._claimed: set[Path] = set()
         self._waiters: dict[str, asyncio.Task] = {}
         self._waking: dict[str, float] = {}
         # The pairing each computer was told for whether this phone takes its requests.
@@ -301,6 +314,8 @@ class MobileLink:
                 db.execute(f"DELETE FROM {table} WHERE host_id=?", (host_id,))
         self._next.pop(host_id, None)
         self._failures.pop(host_id, None)
+        self._refound.pop(host_id, None)
+        self._offered.pop(host_id, None)
 
     def _host(self, host_id: object) -> dict[str, Any]:
         host = self.connections.get(_checked_id(host_id, "computer"))
@@ -356,6 +371,8 @@ class MobileLink:
     def _schedule(self, host_id: str, ok: bool) -> None:
         if ok:
             self._failures[host_id] = 0
+            self._refound.pop(host_id, None)
+            self._offered.pop(host_id, None)
             self._next[host_id] = self.clock() + _POLL_SECONDS
             return
         count = self._failures.get(host_id, 0)
@@ -367,7 +384,10 @@ class MobileLink:
         async with self._locks.setdefault(host_id, asyncio.Lock()):
             try:
                 host = self._host(host_id)
-                if host.get("runtime_at") is None or self.clock() - float(host["runtime_at"] or 0) > _RUNTIME_SECONDS:
+                stale = host.get("runtime_at") is None or self.clock() - float(host["runtime_at"] or 0) > _RUNTIME_SECONDS
+                # Over plain HTTP nothing proves who answers: on another Wi-Fi a device can have the same
+                # address. The computer's id is checked every round there, before its inbox is read.
+                if stale or (host.get("desktop_id") and str(host.get("url") or "").startswith("http://")):
                     host = await self.connections.refresh_runtime(host_id)
                 # The desktop offers its phone_task tool only for phones that take requests: told at the
                 # first round after pairing (pairing reads the computer's details itself, which kept this
@@ -381,17 +401,19 @@ class MobileLink:
                     _, inbox = await self.connections.request(host_id, "GET", "/mobile/inbox")
                 await self._handle(host, inbox)
                 await self._drive_jobs(host)
-                await self._knowledge_due(host)
+                self._knowledge_due(host)
             except (httpx.HTTPError, ValueError, KeyError, sqlite3.Error) as error:
                 if isinstance(error, KeyError):
                     return {"ok": False}
                 # A computer that removed this phone answers 401 (RemoteHTTPError says so).
                 reason = unavailable_reason(error) if isinstance(error, httpx.HTTPError) else str(error)
+                # The page keeps offering an address found earlier until it is used or gone.
+                offered = self._offered.get(host_id)
                 with self._db() as db:
                     db.execute(
                         "INSERT INTO link_state (host_id, error) VALUES (?,?) "
                         "ON CONFLICT(host_id) DO UPDATE SET error=excluded.error",
-                        (host_id, reason[:300]),
+                        (host_id, (f"found at {offered}" if offered else reason)[:300]),
                     )
                 self._schedule(host_id, False)
                 if isinstance(error, httpx.HTTPError):
@@ -564,13 +586,17 @@ class MobileLink:
             raise ValueError("the file is larger than 100 MiB")
         folder = self.workspace / RECEIVED_FOLDER
         folder.mkdir(parents=True, exist_ok=True)
-        target = unique_path(folder, safe_filename(item.get("name")))
+        target = unique_path(folder, safe_filename(item.get("name")), self._claimed)
         # Room for a slow link (about 1 Mbit/s): ten minutes at least, an hour at most.
         seconds = min(3600.0, max(600.0, (size if isinstance(size, int) and size > 0 else 0) / 125_000))
-        received = await self.connections.download(
-            host_id, f"/mobile/transfers/{quote(transfer_id, safe='')}/content", target, max_bytes=MAX_FILE_BYTES,
-            timeout=seconds,
-        )
+        self._claimed.add(target)
+        try:
+            received = await self.connections.download(
+                host_id, f"/mobile/transfers/{quote(transfer_id, safe='')}/content", target, max_bytes=MAX_FILE_BYTES,
+                timeout=seconds,
+            )
+        finally:
+            self._claimed.discard(target)
         expected = item.get("sha256")
         if isinstance(expected, str) and expected and expected.lower() != received["sha256"]:
             target.unlink(missing_ok=True)
@@ -730,7 +756,7 @@ class MobileLink:
                     # Answered without asking; an answer that did not reach the computer is given again
                     # at the next round instead of the request quietly expiring there.
                     with contextlib.suppress(httpx.HTTPError, ValueError):
-                        await self.decide_job(host_id, job_id, "reject" if choice == "off" else "accept")
+                        await self.decide_job(host_id, job_id, "reject" if choice == "off" else "accept", auto=True)
             elif state == "cancelled" and local is not None and local["state"] in {"waiting", "accepted", "running"}:
                 if local["task_id"] and self.controller is not None:
                     with contextlib.suppress(Exception):
@@ -744,8 +770,11 @@ class MobileLink:
                 self._job_state(host_id, job["job_id"], "expired")
                 self.notify({"action": "cancel", "tag": f"job:{job['job_id']}"})
 
-    async def decide_job(self, host_id: str, job_id: str, decision: str, *, approve_all: bool = False) -> dict[str, Any]:
-        """The user's answer to a desktop's request: reject, or accept and run it here."""
+    async def decide_job(
+        self, host_id: str, job_id: str, decision: str, *, approve_all: bool = False, auto: bool = False
+    ) -> dict[str, Any]:
+        """The user's answer to a desktop's request: reject, or accept and run it here. [auto]: the
+        "accept automatically" setting answered, and the user has not seen the request."""
         host = self._host(host_id)
         job = self._job(host_id, _checked_id(job_id, "request"))
         if job is None:
@@ -766,7 +795,7 @@ class MobileLink:
         self._job_state(host_id, job_id, "accepted")
         self.activity(host_id, "job_accepted", job["prompt"][:80])
         try:
-            task_id, session_id = await self._start_job(host, job, approve_all=approve_all)
+            task_id, session_id = await self._start_job(host, job, approve_all=approve_all, auto=auto)
         except Exception as error:
             reason = " ".join(str(error).split())[:300] or type(error).__name__
             self._job_state(host_id, job_id, "failed", error=reason)
@@ -783,7 +812,9 @@ class MobileLink:
         job = self._job(host_id, job_id)
         return {**dict(job), "operate_phone": bool(job["operate_phone"])} if job is not None else {}
 
-    async def _start_job(self, host: dict[str, Any], job: sqlite3.Row, *, approve_all: bool) -> tuple[str, str]:
+    async def _start_job(
+        self, host: dict[str, Any], job: sqlite3.Row, *, approve_all: bool, auto: bool = False
+    ) -> tuple[str, str]:
         from mobile_protocol import parse_mobile_task_request
 
         if self.controller is None or self.runtime is None:
@@ -793,11 +824,17 @@ class MobileLink:
         if not self._session_exists(session_id):
             session_id = self._new_session(f"{host['name']} 交来的任务")
             self._set(host["host_id"], job_session=session_id)
-        title = f"「{job['title']}」" if job["title"] else ""
+        # The title comes from the computer's AI: quoted, and without brackets that could end the note
+        # early and add words of the note's own after it.
+        title = json.dumps(re.sub(r"[\[\]「」]", "", job["title"]), ensure_ascii=False) if job["title"] else ""
+        agreed = (
+            "The user's setting accepts this computer's requests automatically; the user has not read this one."
+            if auto else "The user read it and agreed to let this phone do it."
+        )
         # The conversation and its notifications show the request itself; where it came from is a note.
         note = (
             f"[This message is a request from the AI on the paired computer {host['name']}"
-            f"{' (conversation ' + title + ')' if title else ''}. The user read it and agreed to let this phone do it.]"
+            f"{' (conversation ' + title + ')' if title else ''}. {agreed}]"
         )
         operate = bool(job["operate_phone"])
         request = parse_mobile_task_request({
@@ -1063,7 +1100,8 @@ class MobileLink:
         if not relative or len(relative) > 1000 or ".." in relative.split("/"):
             raise ValueError("invalid file")
         folder = self.workspace / RECEIVED_FOLDER
-        target = unique_path(folder, safe_filename(relative))
+        target = unique_path(folder, safe_filename(relative), self._claimed)
+        self._claimed.add(target)
         try:
             received = await self.connections.download(
                 host_id, f"/mobile/files/content?{urlencode({'path': relative})}", target, max_bytes=MAX_FILE_BYTES
@@ -1074,6 +1112,8 @@ class MobileLink:
             if error.code == "payload_too_large":
                 raise ValueError("the file is larger than 100 MiB") from None
             raise
+        finally:
+            self._claimed.discard(target)
         self.activity(host_id, "file_received", target.name)
         return {"path": target.relative_to(self.workspace).as_posix(), "name": target.name, "sha256": received["sha256"]}
 
@@ -1455,31 +1495,43 @@ class MobileLink:
         if self.discover is None:
             return
         host = self.connections.get(host_id)
-        if not host.get("desktop_id") or self._failures.get(host_id, 0) != 2:
-            return  # once, after the second failure in a row
+        now = self.clock()
+        # A computer that is off at the second failure comes back later, on another address.
+        if (
+            not host.get("desktop_id")
+            or self._failures.get(host_id, 0) < 2
+            or now - self._refound.get(host_id, -_REFIND_SECONDS) < _REFIND_SECONDS
+        ):
+            return
+        self._refound[host_id] = now
         try:
             found = await asyncio.to_thread(self.discover, 4.0)
         except Exception:
             return
+        # One computer can show several times (two network adapters, IPv4 and IPv6).
         for service in found:
-            if service.get("id") != host["desktop_id"] or not isinstance(service.get("url"), str):
+            url = service.get("url")
+            if service.get("id") != host["desktop_id"] or not isinstance(url, str) or url == host["url"]:
                 continue
-            if host.get("fingerprint") and service["url"].startswith("https://"):
+            if host.get("fingerprint") and url.startswith("https://"):
                 # Tried there first with the pinned certificate: an address that does not answer as
                 # this computer (forged, or another one) is left alone, the pairing kept as it was.
-                if await self.connections.answers_at(host_id, service["url"]):
+                if await self.connections.answers_at(host_id, url):
                     with contextlib.suppress(Exception):
-                        self.connections.use_address(host_id, service["url"])
-                        self.activity(host_id, "address_changed", service["url"])
+                        self.connections.use_address(host_id, url)
+                        self.activity(host_id, "address_changed", url)
                         self._next[host_id] = 0.0
-                return
-            if not host.get("fingerprint") and service["url"].startswith("http://"):
-                self.notify({"action": "moved", "id": host_id, "host": host["name"], "host_id": host_id,
-                             "url": service["url"]})
+                    return
+            elif not host.get("fingerprint") and url.startswith("http://"):
+                # Said once for an address, however many rounds it stays away.
+                if self._offered.get(host_id) != url:
+                    self._offered[host_id] = url
+                    self.notify({"action": "moved", "id": host_id, "host": host["name"], "host_id": host_id,
+                                 "url": url})
                 with self._db() as db:
-                    db.execute("UPDATE link_state SET error=? WHERE host_id=?",
-                               (f"found at {service['url']}", host_id))
+                    db.execute("UPDATE link_state SET error=? WHERE host_id=?", (f"found at {url}", host_id))
                 return
+        self._offered.pop(host_id, None)
 
     # ---- knowledge bases -------------------------------------------------------------------------
 
@@ -1511,18 +1563,36 @@ class MobileLink:
         self._set(host_id, kb_pairs=json.dumps(kept))
         return self.settings(host_id)
 
-    async def _knowledge_due(self, host: dict[str, Any]) -> None:
+    def _knowledge_due(self, host: dict[str, Any]) -> None:
+        """Starts the periodic sync beside the rounds. Run inside a round, a long first sync was cut
+        off by the round's time limit, counted as the computer failing (so its inbox and approvals
+        were read less often), and started over the next time."""
         settings = self.settings(host["host_id"])
         if not settings["kb_pairs"] or "knowledge" not in host["features"]:
             return
         if settings["kb_synced_at"] and self.clock() - float(settings["kb_synced_at"]) < _KNOWLEDGE_SECONDS:
             return
-        with contextlib.suppress(httpx.HTTPError, ValueError):
-            await self.sync_knowledge(host["host_id"])
+        host_id = host["host_id"]
+        running = self._knowledge_syncs.get(host_id)
+        if running is None or running.done():
+            self._knowledge_syncs[host_id] = asyncio.get_running_loop().create_task(
+                self._sync_knowledge_in_background(host_id), name=f"link-knowledge-{host_id}")
+
+    async def _sync_knowledge_in_background(self, host_id: str) -> None:
+        # Each document has its own request limit; this bounds the whole. One that stops early is
+        # due again at the next round and skips the documents already copied (by SHA-256).
+        with contextlib.suppress(httpx.HTTPError, ValueError, KeyError, sqlite3.Error, TimeoutError):
+            await asyncio.wait_for(self.sync_knowledge(host_id), timeout=_KNOWLEDGE_SYNC_SECONDS)
 
     async def sync_knowledge(self, host_id: str) -> dict[str, Any]:
         """Each pair of knowledge bases gets the documents the other side has and it lacks (by the
         original file's SHA-256). Removals are not copied."""
+        # One sync per computer at a time: the user's "sync now" waits for a periodic one under way,
+        # then finds its documents already there.
+        async with self._knowledge_locks.setdefault(host_id, asyncio.Lock()):
+            return await self._sync_knowledge(host_id)
+
+    async def _sync_knowledge(self, host_id: str) -> dict[str, Any]:
         host = self._host(host_id)
         self._needs(host, "knowledge")
         if self.knowledge is None:

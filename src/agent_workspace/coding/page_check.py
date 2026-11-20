@@ -13,6 +13,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+from urllib.request import url2pathname
 
 from agent_workspace.application.ports import ToolExecutionContext
 from agent_workspace.core.events import Event
@@ -23,9 +24,18 @@ from agent_workspace.tools.base import (
     json_result,
     validate_tool_arguments,
 )
-from agent_workspace.tools.browser import BrowserError, CdpSession
+from agent_workspace.tools.browser import (
+    BrowserError,
+    CdpSession,
+    guarded_requests,
+    page_address_refusal,
+)
 from agent_workspace.tools.managed_browser import ManagedBrowser, ManagedBrowserError
-from agent_workspace.tools.paths import WorkspacePaths
+from agent_workspace.tools.paths import (
+    WorkspacePathError,
+    WorkspacePaths,
+    is_sensitive_workspace_path,
+)
 
 VIEWPORTS = {"desktop": (1280, 800, False), "mobile": (390, 844, True)}
 SCREENSHOTS = Path(".agent") / "screenshots"
@@ -84,6 +94,8 @@ class CheckPageTool:
             "console, uncaught exceptions, failed requests and HTTP errors, and the page "
             "title. Use it after changing a web interface: start the dev server first (a "
             "background job), then check the page it serves, e.g. http://localhost:5173. "
+            "It opens pages of the internet, of this computer and files of this folder, not "
+            "other local files or private networks. "
             "steps click, type or wait before the screenshot (CSS selectors); wait_for then "
             "waits until a selector appears. viewport 'mobile' is a 390x844 phone. The screenshot "
             "is also saved under .agent/screenshots for the user."
@@ -142,8 +154,9 @@ class CheckPageTool:
     async def _run(self, arguments: dict[str, Any], context: ToolExecutionContext | None) -> str:
         validate_tool_arguments(self._SPEC, arguments)
         url = str(arguments["url"]).strip()
-        if urlsplit(url).scheme not in {"http", "https", "file"}:
-            raise ToolArgumentError("url must be an http(s) or file address")
+        refusal = await asyncio.to_thread(self._refusal, url)
+        if refusal is not None:
+            raise ToolArgumentError(f"check_page cannot open {url[:200]}: {refusal}")
         browser = self._browser()
         try:
             try:
@@ -160,7 +173,9 @@ class CheckPageTool:
                     "Target.attachToTarget", {"targetId": target_id, "flatten": True}
                 )
                 session.session_id = str(attached.get("sessionId") or "")
-                report, image = await self._inspect(session, url, arguments)
+                # A file of the folder may frame another file; a page may redirect anywhere.
+                async with guarded_requests(session, self._refusal):
+                    report, image = await self._inspect(session, url, arguments)
             finally:
                 session.session_id = None
                 if target_id:
@@ -197,6 +212,26 @@ class CheckPageTool:
                     )
                 )
         return json_result(report)
+
+    def _refusal(self, url: str) -> str | None:
+        """Why this address stays closed, or None: the browser's rule for the web, and for a file
+        the rule of the workspace tools, which the screenshot would otherwise step around."""
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            return "the address is invalid"
+        if parts.scheme != "file":
+            return page_address_refusal(url)
+        if parts.netloc not in {"", "localhost"}:
+            return "a file address must be on this computer"
+        try:
+            target = self.paths.resolve(url2pathname(parts.path))
+            relative = self.paths.relative(target)
+        except (WorkspacePathError, OSError, ValueError):
+            return "only files of this folder are opened"
+        if is_sensitive_workspace_path(relative):
+            return "it is a sensitive file; read_file asks the user for those"
+        return "a folder is not a page" if target.is_dir() else None
 
     def _save(self, image: bytes) -> str:
         folder = self.paths.resolve(str(SCREENSHOTS))

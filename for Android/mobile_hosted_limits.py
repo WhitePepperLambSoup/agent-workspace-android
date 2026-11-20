@@ -5,12 +5,20 @@ says which (the user reads what was done and can continue). Stored in <data>/hos
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
 from agent_workspace.core.budgets import TaskBudget
+
+# The running unattended task's budget and when it started (bound per task by the controller):
+# a repeat it starts on the phone keeps within what is left of it (android_system).
+_HOSTED: contextvars.ContextVar[tuple[TaskBudget, float] | None] = contextvars.ContextVar(
+    "mobile_hosted_budget", default=None
+)
 
 DEFAULTS = {"max_steps": 60, "max_minutes": 20}
 RANGES = {"max_steps": (5, 300), "max_minutes": (1, 240)}
@@ -65,6 +73,27 @@ def budget() -> TaskBudget:
         max_provider_attempts=2 * steps + 10,
         max_turn_seconds=float(limits["max_minutes"] * 60),
     )
+
+
+def bind(task_budget: TaskBudget) -> contextvars.Token[tuple[TaskBudget, float] | None]:
+    """The running task is unattended phone work under this budget, from now."""
+    return _HOSTED.set((task_budget, time.monotonic()))
+
+
+def reset(token: contextvars.Token[tuple[TaskBudget, float] | None]) -> None:
+    _HOSTED.reset(token)
+
+
+def allowance() -> tuple[int, int] | None:
+    """What is left of the running unattended task's limits: (steps, milliseconds); None for a
+    task someone watches. A repeat it starts runs within these, each of its steps counting."""
+    bound = _HOSTED.get()
+    if bound is None:
+        return None
+    task_budget, started = bound
+    steps = max(0, task_budget.max_tool_calls - task_budget.tool_calls)
+    left = task_budget.max_turn_seconds - (time.monotonic() - started)
+    return steps, max(0, int(left * 1000))
 
 
 def reason(error: BaseException) -> str | None:

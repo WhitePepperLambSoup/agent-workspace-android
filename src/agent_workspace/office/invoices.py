@@ -4,7 +4,7 @@ or PDF files: number, date, seller, buyer, amount, tax, total and the items.
 
 The XML file is the original (what accounting keeps); an OFD file carries the same fields in its
 custom data or an attached XML, and its pages as text; a PDF is read from its text. Duplicates
-are found by number, and each invoice is checked: amount + tax = total.
+are found by code and number, and each invoice is checked: amount + tax = total.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import re
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -163,16 +164,57 @@ def _from_text(text: str, invoice: Invoice) -> None:
     _apply(invoice, values)
 
 
+# An OFD invoice is a few small XML parts: these bound a damaged or crafted one (a few KB
+# that unpack to gigabytes) instead of reading it whole into memory.
+_MAX_OFD_PART_BYTES = 8 * 1024 * 1024
+_MAX_OFD_TOTAL_BYTES = 64 * 1024 * 1024
+_MAX_OFD_PARTS = 5000
+
+
+def _ofd_part(archive: zipfile.ZipFile, name: str, budget: list[int]) -> bytes:
+    """One part, read at most to its limit (the size in the header may lie)."""
+    with archive.open(name) as stream:
+        data = stream.read(_MAX_OFD_PART_BYTES + 1)
+    if len(data) > _MAX_OFD_PART_BYTES:
+        raise OfficeError(f"{name} in the OFD file is larger than 8 MB")
+    budget[0] -= len(data)
+    if budget[0] < 0:
+        raise OfficeError("the OFD file unpacks to more than 64 MB")
+    return data
+
+
 def _ofd(data: bytes, invoice: Invoice) -> None:
+    # One bad file is listed with its problem; it must not stop the rest of the batch.
+    try:
+        _ofd_parts(data, invoice)
+    except OfficeError as error:
+        raise OfficeError(f"{invoice.file}: {error}") from None
+    except (
+        ET.ParseError,
+        zipfile.BadZipFile,
+        zlib.error,
+        KeyError,
+        EOFError,
+        NotImplementedError,
+        RuntimeError,
+        ValueError,
+    ) as error:
+        raise OfficeError(f"{invoice.file}: not a readable OFD file ({error})") from None
+
+
+def _ofd_parts(data: bytes, invoice: Invoice) -> None:
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile:
         raise OfficeError("not an OFD file") from None
     with archive:
         names = archive.namelist()
+        if len(names) > _MAX_OFD_PARTS:
+            raise OfficeError("the OFD file has too many parts")
+        budget = [_MAX_OFD_TOTAL_BYTES]
         # Custom data of OFD.xml: <ofd:CustomData Name="发票号码">…</ofd:CustomData>
         if "OFD.xml" in names:
-            root = ET.fromstring(archive.read("OFD.xml"))
+            root = ET.fromstring(_ofd_part(archive, "OFD.xml", budget))
             values = {}
             for element in root.iter():
                 if _local(element.tag) == "CustomData":
@@ -185,7 +227,7 @@ def _ofd(data: bytes, invoice: Invoice) -> None:
         for name in names:
             if name.lower().endswith(".xml") and "/attachs/" in name.lower():
                 try:
-                    _from_xml(ET.fromstring(archive.read(name)), invoice)
+                    _from_xml(ET.fromstring(_ofd_part(archive, name, budget)), invoice)
                 except ET.ParseError:
                     continue
         # The page text: TextCode elements of each page's content.
@@ -193,7 +235,7 @@ def _ofd(data: bytes, invoice: Invoice) -> None:
         for name in sorted(names):
             if re.search(r"Pages/Page_\d+/Content\.xml$", name):
                 try:
-                    root = ET.fromstring(archive.read(name))
+                    root = ET.fromstring(_ofd_part(archive, name, budget))
                 except ET.ParseError:
                     continue
                 text.extend(
@@ -248,12 +290,15 @@ def _check(invoice: Invoice) -> None:
 
 
 def summarize(invoices: list[Invoice]) -> dict[str, Any]:
-    """Totals, duplicates (the same number twice; an XML and its OFD count once)."""
+    """Totals, duplicates (the same code and number twice; an XML and its OFD count once)."""
     seen: dict[str, Invoice] = {}
     duplicates: list[dict[str, str]] = []
     unique: list[Invoice] = []
     for invoice in invoices:
-        key = invoice.number or invoice.file
+        # The 8-digit numbers of the earlier invoices are unique only with their code; a 数电
+        # invoice has no code and a 20-digit number of its own.
+        key = f"{invoice.code}:{invoice.number}" if invoice.code else invoice.number
+        key = key if invoice.number else invoice.file
         if invoice.number and key in seen:
             first = seen[key]
             if Path(first.file).stem != Path(invoice.file).stem:

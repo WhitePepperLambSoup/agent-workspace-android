@@ -50,26 +50,43 @@ class BackgroundJobManager:
             self.reconcile()
 
     def reconcile(self) -> None:
-        active = self.store.list_background_jobs(
-            str(self.paths.root),
-            limit=_MAX_ACTIVE_JOBS + 1,
-            active_only=True,
-        )
-        if len(active) > _MAX_ACTIVE_JOBS:
-            raise RuntimeError("durable background jobs exceed the runtime active-job limit")
-        for status in active:
-            anchor = self.store.get_background_job_active_event(status.session_id, status.job_id)
-            if anchor is None:
-                raise RuntimeError("durable background job causal state is unavailable")
-            self.store.append(
-                Event(
-                    session_id=status.session_id,
-                    type="background.job.interrupted",
-                    data={"job_id": status.job_id, "reason": "runtime restarted"},
-                    causation_id=anchor.id,
-                    correlation_id=anchor.correlation_id,
+        # The active-job limit is per manager, and the phone builds one per conversation, so a
+        # workspace can be left with more than _MAX_ACTIVE_JOBS of them. Raising here stopped the
+        # workspace from opening on every start; all of them are now marked interrupted.
+        skipped: set[tuple[str, str]] = set()
+        while True:
+            active = [
+                status
+                for status in self.store.list_background_jobs(
+                    str(self.paths.root), limit=1000, active_only=True
                 )
-            )
+                if (status.session_id, status.job_id) not in skipped
+            ]
+            if not active:
+                return
+            for status in active:
+                anchor = self.store.get_background_job_active_event(
+                    status.session_id, status.job_id
+                )
+                if anchor is None:
+                    # The terminal event has to name its anchor; without one the job stays as it
+                    # is rather than keeping the workspace from opening.
+                    logging.getLogger(__name__).warning(
+                        "background job %s has no active event; left as %s",
+                        status.job_id,
+                        status.state,
+                    )
+                    skipped.add((status.session_id, status.job_id))
+                    continue
+                self.store.append(
+                    Event(
+                        session_id=status.session_id,
+                        type="background.job.interrupted",
+                        data={"job_id": status.job_id, "reason": "runtime restarted"},
+                        causation_id=anchor.id,
+                        correlation_id=anchor.correlation_id,
+                    )
+                )
 
     async def _publish(self, event: Event) -> None:
         if self._event_publisher is not None:

@@ -5,10 +5,13 @@ import json
 import ssl
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import replace
+from typing import cast
 
 import httpx
 
 from agent_workspace.config import is_loopback_endpoint
+from agent_workspace.core.models import DeltaKind, ProviderDelta, Usage
 from agent_workspace.core.recovery import parse_retry_after
 
 _MAX_ERROR_BODY_BYTES = 16 * 1024
@@ -28,6 +31,7 @@ _CONTEXT_EXCEEDED_MARKERS = (
     "prompt too large",
     "payload too large",
     "request too large",
+    "request_too_large",
     "too many tokens",
     "maximum token",
     "token limit",
@@ -38,6 +42,9 @@ _QUOTA_EXCEEDED_MARKERS = (
     "quota exceeded",
     "rate limit reached for requests",
 )
+# A 429 that will not pass by waiting: the account's credit or plan quota is used up. A per-minute
+# limit ("rate limit reached", Gemini's "quota exceeded for ... per minute") is still retried.
+_OUT_OF_QUOTA_MARKERS = ("insufficient_quota", "exceeded your current quota")
 _BALANCE_EXCEEDED_MARKERS = (
     "insufficient balance",
     "balance is insufficient",
@@ -46,6 +53,25 @@ _BALANCE_EXCEEDED_MARKERS = (
     "payment required",
     "payment_required",
     "billing hard limit",
+    "billing_error",
+)
+_PERMANENT_INLINE_ERROR_CODES = frozenset({400, 401, 403, 404, 405, 410, 413, 415, 422})
+_PERMANENT_INLINE_ERROR_MARKERS = (
+    "unauthorized",
+    "authentication",
+    "invalid api key",
+    "invalid_api_key",
+    "forbidden",
+    "permission",
+    "not found",
+    "not_found",
+    "invalid request",
+    "invalid_request",
+    "bad request",
+    "unsupported",
+    "content_filter",
+    "content policy",
+    "safety",
 )
 _TLS_CONTEXTS: dict[bool, ssl.SSLContext] = {}
 _TLS_CONTEXTS_LOCK = threading.Lock()
@@ -89,8 +115,30 @@ class ProviderError(RuntimeError):
         self.quota_exceeded = quota_exceeded
         self.balance_exceeded = balance_exceeded
         self.incomplete_tool_call = incomplete_tool_call
+        # Tokens the provider reported for the request before it failed (with_reported_usage):
+        # a failed request is still billed.
+        self.partial_usage: Usage | None = None
         status = str(status_code) if status_code is not None else "unavailable"
         super().__init__(f"{message} (status={status})")
+
+
+def with_reported_usage[E: ProviderError](error: E, usage: Usage | None) -> E:
+    """The error, carrying the usage the provider reported for the request so far. Adapters
+    send usage only with a complete answer; this keeps it when the stream fails after it."""
+    if usage is not None:
+        error.partial_usage = _add_usage(error.partial_usage, usage)
+    return error
+
+
+def _add_usage(left: Usage | None, right: Usage) -> Usage:
+    if left is None:
+        return right
+    return Usage(
+        input_tokens=left.input_tokens + right.input_tokens,
+        output_tokens=left.output_tokens + right.output_tokens,
+        cached_tokens=left.cached_tokens + right.cached_tokens,
+        estimated=left.estimated or right.estimated,
+    )
 
 
 def encode_json_request(body: dict[str, object]) -> bytes:
@@ -110,6 +158,10 @@ def encode_json_request(body: dict[str, object]) -> bytes:
 
 class ProviderHTTPError(ProviderError):
     """A non-success response from a provider endpoint."""
+
+    # The provider's own words, without the key, also when they are not shown (plain text):
+    # what an adapter can tell a refusal by.
+    detail: str = ""
 
 
 class ProviderTransportError(ProviderError):
@@ -142,6 +194,9 @@ async def response_http_error(
     api_key: str | None,
 ) -> ProviderHTTPError:
     message = "provider returned an HTTP error"
+    # Unset when the body timed out or the connection dropped while it was read: the 429 or 5xx
+    # then raised UnboundLocalError instead of a retryable ProviderHTTPError.
+    payload: bytes | None = None
     try:
         async with asyncio.timeout(_ERROR_BODY_TIMEOUT_SECONDS):
             payload = await _read_bounded_body(response)
@@ -157,6 +212,7 @@ async def response_http_error(
         detail = payload.decode("utf-8", errors="replace")
     context_exceeded = False
     quota_exceeded = False
+    out_of_quota = False
     balance_exceeded = response.status_code == 402
     if detail is not None:
         lowered = detail.casefold()
@@ -164,53 +220,83 @@ async def response_http_error(
         if response.status_code == 413:
             context_exceeded = True
         quota_exceeded = any(marker in lowered for marker in _QUOTA_EXCEEDED_MARKERS)
+        out_of_quota = any(marker in lowered for marker in _OUT_OF_QUOTA_MARKERS)
         balance_exceeded = balance_exceeded or any(
             marker in lowered for marker in _BALANCE_EXCEEDED_MARKERS
         )
-        if api_key:
-            detail = detail.replace(api_key, "<redacted>")
-        detail = "".join(character if character.isprintable() else " " for character in detail)
-        detail = " ".join(detail.split())[:400]
+        detail = _reportable_detail(detail, api_key)
         if detail and detail_safe_to_report:
             message = f"provider rejected the request: {detail}"
-    return ProviderHTTPError(
+    error = ProviderHTTPError(
         message,
         status_code=response.status_code,
         retryable=(
             response.status_code in _RETRYABLE_STATUS_CODES
             and not context_exceeded
             and not balance_exceeded
+            and not out_of_quota
         ),
         retry_after_seconds=_retry_after_seconds(response.headers.get("retry-after")),
         context_exceeded=context_exceeded,
         quota_exceeded=quota_exceeded,
         balance_exceeded=balance_exceeded,
     )
+    error.detail = detail or ""
+    return error
+
+
+def _reportable_detail(detail: str, api_key: str | None) -> str:
+    """A provider's own error message as it may be shown: without the key, on one short line."""
+    if api_key:
+        detail = detail.replace(api_key, "<redacted>")
+    detail = "".join(character if character.isprintable() else " " for character in detail)
+    return " ".join(detail.split())[:400]
 
 
 def provider_stream_error(
     detail: str | None,
     *,
     status_code: int | None,
+    code: object = None,
+    api_key: str | None = None,
 ) -> ProviderError:
-    """Normalize inline SSE/NDJSON errors like HTTP provider failures."""
+    """Normalize inline SSE/NDJSON errors like HTTP provider failures.
+
+    A gateway that has already answered 200 can only report an upstream failure inside the stream,
+    so one is taken as passing unless it says otherwise: by a client-error ``code``, or in words.
+    The provider's message goes with the error, as an HTTP error's does.
+    """
     context_exceeded = False
     quota_exceeded = False
     balance_exceeded = status_code == 402
-    if isinstance(detail, str) and detail:
-        lowered = detail.casefold()
+    permanent = _inline_error_status(code) in _PERMANENT_INLINE_ERROR_CODES
+    lowered = " ".join(str(part) for part in (detail, code) if part).casefold()
+    if lowered:
         context_exceeded = any(marker in lowered for marker in _CONTEXT_EXCEEDED_MARKERS)
         quota_exceeded = any(marker in lowered for marker in _QUOTA_EXCEEDED_MARKERS)
         balance_exceeded = balance_exceeded or any(
             marker in lowered for marker in _BALANCE_EXCEEDED_MARKERS
         )
+        permanent = permanent or any(
+            marker in lowered for marker in _PERMANENT_INLINE_ERROR_MARKERS
+        )
+    reported = _reportable_detail(detail, api_key) if detail else ""
     return ProviderError(
-        "provider returned an error",
+        f"provider returned an error: {reported}" if reported else "provider returned an error",
         status_code=status_code,
+        retryable=not (permanent or context_exceeded or quota_exceeded or balance_exceeded),
         context_exceeded=context_exceeded,
         quota_exceeded=quota_exceeded,
         balance_exceeded=balance_exceeded,
     )
+
+
+def _inline_error_status(code: object) -> int | None:
+    if isinstance(code, bool):
+        return None
+    if isinstance(code, int):
+        return code
+    return int(code) if isinstance(code, str) and code.isdecimal() else None
 
 
 def provider_request_error(
@@ -239,6 +325,8 @@ async def stream_with_retries[T](
     attempt_factory: Callable[[], AsyncIterator[T]],
     attempt_started: Callable[[int], Awaitable[None]] | None = None,
 ) -> AsyncIterator[T]:
+    # What failed tries before this one were billed, added to the usage of the one that answers.
+    carried: Usage | None = None
     for attempt in range(_MAX_ATTEMPTS):
         emitted = False
         try:
@@ -246,11 +334,22 @@ async def stream_with_retries[T](
                 await attempt_started(attempt + 1)
             async for item in attempt_factory():
                 emitted = True
+                if (
+                    carried is not None
+                    and isinstance(item, ProviderDelta)
+                    and item.kind is DeltaKind.USAGE
+                    and item.usage is not None
+                ):
+                    item = cast(T, replace(item, usage=_add_usage(carried, item.usage)))
+                    carried = None
                 yield item
             return
         except ProviderError as exc:
             if emitted or not exc.retryable or attempt + 1 >= _MAX_ATTEMPTS:
+                with_reported_usage(exc, carried)
                 raise
+            if exc.partial_usage is not None:
+                carried = _add_usage(carried, exc.partial_usage)
             delay = (
                 exc.retry_after_seconds
                 if exc.retry_after_seconds is not None

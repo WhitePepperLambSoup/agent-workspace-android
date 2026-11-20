@@ -80,6 +80,17 @@ def configure_environment(files_dir: str, provider_json: str) -> tuple[Path, Pat
     )
     for directory in (home, data, workspace, temporary):
         directory.mkdir(parents=True, exist_ok=True)
+    # Earlier versions kept a raw trace of every model request (whole conversations in clear text)
+    # that nothing on the phone reads; tracing is off here now, so what they left goes.
+    tracing = os.environ.get("AGENT_WORKSPACE_RAW_TRACE", "").strip().lower()
+    if tracing in {"", "0", "false", "off", "no"}:
+        traces = data / "raw-traces"
+        if traces.is_dir():
+            for path in traces.glob("session-*.jsonl*"):
+                with contextlib.suppress(OSError):
+                    path.unlink()
+            with contextlib.suppress(OSError):
+                traces.rmdir()
 
     database = data / "agent.db"
     os.environ.pop("PYTHONHOME", None)
@@ -114,6 +125,13 @@ def configure_environment(files_dir: str, provider_json: str) -> tuple[Path, Pat
         AGENT_WORKSPACE_CONTEXT_SUMMARY_ENABLED="1" if context_summary_enabled else "0",
         # Long tool results of earlier tasks in a conversation are cut to their start (runner).
         AGENT_WORKSPACE_TRIM_EARLIER_TOOL_RESULTS="1",
+        # A reply cut off midway goes on from where it stopped. Tries are per model call, so a long
+        # task outlasts a dropped connection now and then and still gives up soon in an outage.
+        AGENT_WORKSPACE_STREAM_RECOVERY_DELAYS="1,2,4",
+        # A connection left half open by a switch between Wi-Fi and mobile data sends nothing and
+        # reports nothing: after five silent minutes the reply is tried again, as on the desktop.
+        # Servers send keep-alives while a model thinks, and a model on this phone is not cut.
+        AGENT_WORKSPACE_PROVIDER_IDLE_SECONDS="300",
     )
     allow_lan_http = provider.get("allow_lan_http", False)
     if type(allow_lan_http) is not bool:
@@ -123,6 +141,11 @@ def configure_environment(files_dir: str, provider_json: str) -> tuple[Path, Pat
         os.environ["AGENT_WORKSPACE_ALLOW_LAN_HTTP"] = "1"
     else:
         os.environ.pop("AGENT_WORKSPACE_ALLOW_LAN_HTTP", None)
+    # Set by the service in a debuggable build only, which is never published (mobile_evaluation).
+    if provider.get("debug_build") is True:
+        os.environ["AGENT_WORKSPACE_DEBUG_BUILD"] = "1"
+    else:
+        os.environ.pop("AGENT_WORKSPACE_DEBUG_BUILD", None)
     api_key = setting("api_key", "apiKey")
     if effort != "auto":
         os.environ["AGENT_WORKSPACE_REASONING_EFFORT"] = effort

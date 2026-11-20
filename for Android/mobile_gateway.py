@@ -22,6 +22,7 @@ import traceback
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, BinaryIO
@@ -42,6 +43,7 @@ from mobile_runtime_controller import (
     configured_mobile_context_summary,
     experimental_mobile_context_summary,
 )
+from mobile_task_store import TASK_STREAM_EVENT
 from mobile_workspace import (
     WorkspaceContentTooLargeError,
     WorkspaceStorageFullError,
@@ -69,6 +71,7 @@ from agent_workspace.core.events import Event
 from agent_workspace.core.models import Autonomy
 from agent_workspace.providers.reasoning import supported_reasoning_efforts
 from agent_workspace.storage.durable import fsync_directory
+from agent_workspace.storage.sqlite import take_skipped_migration_backup
 from agent_workspace.tools.base import ConcurrentModificationError, ToolArgumentError, ToolError
 from agent_workspace.tools.filesystem import _open_identity_checked
 from agent_workspace.tools.paths import WorkspacePaths
@@ -82,6 +85,9 @@ _MAX_UPLOAD_RECEIPT_BYTES = 64 * 1024
 _RUN_TIMEOUT_SECONDS = 900.0
 _MOBILE_OPERATION_TIMEOUT_SECONDS = 30.0
 _ACTIVE_TASK_STATES = frozenset({"queued", "running", "waiting_approval"})
+# GET /mobile/tasks?active=1: finished tasks stay in the answer this long after their last change.
+# The watcher runs in the engine's process, so a task can only finish while it polls too.
+_WATCHED_TASK_WINDOW = timedelta(minutes=30)
 # Files page changes besides saving (POST /mobile/workspace/<name>).
 _FILE_CHANGES = {
     "delete": delete_workspace_path,
@@ -92,6 +98,30 @@ _FILE_CHANGES = {
 }
 _IDENTITY_CHALLENGE = re.compile(r"[A-Za-z0-9_-]{32,128}")
 _IDENTITY_CONTEXT = b"agent-workspace-mobile-identity-v1\n"
+# Any app on the phone can open connections to the engine before it proves anything. A peer that
+# stops part-way through a request line, its headers or a JSON body frees its thread after this
+# long. Only reading a request is bounded: send_response() lifts the limit, so a slow download, an
+# event stream between events or a long poll is never cut off. Uploads set their own 60 s limit.
+_REQUEST_READ_TIMEOUT_SECONDS = 30.0
+# Connections served at the same time. The console page (Chromium keeps up to 6 per host, plus its
+# event streams), previews, widgets and the app's native clients use a few dozen at most. Over the
+# cap a connection gets an immediate 503 engine_busy and is closed without a thread, so idle
+# connections from another app cannot use up the engine's threads; the clients retry.
+_MAX_CONCURRENT_CONNECTIONS = 128
+_OVER_CAPACITY_BODY = json.dumps(
+    {
+        "error": "The engine has too many open connections; try again shortly",
+        "code": "engine_busy",
+        "retryable": True,
+    }
+).encode("utf-8")
+_OVER_CAPACITY_RESPONSE = (
+    b"HTTP/1.0 503 Service Unavailable\r\n"
+    b"Content-Type: application/json; charset=utf-8\r\n"
+    b"Content-Length: " + str(len(_OVER_CAPACITY_BODY)).encode("ascii") + b"\r\n"
+    b"Retry-After: 1\r\n"
+    b"Connection: close\r\n\r\n" + _OVER_CAPACITY_BODY
+)
 
 
 class WorkspaceBusyError(RuntimeError):
@@ -247,8 +277,45 @@ def _record_gateway_error(method: str, path: str, exc: BaseException) -> None:
             handle.write(entry)
 
 
+class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """A thread per connection, up to a cap; connections over it are refused at once."""
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        handler: type[BaseHTTPRequestHandler],
+        *,
+        max_connections: int,
+    ) -> None:
+        super().__init__(server_address, handler)
+        self._connection_slots = threading.BoundedSemaphore(max_connections)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._connection_slots.acquire(blocking=False):
+            # Answer without blocking the accept loop: a non-blocking send of a few hundred
+            # bytes lands in the socket buffer, and a peer that cannot take it gets a reset.
+            with suppress(OSError):
+                request.setblocking(False)
+                request.send(_OVER_CAPACITY_RESPONSE)
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._connection_slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connection_slots.release()
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "AgentWorkspaceMobileGateway/0.1"
+    # StreamRequestHandler.setup() applies this to the socket; see _REQUEST_READ_TIMEOUT_SECONDS.
+    timeout = _REQUEST_READ_TIMEOUT_SECONDS
 
     @property
     def _api(self) -> MobileGateway:
@@ -256,6 +323,11 @@ class _Handler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:
         return
+
+    def handle_one_request(self) -> None:
+        # A response lifted the read limit; the next request on a kept connection gets it again.
+        self.connection.settimeout(self.timeout)
+        super().handle_one_request()
 
     def end_headers(self) -> None:
         self.send_header("Referrer-Policy", "no-referrer")
@@ -331,6 +403,10 @@ class _Handler(BaseHTTPRequestHandler):
             return None
         try:
             payload: Any = json.loads(self.rfile.read(length)) if length else {}
+        except TimeoutError:
+            self.close_connection = True
+            self._reply(408, {"error": "the request body did not arrive in time"})
+            return None
         except (json.JSONDecodeError, UnicodeDecodeError):
             self._reply(400, {"error": "invalid JSON"})
             return None
@@ -341,6 +417,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def send_response(self, code: int, message: str | None = None) -> None:
         self._response_started = True
+        # Writing is not bounded: a download the client reads slowly, or an event stream, runs
+        # for as long as it needs (see _REQUEST_READ_TIMEOUT_SECONDS).
+        self.connection.settimeout(None)
         super().send_response(code, message)
 
     def do_GET(self) -> None:
@@ -430,6 +509,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/mobile/settings":
             self._reply(200, self._api.effective_settings())
+            return
+        if path == "/mobile/start-notices":
+            self._reply(200, self._api.start_notices())
             return
         if path == "/mobile/workspaces":
             self._reply(200, self._api.list_workspaces())
@@ -673,6 +755,7 @@ class _Handler(BaseHTTPRequestHandler):
         if parts == ["mobile", "tasks"]:
             session_id = query.get("session_id", [None])[0]
             workspace_id = query.get("workspace_id", [None])[0]
+            watched = query.get("active", [None])[0] == "1"
             try:
                 tasks = self._api.controller.list(session_id)
                 if workspace_id is not None:
@@ -686,17 +769,18 @@ class _Handler(BaseHTTPRequestHandler):
             except KeyError:
                 self._reply(404, {"error": "unknown workspace or session"})
                 return
-            self._reply(
-                200,
-                {
-                    "tasks": [
-                        summarize(task) if callable(summarize := getattr(self._api.controller, "task_summary", None))
-                        else task.to_dict()
-                        for task in tasks
-                    ],
-                    "services": _services_summary(),
-                },
-            )
+            if watched:
+                tasks = _watched_tasks(tasks, datetime.now(UTC))
+            documents = [
+                summarize(task) if callable(summarize := getattr(self._api.controller, "task_summary", None))
+                else task.to_dict()
+                for task in tasks
+            ]
+            if watched:
+                # Up to 2000 output files a task, read by no watcher; GET /mobile/tasks/<id> has them.
+                for document in documents:
+                    document.pop("artifacts", None)
+            self._reply(200, {"tasks": documents, "services": _services_summary()})
             return
         if parts == ["mobile", "approvals"]:
             task_id = query.get("task_id", [None])[0]
@@ -1456,7 +1540,8 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if any(len(values) != 1 for values in query.values()):
                 raise ValueError("upload parameters may not repeat")
-            session = self._api.runtime.service.get_session(query.get("session_id", [""])[0])
+            session_id = query.get("session_id", [""])[0]
+            session = self._api.scoped_runtime(session_id=session_id).service.get_session(session_id)
             body, length = self._upload_body()
             result = save_replay(session.workspace, query.get("title", [""])[0][:120], query.get("format", [""])[0],
                                  body, content_length=length)
@@ -1589,7 +1674,9 @@ class MobileGateway:
             self.management = MobileManagement(runtime, controller)
             # Conversations it makes and removes for itself (preparing the on-device model).
             self.management.api = self
-        self._server = ThreadingHTTPServer((host, port), _Handler)
+        self._server = _BoundedThreadingHTTPServer(
+            (host, port), _Handler, max_connections=_MAX_CONCURRENT_CONNECTIONS
+        )
         self._server.api = self  # type: ignore[attr-defined]
         self._thread: threading.Thread | None = None
         self._attachment_locks: WeakValueDictionary = WeakValueDictionary()
@@ -1694,6 +1781,13 @@ class MobileGateway:
     async def aclose_management(self) -> None:
         if self.management is not None:
             await self.management.aclose()
+
+    def start_notices(self) -> dict[str, Any]:
+        """What the page says once after the engine started: a migration that ran without its
+        backup because the phone had no room for it, or its storage failed."""
+        database = getattr(self.runtime, "database", None)
+        skipped = take_skipped_migration_backup(database) if database is not None else None
+        return {"backup_skipped": skipped}
 
     def list_workspaces(self) -> dict[str, Any]:
         if self.workspace_catalog is None:
@@ -1955,7 +2049,47 @@ class MobileGateway:
                     management.mirror_schedules()
         with contextlib.suppress(Exception):
             forget_helpers(gone)
-        return {"deleted": session_ids, "count": deleted, "schedules_removed": removed_schedules}
+        with contextlib.suppress(Exception):
+            from mobile_private_turns import forget as forget_private_turns
+
+            forget_private_turns(gone)
+        # Settings that hang off a deleted conversation and nothing else. Each piece on its own:
+        # one that fails is logged and the others still go.
+
+        def tidy(what: str, step: Any) -> Any:
+            try:
+                return step()
+            except Exception as exc:  # noqa: BLE001 - cleanup after the deletion succeeded
+                _record_gateway_error("DELETE", f"conversation cleanup: {what}", exc)
+                return None
+
+        import mobile_session_meta
+        import mobile_triggers
+        import mobile_widget_card
+
+        tidy("tags and pins", lambda: mobile_session_meta.forget(gone))
+        removed_triggers = tidy("triggers", lambda: mobile_triggers.forget_sessions(gone)) or 0
+        removed_rules = 0
+        rules = getattr(management, "notification_rules", None)
+        if callable(rules):
+            removed_rules = (
+                tidy("notification rules", lambda: rules().forget_sessions(gone)) or 0
+            )
+        tidy("home-screen card", lambda: mobile_widget_card.forget_sessions(gone))
+        database = getattr(self.runtime, "database", None)
+        if database is not None:
+            # entrypoint.child_controller keeps one grant file per conversation, named by its id.
+            grants = Path(database).parent / "mobile-extension-consents"
+            for session_id in gone:
+                grant = grants / f"{hashlib.sha256(session_id.encode()).hexdigest()}.json"
+                tidy("extension grants", lambda grant=grant: grant.unlink(missing_ok=True))
+        return {
+            "deleted": session_ids,
+            "count": deleted,
+            "schedules_removed": removed_schedules,
+            "triggers_removed": removed_triggers,
+            "notification_rules_removed": removed_rules,
+        }
 
     def discard_empty_session(self, session_id: str) -> dict[str, Any]:
         return self._run_coro(
@@ -2537,7 +2671,11 @@ class MobileGateway:
                 "created_at": event.created_at,
                 "data": event.data,
             }
-            for event in self.runtime.store.list_events(session_id)
+            # The console follows a running reply through the task's own events; here the finished
+            # message says it all, and a conversation's written-out replies are its largest part.
+            for event in self.runtime.store.list_events(
+                session_id, omit_types=("model.output.delta", TASK_STREAM_EVENT)
+            )
             if not event.type.startswith("mobile.artifacts.")
         ]
 
@@ -2556,8 +2694,20 @@ class MobileGateway:
         return add_comment(self.runtime.store, session_id, text, author)
 
     def submit_mobile_task(self, request: MobileTaskRequest, *, request_id: str | None = None):
+        from mobile_notification_journal import about_codes
+
+        # The user asks about a verification code ("把刚收到的验证码读给我"): the notifications the
+        # task reads keep their codes. Card and ID numbers stay masked.
+        options: dict[str, bool] = {}
+        if about_codes(request.prompt):
+            options["notification_codes"] = True
+        # Typed on the phone (the page, the phone control panel): the user is there, so the task may
+        # work on the background screen while the phone is locked. Another app's request
+        # (ExternalTaskActivity, "external-" ids) can come with nobody at the phone.
+        if not str(request_id or "").startswith("external-"):
+            options["in_person"] = True
         return self._run_coro(
-            self.controller.submit(request, request_id=request_id),
+            self.controller.submit(request, request_id=request_id, **options),
             _MOBILE_OPERATION_TIMEOUT_SECONDS,
         )
 
@@ -2628,6 +2778,34 @@ class MobileGateway:
         except BaseException:
             future.cancel()
             raise
+
+
+def _watched_tasks(tasks: list[Any], now: datetime) -> list[Any]:
+    """The tasks the engine's own watcher (TaskNotifications.kt) needs: the unfinished ones, those
+    that changed in the last half hour (a result to tell), and the latest one (the task widget
+    shows it). It asks every 2-10 s; with every task ever made in each answer, a phone with a few
+    thousand tasks built and parsed a few hundred KB each time."""
+    since = now - _WATCHED_TASK_WINDOW
+
+    def updated(task: Any) -> datetime | None:
+        try:
+            moment = datetime.fromisoformat(str(task.updated_at))
+        except ValueError:
+            return None
+        return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+
+    latest = max(tasks, key=lambda task: str(task.updated_at), default=None)
+    watched = []
+    for task in tasks:
+        moment = updated(task)
+        if (
+            task is latest
+            or str(task.state) in _ACTIVE_TASK_STATES
+            or moment is None
+            or moment >= since
+        ):
+            watched.append(task)
+    return watched
 
 
 def _services_summary() -> dict[str, Any]:

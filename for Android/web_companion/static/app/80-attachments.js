@@ -594,7 +594,7 @@
   $("btnSaveTaskLimits").addEventListener("click", saveTaskLimits);
   elements.btnJumpLatest.addEventListener("click", () => scrollToBottom(true));
   elements.btnResumeTask.addEventListener("click", resumeTask);
-  elements.btnRetryTask.addEventListener("click", () => { if (retryTask?.inputText) sendPrompt(retryTask.inputText, retryTask.attachments); });
+  elements.btnRetryTask.addEventListener("click", () => { if (retryTask?.inputText) sendPrompt(retryTask.inputText, retryTask.attachments, retryTask.route); });
   elements.btnReconnect.addEventListener("click", async () => {
     if (!activeTask) return;
     engineReconnectRequestedAt = 0;
@@ -675,9 +675,10 @@
   // only removes one that has no stored events at all; the page also keeps any draft or attachment.
   function blankSessionId() {
     if (!currentSessionId || !historyReady || activeTask || pendingRequests[currentSessionId]) return null;
-    // Only a conversation the app opened under its default name and that was never renamed.
+    // Only a conversation the app opened under its default name (in whichever language the page
+    // had then) and that was never renamed.
     const current = sessions.find(item => item.id === currentSessionId);
-    if (!current || current.archived === true || current.title !== t("新会话")) return null;
+    if (!current || current.archived === true || !defaultSessionTitles.has(current.title)) return null;
     if (elements.promptInput.value.trim() || attachments.length || timelineMessages().length || incomingFor(currentSessionId).length) return null;
     if ([...backgroundTasks.values()].some(task => task.sessionId === currentSessionId && !task.done)) return null;
     return currentSessionId;

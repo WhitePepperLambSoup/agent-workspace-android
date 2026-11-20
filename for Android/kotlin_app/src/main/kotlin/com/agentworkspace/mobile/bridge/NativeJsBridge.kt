@@ -878,12 +878,12 @@ class NativeJsBridge(
     @JavascriptInterface
     fun requestPersonalAccess(kind: String) { Handler(Looper.getMainLooper()).post { personalAccessAction(kind) } }
 
-    /** Whether other apps (Tasker, Shortcuts) may start tasks without being asked each time. */
+    /** The apps (Tasker, Shortcuts) the user lets start tasks without being asked each time. */
     @JavascriptInterface
-    fun getExternalEntry(): Boolean = com.agentworkspace.mobile.entry.ExternalTaskActivity.enabled(context)
+    fun getExternalEntry(): String = com.agentworkspace.mobile.entry.ExternalTaskActivity.allowedApps(context)
 
     @JavascriptInterface
-    fun setExternalEntry(enabled: Boolean) = com.agentworkspace.mobile.entry.ExternalTaskActivity.setEnabled(context, enabled)
+    fun removeExternalEntry(packageName: String) = com.agentworkspace.mobile.entry.ExternalTaskActivity.forget(context, packageName)
 
     /** The app lock: whether this phone can use it, whether it is on, after how many minutes away. */
     @JavascriptInterface

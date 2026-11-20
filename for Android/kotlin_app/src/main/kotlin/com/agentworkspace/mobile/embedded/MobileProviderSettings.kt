@@ -234,9 +234,22 @@ data class MobileProviderSettings(
             load(context)
         }
 
+        /** Read and written through a file both processes see at once (ProviderSettingsFile). */
+        private fun settingsFile(context: Context): ProviderSettingsFile {
+            val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+            return ProviderSettingsFile(
+                java.io.File(context.filesDir, "provider-settings.json"),
+                java.io.File(context.applicationInfo.dataDir, "shared_prefs/$PREFERENCES.xml"),
+                object : ProviderSettingsFile.Preferences {
+                    override fun all() = preferences.all.mapNotNull { (key, value) -> (value as? String)?.let { key to it } }.toMap()
+                    override fun write(values: Map<String, String>) =
+                        preferences.edit().apply { values.forEach { (key, value) -> putString(key, value) } }.commit()
+                },
+            )
+        }
+
         fun restorePreviousProvider(context: Context) = synchronized(this) {
-            val value = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
-                .getString("previous_remote", null)
+            val value = settingsFile(context).read()["previous_remote"]
                 ?: throw IllegalStateException("尚无原模型配置")
             val previous = JSONObject(value)
             val base = previous.getString("base_url")
@@ -288,30 +301,30 @@ data class MobileProviderSettings(
 
         fun load(context: Context): MobileProviderSettings {
             EmbeddedSecrets.initialize(context)
-            val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+            val stored = settingsFile(context).read()
             val defaults = MobileProviderSettings()
-            val protocol = preferences.getString("protocol", defaults.protocol)!!
-            val baseUrl = preferences.getString("base_url", defaults.baseUrl)!!
-            val model = preferences.getString("model", defaults.model)!!
-            val effort = preferences.getString("reasoning_effort", "auto")
-                ?.takeIf { it in reasoningEfforts(protocol, baseUrl, model) } ?: "auto"
-            val autonomy = preferences.getString("autonomy", "workspace")
-                ?.takeIf { it in autonomies } ?: "workspace"
-            val contextTokens = preferences.getString("local_context_tokens", "0")
-                ?.toIntOrNull()?.takeIf { validLocalContext(it) } ?: 0
-            val memoryMode = preferences.getString("local_memory_mode", "balanced")
-                ?.takeIf { it in localMemoryModes } ?: "balanced"
+            val protocol = stored["protocol"] ?: defaults.protocol
+            val baseUrl = stored["base_url"] ?: defaults.baseUrl
+            val model = stored["model"] ?: defaults.model
+            val effort = (stored["reasoning_effort"] ?: "auto")
+                .takeIf { it in reasoningEfforts(protocol, baseUrl, model) } ?: "auto"
+            val autonomy = (stored["autonomy"] ?: "workspace")
+                .takeIf { it in autonomies } ?: "workspace"
+            val contextTokens = (stored["local_context_tokens"] ?: "0")
+                .toIntOrNull()?.takeIf { validLocalContext(it) } ?: 0
+            val memoryMode = (stored["local_memory_mode"] ?: "balanced")
+                .takeIf { it in localMemoryModes } ?: "balanced"
             return MobileProviderSettings(
                 protocol, baseUrl, model,
                 EmbeddedSecrets.getCredential(credentialTarget(protocol, baseUrl)), effort, autonomy,
                 contextTokens, memoryMode,
-                preferences.getString("local_threads", "0")?.toIntOrNull()
+                (stored["local_threads"] ?: "0").toIntOrNull()
                     ?.takeIf { it in 0..LocalModelPerformance.MAX_THREADS } ?: 0,
-                preferences.getString("local_timeout_seconds", "0")?.toIntOrNull()
+                (stored["local_timeout_seconds"] ?: "0").toIntOrNull()
                     ?.takeIf { it in 0..LocalModelPerformance.MAX_TIMEOUT_SECONDS } ?: 0,
-                preferences.getString("context_summary_enabled", null)?.toBooleanStrictOrNull()
+                stored["context_summary_enabled"]?.toBooleanStrictOrNull()
                     ?: defaultContextSummaryEnabled(baseUrl),
-                preferences.getString("allow_lan_http", null)?.toBooleanStrictOrNull() ?: false,
+                stored["allow_lan_http"]?.toBooleanStrictOrNull() ?: false,
             )
         }
 
@@ -341,9 +354,10 @@ data class MobileProviderSettings(
             }
             require(localThreads == null || localThreads in 0..LocalModelPerformance.MAX_THREADS) { "Invalid local threads" }
             require(localTimeoutSeconds == null || localTimeoutSeconds in 0..LocalModelPerformance.MAX_TIMEOUT_SECONDS) { "Invalid local timeout" }
-            val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
-            val contextTokens = localContextTokens ?: preferences.getString("local_context_tokens", "0")
-                ?.toIntOrNull()?.takeIf { validLocalContext(it) } ?: 0
+            val settings = settingsFile(context)
+            val stored = settings.read()
+            val contextTokens = localContextTokens ?: (stored["local_context_tokens"] ?: "0")
+                .toIntOrNull()?.takeIf { validLocalContext(it) } ?: 0
             validateLocalContext(baseUrl, model, contextTokens)
             if (baseUrl.trimEnd('/') == EMBEDDED_QWEN_BASE_URL) {
                 require(protocol == "openai-compatible" && model in embeddedQwenModels) {
@@ -358,7 +372,7 @@ data class MobileProviderSettings(
             require(uri.userInfo == null && uri.query == null && uri.fragment == null) {
                 "Endpoint may not contain credentials, query parameters, or a fragment"
             }
-            val lanHttp = allowLanHttp ?: (preferences.getString("allow_lan_http", null)?.toBooleanStrictOrNull() ?: false)
+            val lanHttp = allowLanHttp ?: (stored["allow_lan_http"]?.toBooleanStrictOrNull() ?: false)
             require(endpointAllowed(uri.scheme, uri.host, lanHttp)) {
                 if (lanHttp || !isPrivateLanHost(uri.host)) com.agentworkspace.mobile.UiText.of(context,
                     "远程地址需要 HTTPS。局域网里的电脑请填它的 IP 地址（如 192.168.1.5）",
@@ -370,39 +384,36 @@ data class MobileProviderSettings(
             if (baseUrl.trimEnd('/') == EMBEDDED_QWEN_BASE_URL) {
                 val previous = load(context)
                 if (previous.baseUrl.trimEnd('/') != EMBEDDED_QWEN_BASE_URL) {
-                    check(preferences.edit().putString("previous_remote", previous.toPublicJson())
-                        .commit()) { "Failed to preserve previous provider settings" }
+                    stored["previous_remote"] = previous.toPublicJson()
+                    settings.write(stored)
                 }
             }
             val supported = reasoningEfforts(protocol, baseUrl, model)
-            val effort = reasoningEffort ?: preferences.getString("reasoning_effort", "auto")
-                ?.takeIf { it in supported } ?: "auto"
+            val effort = reasoningEffort ?: (stored["reasoning_effort"] ?: "auto")
+                .takeIf { it in supported } ?: "auto"
             require(effort in supported) { "Unsupported reasoning effort for this model" }
-            val mode = autonomy ?: preferences.getString("autonomy", "workspace")
-                ?.takeIf { it in autonomies } ?: "workspace"
+            val mode = autonomy ?: (stored["autonomy"] ?: "workspace")
+                .takeIf { it in autonomies } ?: "workspace"
             require(mode in autonomies) { "Invalid execution mode" }
-            val memoryMode = localMemoryMode ?: preferences.getString("local_memory_mode", "balanced")
-                ?.takeIf { it in localMemoryModes } ?: "balanced"
+            val memoryMode = localMemoryMode ?: (stored["local_memory_mode"] ?: "balanced")
+                .takeIf { it in localMemoryModes } ?: "balanced"
             val performance = load(context)
             EmbeddedSecrets.initialize(context)
             val target = credentialTarget(protocol, baseUrl)
             if (deleteApiKey) EmbeddedSecrets.deleteCredential(target)
             else if (!newApiKey.isNullOrBlank()) EmbeddedSecrets.setCredential(target, newApiKey)
-            val editor = preferences.edit()
-                .putString("protocol", protocol)
-                .putString("base_url", baseUrl)
-                .putString("model", model)
-                .putString("reasoning_effort", effort)
-                .putString("autonomy", mode)
-                .putString("local_context_tokens", contextTokens.toString())
-                .putString("local_memory_mode", memoryMode)
-                .putString("local_threads", (localThreads ?: performance.localThreads).toString())
-                .putString("local_timeout_seconds", (localTimeoutSeconds ?: performance.localTimeoutSeconds).toString())
-            if (contextSummaryEnabled != null) {
-                editor.putString("context_summary_enabled", contextSummaryEnabled.toString())
-            }
-            if (allowLanHttp != null) editor.putString("allow_lan_http", allowLanHttp.toString())
-            check(editor.commit()) { "Failed to save provider settings" }
+            stored["protocol"] = protocol
+            stored["base_url"] = baseUrl
+            stored["model"] = model
+            stored["reasoning_effort"] = effort
+            stored["autonomy"] = mode
+            stored["local_context_tokens"] = contextTokens.toString()
+            stored["local_memory_mode"] = memoryMode
+            stored["local_threads"] = (localThreads ?: performance.localThreads).toString()
+            stored["local_timeout_seconds"] = (localTimeoutSeconds ?: performance.localTimeoutSeconds).toString()
+            if (contextSummaryEnabled != null) stored["context_summary_enabled"] = contextSummaryEnabled.toString()
+            if (allowLanHttp != null) stored["allow_lan_http"] = allowLanHttp.toString()
+            settings.write(stored)
         }
 
         fun applyRuntimeSettings(context: Context, settingsJson: String): MobileProviderSettings = synchronized(this) {

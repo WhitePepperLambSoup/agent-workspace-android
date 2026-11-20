@@ -180,12 +180,6 @@ class SandboxStatus:
         return document
 
 
-def _autonomy_value(autonomy: Autonomy | str) -> str:
-    if isinstance(autonomy, Autonomy):
-        return autonomy.value
-    return str(autonomy).strip().casefold()
-
-
 def sandbox_status(
     *,
     autonomy: Autonomy | str = Autonomy.WORKSPACE,
@@ -201,7 +195,8 @@ def sandbox_status(
     a stable failure code instead of an implicit host-process fallback.
     """
 
-    strict_isolation = require_isolation or _autonomy_value(autonomy) == "yolo"
+    del autonomy  # retained in the public signature for caller compatibility
+    strict_isolation = require_isolation
     normalized_backend = backend.strip().casefold()
     native = native_report or inspect_native_isolation()
     risks = native.risk_boundary
@@ -874,8 +869,14 @@ class RunSandboxTool:
         prepared = dict(arguments)
         # A backend that runs in a staged copy says what it leaves out of the copy (.git): what
         # the command cannot see does not make it ask.
-        excluded: frozenset[str] = getattr(self.backend, "staging_exclusions", frozenset())
-        sensitive_count, sensitive_sha256 = _validate_workspace_mount(self.paths.root, excluded)
+        excluded: frozenset[str] | None = getattr(self.backend, "staging_exclusions", None)
+        # A copy leaves links and special files out (the run lists them) rather than refusing;
+        # a backend that mounts the workspace itself keeps refusing them.
+        sensitive_count, sensitive_sha256 = _validate_workspace_mount(
+            self.paths.root,
+            excluded or frozenset(),
+            left_out=[] if excluded is not None else None,
+        )
         prepared["_sandbox_sensitive_count"] = sensitive_count
         prepared["_sandbox_sensitive_sha256"] = sensitive_sha256
         return prepared
@@ -1562,12 +1563,19 @@ def _docker_arguments(
 
 
 def _validate_workspace_mount(
-    root: Path, excluded: frozenset[str] = frozenset()
+    root: Path,
+    excluded: frozenset[str] = frozenset(),
+    *,
+    left_out: list[str] | None = None,
 ) -> tuple[int, str]:
     """Reject host filesystem objects whose identity or target is not workspace-local.
 
     ``excluded`` names (case-insensitive, at any depth) are left out of a staged copy, so they
     are neither checked nor counted as sensitive paths the sandbox would see.
+
+    ``left_out`` (a staged copy): links, junctions and other reparse points, special files,
+    nested mounts and hard-linked files are not refused but added to the list, by workspace
+    path, and not copied; a linked folder is not entered, so nothing outside is reached.
     """
     entries = 0
     sensitive_count = 0
@@ -1590,6 +1598,17 @@ def _validate_workspace_mount(
                 file_names[:] = [n for n in file_names if n.casefold() not in excluded]
             directory_names.sort()
             file_names.sort()
+            if left_out is not None:
+                for names_list in (directory_names, file_names):
+                    kept = []
+                    for name in names_list:
+                        path = Path(directory) / name
+                        if _not_staged(path, root_device):
+                            left_out.append(path.relative_to(root).as_posix())
+                        else:
+                            kept.append(name)
+                    # In place, so os.walk does not enter a linked folder.
+                    names_list[:] = kept
             names = (*directory_names, *file_names)
             entries += len(names)
             if entries > _MAX_MOUNT_ENTRIES:
@@ -1626,6 +1645,20 @@ def _validate_workspace_mount(
         if len(observed) != expected:
             raise ToolError(f"workspace file has a hard link outside the mount: {observed[0]}")
     return sensitive_count, sensitive_digest.hexdigest()
+
+
+def _not_staged(path: Path, root_device: int) -> bool:
+    """What a staged copy leaves out: a link, junction or other reparse point, a special file,
+    a nested mount, or a file with more than one name (another may be outside the workspace)."""
+    metadata = path.lstat()
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    if stat.S_ISLNK(metadata.st_mode) or attributes & 0x400:
+        return True
+    if metadata.st_dev != root_device or path.is_mount():
+        return True
+    if stat.S_ISREG(metadata.st_mode):
+        return metadata.st_nlink > 1
+    return not stat.S_ISDIR(metadata.st_mode)
 
 
 def _run_docker_sandbox_sync(

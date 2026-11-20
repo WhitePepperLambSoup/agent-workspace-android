@@ -455,6 +455,7 @@ class AndroidReadDocumentTool(_NativeTool):
         },
         side_effect="read",
         capability=Capability.WORKSPACE_READ,
+        sensitive_result=True,
     )
 
     async def execute(self, arguments: dict[str, Any]) -> str:

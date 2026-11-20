@@ -13,14 +13,22 @@ import org.json.JSONObject
 /**
  * The app lock the user can turn on: conversations, memory and API settings are all on this
  * phone, so opening the app again after a while asks for the fingerprint, face or the screen lock
- * (Android 9+, the system's own prompt). Off by default.
+ * (Android 10+, the system's own prompt). Off by default.
  */
 object AppLock {
     private const val PREFS = "app_lock"
     private val DELAYS = listOf(0, 1, 5)
+    /**
+     * The screen lock as a choice in the system prompt needs API 29. On Android 9 the call does not
+     * exist (NoSuchMethodError, which nothing catches: turning the lock on crashed the app), and
+     * a fingerprint-only prompt would shut out phones with just a PIN.
+     */
+    const val MINIMUM_SDK = 29
+
+    fun supportedOn(sdk: Int): Boolean = sdk >= MINIMUM_SDK
 
     fun available(context: Context): Boolean {
-        if (Build.VERSION.SDK_INT < 28) return false
+        if (!supportedOn(Build.VERSION.SDK_INT)) return false
         if (Build.VERSION.SDK_INT >= 30) {
             val manager = context.getSystemService(BiometricManager::class.java) ?: return false
             return manager.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_WEAK or
@@ -40,7 +48,7 @@ object AppLock {
         .put("available", available(context))
         .put("enabled", enabled(context))
         .put("delay_minutes", delayMinutes(context))
-        .put("minimum_android", 9).toString()
+        .put("minimum_android", 10).toString()
 
     fun save(context: Context, enabled: Boolean, delayMinutes: Int) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
@@ -57,14 +65,14 @@ object AppLock {
 
     /** The system prompt; [done] gets true once the user is through, false if they cancel or fail. */
     fun authenticate(activity: Activity, done: (Boolean) -> Unit) {
-        if (Build.VERSION.SDK_INT < 28) { done(true); return }
+        if (!supportedOn(Build.VERSION.SDK_INT)) { done(true); return }
         val builder = BiometricPrompt.Builder(activity)
             .setTitle(UiText.of(activity, "解锁 Agent Workspace", "Unlock Agent Workspace"))
             .setSubtitle(UiText.of(activity, "验证指纹、面容或锁屏密码", "Use your fingerprint, face or screen lock"))
         if (Build.VERSION.SDK_INT >= 30) {
             builder.setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_WEAK or
                 BiometricManager.Authenticators.DEVICE_CREDENTIAL)
-        } else {
+        } else if (Build.VERSION.SDK_INT >= 29) {
             @Suppress("DEPRECATION")
             builder.setDeviceCredentialAllowed(true)
         }

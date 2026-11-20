@@ -2,8 +2,9 @@
 
 The core tools keep memory per workspace and ask for approval on every write. On the phone the
 memory is about the user, shared by all workspaces, shown in every task's system prompt and kept
-small by hard limits in the store, so writes run without an approval prompt (the "session_state"
-effect) and every saved note stays visible and editable on the Memory page.
+small by hard limits in the store, so saving a new note runs without an approval prompt (the
+"session_state" effect) and every saved note stays visible and editable on the Memory page.
+Deleting a memory, or rewriting one the user wrote, asks the user first (prepare_for_approval).
 """
 
 from __future__ import annotations
@@ -86,8 +87,8 @@ class MobileMemoryWriteTool:
             "required": ["action"],
             "additionalProperties": False,
         },
-        # Allowed without an approval prompt in workspace and YOLO modes; the store enforces size,
-        # count, duplicates and secret filtering, and the user can review every note.
+        # A new note is allowed without an approval prompt in workspace and YOLO modes; the store
+        # enforces size, count, duplicates and secret filtering, and the user can review every note.
         side_effect="session_state",
         capability=Capability.MEMORY_WRITE,
     )
@@ -99,6 +100,24 @@ class MobileMemoryWriteTool:
     def spec(self) -> ToolSpec:
         return self._SPEC
 
+    def prepare_for_approval(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Deleting a memory, or rewriting one the user wrote themselves, asks the user first: the
+        policy asks for a call marked _confirm_change, and the approval shows the memory."""
+        memory_id = arguments.get("id")
+        if arguments.get("action") not in ("upsert", "delete") or not isinstance(memory_id, str):
+            return dict(arguments)
+        items = _store().snapshot()["items"]
+        item = next((entry for entry in items if entry["id"] == memory_id), None)
+        if item is None:
+            return dict(arguments)  # Refused when it runs: no memory has that id.
+        if arguments["action"] == "delete":
+            kind = "delete_memory"
+        elif item.get("source") == "user":
+            kind = "replace_memory"
+        else:
+            return dict(arguments)
+        return {**arguments, "_confirm_change": {"kind": kind, "text": item["content"]}}
+
     async def execute(self, _arguments: dict[str, Any]) -> str:
         raise ToolArgumentError("memory_write requires an active task")
 
@@ -109,8 +128,8 @@ class MobileMemoryWriteTool:
         used = self._saves.get(key, 0)
         if used >= AUTO_SAVES_PER_TASK:
             raise ToolError(
-                f"only {AUTO_SAVES_PER_TASK} memory saves are allowed per task; combine related "
-                "facts, or tell the user they can add more on the Memory page"
+                f"only {AUTO_SAVES_PER_TASK} memory saves or deletions are allowed per task; "
+                "combine related facts, or tell the user they can change more on the Memory page"
             )
         self._saves[key] = used + 1
         self._saves.move_to_end(key)
@@ -128,17 +147,23 @@ class MobileMemoryWriteTool:
         if memory_id is not None and (not isinstance(memory_id, str) or not memory_id):
             raise ToolArgumentError("'id' must be a memory id from the list")
         try:
+            if action not in ("upsert", "delete"):
+                raise ToolArgumentError("action must be upsert or delete")
+            if action == "delete" and not memory_id:
+                raise ToolArgumentError("delete needs the id of the memory to remove")
+            # Deletions count too: where nobody is asked (full access), one task must not be able to
+            # empty the user's memory.
+            self._count_save(context)
             if action == "delete":
-                if not memory_id:
-                    raise ToolArgumentError("delete needs the id of the memory to remove")
                 store.delete(memory_id)
                 return json_result({"deleted": memory_id})
-            if action != "upsert":
-                raise ToolArgumentError("action must be upsert or delete")
-            self._count_save(context)
             topic = arguments.get("topic")
             if memory_id:
-                item = store.update(memory_id, arguments.get("content"), source="auto", topic=topic)
+                # A memory the user wrote stays theirs once they approved the new wording, so the
+                # next rewrite asks again.
+                confirmed = arguments.get("_confirm_change") or {}
+                source = None if confirmed.get("kind") == "replace_memory" else "auto"
+                item = store.update(memory_id, arguments.get("content"), source=source, topic=topic)
                 return json_result({"updated": item})
             item = store.add(arguments.get("content"), source="auto", topic=topic)
             return json_result({"saved": item})

@@ -69,7 +69,6 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
         private const val ACCENT = 0xFF0F766E.toInt()
         private const val ACCENT_DARK = 0xFF5CC6B1.toInt()
         private const val DANGER = 0xFFB42318.toInt()
-        private const val POLL_MS = 600L
         private const val MAX_STEPS = 6
         private const val BLUR_DP = 24
         internal const val STOPPED_BY_USER = "stopped by the user"
@@ -204,7 +203,10 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
         }
     }
 
-    fun close() {
+    /** Closes the panel; [force] when the service itself goes away (the repeat's stop reaches the
+     * panel later, by then dropped, so the repeat would still read as running). */
+    fun close(force: Boolean = false) {
+        if (force) repeatState = null
         // A repeat keeps going after its task: the panel shrinks to its pill instead, so it can be stopped.
         if (repeatState?.running == true && root != null) {
             if (stage == Stage.COMPOSE || stage == Stage.APPROVAL) stage = Stage.DONE
@@ -561,6 +563,10 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
         reason == "automation was paused" -> text("自动化已暂停", "automation was paused")
         reason.startsWith("the user left") -> text("离开了原来的应用", "you left the app")
         reason == "reached the four-hour limit" -> text("已到 4 小时上限", "it reached the four-hour limit")
+        reason == "reached the task's hosted time limit" -> text("已到托管时间上限", "it reached the hosted time limit")
+        reason == "reached the task's hosted step limit" -> text("已到托管步数上限", "it reached the hosted step limit")
+        reason.startsWith("the user keeps the agent away from") ->
+            text("前台换成了不让 AI 碰的应用", "an app the agent is kept away from came to the front")
         reason == "replaced by a new repeat" -> text("换成了新的定时重复", "a new repeat replaced it")
         reason.startsWith("none of the steps could be done") ->
             text("连续几轮都点不到目标", "its steps could not be done several rounds in a row")
@@ -1230,14 +1236,17 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
     private suspend fun follow() {
         val id = taskId ?: return
         var misses = 0
+        var quiet = 0
         while (scope.isActive && root != null && taskId == id) {
             try {
+                val before = sequence
                 val updates = withContext(Dispatchers.IO) {
                     EngineHttp.request(service, "GET", "/mobile/tasks/${Uri.encode(id)}/events?after=$sequence", null, 10000)
                 }
                 if (updates.ok) updates.body.optJSONArray("events")?.let { events ->
                     for (index in 0 until events.length()) events.optJSONObject(index)?.let(::consume)
                 }
+                quiet = if (sequence > before) 0 else quiet + 1
                 val snapshot = withContext(Dispatchers.IO) {
                     EngineHttp.request(service, "GET", "/mobile/tasks/${Uri.encode(id)}", null, 10000)
                 }
@@ -1283,8 +1292,10 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
                 }
             } catch (failure: Exception) {
                 if (++misses >= 8) { finish(text("和 AI 引擎的连接中断了", "Lost the connection to the engine"), true); return }
+                // Retried at the usual pace, so a lost engine is still reported after a few seconds.
+                quiet = 0
             }
-            delay(POLL_MS)
+            delay(followDelay(quiet))
         }
     }
 
@@ -1332,7 +1343,7 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
                 val arguments = payload.optJSONObject("arguments")
                 "tool" to if (name == "android_action" && arguments != null) {
                     // In words, as the approval prompt says it.
-                    runCatching { service.describeAction(arguments) }.getOrDefault(name)
+                    runCatching { service.describeAction(arguments, forApproval = true) }.getOrDefault(name)
                 } else toolWords(name, arguments)
             }
             type == "runtime.tool.settled" -> {
@@ -1490,7 +1501,7 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
         }
         val tool = details.optString("tool")
         val arguments = details.optJSONObject("arguments") ?: JSONObject()
-        if (tool == "android_action") return service.describeAction(arguments)
+        if (tool == "android_action") return service.describeAction(arguments, forApproval = true)
         if (tool == "notification_reply" || tool == "notification_open") return toolWords(tool, arguments)
         return text("使用工具 $tool", "Use the tool $tool")
     }
@@ -1598,6 +1609,18 @@ internal class PhoneControlPanel(private val service: AgentAccessibilityService)
         val view = root ?: return
         service.getSystemService(InputMethodManager::class.java)?.hideSoftInputFromWindow(view.windowToken, 0)
     }
+}
+
+/**
+ * How long the panel waits before it next asks about the task it follows (two requests a round),
+ * after [quietRounds] rounds in a row with no new event. While the reply is written or steps come
+ * it asks every 0.6 s; through a long tool or a model thinking it slows to every 2 s. At 0.6 s
+ * throughout, a 20-minute task made about 4000 requests.
+ */
+internal fun followDelay(quietRounds: Int): Long = when {
+    quietRounds < 3 -> 600L
+    quietRounds < 8 -> 1200L
+    else -> 2000L
 }
 
 /**

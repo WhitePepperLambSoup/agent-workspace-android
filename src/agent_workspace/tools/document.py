@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import unicodedata
 import zipfile
 from pathlib import Path
@@ -15,11 +16,13 @@ from agent_workspace.tools.base import (
     optional_int,
     require_string,
 )
-from agent_workspace.tools.paths import StrPath, WorkspacePaths
+from agent_workspace.tools.paths import StrPath, WorkspacePaths, open_checked
 
 _MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
 _MAX_ZIP_MEMBER_BYTES = 64 * 1024 * 1024
 _MAX_TEXT_CHARS = 256 * 1024
+# How far into a document's text a read may start (the text before it is extracted too).
+_MAX_OFFSET_BYTES = 64 * 1024 * 1024
 _PDF_MAGIC = b"%PDF"
 _DOCX_CONTENT_TYPES = (
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
@@ -178,9 +181,9 @@ def _read_zip_member(archive: zipfile.ZipFile, name: str, maximum: int) -> bytes
     return raw
 
 
-def _docx_text(path: Path, maximum: int) -> tuple[str, bool]:
+def _docx_text(path: Path, maximum: int, *, stream: BinaryIO | None = None) -> tuple[str, bool]:
     try:
-        with zipfile.ZipFile(path) as archive:
+        with zipfile.ZipFile(stream if stream is not None else path) as archive:
             names = archive.namelist()
             target = next(
                 (name for name in names if name == "word/document.xml"),
@@ -215,9 +218,9 @@ def _docx_text(path: Path, maximum: int) -> tuple[str, bool]:
     return "\n".join(paragraphs), truncated
 
 
-def _xlsx_text(path: Path, maximum: int) -> tuple[str, bool]:
+def _xlsx_text(path: Path, maximum: int, *, stream: BinaryIO | None = None) -> tuple[str, bool]:
     try:
-        with zipfile.ZipFile(path) as archive:
+        with zipfile.ZipFile(stream if stream is not None else path) as archive:
             shared: list[str] = []
             if "xl/sharedStrings.xml" in archive.namelist():
                 shared_root = None
@@ -290,7 +293,20 @@ def _xlsx_text(path: Path, maximum: int) -> tuple[str, bool]:
         raise ToolError("document is not a valid ZIP-based Office file") from None
 
 
-def _read_document_sync(paths: WorkspacePaths, raw_path: str, maximum: int) -> str:
+def _read_document_sync(
+    paths: WorkspacePaths,
+    raw_path: str,
+    maximum: int,
+    *,
+    offset: int = 0,
+    start_page: int = 1,
+    max_pages: int | None = None,
+) -> str:
+    """A part of a document's text: ``maximum`` UTF-8 bytes from byte ``offset`` (of the
+    selected pages, for a PDF), with ``next_offset`` set while more text follows."""
+    window = maximum
+    # The text before the offset is extracted too (the formats are read from the start).
+    maximum = offset + window
     path = paths.resolve(raw_path)
     if path.is_dir():
         raise ToolError(f"path is a directory: {path}")
@@ -301,58 +317,74 @@ def _read_document_sync(paths: WorkspacePaths, raw_path: str, maximum: int) -> s
     if metadata.st_size > _MAX_DOCUMENT_BYTES:
         raise ToolError(f"document exceeds the {_MAX_DOCUMENT_BYTES}-byte limit: {path}")
     try:
-        with path.open("rb") as stream:
-            prefix = stream.read(8)
+        # Read once, through a checked open: the readers below then see exactly these bytes,
+        # not whatever a folder swapped for a link would lead to on a later open by path.
+        with open_checked(path) as stream:
+            data = stream.read(_MAX_DOCUMENT_BYTES + 1)
     except OSError as exc:
         raise ToolError(f"cannot read document: {path}") from exc
+    if len(data) > _MAX_DOCUMENT_BYTES:
+        raise ToolError(f"document exceeds the {_MAX_DOCUMENT_BYTES}-byte limit: {path}")
+    prefix = data[:8]
     suffix = path.suffix.casefold()
     if suffix == ".pdf" and (prefix.startswith(_PDF_MAGIC) or not prefix.startswith(b"PK")):
-        text, truncated = _pdf_text(path, maximum)
+        text, truncated = _pdf_text(
+            path, maximum, start_page=start_page, max_pages=max_pages, stream=io.BytesIO(data)
+        )
         media_type = "application/pdf"
     elif suffix in {".docx", ".doc"} and prefix.startswith(b"PK"):
-        text, truncated = _docx_text(path, maximum)
+        text, truncated = _docx_text(path, maximum, stream=io.BytesIO(data))
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     elif suffix in {".xlsx", ".xls"} and prefix.startswith(b"PK"):
-        text, truncated = _xlsx_text(path, maximum)
+        text, truncated = _xlsx_text(path, maximum, stream=io.BytesIO(data))
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     elif suffix == ".pptx" and prefix.startswith(b"PK"):
-        text, truncated = _pptx_text(path, maximum)
+        text, truncated = _pptx_text(path, maximum, data=data)
         media_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     elif suffix in {".txt", ".md", ".csv", ".json", ".log", ".toml", ".yaml", ".yml"}:
-        try:
-            raw = path.read_bytes()
-        except OSError as exc:
-            raise ToolError(f"cannot read document: {path}") from exc
         text, truncated = _bounded_text(
-            raw.decode("utf-8", errors="replace"),
+            data.decode("utf-8", errors="replace"),
             maximum,
         )
         media_type = "text/plain"
     else:
         raise ToolError(f"unsupported document format: {suffix or path.name}")
-    try:
-        # The digest edit_docx and update_xlsx ask for, so a change applies to this version.
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError as exc:
-        raise ToolError(f"cannot read document: {path}") from exc
+    # The digest edit_docx and update_xlsx ask for, so a change applies to this version.
+    digest = hashlib.sha256(data).hexdigest()
+    encoded = text.encode("utf-8")
+    start = _character_start(encoded, offset)
+    end = _character_start(encoded, start + window)
+    part = encoded[start:end]
+    more = truncated or end < len(encoded)
     return json_result(
         {
             "path": paths.relative(path),
             "media_type": media_type,
             "sha256": digest,
-            "chars": len(text.encode("utf-8")),
-            "truncated": truncated,
-            "content": text,
+            "chars": len(part),
+            "truncated": more,
+            "content": part.decode("utf-8", errors="replace"),
+            "offset": start,
+            # Pass as offset (with the same start_page) to read on.
+            "next_offset": end if more else None,
         }
     )
 
 
-def _pptx_text(path: Path, maximum: int) -> tuple[str, bool]:
+def _character_start(encoded: bytes, position: int) -> int:
+    """``position`` moved back to the start of the UTF-8 character it falls in."""
+    position = min(position, len(encoded))
+    while 0 < position < len(encoded) and encoded[position] & 0xC0 == 0x80:
+        position -= 1
+    return position
+
+
+def _pptx_text(path: Path, maximum: int, *, data: bytes | None = None) -> tuple[str, bool]:
     """A presentation's text, slide by slide: the title, then its points indented by level."""
     from agent_workspace.tools.office_preview import PreviewError, preview_office
 
     try:
-        preview = preview_office(path.read_bytes(), ".pptx")
+        preview = preview_office(data if data is not None else path.read_bytes(), ".pptx")
     except (OSError, PreviewError):
         raise ToolError("document is not a readable PowerPoint presentation") from None
     lines: list[str] = []
@@ -381,13 +413,17 @@ class ReadDocumentTool:
             "edit_docx and update_xlsx need as expected_sha256. PDF fonts need readable "
             "Unicode mappings; scanned or unmapped PDFs need page rendering and OCR. "
             "Binary Word/Excel/PowerPoint files (.doc/.xls/.ppt) and PDFs over 16 MiB are "
-            "unsupported."
+            "unsupported. When next_offset is set, pass it as offset to read on; for a PDF, "
+            "start_page (one-based) and max_pages choose the pages read."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "path": {"type": "string", "minLength": 1},
                 "max_chars": {"type": "integer", "minimum": 1024, "maximum": 262144},
+                "offset": {"type": "integer", "minimum": 0, "maximum": _MAX_OFFSET_BYTES},
+                "start_page": {"type": "integer", "minimum": 1},
+                "max_pages": {"type": "integer", "minimum": 1},
             },
             "required": ["path"],
             "additionalProperties": False,
@@ -417,4 +453,16 @@ class ReadDocumentTool:
             minimum=1024,
             maximum=262144,
         )
-        return _read_document_sync(self.paths, raw_path, maximum)
+        offset = optional_int(arguments, "offset", 0, minimum=0, maximum=_MAX_OFFSET_BYTES)
+        start_page = optional_int(arguments, "start_page", 1, minimum=1, maximum=1_000_000)
+        max_pages = arguments.get("max_pages")
+        if max_pages is not None:
+            max_pages = optional_int(arguments, "max_pages", 1, minimum=1, maximum=1_000_000)
+        return _read_document_sync(
+            self.paths,
+            raw_path,
+            maximum,
+            offset=offset,
+            start_page=start_page,
+            max_pages=max_pages,
+        )

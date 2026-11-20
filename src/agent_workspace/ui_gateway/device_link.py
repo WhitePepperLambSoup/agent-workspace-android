@@ -5,9 +5,9 @@ reads a session's messages, and hands tasks over with an idempotent request id; 
 the desktop's own runtime, so they show in its window and its approvals are given there.
 
 Each phone gets its own token. Only the token's SHA-256 is stored, and a phone can be revoked on
-its own. The endpoint answers only peers on private networks (LAN, Tailscale, link-local) and
-Host headers that name this machine, and it can serve HTTPS with a self-signed certificate whose
-fingerprint a phone pins when it pairs.
+its own. The endpoint answers only peers on private networks (LAN, link-local, and Tailscale
+while its adapter is up here) and Host headers that name this machine, and it can serve HTTPS
+with a self-signed certificate whose fingerprint a phone pins when it pairs.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ from agent_workspace.core.experts import ExpertError, parse_team
 from agent_workspace.ui_gateway.device_store import DeviceStore
 from agent_workspace.ui_gateway.firewall import FirewallWatch
 from agent_workspace.ui_gateway.mdns import MdnsAnnouncer, txt_record
-from agent_workspace.ui_gateway.net_adapters import reachable_addresses
+from agent_workspace.ui_gateway.net_adapters import reachable_addresses, tailscale_present
 
 SCOPES = ("read", "tasks", "approvals", "broad_autonomy", "files", "knowledge")
 # Device link 2 (docs/DEVICE_LINK_API.md): what this desktop implements, for the phone to show.
@@ -85,6 +85,7 @@ _ADDRESS_CACHE_SECONDS = 30.0
 # Without look-alike letters and digits (0/O, 1/I/L), so a code read aloud is typed right.
 _CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 _TAILSCALE = ipaddress.ip_network("100.64.0.0/10")
+# Tailscale's range (_TAILSCALE) is answered only while its adapter is up here (peer_allowed).
 _ALLOWED_PEERS = tuple(
     ipaddress.ip_network(network)
     for network in (
@@ -92,7 +93,6 @@ _ALLOWED_PEERS = tuple(
         "10.0.0.0/8",
         "172.16.0.0/12",
         "192.168.0.0/16",
-        "100.64.0.0/10",
         "169.254.0.0/16",
         "::1/128",
         "fc00::/7",
@@ -123,14 +123,32 @@ def _loopback(host: str) -> bool:
         return host.lower() == "localhost"
 
 
-def peer_allowed(address: str) -> bool:
-    """Only peers on this machine, a private LAN, Tailscale or a link-local network."""
+_tailscale_seen: tuple[float, bool] | None = None
+_tailscale_lock = threading.Lock()
+
+
+def _tailscale_here() -> bool:
+    """Whether Tailscale's adapter is up here (net_adapters.tailscale_present), read at most every
+    30 seconds: without it, 100.64.0.0/10 is a carrier's shared addresses, other customers."""
+    global _tailscale_seen
+    now = time.monotonic()
+    with _tailscale_lock:
+        if _tailscale_seen is None or now - _tailscale_seen[0] > _ADDRESS_CACHE_SECONDS:
+            _tailscale_seen = (now, tailscale_present())
+        return _tailscale_seen[1]
+
+
+def peer_allowed(address: str, *, tailscale: Callable[[], bool] = _tailscale_here) -> bool:
+    """Only peers on this machine, a private LAN, a link-local network, or Tailscale while its
+    adapter is up here."""
     try:
         ip = ipaddress.ip_address(address.split("%", 1)[0])
     except ValueError:
         return False
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
+    if ip.version == 4 and ip in _TAILSCALE:
+        return tailscale()
     return any(ip.version == network.version and ip in network for network in _ALLOWED_PEERS)
 
 
@@ -219,15 +237,32 @@ class DeviceRegistry:
         self._pairing: _PairingCode | None = None
         self._failed_redeems: list[float] = []
 
-    def _read(self) -> list[dict[str, Any]]:
+    def _read(self, *, for_update: bool = False) -> list[dict[str, Any]]:
+        """The stored records. Only a missing file is an empty list to write back over: one that
+        could not be read (held by a virus scanner or backup, say) refuses the change, and one
+        that is not a device list is set aside first, so pairing a phone never drops the others.
+        """
         try:
             document = json.loads(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return []
-        except (OSError, ValueError):
+        except OSError:
+            if for_update:
+                raise DeviceLinkError("storage_unavailable", 503) from None
             return []
+        except ValueError:
+            document = None
         devices = document.get("devices") if isinstance(document, dict) else None
         if not isinstance(devices, list):
+            if for_update:
+                try:
+                    self.path.replace(
+                        self.path.with_name(f"{self.path.name}.corrupt-{int(self._clock())}")
+                    )
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    raise DeviceLinkError("storage_unavailable", 503) from None
             return []
         return [item for item in devices if isinstance(item, dict)]
 
@@ -275,7 +310,7 @@ class DeviceRegistry:
             raise DeviceLinkError("invalid_device")
         allowed = clean_scopes(scopes) if scopes is not None else None
         with self._lock:
-            records = self._read()
+            records = self._read(for_update=True)
             record = next((item for item in records if item.get("id") == device_id), None)
             if record is None:
                 raise DeviceLinkError("unknown_device", 404)
@@ -315,7 +350,7 @@ class DeviceRegistry:
             "last_address": None,
         }
         with self._lock:
-            records = self._read()
+            records = self._read(for_update=True)
             if len(records) >= _MAX_DEVICES:
                 raise DeviceLinkError("too_many_devices", 409)
             records.append(record)
@@ -1594,6 +1629,8 @@ class DeviceLink:
         self._server = server
         self._announce()
         if self._firewall is not None and not _loopback(self.bind_host):
+            # The rule the fix adds, and the check, are for this port only.
+            self._firewall.port = server.bound_port or settings["port"]
             self._firewall.recheck()
 
     def _firewall_state(self) -> str | None:

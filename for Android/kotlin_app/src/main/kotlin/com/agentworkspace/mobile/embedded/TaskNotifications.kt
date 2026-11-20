@@ -128,6 +128,7 @@ class TaskNotificationTracker(storageFile: File, private val startupAtMillis: Lo
         val records = ledger.optJSONObject("tasks") ?: JSONObject()
         val seen = mutableSetOf<String>()
         val changes = mutableListOf<TaskNotificationChange>()
+        var changed = firstSnapshot
         for (index in 0 until tasks.length()) {
             val task = tasks.optJSONObject(index)?.let(TaskNotificationSnapshot::fromJson) ?: continue
             seen.add(task.taskId)
@@ -175,7 +176,7 @@ class TaskNotificationTracker(storageFile: File, private val startupAtMillis: Lo
                 handledKeys.add(quietKey)
                 quietVisible = true
             }
-            records.put(task.taskId, JSONObject()
+            val record = JSONObject()
                 .put("session_id", task.sessionId)
                 .put("state", task.state)
                 .put("approval_key", if (task.state == "waiting_approval") key else JSONObject.NULL)
@@ -183,7 +184,9 @@ class TaskNotificationTracker(storageFile: File, private val startupAtMillis: Lo
                 .put("sequence", task.sequence)
                 .put("moved_at", movedAt)
                 .put("quiet_visible", quietVisible)
-                .put("handled", JSONArray(handledKeys.toList())))
+                .put("handled", JSONArray(handledKeys.toList()))
+            if (TaskNotificationLedger.differs(previous, record)) changed = true
+            records.put(task.taskId, record)
         }
         for (id in records.keys().asSequence().toList()) {
             val record = records.optJSONObject(id) ?: continue
@@ -193,10 +196,12 @@ class TaskNotificationTracker(storageFile: File, private val startupAtMillis: Lo
                 )))
                 record.put("waiting_visible", false)
                 record.put("quiet_visible", false)
+                changed = true
             }
         }
+        if (TaskNotificationLedger.prune(records, seen)) changed = true
         ledger = JSONObject().put("baseline_at", baseline).put("tasks", records)
-        writeAtomicJson(storage, ledger)
+        if (changed) writeAtomicJson(storage, ledger)
         return changes
     }
 
@@ -204,6 +209,47 @@ class TaskNotificationTracker(storageFile: File, private val startupAtMillis: Lo
         const val QUIET_MILLIS = 5 * 60_000L
         /** The notice's own state: a running task with nothing new for QUIET_MILLIS. */
         const val QUIET_STATE = "quiet"
+    }
+}
+
+/**
+ * How the tracker's ledger stays small and off the disk. It was written (with fsync) on every poll,
+ * every 2 s while a task ran, and kept a record of every task ever seen.
+ */
+internal object TaskNotificationLedger {
+    /** Records kept for tasks that left the engine's list, the most recently moved first. */
+    const val MAX_RECORDS = 500
+
+    /**
+     * Fields that move on every poll of a running task. They stay in memory and go out with the next
+     * real change: the watcher runs in the engine's process, so a restart that loses them also ends
+     * the task they were timing.
+     */
+    private val volatileFields = setOf("sequence", "moved_at")
+
+    /** Whether a task's record changed in a way that must be saved before notices are posted. */
+    fun differs(previous: JSONObject?, next: JSONObject): Boolean {
+        if (previous == null) return true
+        val keys = (previous.keys().asSequence() + next.keys().asSequence()).toSet() - volatileFields
+        return keys.any { previous.opt(it)?.toString() != next.opt(it)?.toString() }
+    }
+
+    /**
+     * Drops the oldest records past [limit] whose task is not in the current list and shows no notice.
+     * The engine lists finished tasks for half an hour after their last change; a task that comes
+     * back changed after its record went is told about like a new one. Returns whether any went.
+     */
+    fun prune(records: JSONObject, seen: Set<String>, limit: Int = MAX_RECORDS): Boolean {
+        val excess = records.length() - limit
+        if (excess <= 0) return false
+        val removable = records.keys().asSequence().toList().filter { id ->
+            val record = records.optJSONObject(id)
+            id !in seen && (record == null ||
+                (!record.optBoolean("waiting_visible") && !record.optBoolean("quiet_visible")))
+        }
+        val gone = removable.sortedBy { records.optJSONObject(it)?.optLong("moved_at", 0L) ?: 0L }.take(excess)
+        gone.forEach { records.remove(it) }
+        return gone.isNotEmpty()
     }
 }
 
@@ -316,7 +362,12 @@ class TaskNotificationMonitor(
             return 2000
         }
         try {
-            val endpoint = fixedEndpoint ?: URL("${EngineAddress.baseUrl(context)}/mobile/tasks")
+            // Unfinished and lately changed tasks plus the latest one, without output file lists.
+            val endpoint = fixedEndpoint ?: URL("${EngineAddress.baseUrl(context)}/mobile/tasks?active=1")
+            // A stale token beside another app on the port: send it nothing (EngineIdentity).
+            if (!EngineIdentity.verify("${endpoint.protocol}://${endpoint.host}:${endpoint.port}", token, 2000)) {
+                return unreachable(10000)
+            }
             val connection = endpoint.openConnection() as HttpURLConnection
             val snapshot = try {
                 connection.setRequestProperty("Authorization", "Bearer $token")

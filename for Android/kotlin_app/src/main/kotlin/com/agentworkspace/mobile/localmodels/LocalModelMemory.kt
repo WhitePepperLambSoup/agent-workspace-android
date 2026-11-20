@@ -101,6 +101,15 @@ object LocalModelMemory {
         )
     }
 
+    /**
+     * What a context kept between a task's steps (the model's reading of the prompt) holds besides
+     * the weights, which stay mapped: its cache, recurrent state and compute buffers. 0 when the
+     * model's shape is not verified, so memory is never counted twice on a guess.
+     */
+    fun keptContextBytes(modelId: String, modelBytes: Long, contextTokens: Int, installedSha256: String?): Long =
+        runCatching { estimate(modelId, modelBytes, contextTokens, null, installedSha256) }.getOrNull()
+            ?.takeIf { it.verifiedHybridShape }?.let { it.requiredBytes - it.weightsBytes } ?: 0L
+
     fun canLoad(lowMemory: Boolean, availableBytes: Long, requiredBytes: Long): Boolean =
         !lowMemory && availableBytes >= 0 && requiredBytes >= 0 && availableBytes >= requiredBytes
 

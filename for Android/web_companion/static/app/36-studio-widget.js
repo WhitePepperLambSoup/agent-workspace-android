@@ -19,6 +19,20 @@
   };
   let studioWidgetBusy = false;
   let studioWidgetTimer = 0;
+  let studioWidgetWebGl = null;
+
+  /** Whether this phone can draw the studio at all. A one-off drawing, not the live backdrop's
+   * animation: liveHardware() asks for 8 cores and 8 GB (deviceMemory reports 6 GB as 4), which
+   * left most phones' widget empty for good. */
+  function studioWidgetCanDraw() {
+    if (studioWidgetWebGl === null) {
+      try {
+        const probe = document.createElement("canvas");
+        studioWidgetWebGl = !!(probe.getContext("webgl2") || probe.getContext("webgl"));
+      } catch { studioWidgetWebGl = false; }
+    }
+    return studioWidgetWebGl && typeof window.requestAnimationFrame === "function";
+  }
 
   function studioWidgetLook() {
     const palette = getComputedStyle(document.documentElement);
@@ -55,7 +69,8 @@
     const version = JSON.stringify({ drawing: studioWidgetDrawing, ...look });
     if (!state.placed || state.version === version) return;
     // Not over a running task or while the app is away; it is tried again later.
-    if (activeTask || document.visibilityState !== "visible" || !liveHardware()) { queueStudioWidget(30000); return; }
+    if (!studioWidgetCanDraw()) return;
+    if (activeTask || document.visibilityState !== "visible") { queueStudioWidget(30000); return; }
     studioWidgetBusy = true;
     const stage = document.createElement("div");
     stage.className = "studio-widget-stage";

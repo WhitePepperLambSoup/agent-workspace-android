@@ -24,6 +24,24 @@ function rawHtmlAsText() {
   return visit;
 }
 
+// A picture on another host is fetched as soon as the reply is drawn, mid-stream too, with whatever
+// the model wrote into its address: what a web page told the model to put there would leave the phone
+// with no tap. It stays a link with the host in view, opened only when tapped (decorateMarkdown).
+// Pictures on the engine's own address are kept; the sanitizer already removed data:, blob: and file:.
+// The Content-Security-Policy in index.html stops the ones that come another way (a diagram's labels).
+function otherHostPicturesAsLinks() {
+  const visit = (node, inLink) => (node.children || []).forEach((child, index) => {
+    if (child.tagName !== "img") { visit(child, inLink || child.tagName === "a"); return; }
+    let url = null;
+    try { if (child.properties?.src) url = new URL(String(child.properties.src), window.location.href); } catch { /* A browser could not load it either. */ }
+    if (!url || url.origin === window.location.origin) return;
+    const alt = child.properties.alt;
+    const label = { type: "text", value: alt ? `${alt} (${url.host})` : url.host };
+    node.children[index] = inLink ? label : { type: "element", tagName: "a", properties: { href: url.href }, children: [label] };
+  });
+  return (tree) => { visit(tree, false); };
+}
+
 // Math runs after sanitizing: the sanitizer keeps the `language-math` class remark-math emits, and
 // KaTeX's own output is never stripped. MathML needs no fonts or stylesheet; Chromium draws it.
 const renderer = unified()
@@ -33,6 +51,7 @@ const renderer = unified()
   .use(rawHtmlAsText)
   .use(remarkRehype)
   .use(rehypeSanitize)
+  .use(otherHostPicturesAsLinks)
   .use(rehypeKatex, { output: "mathml", strict: "ignore" });
 const iconNodes = __MOBILE_ICON_NODES__;
 const escapeAttribute = (value) => String(value).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);

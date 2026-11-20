@@ -290,7 +290,7 @@ strong { font-weight: 600; }
 .code-wrap.has-diagram { background: var(--surface); color: var(--text); }
 .code-wrap.has-diagram pre { display: none; }
 .code-wrap .diagram { padding: 12px; overflow-x: auto; text-align: center; }
-.code-wrap .diagram svg { max-width: 100%; height: auto; }
+.code-wrap .diagram img { max-width: 100%; height: auto; }
 .table-scroll { max-width: 100%; margin: 12px 0; overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
 .message-body table { min-width: 100%; border-collapse: collapse; border-style: hidden; font-size: 13px; }
 .message-body th, .message-body td { min-width: 72px; padding: 8px 10px; border: 1px solid var(--border); vertical-align: top; }
@@ -724,6 +724,8 @@ strong { font-weight: 600; }
 /* A failed reply's explanation and the step that fixes it (60-timeline.js failureHelp). */
 .task-error-help { margin: 6px 0 0; color: var(--text); font-size: 14px; line-height: 1.5; }
 .task-error > .button-secondary { margin-top: 8px; }
+/* A quiet line under a reply whose turn ended at its budget (60-timeline.js markBudgetExhausted). */
+.budget-note { margin: 4px 0 0; color: var(--text-3); font-size: 12px; }
 /* The composer's model chip when no model can answer yet: it opens the setup sheet. */
 #modelBar[data-setup="true"] { border-color: var(--accent); color: var(--accent); }
 /* It reaches 40px below the screen so the spring's overshoot never shows a gap under it. */

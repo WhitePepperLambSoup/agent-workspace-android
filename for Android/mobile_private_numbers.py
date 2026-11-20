@@ -59,6 +59,17 @@ def find_all(texts: Iterable[str]) -> list[dict[str, str]]:
     return list(seen.values())
 
 
+def strings(value: object) -> list[str]:
+    """Every string in [value], nested ones too: a tool call's arguments, whatever their keys."""
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, dict):
+        return [text for item in value.values() for text in strings(item)]
+    if isinstance(value, (list, tuple)):
+        return [text for item in value for text in strings(item)]
+    return []
+
+
 def mask(text: str) -> str:
     """[text] with each personal number masked (the first and last four digits kept)."""
     for item in find(text):
@@ -66,4 +77,4 @@ def mask(text: str) -> str:
     return text
 
 
-__all__ = ["find", "find_all", "mask"]
+__all__ = ["find", "find_all", "mask", "strings"]

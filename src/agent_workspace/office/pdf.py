@@ -389,6 +389,53 @@ class Jpeg:
     width: int
     height: int
     components: int
+    # EXIF orientation, 1 to 8: phone cameras store pixels sideways and say so here (6 or 8).
+    # PDF readers and PowerPoint do not turn the picture by it, so the writer has to.
+    orientation: int = 1
+
+    @property
+    def upright(self) -> tuple[int, int]:
+        """Width and height as the picture is meant to be seen."""
+        return (self.height, self.width) if self.orientation >= 5 else (self.width, self.height)
+
+
+def jpeg_orientation(data: bytes) -> int:
+    """The EXIF orientation of a JPEG (1, upright, when it has none)."""
+    index = 2
+    while data.startswith(b"\xff\xd8") and index + 4 <= len(data):
+        if data[index] != 0xFF:
+            index += 1
+            continue
+        marker = data[index + 1]
+        if marker in (0xD8, 0x01, 0xFF) or 0xD0 <= marker <= 0xD7:
+            index += 2 if marker != 0xFF else 1
+            continue
+        if marker == 0xDA:  # the picture data starts: no EXIF came before it
+            break
+        length = struct.unpack(">H", data[index + 2 : index + 4])[0]
+        segment = data[index + 4 : index + 2 + length]
+        if marker == 0xE1 and segment.startswith(b"Exif\x00\x00"):
+            return _exif_orientation(segment[6:])
+        index += 2 + length
+    return 1
+
+
+def _exif_orientation(tiff: bytes) -> int:
+    order = {b"II": "<", b"MM": ">"}.get(tiff[:2])
+    if order is None or len(tiff) < 8:
+        return 1
+    try:
+        (offset,) = struct.unpack(order + "I", tiff[4:8])
+        (count,) = struct.unpack(order + "H", tiff[offset : offset + 2])
+        for entry in range(min(count, 500)):
+            start = offset + 2 + entry * 12
+            tag, kind = struct.unpack(order + "HH", tiff[start : start + 4])
+            if tag == 0x0112 and kind == 3:
+                (value,) = struct.unpack(order + "H", tiff[start + 8 : start + 10])
+                return value if 1 <= value <= 8 else 1
+    except struct.error:
+        return 1
+    return 1
 
 
 def jpeg_info(data: bytes) -> Jpeg | None:
@@ -407,9 +454,25 @@ def jpeg_info(data: bytes) -> Jpeg | None:
         if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
             height, width = struct.unpack(">HH", data[index + 5 : index + 9])
             components = data[index + 9]
-            return Jpeg(data, width, height, components)
+            return Jpeg(data, width, height, components, jpeg_orientation(data))
         index += 2 + length
     return None
+
+
+def _placement(orientation: int, w: float, h: float, x: float, y: float) -> str:
+    """The cm matrix that draws a picture stored with this EXIF orientation upright into the
+    box of width w and height h at x, y (as seen)."""
+    a, b, c, d, e, f = {
+        1: (w, 0, 0, h, x, y),
+        2: (-w, 0, 0, h, x + w, y),
+        3: (-w, 0, 0, -h, x + w, y + h),
+        4: (w, 0, 0, -h, x, y + h),
+        5: (0, -h, -w, 0, x + w, y + h),
+        6: (0, -h, w, 0, x, y + h),
+        7: (0, h, w, 0, x, y),
+        8: (0, h, -w, 0, x + w, y),
+    }.get(orientation, (w, 0, 0, h, x, y))
+    return f"{a:.2f} {b:.2f} {c:.2f} {d:.2f} {e:.2f} {f:.2f}"
 
 
 _TO_JPEG = r"""
@@ -480,7 +543,7 @@ def images_to_pdf(images: list[Jpeg], page: str = "a4", margin: float = 28.35) -
     """One picture per page: on A4 (portrait or landscape to suit), or a page its own size."""
     writer = PdfWriter()
     for number, image in enumerate(images):
-        pixels_w, pixels_h = image.width, image.height
+        pixels_w, pixels_h = image.upright
         if page == "image":
             width, height = pixels_w * 72 / 150, pixels_h * 72 / 150
             draw_w, draw_h, x, y = width, height, 0.0, 0.0
@@ -495,8 +558,8 @@ def images_to_pdf(images: list[Jpeg], page: str = "a4", margin: float = 28.35) -
             {
                 NameObject("/Type"): NameObject("/XObject"),
                 NameObject("/Subtype"): NameObject("/Image"),
-                NameObject("/Width"): NumberObject(pixels_w),
-                NameObject("/Height"): NumberObject(pixels_h),
+                NameObject("/Width"): NumberObject(image.width),
+                NameObject("/Height"): NumberObject(image.height),
                 NameObject("/ColorSpace"): NameObject(
                     "/DeviceGray"
                     if image.components == 1
@@ -520,9 +583,8 @@ def images_to_pdf(images: list[Jpeg], page: str = "a4", margin: float = 28.35) -
             }
         )
         content = DecodedStreamObject()
-        content.set_data(
-            f"q {draw_w:.2f} 0 0 {draw_h:.2f} {x:.2f} {y:.2f} cm {name} Do Q".encode("latin-1")
-        )
+        matrix = _placement(image.orientation, draw_w, draw_h, x, y)
+        content.set_data(f"q {matrix} cm {name} Do Q".encode("latin-1"))
         blank[NameObject("/Contents")] = writer._add_object(content)
     return _bytes(writer)
 
@@ -741,6 +803,7 @@ __all__ = [
     "images_to_pdf",
     "info",
     "jpeg_info",
+    "jpeg_orientation",
     "merge",
     "page_numbers",
     "parse_pages",

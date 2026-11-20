@@ -178,6 +178,8 @@ class RunTerminalTool:
         },
         side_effect="process",
         capability=Capability.PROCESS_EXECUTE,
+        # Output can be any file the command prints, as with read_file and run_process.
+        sensitive_result=True,
     )
 
     def __init__(self, workspace: WorkspacePaths | StrPath) -> None:

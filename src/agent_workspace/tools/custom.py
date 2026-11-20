@@ -37,6 +37,8 @@ class CustomToolDefinition:
     cwd: str
     append_workspace: bool
     path: str
+    # `yolo = true` in the file: YOLO mode runs the tool without asking (off by default).
+    yolo: bool = False
 
 
 def _custom_tool_files(workspace: StrPath) -> tuple[Path, ...]:
@@ -106,6 +108,7 @@ def load_custom_tool_definitions(workspace: StrPath) -> tuple[CustomToolDefiniti
         timeout_seconds = raw.get("timeout_seconds", 60)
         cwd = raw.get("cwd", ".")
         append_workspace = raw.get("append_workspace", False)
+        yolo = raw.get("yolo", False)
         if (
             not isinstance(name, str)
             or _TOOL_NAME_PATTERN.fullmatch(name) is None
@@ -124,6 +127,7 @@ def load_custom_tool_definitions(workspace: StrPath) -> tuple[CustomToolDefiniti
             or not isinstance(cwd, str)
             or not cwd
             or type(append_workspace) is not bool
+            or type(yolo) is not bool
         ):
             raise CustomToolError(f"custom tool file {path} contains invalid fields")
         try:
@@ -158,6 +162,7 @@ def load_custom_tool_definitions(workspace: StrPath) -> tuple[CustomToolDefiniti
                 cwd=cwd,
                 append_workspace=append_workspace,
                 path=str(path),
+                yolo=yolo,
             )
         )
     return tuple(definitions)
@@ -186,6 +191,7 @@ class CustomCommandTool:
             input_schema=definition.input_schema,
             side_effect="process",
             capability=Capability.PROCESS_EXECUTE,
+            yolo_opt_in=definition.yolo,
         )
 
     @property

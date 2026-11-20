@@ -34,10 +34,10 @@ class CodingDesk:
         shells: ShellDesk | None = None,
     ) -> None:
         self.tools_dir = tools_dir
-        self.lsp = pool or LspPool(tools_dir)
+        self.trust = TrustBook(trust_path)
+        self.lsp = pool or LspPool(tools_dir, runs_folder_code=self.trust.accepted)
         self.shells = shells or ShellDesk()
         self.debug = DebugDesk(tools_dir)
-        self.trust = TrustBook(trust_path)
         self._states: dict[str, ProjectState] = {}
         self._lock = threading.Lock()
         # Told when a folder's check results change (the gateway sends them to the window).
@@ -51,20 +51,39 @@ class CodingDesk:
         with self._lock:
             return self._states.setdefault(self._key(root), ProjectState())
 
+    def try_start(self, root: Path) -> bool:
+        """Mark the folder's checks as running, unless they already are. The Changes page, the
+        run after a turn and the agent's run_checks take turns: two runs of one test suite trip
+        over its caches and locks."""
+        state = self.state(root)
+        with self._lock:
+            if state.running:
+                return False
+            state.running = True
+            return True
+
+    def finish(self, root: Path) -> None:
+        state = self.state(root)
+        with self._lock:
+            state.running = False
+
     def record(self, root: Path, results: list[CheckResult]) -> None:
+        # Not the running mark: that belongs to whoever started a run (finish), and results
+        # reported by one run must not end another that is still going.
         state = self.state(root)
         with self._lock:
             state.results = [result.to_dict() for result in results]
             state.finished_at = time.time()
-            state.running = False
         if self.on_results is not None:
             self.on_results(root, state)
 
     def tools(self, workspace: Path) -> tuple[Tool, ...]:
         return (
             *code_tools(workspace, self.lsp),
-            RunChecksTool(workspace, self.trust, self.record),
-            ReadTerminalTool(self.shells),
+            RunChecksTool(
+                workspace, self.trust, self.record, start=self.try_start, finish=self.finish
+            ),
+            ReadTerminalTool(self.shells, workspace),
             CheckPageTool(workspace),
             DebugPythonTool(workspace, self.debug.home),
             # Linux commands in the folder, where Windows has WSL.

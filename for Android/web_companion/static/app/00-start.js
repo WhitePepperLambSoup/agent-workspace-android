@@ -53,6 +53,8 @@
   const fileDraftsKey = "agent-mobile-file-drafts-v1";
   const workspaceKey = "agent-mobile-workspace-v1";
   const wallpaperKey = "agent-mobile-wallpaper-v1";
+  // Written by the backup page (management.js) when a restore set risky settings to their safe value.
+  const restoreLoweredKey = "agent-mobile-restore-lowered-v1";
   const effortLabels = { auto: t("自动"), none: t("不思考"), low: t("低"), medium: t("中"), high: t("高"), xhigh: t("极高"), max: t("最高") };
   const effortOrder = ["none", "low", "medium", "high", "xhigh", "max"];
   const autonomyLabels = { workspace: t("工作区"), yolo: "YOLO", full_access: t("完全访问") };
@@ -321,6 +323,23 @@
     if (message) noticeTimer = window.setTimeout(() => { if (elements.noticeText.textContent === message) notice(""); }, tone === "info" ? 5000 : 20000);
   }
 
+  // Said once after the engine started (mobile_gateway start_notices): an update upgraded the data
+  // without a backup first, because the phone had no room for one or its storage failed. And the
+  // risky settings a restore set to their safe value (BackupController.lowered): the restore
+  // restarts the engine, which reloads this page, so the backup page leaves them in storage.
+  async function showStartNotices() {
+    const lowered = readStorage(restoreLoweredKey, []);
+    try { window.localStorage.removeItem(restoreLoweredKey); } catch { /* Shown once either way. */ }
+    const said = [];
+    if (Array.isArray(lowered) && lowered.includes("full_access")) said.push(t("执行模式「完全访问」没有随备份恢复，现在是「工作区」。需要时可在设置里改回。"));
+    if (Array.isArray(lowered) && lowered.includes("allow_lan_http")) said.push(t("「允许局域网 HTTP」没有随备份恢复。需要时可在模型设置里重新打开。"));
+    try {
+      const notices = await apiJson("/mobile/start-notices");
+      if (notices.backup_skipped) said.push(t("更新后升级数据前没有备份：存储空间不足或存储出错。升级已照常完成。"));
+    } catch { /* An older engine has nothing to say here. */ }
+    if (said.length) notice(said.join(" "));
+  }
+
   function setConnection(online) {
     if (disposed) return;
     const label = online ? t("已连接") : t("连接中断");
@@ -395,6 +414,29 @@
       throw error;
     }
     return data;
+  }
+
+  // The wait between two reads of something under way (a task, a command's output, speech). Android
+  // keeps the page running behind other apps and with the screen off, timers and all, so a task was
+  // read twice every 0.5 s there too. While the app is hidden a wait lasts at least 5 s, and it ends
+  // at once when the app is shown again. Not stopped outright: a voice conversation or the elder
+  // screen still reads the reply aloud with the screen off.
+  const hiddenPollMs = 5000;
+  const shownWakers = new Set();
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") return;
+    const due = [...shownWakers];
+    shownWakers.clear();
+    for (const wake of due) wake();
+  });
+  function pollPause(ms) {
+    return new Promise((resolve) => {
+      if (document.visibilityState !== "hidden") { setTimeout(resolve, ms); return; }
+      let timer = 0;
+      const wake = () => { clearTimeout(timer); shownWakers.delete(wake); resolve(); };
+      timer = setTimeout(wake, Math.max(ms, hiddenPollMs));
+      shownWakers.add(wake);
+    });
   }
 
   const darkSchemeQuery = typeof window.matchMedia === "function" ? window.matchMedia("(prefers-color-scheme: dark)") : null;

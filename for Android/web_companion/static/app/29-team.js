@@ -502,7 +502,11 @@
         open.type = "button";
         open.className = "button-secondary";
         open.textContent = t("查看过程");
-        open.addEventListener("click", () => { if (!openSession(item.session_id)) notice(t("任务进行中，结束后再打开")); });
+        open.addEventListener("click", () => {
+          // openSession is false while the switch starts too (see openFromStudio).
+          const id = item.session_id;
+          if (!openSession(id) && sessionOpening !== id && currentSessionId !== id) notice(t("任务进行中，结束后再打开"));
+        });
         row.append(open);
       }
       list.append(row);

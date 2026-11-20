@@ -514,6 +514,64 @@ def _recover_services(data_dir: Path) -> None:
         _startup_phase(f"services: {len(failed)} autostart service(s) could not start")
 
 
+# How long a kept file version an undo or a change list still names is kept whatever the budget.
+_KEEP_NEEDED_VERSIONS_SECONDS = 30 * 24 * 3600
+
+
+def _prune_file_versions(data_dir: Path, database: Path, delay: float = 60.0) -> None:
+    """The kept earlier contents of files (<data>/file-versions) were never cleared on the phone,
+    though the store promises an age limit and a size budget. Once a day, a minute after start,
+    those no file record names any more (a deleted conversation's, an undo's own copy) go when
+    past the limit or the budget (1 GiB / 90 days, as on the desktop). One an undo can still ask
+    for stays while it was kept or used in the last 30 days; an older one goes too, oldest first,
+    and that undo then says the earlier content is no longer kept."""
+    time.sleep(delay)
+    root = data_dir / "file-versions"
+    marker = root / ".pruned"
+    with suppress(OSError):
+        if time.time() - marker.stat().st_mtime < 24 * 3600:
+            return
+    if not root.is_dir():
+        return
+    from agent_workspace.storage.file_versions import FileVersions
+    from agent_workspace.storage.sqlite import SQLiteEventStore
+
+    try:
+        needed = SQLiteEventStore.file_version_digests_read_only(database)
+        if needed is None:
+            return  # nothing says which are still needed: all stay
+        removed = FileVersions(root).prune(
+            keep=needed, grace_seconds=24 * 3600, keep_for_seconds=_KEEP_NEEDED_VERSIONS_SECONDS
+        )
+        marker.touch()
+    except Exception as error:
+        _startup_phase(f"file versions: clean-up failed: {type(error).__name__}")
+        return
+    if removed:
+        _startup_phase(f"file versions: {removed} no longer needed were removed")
+
+
+def _compact_streams(database: Path, delay: float = 90.0) -> None:
+    """Blank the streamed chunks of turns that ended a month ago and whose messages hold their
+    text (storage.stream_compaction), once a day and well after start, a few turns at a time, so
+    an old reply's text is no longer stored twice."""
+    time.sleep(delay)
+    marker = database.with_name(f"{database.name}.streams-compacted")
+    with suppress(OSError):
+        if time.time() - marker.stat().st_mtime < 24 * 3600:
+            return
+    from agent_workspace.storage.stream_compaction import compact_finished_streams
+
+    try:
+        blanked = compact_finished_streams(database)
+        marker.touch()
+    except Exception as error:
+        _startup_phase(f"stream compaction failed: {type(error).__name__}")
+        return
+    if blanked:
+        _startup_phase(f"stream compaction: {blanked} chunks of old replies blanked")
+
+
 def _stop_services(data_dir: Path) -> None:
     from mobile_services import get_service_manager
 
@@ -591,6 +649,16 @@ async def _run_mobile_web_server(
         else None
     )
     threading.Thread(target=_preload_tools, name="tool-preload", daemon=True).start()
+    if data_dir:
+        threading.Thread(
+            target=_prune_file_versions,
+            args=(Path(data_dir), database),
+            name="file-versions-prune",
+            daemon=True,
+        ).start()
+    threading.Thread(
+        target=_compact_streams, args=(database,), name="stream-compaction", daemon=True
+    ).start()
     try:
         await asyncio.Event().wait()
     finally:

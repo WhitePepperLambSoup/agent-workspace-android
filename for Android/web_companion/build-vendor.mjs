@@ -2,6 +2,7 @@ import { copyFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises"
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildSync } from "../node_modules/esbuild/lib/main.js";
+import { BUNDLES, writeVendorLicenses } from "./vendor-licenses.mjs";
 
 // Android owns its web tooling: run `npm ci` in "for Android/" (see package.json), never desktop/.
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -17,43 +18,14 @@ const icons = Object.fromEntries(await Promise.all(names.map(async (name) => {
   }
   return [name, module.__iconNode];
 })));
-buildSync({
-  entryPoints: [path.join(root, "vendor-entry.mjs")],
-  nodePaths: [dependencies],
-  outfile: path.join(root, "static/mobile-vendor.js"),
-  bundle: true,
-  minify: true,
-  format: "iife",
-  platform: "browser",
-  target: "es2020",
-  legalComments: "inline",
-  define: { __MOBILE_ICON_NODES__: JSON.stringify(icons) },
-});
-// Diagrams are a separate, much larger file that app.js loads only when a reply contains one.
-buildSync({
-  entryPoints: [path.join(root, "mermaid-entry.mjs")],
-  nodePaths: [dependencies],
-  outfile: path.join(root, "static/mobile-mermaid.js"),
-  bundle: true,
-  minify: true,
-  format: "iife",
-  platform: "browser",
-  target: "es2020",
-  legalComments: "inline",
-});
-// The expert team's studio (three.js and the office scene, web_companion/studio) is loaded only when
-// it opens, like the diagrams.
-buildSync({
-  entryPoints: [path.join(root, "studio/entry.ts")],
-  nodePaths: [dependencies],
-  outfile: path.join(root, "static/mobile-studio.js"),
-  bundle: true,
-  minify: true,
-  format: "iife",
-  platform: "browser",
-  target: "es2020",
-  legalComments: "inline",
-});
+// The page's bundles (vendor-licenses.mjs): Markdown, math and icons; the diagrams, a separate, much
+// larger file that app.js loads only when a reply contains one; and the expert team's studio
+// (three.js and the office scene, web_companion/studio), also loaded only when it opens.
+const metafiles = BUNDLES.map((bundle, index) => buildSync({
+  ...bundle,
+  metafile: true,
+  ...(index === 0 ? { define: { __MOBILE_ICON_NODES__: JSON.stringify(icons) } } : {}),
+}).metafile);
 // create_pdf typesets with KaTeX's HTML output, which needs its stylesheet and fonts (woff2 only:
 // every Chromium WebView reads it).
 const katexDist = path.join(dependencies, "katex/dist");
@@ -65,18 +37,5 @@ await writeFile(path.join(root, "pdf/katex.min.css"), css);
 for (const name of await readdir(path.join(katexDist, "fonts"))) {
   if (name.endsWith(".woff2")) await copyFile(path.join(katexDist, "fonts", name), path.join(pdfFonts, name));
 }
-const packages = ["unified", "remark-parse", "remark-gfm", "remark-math", "remark-rehype", "rehype-sanitize", "rehype-katex", "katex", "hast-util-to-html", "lucide-react", "mermaid", "three"];
-const licenses = await Promise.all(packages.map(async (name) => {
-  const packageRoot = path.join(dependencies, name);
-  const metadata = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8"));
-  let license;
-  for (const filename of ["license", "LICENSE", "LICENSE.md"]) {
-    try { license = await readFile(path.join(packageRoot, filename), "utf8"); break; } catch {}
-  }
-  // Some packages (remark-math) publish no license file; their package.json still names the license.
-  if (!license && metadata.license) license = `License: ${metadata.license} (declared in package.json; the npm package ships no license file)`;
-  if (!license) throw new Error(`Missing license for ${name}`);
-  return `${name} ${metadata.version}\n${license.trim()}`;
-}));
-await writeFile(path.join(root, "static/mobile-vendor.LICENSE.txt"), `${licenses.join("\n\n")}\n`);
+await writeVendorLicenses(metafiles);
 console.log("Bundled offline Markdown, math, Lucide icons, the on-demand diagram renderer and the studio.");

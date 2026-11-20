@@ -33,13 +33,17 @@ object EngineHttp {
 
     fun request(context: Context, method: String, path: String, body: JSONObject? = null, readTimeoutMs: Int = 15000): Reply {
         require(path.startsWith("/") && !path.startsWith("//")) { "Invalid local route" }
-        val connection = URL("${EngineAddress.baseUrl(context)}$path").openConnection() as HttpURLConnection
+        val base = EngineAddress.baseUrl(context)
+        val token = token(context)
+        // The token goes only to the engine that can prove it holds it (EngineIdentity).
+        EngineIdentity.require(base, token, readTimeoutMs.coerceIn(1000, 10000))
+        val connection = URL("$base$path").openConnection() as HttpURLConnection
         try {
             connection.requestMethod = method
             connection.instanceFollowRedirects = false
             connection.connectTimeout = 1500
             connection.readTimeout = readTimeoutMs
-            connection.setRequestProperty("Authorization", "Bearer ${token(context)}")
+            connection.setRequestProperty("Authorization", "Bearer $token")
             if (body != null) {
                 val bytes = body.toString().toByteArray(Charsets.UTF_8)
                 connection.doOutput = true
@@ -61,6 +65,9 @@ object EngineHttp {
                 value.toString()
             }.orEmpty()
             return Reply(code, runCatching { JSONObject(text) }.getOrNull() ?: JSONObject())
+        } catch (failure: java.net.ConnectException) {
+            EngineIdentity.forget(base, token)
+            throw failure
         } finally {
             connection.disconnect()
         }

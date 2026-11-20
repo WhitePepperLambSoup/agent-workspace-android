@@ -17,6 +17,7 @@ from agent_workspace.tools.base import (
     json_result,
     optional_int,
 )
+from agent_workspace.tools.command import _chart_defaults
 from agent_workspace.tools.paths import StrPath, WorkspacePaths
 from agent_workspace.tools.process_worker import terminate_process_tree_pid
 
@@ -273,6 +274,7 @@ def _clean_environment_block() -> Any:
         value = os.environ.get(name)
         if value:
             values[name] = value
+    values.update(_chart_defaults())
     block = "".join(f"{name}={value}\0" for name, value in values.items()) + "\0"
     return ctypes.create_unicode_buffer(block)
 
@@ -306,6 +308,7 @@ def _conpty_sync(
     process_info = _PROCESS_INFORMATION()
     process_started = False
     attribute_list: Any = None
+    job_handle: wintypes.HANDLE | None = None
     try:
         if not kernel32.CreatePipe(ctypes.byref(read_handle), ctypes.byref(write_handle), None, 0):
             raise ToolError("cannot create ConPTY pipe")
@@ -373,25 +376,14 @@ def _conpty_sync(
             ctypes.byref(startup_info),
             ctypes.byref(process_info),
         ):
-            raise ToolError("cannot start the interactive process")
+            error_code = ctypes.get_last_error()
+            raise ToolError(
+                f"cannot start the interactive process (winerror={error_code}); "
+                "only .exe and .com files start directly, run .cmd and .bat files through "
+                '"cmd", "/c"'
+            )
         process_started = True
 
-        if startup_input:
-            input_bytes = startup_input.encode("utf-8")
-            input_buffer = ctypes.create_string_buffer(input_bytes)
-            written = wintypes.DWORD()
-            if not kernel32.WriteFile(
-                input_write,
-                input_buffer,
-                wintypes.DWORD(len(input_bytes)),
-                ctypes.byref(written),
-                None,
-            ) or written.value != len(input_bytes):
-                raise ToolError("cannot write terminal startup input")
-            kernel32.CloseHandle(input_write)
-            input_write = wintypes.HANDLE()
-
-        job_handle: wintypes.HANDLE | None = None
         if hasattr(kernel32, "CreateJobObjectW"):
             raw_job = kernel32.CreateJobObjectW(None, None)
             if raw_job:
@@ -405,6 +397,22 @@ def _conpty_sync(
                     ctypes.sizeof(info),
                 )
                 kernel32.AssignProcessToJobObject(job_handle, process_info.hProcess)
+
+        if startup_input:
+            input_bytes = startup_input.encode("utf-8")
+            input_buffer = ctypes.create_string_buffer(input_bytes)
+            written = wintypes.DWORD()
+            if not kernel32.WriteFile(
+                input_write,
+                input_buffer,
+                wintypes.DWORD(len(input_bytes)),
+                ctypes.byref(written),
+                None,
+            ) or written.value != len(input_bytes):
+                kernel32.TerminateProcess(process_info.hProcess, 1)
+                raise ToolError("cannot write terminal startup input")
+            kernel32.CloseHandle(input_write)
+            input_write = wintypes.HANDLE()
 
         output = bytearray()
         deadline = time.monotonic() + timeout_seconds
@@ -557,6 +565,14 @@ class RunTerminalTool:
     @property
     def spec(self) -> ToolSpec:
         return self._SPEC
+
+    def execution_timeout_seconds(self, arguments: dict[str, Any]) -> float:
+        """Room for the command's own timeout plus stopping it (read by the runner): the thread
+        cannot be cancelled, so a runner limit below it would give up while the command runs."""
+        timeout = arguments.get("timeout_seconds", 60)
+        if type(timeout) is not int or not 1 <= timeout <= 300:
+            return 0.0
+        return timeout + 15.0
 
     async def execute(self, arguments: dict[str, Any]) -> str:
         raw_argv = arguments.get("argv")

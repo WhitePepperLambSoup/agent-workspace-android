@@ -32,6 +32,7 @@ from .local_provider import EmbeddedQwenProvider, context_units_per_token, hidde
 
 SELECTION_TOOL = "select_local_tools"
 LOCAL_OUTPUT_TOKENS = 4096
+LARGE_CONTEXT_OUTPUT_TOKENS = 8192
 FILE_TOOLS = ("list_files", "read_file", "write_file")
 PHONE_TOOLS = ("android_observe", "android_action", "android_verify")
 DEFAULT_TOOLS = (*FILE_TOOLS, *PHONE_TOOLS)
@@ -299,8 +300,39 @@ class LocalToolSelectionTool:
         )
 
 
+def _embedded(runner: Any) -> EmbeddedQwenProvider | None:
+    """The on-device provider of this runner, behind the wrapper tasks run it in (mobile_pause)."""
+    provider = getattr(runner, "_provider", None)
+    while provider is not None and not isinstance(provider, EmbeddedQwenProvider):
+        provider = getattr(provider, "_provider", None)
+    return provider
+
+
 def _local(runner: Any) -> bool:
+    """Whether the runner was built for the on-device provider (tool catalog, local tools). Since
+    2.0.0 tasks run it wrapped; budgets and measuring go by _embedded, the prompt by _compact."""
     return isinstance(getattr(runner, "_provider", None), EmbeddedQwenProvider)
+
+
+# The full prompt with its tool list is about 10 000 tokens.
+_SMALL_CONTEXT_TOKENS = 8192
+
+
+def _compact(runner: Any) -> bool:
+    """Whether requests get the compact prompt (tools chosen per request). Behind the wrapper every
+    conversation sends the full tool list and system prompt, and the phone keeps its reading of that
+    one prompt (SHARED_ON_DEVICE, about 1 s instead of minutes); a context of 8192 tokens or fewer
+    cannot hold it at all, so there the compact one is sent. That needs the catalog the runner got
+    when it was built for the on-device provider: a provider swapped in for one task has none."""
+    if _local(runner):
+        return True
+    provider = _embedded(runner)
+    return (
+        provider is not None
+        and getattr(runner, "_android_local_context", None) is not None
+        and provider.context_plan_ready
+        and provider._context_size <= _SMALL_CONTEXT_TOKENS
+    )
 
 
 def local_request_budget(provider: EmbeddedQwenProvider, output_tokens: int | None = None) -> int:
@@ -315,6 +347,9 @@ def local_request_budget(provider: EmbeddedQwenProvider, output_tokens: int | No
 def local_output_budget(provider: EmbeddedQwenProvider) -> int:
     # Reserve space for complete code/file parameters, while small test or
     # low-memory contexts retain a proportionate input/output allocation.
+    if provider._context_size >= 32768:
+        # Room for a long file in one reply (a quarter of the context or less).
+        return LARGE_CONTEXT_OUTPUT_TOKENS
     return min(LOCAL_OUTPUT_TOKENS, max(128, provider._context_size // 4))
 
 
@@ -348,7 +383,8 @@ def _system_message(mode: Mode, suffix: str, autonomy: Autonomy) -> ChatMessage:
 
 def local_context_status(runtime: Any) -> dict[str, Any]:
     runner = getattr(getattr(runtime, "service", None), "runner", runtime)
-    active = _local(runner)
+    provider = _embedded(runner)
+    active = provider is not None
     state = getattr(runner, "_android_local_context", None)
     turn = state.turns.get(state.last_session) if state is not None else None
     available = (
@@ -358,7 +394,6 @@ def local_context_status(runtime: Any) -> dict[str, Any]:
         if active
         else []
     )
-    provider = runner._provider if active else None
     ready = provider.context_plan_ready if provider is not None else False
     return {
         "active": active,
@@ -379,6 +414,8 @@ def local_context_status(runtime: Any) -> dict[str, Any]:
             (*turn.selected, *((SELECTION_TOOL,) if turn.selector_available else ()))
         )
         if turn is not None
+        else available
+        if active and not _compact(runner)
         else [],
         "workspace_instructions_preserved": True,
     }
@@ -455,14 +492,23 @@ def install_local_context_profile() -> None:
                 runner._provider._workspace_root = workspace.root
 
     def prepare(runner: Any, **options: Any) -> PreparedTurn:
-        if _local(runner):
+        provider = _embedded(runner)
+        if provider is not None:
             # This hook is inside the durable runner lifecycle, before prompt
             # bounding or summary. A failed retry must preserve old history.
-            runner._provider.ensure_context_plan_ready(options["model"], retry=False)
+            provider.ensure_context_plan_ready(options["model"], retry=False)
         prepared = original_prepare(runner, **options)
-        if not _local(runner):
+        if provider is None:
             return prepared
-        output_limit = local_output_budget(runner._provider)
+        output_limit = local_output_budget(provider)
+        if not _compact(runner):
+            # The full list is shown, so there is nothing to select; the selector has no
+            # catalog to answer from either, and only cost a failed step when called.
+            return replace(
+                prepared,
+                tools=tuple(spec for spec in prepared.tools if spec.name != SELECTION_TOOL),
+                max_output_tokens=min(prepared.max_output_tokens or output_limit, output_limit),
+            )
         # Explicit task tool restrictions and workspace optimization profiles
         # remain authoritative. Without our selector, retain their full list.
         history = tuple(options.get("history", ()))
@@ -527,7 +573,7 @@ def install_local_context_profile() -> None:
                 "android_local_context_v1": {
                     "selected_tools": [spec.name for spec in selected],
                     "available_tools": sorted(turn.available),
-                    "context_tokens": runner._provider._context_size,
+                    "context_tokens": provider._context_size,
                 },
             },
         )
@@ -535,25 +581,37 @@ def install_local_context_profile() -> None:
     def system(
         runner: Any, mode: Mode, suffix: str, autonomy: Autonomy = Autonomy.WORKSPACE
     ) -> ChatMessage:
-        if not _local(runner) or runner._prompt_assembler is not None:
+        if runner._prompt_assembler is not None:
             return original_system(runner, mode, suffix, autonomy)
+        if not _compact(runner):
+            # The shared prompt, placed on the phone rather than Windows and without the
+            # run_sandbox rules when there is no run_sandbox: sub-tasks, experts and scheduled
+            # prompts get no Android note of their own to correct it.
+            return AgentRunner._system_message(
+                mode,
+                suffix,
+                autonomy,
+                platform="Android",
+                sandbox="run_sandbox" in getattr(runner._tools, "_tools", {}),
+            )
         return _system_message(mode, suffix, autonomy)
 
     async def run(runner: Any, *arguments: Any, **options: Any) -> Any:
         ready = False
-        if _local(runner):
+        provider = _embedded(runner)
+        if provider is not None:
             model = options.get("model", arguments[2] if len(arguments) > 2 else None)
-            ready = runner._provider.ensure_context_plan_ready(model, raise_on_error=False)
+            ready = provider.ensure_context_plan_ready(model, raise_on_error=False)
         if ready:
             budget = options.get("budget")
             if budget is None:
                 budget = TaskBudget()
             budget.max_output_tokens_per_call = min(
-                budget.max_output_tokens_per_call, local_output_budget(runner._provider)
+                budget.max_output_tokens_per_call, local_output_budget(provider)
             )
             budget.max_context_bytes = min(
                 budget.max_context_bytes,
-                local_request_budget(runner._provider, budget.max_output_tokens_per_call),
+                local_request_budget(provider, budget.max_output_tokens_per_call),
             )
             proactive = int(budget.max_context_bytes * 0.9)
             budget.proactive_context_bytes = (
@@ -562,7 +620,7 @@ def install_local_context_profile() -> None:
                 else min(budget.proactive_context_bytes, proactive)
             )
             options["budget"] = budget
-        token = active_local_provider.set(runner._provider if _local(runner) else None)
+        token = active_local_provider.set(provider)
         try:
             return await original_run(runner, *arguments, **options)
         finally:

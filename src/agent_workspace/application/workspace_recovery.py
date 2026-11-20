@@ -11,14 +11,11 @@ from agent_workspace.tools.filesystem import rollback_file_checkpoint
 _FILE_RECOVERY_STRATEGY = "file-preimage-v1"
 
 
-class WorkspaceRecoveryConflictError(RuntimeError):
-    pass
-
-
 @dataclass(frozen=True, slots=True)
 class FileRecovery:
     events: tuple[Event, ...]
-    conflict_path: str | None = None
+    # Set when the file was left as it is: what the model is told about it.
+    conflict: str | None = None
 
 
 def reconcile_file_attempt(store: EventStore, attempt: ToolAttempt) -> FileRecovery | None:
@@ -88,6 +85,12 @@ def reconcile_file_attempt(store: EventStore, attempt: ToolAttempt) -> FileRecov
         "postimage_sha256": checkpoint.postimage_sha256,
     }
     if outcome == "conflict":
+        # The attempt ends here. Left open it is found again by every start and every turn of its
+        # session, which then stop on a file nobody may be able to put back.
+        conflict = (
+            f"The write to {checkpoint.relative_path} was interrupted and could not be rolled "
+            f"back safely ({reason}). It was left as it is; inspect it before changing it again."
+        )
         return FileRecovery(
             (
                 Event(
@@ -97,8 +100,22 @@ def reconcile_file_attempt(store: EventStore, attempt: ToolAttempt) -> FileRecov
                     causation_id=attempt.started_event_id,
                     correlation_id=started.correlation_id,
                 ),
+                Event(
+                    session_id=attempt.session_id,
+                    type="tool.unknown",
+                    data={
+                        "attempt_id": attempt.id,
+                        "tool_call_id": attempt.tool_call_id,
+                        "name": attempt.tool_name,
+                        "reason": conflict,
+                        "rollback_conflict": True,
+                        "recovered": True,
+                    },
+                    causation_id=attempt.started_event_id,
+                    correlation_id=started.correlation_id,
+                ),
             ),
-            conflict_path=checkpoint.relative_path,
+            conflict=conflict,
         )
     return FileRecovery(
         (
@@ -129,10 +146,5 @@ def reconcile_file_attempt(store: EventStore, attempt: ToolAttempt) -> FileRecov
 def recover_workspace_file_writes(store: EventStore, workspace: str) -> None:
     for attempt in store.list_incomplete_tool_attempts_for_workspace(workspace):
         recovery = reconcile_file_attempt(store, attempt)
-        if recovery is None:
-            continue
-        store.append_many(recovery.events)
-        if recovery.conflict_path is not None:
-            raise WorkspaceRecoveryConflictError(
-                f"workspace recovery conflict requires manual resolution: {recovery.conflict_path}"
-            )
+        if recovery is not None:
+            store.append_many(recovery.events)

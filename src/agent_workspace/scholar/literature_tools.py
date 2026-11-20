@@ -16,10 +16,16 @@ from typing import Any
 from agent_workspace.application.ports import ToolExecutionContext
 from agent_workspace.core.models import Capability, ToolSpec
 from agent_workspace.scholar import bibtex, checks, imports, sources, styles, zotero
-from agent_workspace.scholar.library import LibraryError, RecentWorks, ReferenceLibrary
+from agent_workspace.scholar.library import (
+    LIBRARY_FILE,
+    LibraryError,
+    RecentWorks,
+    ReferenceLibrary,
+)
 from agent_workspace.scholar.sources import SearchFilters
 from agent_workspace.scholar.works import Work, identifier_kind
 from agent_workspace.tools.base import (
+    ConcurrentModificationError,
     ToolArgumentError,
     ToolError,
     json_result,
@@ -224,10 +230,15 @@ class PaperLookupTool:
 class ReferenceLibraryTool:
     """The folder's reference library. It reads and writes .agent/references.json only."""
 
-    def __init__(self, workspace: Path, recent: RecentWorks) -> None:
+    def __init__(
+        self, workspace: Path, recent: RecentWorks, writer: WriteFileTool | None = None
+    ) -> None:
         self.paths = WorkspacePaths(workspace)
         self.library = ReferenceLibrary(self.paths.root)
         self.recent = recent
+        # The library travels with the project: in a turn its changes are saved through
+        # write_file, so they are checkpointed, listed with the turn's files and undoable.
+        self.writer = writer
         self._spec = ToolSpec(
             name="reference_library",
             description=(
@@ -275,6 +286,7 @@ class ReferenceLibraryTool:
             },
             side_effect="session_state",
             capability=Capability.WORKSPACE_READ,
+            durable_preimage_checkpoint=True,
         )
 
     @property
@@ -284,23 +296,73 @@ class ReferenceLibraryTool:
     def execution_timeout_seconds(self, arguments: dict[str, Any]) -> float:
         return 300.0 if arguments.get("zotero") else 60.0
 
+    def prepare_for_approval(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Removing works asks the user first, also in workspace mode (the policy asks for a call
+        marked _confirm_change, and refuses it after outside content talked to the agent): the
+        library is shared with the project, and the approval names what goes."""
+        if arguments.get("action") != "remove":
+            return dict(arguments)
+        wanted = set(arguments.get("keys") or arguments.get("references") or [])
+        try:
+            going = [work for work in self.library.works() if work.key in wanted]
+        except LibraryError:
+            return dict(arguments)  # Refused when it runs: the library cannot be read.
+        if not going:
+            return dict(arguments)  # Nothing to remove.
+        text = "; ".join(f"{work.key}: {work.title}" for work in going[:20])
+        if len(going) > 20:
+            text += f"; and {len(going) - 20} more"
+        return {**arguments, "_confirm_change": {"kind": "remove_references", "text": text}}
+
     async def execute(self, arguments: dict[str, Any]) -> str:
+        arguments = {key: value for key, value in arguments.items() if key != "_confirm_change"}
         validate_tool_arguments(self.spec, arguments)
         try:
-            return await asyncio.to_thread(self._run, arguments)
+            return await asyncio.to_thread(self._run, arguments, self.library)
         except LibraryError as exc:
             raise ToolError(str(exc)) from None
 
-    def _run(self, arguments: dict[str, Any]) -> str:
+    async def execute_with_context(
+        self, arguments: dict[str, Any], context: ToolExecutionContext
+    ) -> str:
+        arguments = {key: value for key, value in arguments.items() if key != "_confirm_change"}
+        if self.writer is None or arguments.get("action") in {"list", "format"}:
+            return await self.execute(arguments)
+        validate_tool_arguments(self.spec, arguments)
+        changes: list[tuple[str, str | None]] = []
+        library = ReferenceLibrary(
+            self.paths.root, write=lambda text, before: changes.append((text, before))
+        )
+        try:
+            result = await asyncio.to_thread(self._run, arguments, library)
+        except LibraryError as exc:
+            raise ToolError(str(exc)) from None
+        if not changes:
+            return result
+        text, before = changes[-1]
+        try:
+            self.paths.resolve(LIBRARY_FILE.as_posix()).parent.mkdir(parents=True, exist_ok=True)
+        except WorkspacePathError as exc:
+            raise ToolError(str(exc)) from None
+        try:
+            # Saved only over the file the change was made from: the library page may have
+            # saved it in between, and that change must not be lost.
+            await self.writer.execute_with_context(
+                {"path": LIBRARY_FILE.as_posix(), "content": text, "expected_sha256": before},
+                context,
+            )
+        except ConcurrentModificationError:
+            raise ToolError(
+                "the reference library was changed while this ran; run the action again"
+            ) from None
+        return result
+
+    def _run(self, arguments: dict[str, Any], library: ReferenceLibrary) -> str:
         action = arguments["action"]
         if action == "list":
             query = str(arguments.get("query") or "").strip()
-            works = (
-                self.library.search(query, arguments.get("limit", 200))
-                if query
-                else self.library.works()
-            )
-            total = len(self.library.works()) if query else len(works)
+            works = library.search(query, arguments.get("limit", 200)) if query else library.works()
+            total = len(library.works()) if query else len(works)
             shown = works[: arguments.get("limit", 200)]
             return json_result(
                 {
@@ -332,7 +394,7 @@ class ReferenceLibraryTool:
                     raise ToolArgumentError(f"the BibTeX could not be read: {exc}") from None
             if not incoming and not missing:
                 raise ToolArgumentError("add needs references or bibtex")
-            added, known = self.library.add(incoming)
+            added, known = library.add(incoming)
             payload: dict[str, Any] = {
                 "added": [_brief(work) for work in added],
                 "already_there": [work.key for work in known],
@@ -360,7 +422,7 @@ class ReferenceLibraryTool:
                     kind, works = imports.parse_any(_decode(text))
                 except (imports.ImportError_, bibtex.BibtexError) as exc:
                     raise ToolError(str(exc)) from None
-            added, known = self.library.add(works)
+            added, known = library.add(works)
             return json_result(
                 {
                     "format": kind,
@@ -374,17 +436,15 @@ class ReferenceLibraryTool:
             keys = arguments.get("keys") or arguments.get("references") or []
             if not keys:
                 raise ToolArgumentError("remove needs keys")
-            return json_result({"removed": self.library.remove(keys)})
+            return json_result({"removed": library.remove(keys)})
         if action == "update":
             key, fields = arguments.get("key"), arguments.get("fields")
             if not isinstance(key, str) or not isinstance(fields, dict) or not fields:
                 raise ToolArgumentError("update needs key and fields")
-            return json_result(
-                {"updated": self.library.update(key, fields).summary(abstract_chars=0)}
-            )
+            return json_result({"updated": library.update(key, fields).summary(abstract_chars=0)})
         style = arguments.get("style", "gb7714-numeric")
         keys = arguments.get("keys")
-        works, missing = self.library.find(keys) if keys else (self.library.works(), [])
+        works, missing = library.find(keys) if keys else (library.works(), [])
         if not works:
             raise ToolError(
                 "none of these keys are in the library" if keys else "the library is empty"
@@ -628,7 +688,7 @@ def literature_tools(
     return (
         PaperSearchTool(recent, watches),
         PaperLookupTool(recent),
-        ReferenceLibraryTool(workspace, recent),
+        ReferenceLibraryTool(workspace, recent, writer),
         ExportReferencesTool(workspace, writer),
         CheckReferencesTool(workspace),
     )

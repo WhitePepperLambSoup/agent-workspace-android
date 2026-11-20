@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Prepare Android web assets and current Python sources for APK builds.
 
-The default Termux runtime requires a validated ARM64 rootfs. Chaquopy
-provides its Python runtime through Gradle and leaves rootfs assets untouched.
+Python itself comes from Chaquopy through Gradle; this packs the sources and the web page. The
+Termux runtime that needed a separate rootfs archive is gone.
 """
 
 from __future__ import annotations
@@ -41,8 +41,10 @@ IGNORED_EXTENSIONS = {
 }
 
 
-def should_ignore(path: Path) -> bool:
-    for part in path.parts:
+def should_ignore(path: Path, base: Path = PROJECT_ROOT) -> bool:
+    # Only the part below the project counts: a checkout under /build/... or ~/build/... (Docker,
+    # CI runners) used to drop every file of src/ and android_adapter/ without a word.
+    for part in path.relative_to(base).parts:
         if part in IGNORED_PATTERNS:
             return True
     return path.suffix.lower() in IGNORED_EXTENSIONS
@@ -77,16 +79,20 @@ def build_agent_code_zip(zip_path: Path) -> int:
         zip_path.unlink()
 
     file_count = 0
+    # Folders that exist but put nothing in the archive: the engine would not start without them.
+    empty: list[str] = []
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         # 1. 打包 src/ 目录 (核心 agent_workspace)
         if SRC_DIR.exists():
             for root, _dirs, files in os.walk(SRC_DIR):
                 for f in files:
                     file_path = Path(root) / f
-                    if not should_ignore(file_path):
+                    if not should_ignore(file_path, PROJECT_ROOT):
                         arcname = str(file_path.relative_to(PROJECT_ROOT)).replace("\\", "/")
                         zf.write(file_path, arcname)
                         file_count += 1
+            if not file_count:
+                empty.append("src")
 
         # 2. 打包 for Android/ 下的适配脚本与入口
         android_items = [
@@ -110,13 +116,16 @@ def build_agent_code_zip(zip_path: Path) -> int:
                 zf.write(target, arcname)
                 file_count += 1
             elif target.is_dir():
+                before = file_count
                 for root, _dirs, files in os.walk(target):
                     for f in files:
                         file_path = Path(root) / f
-                        if not should_ignore(file_path):
+                        if not should_ignore(file_path, PROJECT_ROOT):
                             arcname = str(file_path.relative_to(PROJECT_ROOT)).replace("\\", "/")
                             zf.write(file_path, arcname)
                             file_count += 1
+                if file_count == before:
+                    empty.append(f"for Android/{item}")
 
         # 3. 打包根目录的关键配置 (pyproject.toml 等)
         for config_name in ["pyproject.toml"]:
@@ -124,6 +133,9 @@ def build_agent_code_zip(zip_path: Path) -> int:
             if cfg_path.exists() and cfg_path.is_file():
                 zf.write(cfg_path, config_name)
                 file_count += 1
+    if empty:
+        zip_path.unlink(missing_ok=True)
+        raise SystemExit(f"agent_code.zip would be missing {', '.join(empty)}; nothing was packed")
 
     size_kb = zip_path.stat().st_size / 1024
     print(
@@ -133,63 +145,19 @@ def build_agent_code_zip(zip_path: Path) -> int:
     return file_count
 
 
-def _validate_bootstrap_rootfs(path: Path) -> None:
-    """Reject metadata-only starter archives before they can enter an APK."""
-    if not path.is_file():
-        raise ValueError(f"real Termux ARM64 bootstrap archive does not exist: {path}")
-    try:
-        with zipfile.ZipFile(path) as archive:
-            infos = archive.infolist()
-            names = {info.filename.rstrip("/") for info in infos}
-            required_python = {"usr/bin/python3", "usr/bin/python"}
-            if not names.intersection(required_python):
-                raise ValueError(
-                    f"bootstrap archive {path} does not contain usr/bin/python3 or usr/bin/python"
-                )
-            uncompressed_bytes = sum(info.file_size for info in infos)
-            if len(names) < 25 or uncompressed_bytes < 1_048_576:
-                raise ValueError(
-                    f"bootstrap archive {path} is a placeholder; provide a real Termux ARM64 rootfs"
-                )
-            for python_name in required_python.intersection(names):
-                payload = archive.read(python_name)[:512]
-                if b"Starter Python Stub" in payload or b"starter" in payload.lower():
-                    raise ValueError(
-                        f"bootstrap archive {path} contains a starter Python stub, not a runtime"
-                    )
-    except zipfile.BadZipFile as exc:
-        raise ValueError(f"bootstrap archive is not a valid ZIP file: {path}") from exc
-
-
-def ensure_bootstrap_rootfs(bootstrap_zip: Path, custom_bootstrap: Path | None = None) -> None:
-    """Require a validated Termux ARM64 rootfs; never create a fake runtime."""
-    source = custom_bootstrap if custom_bootstrap is not None else bootstrap_zip
-    _validate_bootstrap_rootfs(source)
-    if custom_bootstrap is not None:
-        bootstrap_zip.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(custom_bootstrap, bootstrap_zip)
-        print(f"[+] Using external Bootstrap runtime: {custom_bootstrap}")
-        return
-
-    print(f"[*] Bootstrap runtime validated: {bootstrap_zip.relative_to(PROJECT_ROOT)}")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="APK 静态资源打包工具")
     parser.add_argument(
         "--runtime",
         choices=("termux", "chaquopy"),
-        default="termux",
-        help="Python runtime provider (default: termux)",
-    )
-    parser.add_argument(
-        "--bootstrap",
-        type=Path,
-        default=None,
-        help="指定现有的 termux-bootstrap-arm64.zip 路径",
+        default="chaquopy",
+        help="Python runtime provider: chaquopy (the only one the app uses)",
     )
     parser.add_argument("--clean", action="store_true", help="构建前清理旧 assets 目录")
     args = parser.parse_args()
+    if args.runtime == "termux":
+        # Before all the work below, not after it: the old default packed everything, then failed.
+        parser.error("the Termux runtime was removed; the app runs Python through Chaquopy (--runtime chaquopy)")
 
     print("=" * 65)
     print("      Agent Workspace for Android: APK 资源打包流程开始")
@@ -211,11 +179,6 @@ def main() -> None:
     # 2. 压缩代码包
     agent_code_zip = ASSETS_DIR / "agent_code.zip"
     build_agent_code_zip(agent_code_zip)
-
-    # Only Termux requires a separate validated rootfs archive.
-    if args.runtime == "termux":
-        bootstrap_zip = ASSETS_DIR / "termux-bootstrap-arm64.zip"
-        ensure_bootstrap_rootfs(bootstrap_zip, args.bootstrap)
 
     print("=" * 65)
     print(">>> 资源打包成功完成! 所有资产已就绪于 kotlin_app/src/main/assets/ <<<")

@@ -23,7 +23,10 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from agent_workspace.core.models import Capability, ToolSpec
+from agent_workspace.core.secret_redactor import redact_sensitive_text
 from agent_workspace.tools.base import validate_tool_arguments
+
+from .project import mask_secrets
 
 MAX_RUNNING = 8
 MAX_KEPT = 16
@@ -676,10 +679,13 @@ class ShellDesk:
             shells = list(self._shells.values())
         return [event for shell in shells for event in shell.drain()]
 
-    def latest(self) -> Shell | None:
-        """The terminal the user typed in last."""
+    def latest(self, within: Path | None = None) -> Shell | None:
+        """The terminal the user typed in last; with [within], of those opened in that folder."""
         with self._lock:
             shells = list(self._shells.values())
+        if within is not None:
+            root = within.resolve()
+            shells = [shell for shell in shells if shell.cwd.resolve().is_relative_to(root)]
         return max(shells, key=lambda item: item.used_at, default=None)
 
     def close(self) -> None:
@@ -692,15 +698,36 @@ class ShellDesk:
             shell.join(timeout=3)
 
 
+# A secret's value in what `cat .env` or a credentials file prints: NAME_KEY=..., password: ...
+# Upper-case names only for the first, so "KeyError: 'x'" in a traceback stays readable.
+_ENV_SECRET = re.compile(
+    r"\b([A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*\s*=\s*)\S+"
+)
+_CONFIG_SECRET = re.compile(
+    r"(?i)\b((?:aws_secret_access_key|aws_session_token|client_secret|access_token|refresh_token"
+    r"|api_?key|secret|token|password|passwd)\s*[=:]\s*)\S+"
+)
+
+
+def _masked(text: str) -> str:
+    text = mask_secrets(redact_sensitive_text(text).redacted_text)
+    text = _ENV_SECRET.sub(r"\1[hidden]", text)
+    return _CONFIG_SECRET.sub(r"\1[hidden]", text)
+
+
 class ReadTerminalTool:
-    """The end of what the user's terminal in the window shows, for "look at the error"."""
+    """The end of what the user's terminal in the window shows, for "look at the error".
+
+    Only a terminal opened in this conversation's folder: the window keeps the terminals of every
+    folder (an SSH session to a server among them), and a conversation in one folder has no
+    business reading another's. Keys and tokens in the text are masked."""
 
     _spec = ToolSpec(
         name="read_terminal",
         description=(
-            "Read the last lines of the terminal the user has open in the app (the one they "
-            "typed in last): the output of what they ran there, such as a failing build or "
-            "test. Use it when the user refers to their terminal. Read-only."
+            "Read the last lines of the terminal the user has open in the app in this folder "
+            "(the one they typed in last): the output of what they ran there, such as a failing "
+            "build or test. Use it when the user refers to their terminal. Read-only."
         ),
         input_schema={
             "type": "object",
@@ -711,8 +738,9 @@ class ReadTerminalTool:
         capability=Capability.WORKSPACE_READ,
     )
 
-    def __init__(self, desk: ShellDesk) -> None:
+    def __init__(self, desk: ShellDesk, workspace: Path) -> None:
         self.desk = desk
+        self.workspace = workspace
 
     @property
     def spec(self) -> ToolSpec:
@@ -720,11 +748,11 @@ class ReadTerminalTool:
 
     async def execute(self, arguments: dict[str, Any]) -> str:
         validate_tool_arguments(self._spec, arguments)
-        shell = self.desk.latest()
+        shell = self.desk.latest(within=self.workspace)
         if shell is None:
-            return "The user has no terminal open in the app."
+            return "The user has no terminal open in the app in this folder."
         state = "running" if shell.running else f"exited with code {shell.exit_code}"
-        text = shell.tail(int(arguments.get("lines", 80)))
+        text = _masked(shell.tail(int(arguments.get("lines", 80))))
         header = f"Terminal: {shell.program.label} in {shell.cwd} ({state})"
         return f"{header}\n\n{text}" if text else f"{header}\n\n(nothing printed yet)"
 

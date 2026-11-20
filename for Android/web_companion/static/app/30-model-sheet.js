@@ -523,8 +523,11 @@
     elements.promptInput.focus();
     // A shared link can also be saved to the knowledge base (management.js offers it).
     window.dispatchEvent(new window.CustomEvent("agent-shared-text", { detail: text }));
-    // In a voice conversation what was said goes out at once (the reply is read aloud, then it listens again).
-    if (voiceConversation && !activeTask) { voiceTurnPending = true; window.setTimeout(() => { void sendPrompt(); }, 0); }
+    // In a voice conversation what was said goes out at once (the reply is read aloud, then it listens
+    // again); text shared from another app meanwhile stays in the composer.
+    const said = voiceListening;
+    voiceListening = false;
+    if (voiceConversation && said && !activeTask) { voiceTurnPending = true; window.setTimeout(() => { void sendPrompt(); }, 0); }
     return true;
   }
 

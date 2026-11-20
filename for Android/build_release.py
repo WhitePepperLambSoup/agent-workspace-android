@@ -63,6 +63,15 @@ LICENSE_INPUTS = {
         "sha256": "7dba975a2069691db4992b0592d70828b330d2f8a30a71450f4e152a554e84f8",
         "source": "https://raw.githubusercontent.com/modelscope/FunASR/main/MODEL_LICENSE",
     },
+    # The CPython 3.12 that Chaquopy embeds: the PSF license requires its notice with the binary,
+    # and Chaquopy's standard library ships none. Text from a CPython 3.12.10 distribution's
+    # LICENSE.txt; the terms are the same for every 3.12 release.
+    "CPython-3.12": {
+        "file": "CPython-3.12-LICENSE.txt",
+        "asset": "CPython-3.12-PSF-2.0.txt",
+        "sha256": "886a0ead2d89030ee62dbff52b04e47ab91998341295bb9c56fb952b4e081c7a",
+        "source": "https://raw.githubusercontent.com/python/cpython/v3.12.10/LICENSE",
+    },
 }
 SIGNING_FIELDS = (
     "AGENT_ANDROID_KEYSTORE",
@@ -83,6 +92,24 @@ def validate_signing(environment, *, signed):
     if signed and not Path(environment[SIGNING_FIELDS[0]]).is_file():
         raise ValueError("release keystore path does not exist")
     return signed
+
+
+# Switches for a local test build only (kotlin_app/build.gradle.kts): AGENT_WEBVIEW_DEBUG lets
+# anyone with USB debugging read the console page through chrome://inspect (its token and the
+# conversations included), and AGENT_TEST_APP_SUFFIX changes the app's id, so the APK can no
+# longer update the real app. Left set in a shell, they used to go into release builds unnoticed.
+LOCAL_TEST_SWITCHES = ("AGENT_WEBVIEW_DEBUG", "AGENT_TEST_APP_SUFFIX")
+
+
+def check_local_test_switches(environment, *, local_test):
+    """The local test switches that are set; refused unless the build is a --local-test one."""
+    present = [name for name in LOCAL_TEST_SWITCHES if environment.get(name)]
+    if present and not local_test:
+        raise ValueError(
+            f"{', '.join(present)} must not be set for a release build; unset it, or build a test "
+            "APK for your own phone with --local-test"
+        )
+    return present
 
 
 def verify_wrapper(kotlin_root=KOTLIN_ROOT):
@@ -235,8 +262,20 @@ def main():
         action="store_true",
         help="verify wrapper/signing configuration without downloading or building",
     )
+    parser.add_argument(
+        "--local-test",
+        action="store_true",
+        help="a test APK for your own phone: allows AGENT_WEBVIEW_DEBUG and AGENT_TEST_APP_SUFFIX; "
+        "never for release",
+    )
     arguments = parser.parse_args()
     validate_signing(os.environ, signed=arguments.signed)
+    try:
+        switches = check_local_test_switches(os.environ, local_test=arguments.local_test)
+    except ValueError as error:
+        parser.error(str(error))
+    if switches:
+        print(f"LOCAL TEST BUILD ({', '.join(switches)} set): this APK is not for release")
     verify_wrapper()
     if arguments.check:
         print("Gradle wrapper verified; release signing configuration valid")
@@ -260,7 +299,11 @@ def main():
         print("Verified launchers, corresponding source, llama.cpp and Chaquopy assets prepared")
         return 0
     environment = {
-        **os.environ,
+        **{
+            name: value
+            for name, value in os.environ.items()
+            if arguments.local_test or name not in LOCAL_TEST_SWITCHES
+        },
         "AGENT_WORKSPACE_BUILD_PYTHON": sys.executable,
         "AGENT_LLAMA_ARCHIVE": str(native_source),
         "AGENT_OPENCL_HEADERS_ARCHIVE": str(opencl_headers),
@@ -278,6 +321,9 @@ def main():
                 f"{apk.name}: native libraries are not 16 KB page aligned and will not load on "
                 "Android 15+ devices with 16 KB pages:\n  " + "\n  ".join(offenders)
             )
+    if switches:
+        print(f"Local test APK generated in kotlin_app/build/outputs/apk/release ({', '.join(switches)}); not for release")
+        return 0
     print(
         "Release APK generated in kotlin_app/build/outputs/apk/release; "
         "validate signatures and install identity before distribution"

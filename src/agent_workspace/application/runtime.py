@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Callable, Coroutine, Hashable, Sequence
+import logging
+from collections.abc import Awaitable, Callable, Coroutine, Hashable, Sequence
 from concurrent.futures import Future
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -48,14 +49,19 @@ from agent_workspace.optimizations import (
     load_optimization_registry,
 )
 from agent_workspace.policy import (
+    DEFAULT_YOLO_RULES,
     ApprovalCallback,
     EgressApprovalCallback,
     ExtensionApprovalCallback,
     ExtensionApprovalRequiredError,
     ProviderEgressPolicy,
+    WorkspaceExtensionRequest,
     WorkspacePolicy,
+    YoloRules,
     build_custom_tool_extension_request,
     build_mcp_extension_request,
+    workspace_file_decision,
+    workspace_file_requests,
 )
 from agent_workspace.providers import create_provider
 from agent_workspace.storage import ProcessWriteLock, SQLiteEventStore, create_verified_backup
@@ -72,7 +78,7 @@ from agent_workspace.tools.mcp_host import (
     build_mcp_host,
     load_mcp_servers,
 )
-from agent_workspace.tools.openapi import OpenApiGetTool, load_openapi_file
+from agent_workspace.tools.openapi import OpenApiGetTool, OpenApiOperation, load_openapi_file
 from agent_workspace.tools.phone_jobs import PhoneJobLauncher, PhoneTaskTool
 from agent_workspace.tools.process_worker import run_in_process
 from agent_workspace.tools.sandbox import (
@@ -82,6 +88,8 @@ from agent_workspace.tools.sandbox import (
     SandboxStatus,
     resolve_sandbox_backend_id,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 _CLOSE_BACKUP_TIMEOUT_SECONDS = 5.0
 _CLOSE_PROVIDER_TIMEOUT_SECONDS = 5.0
@@ -174,6 +182,12 @@ class ApplicationRuntime:
     _scheduler_factory: Callable[[], ScheduledTaskHost | None] | None = None
     _scheduler_claim_key: Hashable | None = None
     _scheduler_loop: asyncio.AbstractEventLoop | None = None
+    # Approved .agent files this runtime started without because they could not be read, by
+    # their workspace path (".agent/prompt-assembly.json"), with why (skip_broken_workspace_files).
+    skipped_workspace_files: dict[str, str] = field(default_factory=dict)
+    # Custom tools (.agent/tools) left out because a built-in tool has the name: name -> the
+    # definition's file.
+    skipped_custom_tools: dict[str, str] = field(default_factory=dict)
 
     def switch_provider(self, provider_config: ProviderConfig) -> ManagedModelProvider:
         """Point this runtime at another model provider without rebuilding it.
@@ -389,26 +403,61 @@ def _load_prompt_assembler(workspace: Path) -> PromptAssembler | None:
         raise ValueError(f"cannot read prompt assembly config {path}: {exc}") from exc
     if not isinstance(document, dict):
         raise ValueError(f"prompt assembly config {path} must be an object")
-    sections = tuple(
-        PromptSection(
-            name=str(item["name"]),
-            order=int(item["order"]),
-            text=str(item["text"]),
-            complete=bool(item.get("complete", False)),
+    # A missing field used to surface as a bare KeyError ('order'), which named neither the file
+    # nor what was wrong with it.
+    try:
+        sections = tuple(
+            PromptSection(
+                name=str(item["name"]),
+                order=int(item["order"]),
+                text=str(item["text"]),
+                complete=bool(item.get("complete", False)),
+            )
+            for item in document.get("sections", ())
+            if isinstance(item, dict)
         )
-        for item in document.get("sections", ())
-        if isinstance(item, dict)
-    )
-    contexts = tuple(
-        PromptContext(
-            name=str(item["name"]),
-            order=int(item["order"]),
-            text=str(item["text"]),
+        contexts = tuple(
+            PromptContext(
+                name=str(item["name"]),
+                order=int(item["order"]),
+                text=str(item["text"]),
+            )
+            for item in document.get("contexts", ())
+            if isinstance(item, dict)
         )
-        for item in document.get("contexts", ())
-        if isinstance(item, dict)
-    )
+    except KeyError as exc:
+        raise ValueError(f"prompt assembly config {path}: an entry has no {exc}") from None
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"prompt assembly config {path}: {exc}") from None
     return PromptAssembler(sections, contexts)
+
+
+def _workspace_files_to_ask(
+    workspace: Path, autonomy: Autonomy
+) -> list[WorkspaceExtensionRequest]:
+    # Scheduled tasks run unattended, so only where nobody has to be asked for each step; elsewhere
+    # the file is left alone.
+    return [
+        request
+        for request in workspace_file_requests(workspace)
+        if request.kind != "schedule" or autonomy in {Autonomy.YOLO, Autonomy.FULL_ACCESS}
+    ]
+
+
+def _decided_now(decision: bool | Awaitable[bool]) -> bool:
+    if not inspect.isawaitable(decision):
+        return bool(decision)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop and loop.is_running():
+        raise TypeError(
+            "Async extension_approval_callback cannot be awaited in synchronous "
+            "build_runtime() from a running event loop; "
+            "use build_runtime_async() instead."
+        )
+    return asyncio.run(cast(Coroutine[Any, Any, bool], decision))
 
 
 def _build_runtime_core(
@@ -430,11 +479,15 @@ def _build_runtime_core(
     optimizer: Any,
     prompt_assembler: Any,
     scheduled_tasks: Any,
+    openapi_operations: Sequence[OpenApiOperation] = (),
     writer_lock_group: ProcessWriteLockGroup | None = None,
     subagents: SubagentLauncher | None = None,
     phone_jobs: PhoneJobLauncher | None = None,
     extra_tools: Sequence[Tool] = (),
     tool_hooks: ToolHooks | None = None,
+    yolo_rules: YoloRules = DEFAULT_YOLO_RULES,
+    estimate_unlisted_cost: bool = False,
+    schedule_local_clock: bool = False,
 ) -> ApplicationRuntime:
     # Stack-managed resource allocation (R18 & R28)
     cleanup_stack: list[Callable[[], Any]] = []
@@ -487,11 +540,8 @@ def _build_runtime_core(
             workspace_path,
             store,
             sandbox_backend=sandbox,
-            allow_host_process=autonomy is not Autonomy.YOLO,
+            allow_host_process=autonomy is not Autonomy.YOLO or yolo_rules.host_process,
             background_jobs=jobs,
-            custom_tools=(
-                CustomCommandTool(workspace_path, definition) for definition in approved_custom_defs
-            ),
             file_versions=FileVersions(database_path.with_name("file-versions")),
             file_batches=FileBatchStore(database_path.with_name("file-batches")),
         )
@@ -506,10 +556,8 @@ def _build_runtime_core(
         # Tools the embedding app adds (the desktop's use_skill).
         for extra in extra_tools:
             tools.register(extra)
-        openapi_path = workspace_path / ".agent" / "openapi.json"
-        if openapi_path.is_file():
-            for operation in load_openapi_file(openapi_path):
-                tools.register(OpenApiGetTool(operation))
+        for operation in openapi_operations:
+            tools.register(OpenApiGetTool(operation))
 
         mcp_host: McpHost | None = None
         if approved_mcp_servers:
@@ -518,8 +566,19 @@ def _build_runtime_core(
                 cleanup_stack.append(mcp_host.close_sync)
                 for proxy in mcp_host.tools():
                     tools.register(proxy)
+        # Last, so a custom tool named like any tool above is the one left out (and named in
+        # Agent settings).
+        skipped_custom_tools: dict[str, str] = {}
+        for definition in approved_custom_defs:
+            if not tools.register_unless_taken(CustomCommandTool(workspace_path, definition)):
+                skipped_custom_tools[definition.name] = str(definition.path)
 
-        policy = WorkspacePolicy(workspace_path, autonomy, approval_callback)
+        # Hooks that judge a call by what its tool does (the desktop's project rules) see the tools.
+        bind_tools = getattr(tool_hooks, "bind_tools", None)
+        if callable(bind_tools):
+            bind_tools(tools.specs())
+
+        policy = WorkspacePolicy(workspace_path, autonomy, approval_callback, yolo_rules=yolo_rules)
         egress_policy = ProviderEgressPolicy(
             provider_config.base_url,
             autonomy,
@@ -528,6 +587,7 @@ def _build_runtime_core(
         provider = create_provider(provider_config)
         cleanup_stack.append(lambda: _close_resource_sync(provider))
 
+        raw_trace = RawConversationTrace.for_database(database_path)
         service = ApplicationService(
             store,
             provider,
@@ -541,8 +601,10 @@ def _build_runtime_core(
             prompt_assembler=prompt_assembler,
             parallel_tool_calls=parallel_tool_calls,
             profile_turns=profile_turns,
-            raw_trace=RawConversationTrace.for_database(database_path),
+            # With none, the runner does not build each request's payload just to discard it.
+            raw_trace=raw_trace if raw_trace.enabled else None,
             tool_hooks=tool_hooks,
+            estimate_unlisted_cost=estimate_unlisted_cost,
         )
 
         scheduler_factory: Callable[[], ScheduledTaskHost | None] | None = None
@@ -561,7 +623,13 @@ def _build_runtime_core(
                 return execute()
 
             def build_scheduler() -> ScheduledTaskHost | None:
-                return build_scheduled_host(workspace_path, run_prompt)
+                # The tasks that were allowed, not what the file says by the time this runs.
+                return build_scheduled_host(
+                    workspace_path,
+                    run_prompt,
+                    scheduled_tasks,
+                    **({"local_clock": True} if schedule_local_clock else {}),
+                )
 
             scheduler_factory = build_scheduler
 
@@ -577,6 +645,7 @@ def _build_runtime_core(
             mcp=mcp_host,
             knowledge=knowledge,
             _scheduler_factory=scheduler_factory,
+            skipped_custom_tools=skipped_custom_tools,
         )
         if scheduler_factory is not None:
             cleanup_stack.append(lambda: _close_resource_sync(runtime.scheduler))
@@ -623,13 +692,25 @@ def build_runtime(
     database_path = Path(database).expanduser().resolve()
     database_path.parent.mkdir(parents=True, exist_ok=True)
 
-    optimizer = _load_model_optimizer(workspace_path)
-    prompt_assembler = _load_prompt_assembler(workspace_path)
-    scheduled_tasks = load_scheduled_tasks(workspace_path)
-    if scheduled_tasks and autonomy not in {Autonomy.YOLO, Autonomy.FULL_ACCESS}:
-        raise ValueError(
-            "scheduled tasks require YOLO or Full access autonomy for unattended execution"
+    approved_files = {
+        request.kind
+        for request in _workspace_files_to_ask(workspace_path, autonomy)
+        if _decided_now(
+            workspace_file_decision(
+                request, allow_workspace_extensions, extension_approval_callback
+            )
         )
+    }
+    optimizer = _load_model_optimizer(workspace_path) if "optimizations" in approved_files else None
+    prompt_assembler = (
+        _load_prompt_assembler(workspace_path) if "prompt_assembly" in approved_files else None
+    )
+    scheduled_tasks = load_scheduled_tasks(workspace_path) if "schedule" in approved_files else ()
+    openapi_operations = (
+        load_openapi_file(workspace_path / ".agent" / "openapi.json")
+        if "openapi" in approved_files
+        else ()
+    )
 
     # Extension discovery & authorization (R01)
     mcp_servers = load_mcp_servers(workspace_path)
@@ -713,6 +794,7 @@ def build_runtime(
         optimizer=optimizer,
         prompt_assembler=prompt_assembler,
         scheduled_tasks=scheduled_tasks,
+        openapi_operations=openapi_operations,
     )
 
 
@@ -738,19 +820,51 @@ async def build_runtime_async(
     phone_jobs: PhoneJobLauncher | None = None,
     extra_tools: Sequence[Tool] = (),
     tool_hooks: ToolHooks | None = None,
+    yolo_rules: YoloRules = DEFAULT_YOLO_RULES,
+    skip_broken_workspace_files: bool = False,
+    estimate_unlisted_cost: bool = False,
+    schedule_local_clock: bool = False,
 ) -> ApplicationRuntime:
     provider_config.validate()
     workspace_path = Path(workspace).resolve(strict=True)
     database_path = Path(database).expanduser().resolve()
     database_path.parent.mkdir(parents=True, exist_ok=True)
 
-    optimizer = _load_model_optimizer(workspace_path)
-    prompt_assembler = _load_prompt_assembler(workspace_path)
-    scheduled_tasks = load_scheduled_tasks(workspace_path)
-    if scheduled_tasks and autonomy not in {Autonomy.YOLO, Autonomy.FULL_ACCESS}:
-        raise ValueError(
-            "scheduled tasks require YOLO or Full access autonomy for unattended execution"
+    # The approved files by kind, each with its workspace path.
+    approved_files: dict[str, str] = {}
+    for request in _workspace_files_to_ask(workspace_path, autonomy):
+        file_decision = workspace_file_decision(
+            request, allow_workspace_extensions, extension_approval_callback
         )
+        if inspect.isawaitable(file_decision):
+            file_decision = await file_decision
+        if file_decision:
+            approved_files[request.kind] = request.identifier
+    skipped_files: dict[str, str] = {}
+
+    def load_approved(kind: str, load: Callable[[], Any], unused: Any) -> Any:
+        if kind not in approved_files:
+            return unused
+        try:
+            return load()
+        except Exception as exc:
+            # The desktop opens the folder without an approved file that turns out to be broken
+            # and says which and why in Agent settings; elsewhere the error, naming the file,
+            # still stops the start.
+            if not skip_broken_workspace_files:
+                raise
+            _LOGGER.warning("starting without %s: %s", approved_files[kind], exc)
+            skipped_files[approved_files[kind]] = " ".join(str(exc).split())[:1000]
+            return unused
+
+    optimizer = load_approved("optimizations", lambda: _load_model_optimizer(workspace_path), None)
+    prompt_assembler = load_approved(
+        "prompt_assembly", lambda: _load_prompt_assembler(workspace_path), None
+    )
+    scheduled_tasks = load_approved("schedule", lambda: load_scheduled_tasks(workspace_path), ())
+    openapi_operations = load_approved(
+        "openapi", lambda: load_openapi_file(workspace_path / ".agent" / "openapi.json"), ()
+    )
 
     # Extension discovery & authorization (R01)
     mcp_servers = load_mcp_servers(workspace_path)
@@ -791,7 +905,7 @@ async def build_runtime_async(
                 f"to start command: {command_str}"
             )
 
-    return _build_runtime_core(
+    runtime = _build_runtime_core(
         workspace_path=workspace_path,
         database_path=database_path,
         provider_config=provider_config,
@@ -810,9 +924,15 @@ async def build_runtime_async(
         optimizer=optimizer,
         prompt_assembler=prompt_assembler,
         scheduled_tasks=scheduled_tasks,
+        openapi_operations=openapi_operations,
         writer_lock_group=writer_lock_group,
         subagents=subagents,
         phone_jobs=phone_jobs,
         extra_tools=extra_tools,
         tool_hooks=tool_hooks,
+        yolo_rules=yolo_rules,
+        estimate_unlisted_cost=estimate_unlisted_cost,
+        schedule_local_clock=schedule_local_clock,
     )
+    runtime.skipped_workspace_files = skipped_files
+    return runtime

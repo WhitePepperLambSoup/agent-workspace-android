@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -11,6 +12,10 @@ from pathlib import Path
 
 class WorkspaceCatalogError(ValueError):
     pass
+
+
+class _UnreadableCatalog(WorkspaceCatalogError):
+    """The file was read but is not a catalog at all (cut short, overwritten, another format)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,29 +36,49 @@ class WorkspaceCatalog:
         path: str | Path,
         *,
         clock: Callable[[], float] = time.time,
+        set_aside_unreadable: bool = False,
     ) -> None:
         self.path = Path(path)
         self._clock = clock
         self._entries: dict[str, WorkspaceEntry] = {}
         if self.path.is_file():
-            self._load()
+            try:
+                self._load()
+            except _UnreadableCatalog:
+                if not set_aside_unreadable:
+                    raise
+                # Left beside it rather than overwritten, and the list starts again; otherwise
+                # nothing would ever be remembered again.
+                self.path.replace(
+                    self.path.with_name(f"{self.path.name}.bad-{int(self._clock())}")
+                )
 
     def _load(self) -> None:
         try:
-            document = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            content = self.path.read_bytes()
+        except OSError as exc:
             raise WorkspaceCatalogError(f"cannot read workspace catalog: {exc}") from exc
+        try:
+            document = json.loads(content.decode("utf-8"))
+        except ValueError as exc:  # also a file that is not UTF-8
+            raise _UnreadableCatalog(f"cannot read workspace catalog: {exc}") from exc
         if not isinstance(document, dict) or not isinstance(document.get("workspaces"), list):
-            raise WorkspaceCatalogError("workspace catalog is invalid")
+            raise _UnreadableCatalog("workspace catalog is invalid")
+        # One bad entry (a hand edit, a "last_used": null) is left out instead of losing the list,
+        # or, as a TypeError, stopping the desktop gateway from starting.
         for raw in document["workspaces"]:
             if not isinstance(raw, dict):
-                raise WorkspaceCatalogError("workspace catalog entry is invalid")
+                continue
             path = raw.get("path")
             name = raw.get("name")
-            last_used = raw.get("last_used", 0.0)
             if not isinstance(path, str) or not path or not isinstance(name, str) or not name:
-                raise WorkspaceCatalogError("workspace catalog entry is invalid")
-            self._entries[path] = WorkspaceEntry(path, name, float(last_used))
+                continue
+            last_used = raw.get("last_used", 0.0)
+            try:
+                when = float(last_used)
+            except (TypeError, ValueError):
+                when = 0.0
+            self._entries[path] = WorkspaceEntry(path, name, when if math.isfinite(when) else 0.0)
 
     def save(self) -> Path:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -76,7 +101,8 @@ class WorkspaceCatalog:
             raise WorkspaceCatalogError(f"workspace is not a directory: {resolved}")
         entry = WorkspaceEntry(
             str(resolved),
-            name.strip() if name else resolved.name,
+            # A blank name would be written and then refused when read back.
+            (name or "").strip() or resolved.name,
             self._clock(),
         )
         self._entries[entry.path] = entry

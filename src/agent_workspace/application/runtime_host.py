@@ -19,8 +19,9 @@ from agent_workspace.application.runtime import (
     ApplicationRuntime,
     build_runtime_async,
 )
-from agent_workspace.config import ProviderConfig, is_loopback_endpoint
-from agent_workspace.core.budgets import TaskLimits
+from agent_workspace.application.tool_guards import GuardedToolHooks
+from agent_workspace.config import ProviderConfig, is_loopback_endpoint, self_hosted_endpoint
+from agent_workspace.core.budgets import LONG_TURN_LIMITS, TaskLimits
 from agent_workspace.core.events import Event
 from agent_workspace.core.models import (
     ApprovalScope,
@@ -56,10 +57,13 @@ _EXECUTOR_SHUTDOWN_SECONDS = 2.0
 _CONTROL_EVENT_CAPACITY = 512
 _MAX_CONTROL_EVENT_BYTES = 16 * 1024
 _MAX_CONTROL_STRING_CHARS = 4096
+# How many items of each list an approval prompt keeps, tried in turn until the call fits.
+_APPROVAL_LIST_ITEMS: tuple[int | None, ...] = (None, 100, 20, 5, 0)
 _MAX_DISPLAY_DELTA_BYTES = 64 * 1024
 _MUST_DELIVER_DISPLAY_EVENTS = frozenset(
     {
         "approval.requested",
+        "content.untrusted",
         "runtime.failed",
         "runtime.stopped",
         "tool.cancelled",
@@ -87,6 +91,7 @@ def _loopback_endpoint(base_url: str) -> bool:
 
 # What a plan-first turn may use: tools that only read, and the to-do list for the plan.
 _PLAN_EFFECTS = frozenset({"", "none", "read", "read_state", "session_state"})
+_PLAN_LOOKUP_TOOLS = frozenset({"web_search", "web_fetch"})
 _PLAN_FIRST = (
     "Plan first: for this request, look into it with the tools you have (they only read) and "
     "reply with a short numbered plan: what you will change, in which files, and how you will "
@@ -102,6 +107,9 @@ def _tool_allowed(name: str, allowed: frozenset[str]) -> bool:
 
 
 def _reads_only(spec: ToolSpec) -> bool:
+    # Reading the web is looking too, though its effect is "network" (each fetch still asks).
+    if spec.name in _PLAN_LOOKUP_TOOLS:
+        return True
     effect = spec.side_effect.strip().lower().replace("-", "_")
     return effect.rsplit(":", maxsplit=1)[-1].removeprefix("filesystem_") in _PLAN_EFFECTS
 
@@ -161,6 +169,7 @@ _ONCE_ONLY_APPROVAL_TOOLS = frozenset(
 # Effects the policy never grants per-session: every invocation re-asks or is
 # granted once. Kept in sync with WorkspacePolicy's grant_key=None branches so
 # the approval dialog never advertises a session scope the policy downgrades.
+# The sandbox has one exception, which the policy answers for itself.
 _ONCE_ONLY_EFFECTS = frozenset(
     {
         "delete",
@@ -231,6 +240,11 @@ class RuntimeSettings:
     # What runs around tool calls in the open folder (the desktop's project rules), made for it
     # at start; None runs tools as they are.
     tool_hooks: Callable[[Path], ToolHooks] | None = None
+    # A file written broken is reported to the model; outside content that talks to the agent makes
+    # the rest of the turn ask at every step (tool_guards.py).
+    tool_guards: bool = False
+    # A turn may run for hours (core/budgets.py); its cost limit stays.
+    long_turns: bool = False
 
 
 @dataclass(slots=True)
@@ -330,8 +344,15 @@ class RuntimeHost(threading.Thread):
                 extra_tools = (*extra_tools, *folder_tools(self.settings.workspace))
             if extra_tools:
                 build_options["extra_tools"] = extra_tools
-            if self.settings.tool_hooks is not None:
-                build_options["tool_hooks"] = self.settings.tool_hooks(self.settings.workspace)
+            hooks = (
+                self.settings.tool_hooks(self.settings.workspace)
+                if self.settings.tool_hooks is not None
+                else None
+            )
+            if self.settings.tool_guards:
+                hooks = GuardedToolHooks(hooks, self._outside_content_found)
+            if hooks is not None:
+                build_options["tool_hooks"] = hooks
             self._runtime = loop.run_until_complete(
                 build_runtime_async(
                     self.settings.workspace,
@@ -345,6 +366,17 @@ class RuntimeHost(threading.Thread):
                     event_listener=self._forward_event,
                     allow_workspace_extensions=self.settings.allow_workspace_extensions,
                     parallel_tool_calls=True,
+                    # A broken .agent file is left out and named in Agent settings, rather than
+                    # keeping the folder from opening.
+                    skip_broken_workspace_files=True,
+                    # A cloud model without a listed price counts toward the spending limit at a
+                    # cautious default; one served here or on the local network costs nothing.
+                    estimate_unlisted_cost=not self_hosted_endpoint(
+                        self.settings.provider.base_url, self.settings.provider.protocol
+                    ),
+                    # .agent/schedule.toml: cron times are this computer's local time, and the
+                    # latest trigger missed while the app was closed runs once at start.
+                    schedule_local_clock=True,
                     **build_options,
                 )
             )
@@ -379,6 +411,15 @@ class RuntimeHost(threading.Thread):
                     "session_id": self._session.id if self._session is not None else None,
                 },
             )
+            mcp = getattr(self._runtime, "mcp", None)
+            for server_id, error in (mcp.startup_failures() if mcp is not None else {}).items():
+                self._emit(
+                    "runtime.mcp_server_failed",
+                    {
+                        "server_id": server_id,
+                        "message": f"MCP server {server_id} is unavailable: {error}",
+                    },
+                )
             if self._shutdown_requested.is_set():
                 self._schedule_shutdown()
             loop.run_forever()
@@ -583,6 +624,29 @@ class RuntimeHost(threading.Thread):
         if loop is None or loop.is_closed() or self._closing:
             return None
         return asyncio.run_coroutine_threadsafe(self._resolve_approval(request_id, scope), loop)
+
+    def _workspace_policy(self) -> WorkspacePolicy | None:
+        service = getattr(self._runtime, "service", None)
+        policy = getattr(getattr(service, "runner", None), "_policy", None)
+        return policy if isinstance(policy, WorkspacePolicy) else None
+
+    def _outside_content_found(self, session_id: str, tool: str, found: dict[str, Any]) -> None:
+        self.distrust_here(session_id)
+        self._emit("content.untrusted", {"tool": tool, "sample": found["sample"]})
+
+    def distrust_here(self, session_id: str) -> None:
+        policy = self._workspace_policy()
+        if policy is not None:
+            policy.distrust_session(session_id)
+            # Past this turn too: the content stays in the conversation, so writing the files
+            # later conversations read as instructions keeps asking.
+            policy.remember_outside_instructions(session_id)
+
+    def request_distrust(self, session_id: str) -> None:
+        """Outside content reached this conversation through one of its experts."""
+        loop = self._loop
+        if loop is not None and not loop.is_closed() and not self._closing:
+            loop.call_soon_threadsafe(self.distrust_here, session_id)
 
     def request_shutdown(self, *, create_backup: bool = False) -> Future[None] | None:
         self._create_backup_on_shutdown = create_backup
@@ -859,6 +923,10 @@ class RuntimeHost(threading.Thread):
         self._turn_failure_forwarded = False
         task: asyncio.Task[RunResult] | None = None
         watch: TurnObserver | None = None
+        policy = self._workspace_policy()
+        if policy is not None and self._session is not None:
+            # A new request from the user: distrust lasted for the turn that read the content.
+            policy.trust_session_again(self._session.id)
         try:
             if self._session is None:
                 self._session = runtime.service.create_session(
@@ -878,10 +946,11 @@ class RuntimeHost(threading.Thread):
                 )
             turn_model = model or self.settings.provider.model
             options: dict[str, Any] = {}
-            if limits is not None:
-                options["budget"] = limits.apply(
-                    runtime.service.default_budget(turn_model, reasoning_effort)
-                )
+            if limits is not None or self.settings.long_turns:
+                budget = runtime.service.default_budget(turn_model, reasoning_effort)
+                if self.settings.long_turns:
+                    budget = replace(budget, **LONG_TURN_LIMITS)  # type: ignore[arg-type]
+                options["budget"] = limits.apply(budget) if limits is not None else budget
             # Providers that bill a cached prompt prefix cheaply get requests that only grow
             # at the end, and compaction that moves in rare large steps.
             if prefix_cache_endpoint(self.settings.provider.base_url, turn_model):
@@ -1014,28 +1083,55 @@ class RuntimeHost(threading.Thread):
         request_id = str(uuid4())
         future: asyncio.Future[ApprovalResult] = asyncio.get_running_loop().create_future()
         self._approvals[request_id] = future
-        supports_session_scope = (
-            tool.name not in _ONCE_ONLY_APPROVAL_TOOLS
-            and WorkspacePolicy._effect_kind(tool.side_effect) not in _ONCE_ONLY_EFFECTS
-        )
-        self._approval_session_scopes[request_id] = supports_session_scope
         session_id = (
             self._session.id if self._session is not None else self.settings.session_id or "desktop"
         )
-        approval_event = self._compact_control_event(
-            Event(
-                session_id=session_id,
-                type="approval.requested",
-                data={
-                    "request_id": request_id,
-                    "tool": tool.name,
-                    "description": tool.description,
-                    "side_effect": tool.side_effect,
-                    "arguments": approval_display_arguments(tool, arguments),
-                    "supports_session_scope": supports_session_scope,
-                },
-            )
+        policy = self._workspace_policy()
+        effect = WorkspacePolicy._effect_kind(tool.side_effect)
+        # A write to an instruction file after outside content talked to the agent: the card
+        # says why it asks, and it is approved one write at a time.
+        instructions = policy is not None and policy.writes_instructions(
+            tool, arguments, session_id
         )
+        supports_session_scope = (
+            tool.name not in _ONCE_ONLY_APPROVAL_TOOLS
+            and (
+                effect not in _ONCE_ONLY_EFFECTS
+                or (
+                    effect == "sandboxed_process"
+                    and policy is not None
+                    and policy.grants_sandbox_for_session(arguments)
+                )
+            )
+            and not (policy is not None and policy.session_distrusted(session_id))
+            and not instructions
+        )
+        self._approval_session_scopes[request_id] = supports_session_scope
+        # The call is shown whole when it fits; a larger one is shown with long text cut to
+        # a preview and long lists to their first items (the counts are kept), rather than
+        # being refused without the user ever seeing it.
+        for list_items in _APPROVAL_LIST_ITEMS:
+            approval_event = self._compact_control_event(
+                Event(
+                    session_id=session_id,
+                    type="approval.requested",
+                    data={
+                        "request_id": request_id,
+                        "tool": tool.name,
+                        # An extension's own description can be long; cutting it hides
+                        # nothing about the call itself.
+                        "description": tool.description[:_MAX_CONTROL_STRING_CHARS],
+                        "side_effect": tool.side_effect,
+                        "arguments": approval_display_arguments(
+                            tool, arguments, max_list_items=list_items
+                        ),
+                        "supports_session_scope": supports_session_scope,
+                        **({"note": "instruction_file"} if instructions else {}),
+                    },
+                )
+            )
+            if approval_event.data.get("display_truncated") is not True:
+                break
         if approval_event.data.get("display_truncated") is True:
             self._approvals.pop(request_id, None)
             self._approval_session_scopes.pop(request_id, None)
@@ -1116,6 +1212,11 @@ class RuntimeHost(threading.Thread):
                     "tool": f"extension:{request.kind}:{request.identifier}",
                     "description": (
                         f"Allow workspace extension {request.identifier} ({request.kind})"
+                        + (
+                            "; its configuration lets YOLO mode run its tools without asking"
+                            if request.yolo
+                            else ""
+                        )
                     ),
                     "side_effect": "extension_execution",
                     "arguments": {
@@ -1124,6 +1225,7 @@ class RuntimeHost(threading.Thread):
                         "config_source": request.config_source,
                         "command": list(request.command),
                         "config_digest": request.config_digest,
+                        **({"yolo": True} if request.yolo else {}),
                     },
                     "supports_session_scope": False,
                 },

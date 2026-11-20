@@ -149,15 +149,21 @@ def _read_value(text: str, start: int, macros: dict[str, str]) -> tuple[str, int
 def latex_to_text(value: str) -> str:
     """Plain Unicode text from a BibTeX value: accents, escapes and protective braces resolved."""
     text = value
+    # A letter accent (\v{c}, \c c) is a whole command name: \rho, \kappa, \varepsilon, \url
+    # and \cite are other commands and stay as they are.
     text = re.sub(
-        r"\\([`'^\"~=.uvHckr])\s*\{?\\?([A-Za-z])\}?",
-        lambda match: match.group(2) + _ACCENTS[match.group(1)],
+        r"\\([`'^\"~=.])\s*\{?\\?([A-Za-z])\}?|\\([uvHckr])(?![A-Za-z])\s*\{?\\?([A-Za-z])\}?",
+        lambda match: (
+            match.group(2) + _ACCENTS[match.group(1)]
+            if match.group(1)
+            else match.group(4) + _ACCENTS[match.group(3)]
+        ),
         text,
     )
     for command, symbol in _SYMBOLS.items():
         text = re.sub(re.escape(command) + r"(?![A-Za-z])\s*", symbol, text)
     text = re.sub(
-        r"\\(?:textit|textbf|emph|textrm|textsf|texttt|mathrm|mbox|text)\s*\{([^{}]*)\}",
+        r"\\(?:textit|textbf|emph|textrm|textsf|texttt|mathrm|mbox|text|url)\s*\{([^{}]*)\}",
         r"\1",
         text,
     )
@@ -240,10 +246,12 @@ def _entry(kind: str, body: str, macros: dict[str, str]) -> Work:
         work_type = "webpage"
     date = latex_to_text(fields.get("date", ""))
     year_text = latex_to_text(fields.get("year", "")) or date[:4]
+    # Years such as 2020a, 2019--2020 or "in press" occur: the year is its first four digits.
+    year = int(year_text[:4]) if year_text[:4].isdigit() else None
     month = latex_to_text(fields.get("month", ""))
-    if not date and year_text.isdigit():
+    if not date and year is not None:
         month_number = _MONTHS.get(month.casefold()[:3], month.zfill(2) if month.isdigit() else "")
-        date = f"{year_text}-{month_number}" if month_number else year_text
+        date = f"{year_text[:4]}-{month_number}" if month_number else year_text[:4]
     container = fields.get("journal") or fields.get("journaltitle") or fields.get("booktitle") or ""
     publisher = fields.get("publisher") or fields.get("school") or fields.get("institution") or ""
     url = latex_to_text(
@@ -254,7 +262,7 @@ def _entry(kind: str, body: str, macros: dict[str, str]) -> Work:
         title=latex_to_text(fields.get("title", "")),
         authors=_people(fields.get("author", "")),
         editors=_people(fields.get("editor", "")),
-        year=int(year_text) if year_text[:4].isdigit() else None,
+        year=year,
         date=date,
         container=latex_to_text(container),
         volume=latex_to_text(fields.get("volume", "")),

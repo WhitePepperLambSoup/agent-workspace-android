@@ -126,10 +126,16 @@ class GitFlow:
 
     # -- running
 
-    def git(self, *arguments: str, seconds: float = GIT_SECONDS, check: bool = True) -> str:
+    def git(
+        self,
+        *arguments: str,
+        seconds: float = GIT_SECONDS,
+        check: bool = True,
+        cwd: Path | None = None,
+    ) -> str:
         if self._git is None:
             raise GitFlowError("git_unavailable")
-        result = self._run([self._git, *arguments], self.root, seconds)
+        result = self._run([self._git, *arguments], cwd or self.root, seconds)
         if check and result.returncode != 0:
             raise GitFlowError(
                 "git_command_failed", (result.stderr or result.stdout).strip()[-800:]
@@ -189,11 +195,18 @@ class GitFlow:
             return "cherry-pick"
         return None
 
+    def _top(self) -> Path:
+        """The top of the work tree. Git names conflicted files from there, and the open folder
+        can be a folder inside the repository (a package of a monorepo)."""
+        top = self.git("rev-parse", "--show-toplevel", check=False).strip()
+        return Path(top) if top else self.root
+
     def _with_blocks(self, paths: Sequence[str]) -> list[dict[str, object]]:
         found: list[dict[str, object]] = []
+        top = self._top() if paths else self.root
         for path in paths[:MAX_PATHS]:
             try:
-                text = (self.root / path).read_text(encoding="utf-8", errors="replace")
+                text = (top / path).read_text(encoding="utf-8", errors="replace")
             except OSError:
                 text = ""
             found.append({"path": path, "blocks": len(_CONFLICT_START.findall(text))})
@@ -309,19 +322,22 @@ class GitFlow:
         if side not in {"ours", "theirs"}:
             raise GitFlowError("invalid_side")
         path = self._conflicted(path)
-        self.git("checkout", f"--{side}", "--", path)
-        self.git("add", "--", path)
+        # The path is from the top of the work tree; checkout and add read it from where they run.
+        top = self._top()
+        self.git("checkout", f"--{side}", "--", path, cwd=top)
+        self.git("add", "--", path, cwd=top)
         return self.status()
 
     def mark_resolved(self, path: str) -> dict[str, object]:
         path = self._conflicted(path)
+        top = self._top()
         try:
-            text = (self.root / path).read_text(encoding="utf-8", errors="replace")
+            text = (top / path).read_text(encoding="utf-8", errors="replace")
         except OSError:
             text = ""
         if _CONFLICT_START.search(text):
             raise GitFlowError("conflict_markers_left")
-        self.git("add", "--", path)
+        self.git("add", "--", path, cwd=top)
         return self.status()
 
     def finish(self, action: str) -> dict[str, object]:

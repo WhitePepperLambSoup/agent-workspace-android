@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import hashlib
 import json
+import logging
+import operator
 import os
+import re
+import shutil
 import sqlite3
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime
 from itertools import zip_longest
 from pathlib import Path
@@ -39,6 +44,7 @@ from agent_workspace.core.models import (
     ToolAttempt,
     ToolAttemptState,
 )
+from agent_workspace.core.raw_trace import RawConversationTrace
 from agent_workspace.core.sandbox_changes import get_sandbox_change
 from agent_workspace.core.search import SearchIndexUnavailableError, SessionSearchResult
 from agent_workspace.core.session import Session
@@ -46,8 +52,22 @@ from agent_workspace.storage.checkpoint_crypto import (
     protect_checkpoint_preimage,
     unprotect_checkpoint_preimage,
 )
+from agent_workspace.storage.slow_work import watch_connection
+
+_LOGGER = logging.getLogger(__name__)
 
 _BUSY_TIMEOUT_MS = 5_000
+# The WAL is cut back to this size when it starts over after a checkpoint. Checkpoints only reuse
+# the file, so after an import, a deletion or a migration it stayed at its largest (hundreds of MiB
+# on a phone) until the last connection closed, and the engine can run for days.
+_WAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024
+# Whole-database copies kept in migration-backups beside the database.
+MIGRATION_BACKUPS_KEPT = 3
+# Room left after a backup before a migration: its copy and the check's working copy each take
+# about the database's size, and the migration itself still has to be written.
+_MIGRATION_BACKUP_SPARE_BYTES = 16 * 1024 * 1024
+# The id the window gives the row a stream's text fills (coalesceSnapshotStreams).
+_STREAM_REPLY_ID = re.compile(r"stream-(.+)-text-(\d{1,9})")
 
 
 class FileCheckpointConflictError(RuntimeError):
@@ -69,6 +89,31 @@ def _checkpoint_path_row(
 _MAX_SEARCH_QUERY_CHARACTERS = 512
 _MAX_SEARCH_TERMS = 16
 _MAX_SEARCH_RESULTS = 100
+# Han (with extension A, the compatibility forms and the supplementary planes), kana and Hangul:
+# letters written without spaces between words, which unicode61 keeps as one token per run.
+_CJK_RUN = re.compile(
+    r"[\u3005-\u3007\u3041-\u3096\u309d-\u309f\u30a1-\u30fa\u30fc-\u30ff\u3400-\u4dbf"
+    r"\u4e00-\u9fff\uac00-\ud7a3\uf900-\ufaff\uff66-\uff9f\U00020000-\U0003134f]+"
+)
+# The first version whose index reads search_text (session_search_by_pairs).
+SEARCH_PAIRS_SCHEMA_VERSION = 27
+# The first version whose streamed chunks may be blanked (stream_compaction).
+STREAM_COMPACTION_SCHEMA_VERSION = 28
+
+
+def _cjk_pairs(match: re.Match[str]) -> str:
+    run = match.group()
+    # Each character with the next, joined in C: the full check pairs every document again.
+    return f" {' '.join(map(operator.add, run, run[1:])) if len(run) > 1 else run} "
+
+
+def search_text(text: str) -> str:
+    """What the search index reads for a text: each run of CJK characters as its overlapping
+    pairs ("北京的天气" as "北京 京的 的天 天气"), the rest as it is. A query is read the same
+    way, so a word inside a Chinese sentence is found where unicode61 saw only the whole run."""
+    return _CJK_RUN.sub(_cjk_pairs, text)
+
+
 _MAX_CONTEXT_EVENT_ROWS = 5000
 _MAX_CONTEXT_EVENT_DATA_BYTES = 4 * 1024 * 1024
 _MAX_ACTIVITY_PREVIEW_ROWS = 500
@@ -94,6 +139,9 @@ _TRUST_VALIDATED_HERE = False
 # Also trust a file a trusted process closed cleanly, by the note it left beside it.
 _TRUST_ACROSS_RESTARTS = False
 _CLEAN_CLOSE_NOTE_VERSION = 1
+# Attempts whose tool worker outlived its cancellation grace in this process. It may still be
+# writing, so the file stays reserved; a worker does not outlive the process that started it.
+_UNSETTLED_ATTEMPTS: set[str] = set()
 _MAX_IMPORT_ARTIFACT_BATCH_BYTES = 128 * 1024 * 1024
 _CONTEXT_EVENT_TYPES = (
     "message.created",
@@ -1001,6 +1049,226 @@ _MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        25,
+        "research_sources_fit_web_fetch",
+        (
+            # A saved source holds what web_fetch hands back (MAX_RESEARCH_CONTENT_BYTES and
+            # MAX_RESEARCH_RESPONSE_BYTES in core.events); most pages were over the 128 KiB of
+            # version 7. A check cannot be changed in place, so the tables are built again.
+            # Renaming a table the others refer to would rewrite their references, so each is
+            # copied aside and dropped, the ones that refer to others first, and comes back in
+            # the opposite order: no reference is left without its row at any point.
+            "CREATE TABLE research_citations_v24 AS SELECT * FROM research_citations",
+            "DROP TABLE research_citations",
+            "CREATE TABLE research_sources_v24 AS SELECT * FROM research_sources",
+            "DROP TABLE research_sources",
+            "CREATE TABLE text_artifacts_v24 AS SELECT * FROM text_artifacts",
+            "DROP TABLE text_artifacts",
+            """
+            CREATE TABLE text_artifacts (
+                sha256 TEXT PRIMARY KEY CHECK (length(sha256) = 64),
+                content BLOB NOT NULL CHECK (length(content) <= 240000),
+                byte_count INTEGER NOT NULL CHECK (
+                    byte_count >= 0 AND byte_count = length(content)
+                )
+            ) STRICT
+            """,
+            "INSERT INTO text_artifacts SELECT * FROM text_artifacts_v24",
+            """
+            CREATE TABLE research_sources (
+                id TEXT NOT NULL CHECK (length(id) = 64),
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE RESTRICT,
+                url TEXT NOT NULL CHECK (length(url) > 0 AND length(url) <= 4096),
+                title TEXT CHECK (title IS NULL OR length(title) <= 500),
+                artifact_sha256 TEXT NOT NULL REFERENCES text_artifacts(sha256) ON DELETE RESTRICT,
+                response_sha256 TEXT NOT NULL CHECK (length(response_sha256) = 64),
+                response_bytes INTEGER NOT NULL CHECK (
+                    response_bytes >= 0 AND response_bytes <= 1048577
+                ),
+                media_type TEXT NOT NULL CHECK (
+                    length(media_type) > 0 AND length(media_type) <= 255
+                ),
+                fetched_at TEXT NOT NULL,
+                truncated INTEGER NOT NULL CHECK (truncated IN (0, 1)),
+                summary TEXT NOT NULL CHECK (length(summary) <= 10000),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (session_id, id)
+            ) STRICT
+            """,
+            "INSERT INTO research_sources SELECT * FROM research_sources_v24",
+            """
+            CREATE INDEX research_sources_session_updated_idx
+            ON research_sources (session_id, updated_at DESC, id ASC)
+            """,
+            """
+            CREATE TABLE research_citations (
+                id TEXT PRIMARY KEY CHECK (length(id) > 0 AND length(id) <= 128),
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE RESTRICT,
+                source_id TEXT NOT NULL CHECK (length(source_id) = 64),
+                claim TEXT NOT NULL CHECK (length(claim) > 0 AND length(claim) <= 10000),
+                locator TEXT CHECK (locator IS NULL OR length(locator) <= 2000),
+                quote TEXT CHECK (quote IS NULL OR length(quote) <= 10000),
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (session_id, source_id)
+                    REFERENCES research_sources(session_id, id) ON DELETE RESTRICT
+            ) STRICT
+            """,
+            "INSERT INTO research_citations SELECT * FROM research_citations_v24",
+            """
+            CREATE INDEX research_citations_session_source_idx
+            ON research_citations (session_id, source_id, created_at, id)
+            """,
+            "DROP TABLE research_citations_v24",
+            "DROP TABLE research_sources_v24",
+            "DROP TABLE text_artifacts_v24",
+        ),
+    ),
+    (
+        26,
+        "session_search_text_column",
+        (
+            # unicode61 keeps a run of Chinese characters as one token, so a word inside a
+            # sentence was never found and such queries fell back to an unranked scan. The index
+            # reads search_text instead (search_text() in this module; filled after these
+            # statements), from version 27 on. The triggers go first, so that filling the column
+            # does not rewrite the old index document by document.
+            "DROP TRIGGER search_documents_au",
+            "DROP TRIGGER search_documents_ad",
+            "DROP TRIGGER search_documents_ai",
+            "ALTER TABLE search_documents ADD COLUMN search_text TEXT NOT NULL DEFAULT ''",
+        ),
+    ),
+    (
+        27,
+        "session_search_by_pairs",
+        (
+            # The integrity token stays in search_documents, where the full check reads it; as a
+            # column of the index it added one unique term per document. The empty index is
+            # filled when the migration ends (_repair_search_index finds it inconsistent).
+            "DROP TABLE session_search_vocab",
+            "DROP TABLE session_search",
+            """
+            CREATE VIRTUAL TABLE session_search USING fts5(
+                search_text,
+                content='search_documents',
+                content_rowid='rowid',
+                tokenize='unicode61 remove_diacritics 2'
+            )
+            """,
+            """
+            CREATE VIRTUAL TABLE session_search_vocab USING fts5vocab(session_search, 'instance')
+            """,
+            """
+            CREATE TRIGGER search_documents_ai
+            AFTER INSERT ON search_documents
+            BEGIN
+                INSERT INTO session_search(rowid, search_text) VALUES (new.rowid, new.search_text);
+            END
+            """,
+            """
+            CREATE TRIGGER search_documents_ad
+            AFTER DELETE ON search_documents
+            BEGIN
+                INSERT INTO session_search(session_search, rowid, search_text)
+                VALUES ('delete', old.rowid, old.search_text);
+            END
+            """,
+            """
+            CREATE TRIGGER search_documents_au
+            AFTER UPDATE ON search_documents
+            BEGIN
+                INSERT INTO session_search(session_search, rowid, search_text)
+                VALUES ('delete', old.rowid, old.search_text);
+                INSERT INTO session_search(rowid, search_text) VALUES (new.rowid, new.search_text);
+            END
+            """,
+        ),
+    ),
+    (
+        28,
+        "stream_compaction",
+        (
+            # Every streamed chunk was kept for good, and the turn's message stores its text
+            # again. A month after a turn completed, storage.stream_compaction blanks the chunks
+            # that message holds in full. A row here says the turn was looked at and how much of
+            # it was blanked (no chunks: nothing could be).
+            """
+            CREATE TABLE compacted_turns (
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE RESTRICT,
+                correlation_id TEXT NOT NULL,
+                text_chunks INTEGER NOT NULL CHECK (text_chunks >= 0),
+                reasoning_chunks INTEGER NOT NULL CHECK (reasoning_chunks >= 0),
+                characters INTEGER NOT NULL CHECK (characters >= 0),
+                compacted_at TEXT NOT NULL,
+                PRIMARY KEY (session_id, correlation_id)
+            ) STRICT
+            """,
+            # Events stay immutable but for that one change: a chunk of a recorded turn loses its
+            # text and keeps its length, every other column as it was.
+            "DROP TRIGGER events_no_update",
+            """
+            CREATE TRIGGER events_no_update
+            BEFORE UPDATE ON events
+            WHEN NOT (
+                old.type = 'model.output.delta'
+                AND json_type(old.data_json, '$.text') = 'text'
+                AND length(json_extract(old.data_json, '$.text')) > 0
+                AND json_type(old.data_json, '$.compacted') IS NULL
+                AND new.data_json = json_set(
+                    old.data_json,
+                    '$.text', '',
+                    '$.compacted', length(json_extract(old.data_json, '$.text'))
+                )
+                AND new.id = old.id
+                AND new.session_id = old.session_id
+                AND new.type = old.type
+                AND new.schema_version = old.schema_version
+                AND new.sequence = old.sequence
+                AND new.causation_id IS old.causation_id
+                AND new.correlation_id IS old.correlation_id
+                AND new.created_at = old.created_at
+                AND EXISTS (
+                    SELECT 1 FROM compacted_turns AS turn
+                    WHERE turn.session_id = old.session_id
+                      AND turn.correlation_id = old.correlation_id
+                )
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'events are immutable');
+            END
+            """,
+        ),
+    ),
+    (
+        29,
+        "immutable_rows_not_replaced",
+        (
+            # INSERT OR REPLACE deletes the row it meets without firing a delete trigger (SQLite
+            # fires those for a replace only with recursive_triggers on), so an event or a review
+            # snapshot could be swapped for another under its id or place. An insert that meets
+            # one is refused, as an update or a delete of it is.
+            """
+            CREATE TRIGGER events_no_replace
+            BEFORE INSERT ON events
+            WHEN EXISTS (SELECT 1 FROM events WHERE id = new.id)
+              OR EXISTS (
+                  SELECT 1 FROM events
+                  WHERE session_id = new.session_id AND sequence = new.sequence
+              )
+            BEGIN
+                SELECT RAISE(ABORT, 'events are immutable');
+            END
+            """,
+            """
+            CREATE TRIGGER review_snapshots_no_replace
+            BEFORE INSERT ON review_snapshots
+            WHEN EXISTS (SELECT 1 FROM review_snapshots WHERE id = new.id)
+            BEGIN SELECT RAISE(ABORT, 'review_snapshot_immutable'); END
+            """,
+        ),
+    ),
 )
 
 CURRENT_SCHEMA_VERSION = _MIGRATIONS[-1][0]
@@ -1044,7 +1312,8 @@ def trust_databases_validated_here(*, across_restarts: bool = False) -> None:
     host start deadline. A long-running process whose runtimes hold the writer
     lock finds only changes made through the same checked write paths, its own
     or those of a command that took the lock. A replaced file (a restore) has a
-    new identity and is validated again; quick_check still runs on every open.
+    new identity and is validated again. quick_check, which reads every page, runs
+    at the first open of a file in each process.
 
     With ``across_restarts`` the last store of such a process to close a database cleanly (no
     WAL left) notes the file's id, size and modification time beside it, and the next process
@@ -1113,6 +1382,60 @@ def _file_identity(database: Path) -> tuple[int, int] | None:
     return (metadata.st_dev, metadata.st_ino) if metadata.st_ino else None
 
 
+def _skipped_backup_note(database: Path) -> Path:
+    return database.with_name(f"{database.name}.backup-skipped.json")
+
+
+def _room_for_migration_backup(database: Path) -> bool:
+    size = 0
+    for suffix in ("", "-wal"):
+        with contextlib.suppress(OSError):
+            size += database.with_name(database.name + suffix).stat().st_size
+    try:
+        free = shutil.disk_usage(database.parent).free
+    except OSError:
+        return True  # unknown: the backup itself finds out
+    return free >= 2 * size + _MIGRATION_BACKUP_SPARE_BYTES
+
+
+def _disk_failure(error: BaseException) -> str | None:
+    """'no_space' or 'disk_error' when the disk stopped a backup, None when its check did."""
+    if isinstance(error, OSError):
+        return "no_space" if error.errno == errno.ENOSPC else "disk_error"
+    # The backup reports SQLite's own failures as BackupValidationError, raised from them.
+    cause = error.__cause__ or error.__context__
+    code = getattr(cause, "sqlite_errorcode", None) if isinstance(cause, sqlite3.Error) else None
+    if not isinstance(code, int):
+        return None
+    if code & 0xFF == sqlite3.SQLITE_FULL:
+        return "no_space"
+    return "disk_error" if code & 0xFF == sqlite3.SQLITE_IOERR else None
+
+
+def _note_skipped_migration_backup(database: Path, reason: str, from_version: int) -> None:
+    document = {
+        "at": datetime.now(UTC).isoformat(),
+        "reason": reason,
+        "from_version": from_version,
+        "to_version": CURRENT_SCHEMA_VERSION,
+    }
+    # A disk that took no backup may not take this either; the warning logged then still has it.
+    with contextlib.suppress(OSError):
+        _skipped_backup_note(database).write_text(json.dumps(document), encoding="utf-8")
+
+
+def take_skipped_migration_backup(database: str | Path) -> dict[str, object] | None:
+    """A migration that ran without its backup, once: the app says it, and not again."""
+    path = _skipped_backup_note(Path(database).expanduser().resolve())
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    with contextlib.suppress(OSError):
+        path.unlink(missing_ok=True)
+    return document if isinstance(document, dict) else None
+
+
 class SQLiteEventStore:
     """SQLite-backed append-only event store."""
 
@@ -1132,14 +1455,16 @@ class SQLiteEventStore:
         # open-validation cache.
         pre_open_identity = SQLiteEventStore._database_open_identity(database_path)
         existing_version = self._validate_before_migration(database_path)
+        backup_skipped: str | None = None
         if (
             create_migration_backup
             and existing_version is not None
             and 0 < existing_version < CURRENT_SCHEMA_VERSION
         ):
-            self._backup_before_migration(database_path)
+            backup_skipped = self._backup_before_migration(database_path)
         self._lock = RLock()
         self._session_locks: dict[str, asyncio.Lock] = {}
+        self._database_path = database_path
         # Set once the file is validated, when a clean close is noted across restarts.
         self._trusted_path: Path | None = None
         self._connection: sqlite3.Connection | None = sqlite3.connect(
@@ -1152,10 +1477,14 @@ class SQLiteEventStore:
 
         try:
             self._configure()
-            self._migrate()
+            checked = SQLiteEventStore._open_validation_cached(database_path, pre_open_identity)
+            self._migrate(already_checked=checked)
+            if backup_skipped is not None and existing_version is not None:
+                # Noted once the migration went through: a failed one changed nothing.
+                _note_skipped_migration_backup(database_path, backup_skipped, existing_version)
             from agent_workspace.storage.recovery import validate_database
 
-            if not SQLiteEventStore._open_validation_cached(database_path, pre_open_identity):
+            if not checked:
                 validate_database(database_path)
                 SQLiteEventStore._cache_open_validation(database_path, pre_open_identity)
             if _TRUST_ACROSS_RESTARTS:
@@ -1170,11 +1499,18 @@ class SQLiteEventStore:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute(f"PRAGMA synchronous = {self._synchronous}")
+        connection.execute(f"PRAGMA journal_size_limit = {int(_WAL_SIZE_LIMIT_BYTES)}")
 
     @staticmethod
     def _validate_before_migration(database: Path) -> int | None:
         if not database.is_file() or database.stat().st_size == 0:
             return None
+        if _TRUST_VALIDATED_HERE:
+            with _OPEN_VALIDATION_CACHE_LOCK:
+                known = _VALIDATED_HERE.get(database)
+            # A file validated here was migrated to the current schema before its validation.
+            if known is not None and known == _file_identity(database):
+                return CURRENT_SCHEMA_VERSION
         connection: sqlite3.Connection | None = None
         try:
             connection = sqlite3.connect(
@@ -1182,6 +1518,7 @@ class SQLiteEventStore:
                 timeout=_BUSY_TIMEOUT_MS / 1_000,
                 uri=True,
             )
+            watch_connection(connection)
             quick_check = connection.execute("PRAGMA quick_check").fetchall()
             if [row[0] for row in quick_check] != ["ok"]:
                 raise RuntimeError("Database quick_check failed before migration")
@@ -1268,7 +1605,8 @@ class SQLiteEventStore:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA synchronous = FULL")
             connection.execute("BEGIN EXCLUSIVE")
-            SQLiteEventStore._repair_search_index(connection)
+            # The full check found the index wrong, whatever a quick look at it says.
+            SQLiteEventStore._repair_search_index(connection, rebuild=True)
             connection.commit()
         except BaseException:
             if connection.in_transaction:
@@ -1325,14 +1663,57 @@ class SQLiteEventStore:
         }
 
     @staticmethod
-    def _backup_before_migration(database: Path) -> None:
+    def _backup_before_migration(database: Path) -> str | None:
+        """Back the database up before it is migrated; why it was not, when the disk stopped it."""
 
-        from agent_workspace.storage.recovery import create_verified_backup
+        from agent_workspace.storage.recovery import BackupValidationError, create_verified_backup
 
-        create_verified_backup(database, database.parent / "migration-backups", keep=10)
+        # The migration is one transaction, so one that fails leaves the database as it was. A
+        # backup the disk has no room for, or cannot write, is therefore skipped rather than
+        # keeping the app from starting, and the user is told once (take_skipped_migration_backup).
+        # A copy that was made but fails its check still stops the start: something is wrong
+        # with the database.
+        if not _room_for_migration_backup(database):
+            _LOGGER.warning("database %s is migrated without a backup: no free space", database)
+            return "no_space"
+        try:
+            # Older backups are checked in full when one is restored, not at every migration. Each
+            # is a copy of the whole database: three is enough to go back past a bad migration or
+            # two. A backup that fails removes its own unfinished files.
+            create_verified_backup(
+                database,
+                database.parent / "migration-backups",
+                keep=MIGRATION_BACKUPS_KEPT,
+                quick_prune=True,
+            )
+        except (OSError, BackupValidationError) as error:
+            reason = _disk_failure(error)
+            if reason is None:
+                raise
+            _LOGGER.warning("database %s is migrated without a backup: %s", database, error)
+            return reason
+        return None
 
-    def _migrate(self) -> None:
+    @staticmethod
+    def _schema_is_current(connection: sqlite3.Connection) -> bool:
+        try:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            ledger = connection.execute(
+                "SELECT version, name FROM schema_migrations ORDER BY version"
+            ).fetchall()
+        except sqlite3.Error:
+            return False
+        return (
+            version == CURRENT_SCHEMA_VERSION
+            and tuple((row["version"], row["name"]) for row in ledger) == CURRENT_SCHEMA_MIGRATIONS
+        )
+
+    def _migrate(self, *, already_checked: bool = False) -> None:
         connection = self._get_connection()
+        # A checked file with nothing to migrate needs neither the write lock, which every further
+        # open would wait for, nor a pass over its search index, which comes with each full check.
+        if already_checked and self._schema_is_current(connection):
+            return
         try:
             connection.execute("BEGIN EXCLUSIVE")
             connection.execute(
@@ -1394,6 +1775,8 @@ class SQLiteEventStore:
                     self._backfill_sandbox_artifacts(connection)
                 if version == 13:
                     self._backfill_durable_operation_states(connection)
+                if version == 26:
+                    self._backfill_search_text(connection)
                 connection.execute(
                     """
                     INSERT INTO schema_migrations (version, name, applied_at)
@@ -1579,6 +1962,7 @@ class SQLiteEventStore:
         "todos",
         "todo_id_owners",
         "search_documents",
+        "compacted_turns",
         "tool_attempts",
     )
     # Shared state built from a session's events; such sessions are not deleted.
@@ -1704,6 +2088,7 @@ class SQLiteEventStore:
                 raise
         for session_id in existing:
             self._session_locks.pop(session_id, None)
+        RawConversationTrace.for_database(self._database_path).delete_sessions(existing)
         return len(existing)
 
     def append_many(self, events: tuple[Event, ...]) -> list[Event]:
@@ -1773,6 +2158,15 @@ class SQLiteEventStore:
                 raise ValueError("sandbox artifact digest collision detected")
 
     @staticmethod
+    def _stored_binary_artifact_bytes(connection: sqlite3.Connection) -> int:
+        # length() takes a blob's size from the record header, while byte_count lies behind all of
+        # the blob's overflow pages. The table's CHECK keeps the two equal.
+        row = connection.execute(
+            "SELECT COALESCE(SUM(length(content)), 0) AS bytes FROM binary_artifacts"
+        ).fetchone()
+        return cast(int, row["bytes"])
+
+    @staticmethod
     def _insert_binary_artifacts(
         connection: sqlite3.Connection,
         artifacts: tuple[BinaryArtifact, ...],
@@ -1794,9 +2188,6 @@ class SQLiteEventStore:
                     )
                 )
         if enforce_storage_limit:
-            existing_bytes = connection.execute(
-                "SELECT COALESCE(SUM(byte_count), 0) AS bytes FROM binary_artifacts"
-            ).fetchone()
             new_bytes = sum(
                 artifact.byte_count
                 for artifact in artifacts
@@ -1804,8 +2195,8 @@ class SQLiteEventStore:
             )
             if (
                 new_bytes > 0
-                and existing_bytes is not None
-                and existing_bytes["bytes"] + new_bytes > _MAX_BINARY_ARTIFACT_STORAGE_BYTES
+                and SQLiteEventStore._stored_binary_artifact_bytes(connection) + new_bytes
+                > _MAX_BINARY_ARTIFACT_STORAGE_BYTES
             ):
                 raise ValueError("sandbox binary artifact storage exceeds its 512 MiB limit")
         for artifact in artifacts:
@@ -1871,6 +2262,10 @@ class SQLiteEventStore:
     ) -> list[Event]:
         stored_events: list[Event] = []
         for event, data_json in zip(events, data_documents, strict=True):
+            if event.type == "model.output.delta" and "compacted" in event.data:
+                # Only stream compaction blanks a chunk, in place, for a turn it records. A copy
+                # (an export, a fork) carries the text again.
+                raise ValueError("a compacted stream chunk cannot be stored as a new event")
             row = connection.execute(
                 """
                 UPDATE sessions
@@ -1908,22 +2303,28 @@ class SQLiteEventStore:
                 ),
             )
             SQLiteEventStore._project_event(connection, stored_event)
+            if (
+                stored_event.type == "tool.unknown"
+                and stored_event.data.get("settlement_timeout_exceeded") is True
+            ):
+                _UNSETTLED_ATTEMPTS.add(str(stored_event.data.get("attempt_id")))
             stored_events.append(stored_event)
         return stored_events
 
-    def list_events(self, session_id: str) -> list[Event]:
+    def list_events(self, session_id: str, *, omit_types: tuple[str, ...] = ()) -> list[Event]:
+        marks = ",".join("?" for _ in omit_types)
         with self._lock:
             rows = (
                 self._get_connection()
                 .execute(
-                    """
+                    f"""
                 SELECT id, session_id, type, data_json, schema_version, sequence,
                        causation_id, correlation_id, created_at
                 FROM events
-                WHERE session_id = ?
+                WHERE session_id = ? AND type NOT IN ({marks})
                 ORDER BY sequence ASC
                 """,
-                    (session_id,),
+                    (session_id, *omit_types),
                 )
                 .fetchall()
             )
@@ -2751,7 +3152,57 @@ class SQLiteEventStore:
             ).fetchall()
             if rewound or declined:
                 rows = [row for row in rows if kept(cast(int, row["sequence"]))]
+            # A turn too long to load whole is loaded from inside: its request comes first, or
+            # the model would go on without knowing what the turn is for.
+            request = self._turn_request(connection, session_id, boundary, selected_cutoff)
+            if request is not None and kept(cast(int, request["sequence"])):
+                rows = [request, *rows]
         return self._events_from_rows(rows)
+
+    @staticmethod
+    def _turn_request(
+        connection: sqlite3.Connection, session_id: str, boundary: int, start: int
+    ) -> sqlite3.Row | None:
+        """The first user message of the turn a context window starting at ``start`` is in (the
+        turn of the last user message up to there), when the window starts after it."""
+        last = connection.execute(
+            """
+            SELECT sequence, correlation_id FROM events
+            WHERE type = 'message.created' AND session_id = ? AND sequence > ? AND sequence <= ?
+              AND json_extract(data_json, '$.role') = 'user'
+            ORDER BY sequence DESC LIMIT 1
+            """,
+            (session_id, boundary, start),
+        ).fetchone()
+        if last is None:
+            return None
+        first = cast(int, last["sequence"])
+        if last["correlation_id"] is not None:
+            first = cast(
+                int,
+                connection.execute(
+                    """
+                    SELECT MIN(sequence) FROM events
+                    WHERE type = 'message.created' AND session_id = ? AND sequence > ?
+                      AND correlation_id = ? AND json_extract(data_json, '$.role') = 'user'
+                    """,
+                    (session_id, boundary, last["correlation_id"]),
+                ).fetchone()[0],
+            )
+        if first >= start:
+            return None
+        return cast(
+            sqlite3.Row | None,
+            connection.execute(
+                """
+                SELECT id, session_id, type, data_json, schema_version, sequence,
+                       causation_id, correlation_id, created_at
+                FROM events
+                WHERE session_id = ? AND sequence = ?
+                """,
+                (session_id, first),
+            ).fetchone(),
+        )
 
     @staticmethod
     def list_events_read_only(database: str | Path, session_id: str) -> list[Event]:
@@ -2778,6 +3229,33 @@ class SQLiteEventStore:
             return SQLiteEventStore._events_from_rows(rows)
         finally:
             connection.close()
+
+    @staticmethod
+    def file_version_digests_read_only(database: str | Path) -> set[str] | None:
+        """Every digest a ``file.version.recorded`` event names, written or replaced: the kept
+        file versions an undo can still ask for. None when there is no event table to read."""
+
+        database_path = Path(database)
+        if not database_path.is_file():
+            return None
+        connection = SQLiteEventStore._open_read_only(database_path)
+        try:
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'events'"
+            ).fetchone()
+            if table is None:
+                return None
+            rows = connection.execute(
+                """
+                SELECT json_extract(data_json, '$.sha256'),
+                       json_extract(data_json, '$.previous_sha256')
+                FROM events
+                WHERE type = 'file.version.recorded'
+                """
+            ).fetchall()
+        finally:
+            connection.close()
+        return {digest for row in rows for digest in row if isinstance(digest, str)}
 
     @staticmethod
     def list_session_events_of_types_read_only(
@@ -2958,6 +3436,7 @@ class SQLiteEventStore:
         before: int | None = None,
         minimum_user_turns: int = 8,
         max_events: int = 1001,
+        collapse_streams: bool = False,
     ) -> tuple[int, list[Event], bool, bool]:
         """Read a newest-first history window ending on a user-turn boundary.
 
@@ -2965,6 +3444,11 @@ class SQLiteEventStore:
         ``before`` boundary. Normal pages contain at least the requested number
         of user turns. A pathological turn that alone exceeds ``max_events`` is
         returned as a bounded partial page and flagged as oversized.
+
+        A streamed reply is many delta events, and its finished message repeats their text. With
+        ``collapse_streams``, deltas a message covers are left out and do not count: a long turn's
+        page then still reaches back to the request that began it. The text of a stream whose turn
+        ended without a message for it comes back as one such message, at the stream's start.
         """
         if not session_id or len(session_id) > 256:
             raise ValueError("complete turn window session is invalid")
@@ -3018,27 +3502,63 @@ class SQLiteEventStore:
                 # Recovery and legacy databases can contain orphan events with
                 # no user message. Keep those pages small and cursorable.
                 oldest_turn_sequence = max(1, boundary - 64)
-            rows = connection.execute(
+            # Newest first, so a request's message is seen before the deltas it covers. A page that
+            # starts between the two keeps those deltas; the window drops them when it merges pages.
+            rows: list[sqlite3.Row] = []
+            covered_streams: dict[str, set[str]] = {"text": set(), "reasoning": set()}
+            unmarked_turns: set[str] = set()
+            unfinished_streams: set[tuple[str, int]] = set()
+            running_turn = (
+                SQLiteEventStore._running_turn(connection, session_id, resolved_cutoff)
+                if collapse_streams
+                else None
+            )
+            for row in connection.execute(
                 """
                 SELECT id, session_id, type, data_json, schema_version, sequence,
-                       causation_id, correlation_id, created_at
+                       causation_id, correlation_id, created_at,
+                       CASE type WHEN 'model.output.delta'
+                           THEN json_extract(data_json, '$.kind') END AS delta_kind,
+                       CASE type WHEN 'model.output.delta'
+                           THEN json_type(data_json, '$.compacted') END AS compacted
                 FROM events
                 WHERE session_id = ? AND sequence <= ? AND sequence < ?
                   AND sequence >= ?
                 ORDER BY sequence DESC
-                LIMIT ?
                 """,
-                (
-                    session_id,
-                    resolved_cutoff,
-                    boundary,
-                    oldest_turn_sequence,
-                    max_events + 1,
-                ),
-            ).fetchall()
+                (session_id, resolved_cutoff, boundary, oldest_turn_sequence),
+            ):
+                if collapse_streams:
+                    if row["causation_id"] in covered_streams.get(row["delta_kind"], ()):
+                        continue
+                    # Blanked because the turn's message holds its text, even on a page that
+                    # does not reach that message.
+                    if row["compacted"] is not None:
+                        continue
+                    if row["type"] == "message.created":
+                        SQLiteEventStore._note_covered_streams(row, covered_streams, unmarked_turns)
+                    elif row["delta_kind"] == "text":
+                        stream = SQLiteEventStore._unfinished_stream(
+                            row, running_turn, unmarked_turns
+                        )
+                        if stream is not None:
+                            unfinished_streams.add(stream)
+                            continue
+                rows.append(row)
+                if len(rows) > max_events:
+                    break
             oversized = len(rows) > max_events
             selected_rows = rows[:max_events]
             events = SQLiteEventStore._events_from_rows(selected_rows)
+            for request_id, attempt in unfinished_streams:
+                # All of it, also the part past a boundary that fell in the middle of the stream.
+                reply = SQLiteEventStore._stream_reply(
+                    connection, session_id, request_id, attempt, resolved_cutoff
+                )
+                if reply is not None:
+                    events.append(reply)
+            if unfinished_streams:
+                events.sort(key=lambda event: event.sequence or 0, reverse=True)
             if not events:
                 return resolved_cutoff, [], False, False
             oldest_returned = events[-1].sequence
@@ -3053,6 +3573,145 @@ class SQLiteEventStore:
             return resolved_cutoff, events, has_more, oversized
         finally:
             connection.close()
+
+    @staticmethod
+    def _note_covered_streams(
+        row: sqlite3.Row,
+        covered_streams: dict[str, set[str]],
+        unmarked_turns: set[str],
+    ) -> None:
+        """Which streamed text one stored message replaces, as ``filterCanonicalStreams`` decides
+        in the window. An interrupted message is a prefix the window hides: its deltas are what is
+        shown. A message of an old database names no request: only the window can tell what it
+        covers, by the order of the rows, so the earlier deltas of its turn are left to it."""
+        data = json.loads(row["data_json"])
+        metadata = data.get("provider_metadata")
+        if data.get("role") != "assistant" or (
+            isinstance(metadata, dict) and metadata.get("agent_workspace.stream_interrupted")
+        ):
+            return
+        request_id = data.get("model_request_id")
+        if isinstance(request_id, str):
+            covered_streams["text"].add(request_id)
+            if data.get("reasoning"):
+                covered_streams["reasoning"].add(request_id)
+        elif row["correlation_id"] is not None:
+            unmarked_turns.add(row["correlation_id"])
+        superseded = data.get("superseded_model_request_ids")
+        if isinstance(superseded, list):
+            covered_streams["text"].update(item for item in superseded if isinstance(item, str))
+
+    @staticmethod
+    def _running_turn(connection: sqlite3.Connection, session_id: str, cutoff: int) -> str | None:
+        """The one turn of a session that can still be writing: the last started, unless it has
+        ended. An earlier turn with no end was cut off when its process died."""
+        started = connection.execute(
+            """
+            SELECT correlation_id FROM events
+            WHERE session_id = ? AND sequence <= ? AND type = 'turn.started'
+            ORDER BY sequence DESC LIMIT 1
+            """,
+            (session_id, cutoff),
+        ).fetchone()
+        if started is None or started["correlation_id"] is None:
+            return None
+        ended = connection.execute(
+            """
+            SELECT 1 FROM events
+            WHERE session_id = ? AND sequence <= ? AND correlation_id = ?
+              AND type IN ('turn.completed', 'turn.failed', 'turn.cancelled')
+            LIMIT 1
+            """,
+            (session_id, cutoff, started["correlation_id"]),
+        ).fetchone()
+        return None if ended is not None else cast(str, started["correlation_id"])
+
+    @staticmethod
+    def _unfinished_stream(
+        row: sqlite3.Row,
+        running_turn: str | None,
+        unmarked_turns: set[str],
+    ) -> tuple[str, int] | None:
+        """The request and attempt of a delta that nothing will finish, if this one is such."""
+        turn = row["correlation_id"]
+        if turn is None or turn == running_turn or turn in unmarked_turns:
+            return None
+        data = json.loads(row["data_json"])
+        request_id = data.get("model_request_id")
+        attempt = data.get("recoveryAttempt", 0)
+        if request_id is None or request_id != row["causation_id"] or type(attempt) is not int:
+            return None
+        return request_id, attempt
+
+    @staticmethod
+    def _stream_reply(
+        connection: sqlite3.Connection,
+        session_id: str,
+        request_id: str,
+        attempt: int,
+        cutoff: int | None,
+    ) -> Event | None:
+        """A stream's text as the message the turn never wrote for it. The window's row for the
+        stream has the same id, so that it takes this over and keeps what it already has."""
+        rows = connection.execute(
+            """
+            SELECT sequence, correlation_id, created_at, json_extract(data_json, '$.text') AS text
+            FROM events
+            WHERE type = 'model.output.delta' AND session_id = ? AND causation_id = ?
+              AND sequence <= COALESCE(?, sequence)
+              AND json_extract(data_json, '$.kind') = 'text'
+              AND COALESCE(json_extract(data_json, '$.recoveryAttempt'), 0) = ?
+            ORDER BY sequence
+            """,
+            (session_id, request_id, cutoff, attempt),
+        ).fetchall()
+        if not rows:
+            return None
+        return Event(
+            id=f"stream-{request_id}-text-{attempt}",
+            session_id=session_id,
+            type="message.created",
+            data={
+                "role": "assistant",
+                "content": "".join(row["text"] or "" for row in rows),
+                "tool_calls": [],
+                "model_request_id": request_id,
+                "recoveryAttempt": attempt,
+            },
+            sequence=rows[0]["sequence"],
+            causation_id=request_id,
+            correlation_id=rows[0]["correlation_id"],
+            created_at=rows[0]["created_at"],
+        )
+
+    @staticmethod
+    def get_reply_text_read_only(
+        database: str | Path, session_id: str, reply_id: str
+    ) -> str | None:
+        """All of a reply in the history window, stored as a message or only as its stream."""
+        database_path = Path(database)
+        if not database_path.is_file():
+            return None
+        stream = _STREAM_REPLY_ID.fullmatch(reply_id)
+        connection = SQLiteEventStore._open_read_only(database_path)
+        try:
+            if stream is not None:
+                event = SQLiteEventStore._stream_reply(
+                    connection, session_id, stream[1], int(stream[2]), None
+                )
+            else:
+                row = connection.execute(
+                    "SELECT * FROM events WHERE id = ? AND session_id = ?", (reply_id, session_id)
+                ).fetchone()
+                event = SQLiteEventStore._events_from_rows([row])[0] if row is not None else None
+        finally:
+            connection.close()
+        if event is None or event.type != "message.created":
+            return None
+        content = event.data.get("content")
+        return (
+            content if event.data.get("role") == "assistant" and isinstance(content, str) else None
+        )
 
     @staticmethod
     def _events_from_rows(rows: list[sqlite3.Row]) -> list[Event]:
@@ -3199,6 +3858,26 @@ class SQLiteEventStore:
                     or attempt["workspace"] != checkpoint.workspace
                 ):
                     raise ValueError("file checkpoint does not belong to an active tool attempt")
+                # An attempt with an unknown outcome can never settle, so it holds the path only
+                # while its worker may still be running.
+                ended = connection.execute(
+                    """
+                    SELECT c.attempt_id
+                    FROM file_checkpoints AS c
+                    JOIN tool_attempts AS t ON t.id = c.attempt_id
+                    WHERE c.workspace = ? AND c.relative_path = ? AND t.state = ?
+                    """,
+                    (
+                        checkpoint.workspace,
+                        checkpoint.relative_path,
+                        ToolAttemptState.UNKNOWN.value,
+                    ),
+                ).fetchone()
+                if ended is not None and ended["attempt_id"] not in _UNSETTLED_ATTEMPTS:
+                    connection.execute(
+                        "DELETE FROM file_checkpoints WHERE attempt_id = ?",
+                        (ended["attempt_id"],),
+                    )
                 connection.execute(
                     """
                     INSERT INTO file_checkpoints (
@@ -3398,8 +4077,11 @@ class SQLiteEventStore:
     def list_file_checkpoints_read_only(
         database: str | Path,
         session_id: str,
+        *,
+        include_unknown: bool = True,
     ) -> list[tuple[str, str]]:
         """Return checkpoints whose writes are active or still have an unknown outcome."""
+        states = ("started", "unknown") if include_unknown else ("started",)
         database_path = Path(database)
         if not database_path.is_file():
             return []
@@ -3410,16 +4092,17 @@ class SQLiteEventStore:
             ).fetchone()
             if table is None:
                 return []
+            marks = ",".join("?" for _ in states)
             rows = connection.execute(
-                """
+                f"""
                 SELECT c.attempt_id, c.relative_path
                 FROM file_checkpoints AS c
                 JOIN tool_attempts AS a
                   ON a.id = c.attempt_id AND a.session_id = c.session_id
-                WHERE c.session_id = ? AND a.state IN ('started', 'unknown')
+                WHERE c.session_id = ? AND a.state IN ({marks})
                 ORDER BY c.created_at ASC
                 """,
-                (session_id,),
+                (session_id, *states),
             ).fetchall()
             return [(cast(str, row["attempt_id"]), cast(str, row["relative_path"])) for row in rows]
         finally:
@@ -3552,7 +4235,7 @@ class SQLiteEventStore:
                 self._get_connection()
                 .execute(
                     """
-                SELECT COUNT(*) AS count, COALESCE(SUM(byte_count), 0) AS bytes
+                SELECT COUNT(*) AS count, COALESCE(SUM(length(content)), 0) AS bytes
                 FROM binary_artifacts
                 """
                 )
@@ -3946,6 +4629,20 @@ class SQLiteEventStore:
                 include_ids=include_ids,
             )
 
+    def session_heads(self) -> list[tuple[str, str, int]]:
+        """Every session's id, workspace and newest event sequence (0 for none), in one query.
+
+        For a caller that polls: a session whose newest sequence has not moved has nothing new to
+        read, whichever store appended to it. Each append moves next_sequence in its transaction.
+        """
+        with self._lock:
+            rows = (
+                self._get_connection()
+                .execute("SELECT id, workspace, next_sequence - 1 AS newest FROM sessions")
+                .fetchall()
+            )
+        return [(row["id"], row["workspace"], row["newest"]) for row in rows]
+
     def search_sessions(
         self,
         query: str,
@@ -4114,7 +4811,10 @@ class SQLiteEventStore:
                     """
                 ).fetchall()
             }
-            if tables != {"search_documents", "session_search"}:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if tables != {"search_documents", "session_search"} or (
+                type(version) is int and version < SEARCH_PAIRS_SCHEMA_VERSION
+            ):
                 raise SearchIndexUnavailableError(
                     "session search index is unavailable; open the database with the current "
                     "writable runtime to migrate it"
@@ -4282,18 +4982,23 @@ class SQLiteEventStore:
         visible = SQLiteEventStore._conversation_session_filter(
             connection, "s", exclude_run_sessions
         )
+        # The pairs of a word also follow each other where a break between two runs falls on a
+        # repeated character ("北京的天。天气" for "北京的天气"): the words must be in the text.
+        exact_terms = [term for term in terms if _CJK_RUN.search(term)]
+        exact = "".join(" AND d.text LIKE ? ESCAPE '\\'" for _ in exact_terms)
         rows = connection.execute(
             f"""
             WITH hits AS (
-                SELECT d.session_id, d.kind, d.sequence,
-                       snippet(session_search, 0, '[', ']', '...', 18) AS snippet,
+                SELECT d.session_id, d.kind, d.sequence, d.text,
+                       CASE WHEN d.search_text = d.text
+                           THEN snippet(session_search, 0, '[', ']', '...', 18) END AS snippet,
                        bm25(session_search) AS rank
                 FROM session_search
                 JOIN search_documents AS d ON d.rowid = session_search.rowid
-                WHERE session_search MATCH ?
+                WHERE session_search MATCH ?{exact}
             ),
             ranked AS (
-                SELECT session_id, kind, sequence, snippet, rank,
+                SELECT session_id, kind, sequence, text, snippet, rank,
                        ROW_NUMBER() OVER (
                            PARTITION BY session_id
                            ORDER BY rank ASC, sequence DESC
@@ -4302,7 +5007,7 @@ class SQLiteEventStore:
             )
             SELECT s.id, s.workspace, s.mode, s.autonomy, s.title,
                    s.created_at, s.updated_at,
-                   ranked.kind, ranked.snippet, ranked.rank
+                   ranked.kind, ranked.text, ranked.snippet, ranked.rank
             FROM ranked
             JOIN sessions AS s ON s.id = ranked.session_id
             WHERE ranked.hit_number = 1
@@ -4311,18 +5016,31 @@ class SQLiteEventStore:
             ORDER BY ranked.rank ASC, s.updated_at DESC, s.id DESC
             LIMIT ?
             """,
-            (normalized_query, workspace, workspace, limit),
+            (
+                normalized_query,
+                *(f"%{SQLiteEventStore._escape_like(term)}%" for term in exact_terms),
+                workspace,
+                workspace,
+                limit,
+            ),
         ).fetchall()
         results = [
             SessionSearchResult(
                 session=SQLiteEventStore._session_from_row(row),
-                snippet=cast(str, row["snippet"]),
+                # The index holds pairs for a text with CJK in it: that one shows its own words.
+                snippet=(
+                    cast(str, row["snippet"])
+                    if row["snippet"] is not None
+                    else SQLiteEventStore._substring_snippet(cast(str, row["text"]), terms)
+                ),
                 document_kind=cast(str, row["kind"]),
                 rank=float(row["rank"]),
             )
             for row in rows
         ]
-        if len(results) >= limit or not any(not term.isascii() for term in terms):
+        if len(results) >= limit or not any(
+            SQLiteEventStore._index_can_miss(term) for term in terms
+        ):
             return results
         seen = {result.session.id for result in results}
         for result in SQLiteEventStore._query_session_substrings(
@@ -4356,8 +5074,27 @@ class SQLiteEventStore:
 
     @staticmethod
     def _fts_literal_query(terms: list[str]) -> str:
-        expression = " AND ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in terms)
-        return f"text : ({expression})"
+        phrases: list[str] = []
+        for term in terms:
+            phrase = f'"{search_text(term).replace(chr(34), chr(34) * 2)}"'
+            runs = list(_CJK_RUN.finditer(term))
+            # A lone CJK character that ends the term may begin a longer run in the text, whose
+            # pairs start with it.
+            if runs and runs[-1].end() == len(term) and len(runs[-1].group()) == 1:
+                phrase += " *"
+            phrases.append(phrase)
+        return " AND ".join(phrases)
+
+    @staticmethod
+    def _index_can_miss(term: str) -> bool:
+        """Whether a text holding the term can be missing from what the index finds for it, so
+        that the text itself has to be searched as well. A lone CJK character that starts the
+        term may end a longer run in the text, whose pairs do not start with it. Other letters
+        past ASCII may sit inside a longer token, as Chinese did before."""
+        first = _CJK_RUN.match(term)
+        if first is not None and first.end() == 1:
+            return True
+        return not _CJK_RUN.sub("", term).isascii()
 
     @staticmethod
     def _query_session_substrings(
@@ -4420,7 +5157,12 @@ class SQLiteEventStore:
     @staticmethod
     def _substring_snippet(text: str, terms: list[str]) -> str:
         flattened = " ".join(text.split())
-        matches = [(index, len(term)) for term in terms if (index := flattened.find(term)) >= 0]
+        # The index ignores case, so a hit can differ from the query in it.
+        matches = [
+            (found.start(), found.end() - found.start())
+            for term in terms
+            if (found := re.search(re.escape(term), flattened, re.IGNORECASE)) is not None
+        ]
         if not matches:
             return flattened[:160]
         index, length = min(matches)
@@ -4598,8 +5340,11 @@ class SQLiteEventStore:
         connection: sqlite3.Connection,
         event: Event,
         *,
-        projection_version: int = CURRENT_SCHEMA_VERSION,
+        projection_version: int | None = None,
     ) -> None:
+        if projection_version is None:
+            # Looked up now, so a test that builds an older schema writes in its shape.
+            projection_version = CURRENT_SCHEMA_VERSION
         if event.type == "mode.changed":
             from_mode = event.data.get("from_mode")
             to_mode = event.data.get("to_mode")
@@ -4641,21 +5386,14 @@ class SQLiteEventStore:
         ):
             content = event.data.get("content")
             if isinstance(content, str) and content:
-                document_id = f"event:{event.id}"
-                connection.execute(
-                    """
-                    INSERT INTO search_documents (
-                        id, session_id, kind, sequence, text, integrity_token
-                    )
-                    VALUES (?, ?, 'user_message', ?, ?, ?)
-                    """,
-                    (
-                        document_id,
-                        event.session_id,
-                        event.sequence,
-                        content,
-                        SQLiteEventStore._search_integrity_token(document_id, content),
-                    ),
+                SQLiteEventStore._insert_search_document(
+                    connection,
+                    f"event:{event.id}",
+                    event.session_id,
+                    "user_message",
+                    cast(int, event.sequence),
+                    content,
+                    projection_version=projection_version,
                 )
             return
         if projection_version >= 3 and event.type == "todo.upserted":
@@ -4812,22 +5550,55 @@ class SQLiteEventStore:
             )
 
     @staticmethod
-    def _project_session(connection: sqlite3.Connection, session: Session) -> None:
+    def _project_session(
+        connection: sqlite3.Connection,
+        session: Session,
+        *,
+        projection_version: int | None = None,
+    ) -> None:
         if not session.title:
             return
-        document_id = f"session:{session.id}:title"
+        SQLiteEventStore._insert_search_document(
+            connection,
+            f"session:{session.id}:title",
+            session.id,
+            "title",
+            0,
+            session.title,
+            projection_version=(
+                CURRENT_SCHEMA_VERSION if projection_version is None else projection_version
+            ),
+        )
+
+    @staticmethod
+    def _insert_search_document(
+        connection: sqlite3.Connection,
+        document_id: str,
+        session_id: str,
+        kind: str,
+        sequence: int,
+        text: str,
+        *,
+        projection_version: int,
+    ) -> None:
+        token = SQLiteEventStore._search_integrity_token(document_id, text)
+        if projection_version < 26:
+            connection.execute(
+                """
+                INSERT INTO search_documents (
+                    id, session_id, kind, sequence, text, integrity_token
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (document_id, session_id, kind, sequence, text, token),
+            )
+            return
         connection.execute(
             """
             INSERT INTO search_documents (
-                id, session_id, kind, sequence, text, integrity_token
-            ) VALUES (?, ?, 'title', 0, ?, ?)
+                id, session_id, kind, sequence, text, integrity_token, search_text
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (
-                document_id,
-                session.id,
-                session.title,
-                SQLiteEventStore._search_integrity_token(document_id, session.title),
-            ),
+            (document_id, session_id, kind, sequence, text, token, search_text(text)),
         )
 
     @staticmethod
@@ -5927,13 +6698,13 @@ class SQLiteEventStore:
         )
 
     @staticmethod
-    def _repair_search_index(connection: sqlite3.Connection) -> None:
+    def _repair_search_index(connection: sqlite3.Connection, *, rebuild: bool = False) -> None:
         table = connection.execute(
             "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'session_search_docsize'"
         ).fetchone()
         if table is None:
             return
-        if not SQLiteEventStore._search_index_is_consistent(connection):
+        if rebuild or not SQLiteEventStore._search_index_is_consistent(connection):
             connection.execute("INSERT INTO session_search(session_search) VALUES ('rebuild')")
         try:
             connection.execute(
@@ -5962,7 +6733,22 @@ class SQLiteEventStore:
             SELECT 1 FROM missing
             UNION ALL
             SELECT 1 FROM unexpected
-            UNION ALL
+            LIMIT 1
+            """
+        ).fetchone()
+        if mismatch is not None:
+            return False
+        indexed_columns = {
+            cast(str, row[1])
+            for row in connection.execute("PRAGMA table_info(session_search)").fetchall()
+        }
+        if "integrity_token" not in indexed_columns:
+            # The full check compares every term of the index with the documents.
+            return True
+        # An index of version 26 or earlier also held each document's token, so a document
+        # whose text changed without the index is found here too.
+        mismatch = connection.execute(
+            """
             SELECT 1
             FROM search_documents AS d
             LEFT JOIN session_search_vocab AS v
@@ -6037,6 +6823,14 @@ class SQLiteEventStore:
                 )
                 for row in message_rows
             ),
+        )
+
+    @staticmethod
+    def _backfill_search_text(connection: sqlite3.Connection) -> None:
+        rows = connection.execute("SELECT rowid, text FROM search_documents").fetchall()
+        connection.executemany(
+            "UPDATE search_documents SET search_text = ? WHERE rowid = ?",
+            ((search_text(cast(str, row[1])), row[0]) for row in rows),
         )
 
     @staticmethod
@@ -6249,18 +7043,31 @@ class SQLiteEventStore:
     def projection_replay_error(
         connection: sqlite3.Connection,
         schema_version: int,
+        read_event_data: Callable[[sqlite3.Row], dict[str, Any]],
     ) -> str | None:
         expected = sqlite3.connect("")
         expected.row_factory = sqlite3.Row
         try:
             expected.execute("PRAGMA foreign_keys = ON")
             expected.execute("PRAGMA temp_store = FILE")
+            # Nothing here is ever rolled back: any failed statement abandons this whole copy.
+            expected.execute("PRAGMA journal_mode = OFF")
             expected.execute(_SCHEMA_MIGRATIONS_DEFINITION)
             for version, _, statements in _MIGRATIONS:
                 if version > schema_version:
                     break
                 for statement in statements:
                     expected.execute(statement)
+            # Compared below is search_documents, never an index of it: this copy needs none.
+            # Nor does it need the check that an insert meets no event: the rows come from a
+            # table whose keys are unique, and the check makes each insert here half again as slow.
+            for trigger in (
+                "search_documents_ai",
+                "search_documents_ad",
+                "search_documents_au",
+                "events_no_replace",
+            ):
+                expected.execute(f"DROP TRIGGER IF EXISTS {trigger}")
 
             for row in connection.execute(
                 """
@@ -6323,9 +7130,12 @@ class SQLiteEventStore:
                     SQLiteEventStore._project_session(
                         expected,
                         SQLiteEventStore._session_from_row(row),
+                        projection_version=schema_version,
                     )
 
             if schema_version >= 11:
+                # Only sandbox changes read artifacts while they are projected. Images, usually
+                # nearly all of the bytes, are checked against their digests by the validation.
                 expected.executemany(
                     "INSERT INTO binary_artifacts (sha256, content, byte_count) VALUES (?, ?, ?)",
                     (
@@ -6334,6 +7144,7 @@ class SQLiteEventStore:
                             """
                             SELECT sha256, content, byte_count
                             FROM binary_artifacts
+                            WHERE sha256 IN (SELECT artifact_sha256 FROM sandbox_change_artifacts)
                             ORDER BY sha256
                             """
                         )
@@ -6348,6 +7159,7 @@ class SQLiteEventStore:
                 ORDER BY session_id, sequence
                 """
             ):
+                data = read_event_data(row)
                 expected.execute(
                     """
                     INSERT INTO events (
@@ -6357,16 +7169,13 @@ class SQLiteEventStore:
                     """,
                     tuple(row),
                 )
-                data = json.loads(cast(str, row["data_json"]))
-                if not isinstance(data, dict):
-                    raise ValueError(f"event {row['id']} data is not a JSON object")
                 SQLiteEventStore._project_event(
                     expected,
                     Event(
                         id=cast(str, row["id"]),
                         session_id=cast(str, row["session_id"]),
                         type=cast(str, row["type"]),
-                        data=cast(dict[str, Any], data),
+                        data=data,
                         schema_version=cast(int, row["schema_version"]),
                         sequence=cast(int, row["sequence"]),
                         causation_id=cast(str | None, row["causation_id"]),
@@ -6415,8 +7224,9 @@ class SQLiteEventStore:
                 (
                     5,
                     "session search projection is inconsistent",
-                    """
+                    f"""
                     SELECT id, session_id, kind, sequence, text, integrity_token
+                           {", search_text" if schema_version >= 26 else ""}
                     FROM search_documents
                     ORDER BY id
                     """,

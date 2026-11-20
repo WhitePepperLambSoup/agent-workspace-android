@@ -1,7 +1,8 @@
 """Notifications as things to act on (NotificationActions.kt, through notification access).
 
-- active_notifications lists what is in the notification shade now: app, title, text (verification
-  codes hidden), whether it can be answered or opened, and its key.
+- active_notifications lists what is in the notification shade now: app, title, text (card and ID
+  numbers hidden, and verification codes unless the task is about them), whether it can be
+  answered or opened, and its key.
 - notification_reply answers a message from its notification, through the app's own quick reply,
   without opening the app. It sends a message as the user, so it asks every time (mobile_approval).
 - notification_open opens the page a notification leads to (the chat, the order), as a tap on it would.
@@ -83,16 +84,19 @@ class ActiveNotificationsTool(_Tool):
         description=(
             "List the notifications in the phone's notification shade now (newest first): app, "
             "title, text, time, whether it can be answered (can_reply) or opened (can_open), and its "
-            "key for notification_reply or notification_open. Verification codes are hidden."
+            "key for notification_reply or notification_open. Card and ID numbers are hidden, and "
+            "verification codes unless the user asked about a code."
         ),
         input_schema={"type": "object", "properties": {}, "additionalProperties": False},
         side_effect="none",
         capability=Capability.MEMORY_READ,
+        sensitive_result=True,
     )
 
     async def execute(self, _arguments: dict[str, Any]) -> str:
-        from mobile_notification_journal import mask_codes
+        from mobile_notification_journal import codes_wanted, mask_private
 
+        codes = not codes_wanted()
         result = await _call({"action": "list"})
         items = []
         for item in result.get("notifications") or []:
@@ -103,8 +107,8 @@ class ActiveNotificationsTool(_Tool):
                 {
                     "key": item.get("key"),
                     "app": item.get("app"),
-                    "title": mask_codes(str(item.get("title") or "")),
-                    "text": mask_codes(str(item.get("text") or "")),
+                    "title": mask_private(str(item.get("title") or ""), codes=codes),
+                    "text": mask_private(str(item.get("text") or ""), codes=codes),
                     "time": datetime.fromtimestamp(posted / 1000).strftime("%m-%d %H:%M")
                     if isinstance(posted, (int, float)) and posted > 0
                     else None,
@@ -143,18 +147,20 @@ class NotificationReplyTool(_Tool):
         capability=Capability.PROCESS_EXECUTE,
     )
 
-    def prepare_for_approval(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        """The approval names who the reply really goes to, the notification's app and title as the
-        shade shows them, in place of the name the model gave."""
+    @staticmethod
+    def _recipient(key: str) -> str:
+        """Who a reply to this notification goes to, its app and title as the shade shows them now.
+        Never the name the model gave: when the shade cannot be read, nobody is named."""
         from mobile_notification_journal import mask_codes
 
-        key = _key(arguments)
         try:
             listed = json.loads(str(_bridge().execute(json.dumps({"action": "list"}))))
         except Exception:
             listed = {}
         if not isinstance(listed, dict) or listed.get("ok") is not True:
-            return dict(arguments)  # The reply itself says what is wrong (access off, gone).
+            if isinstance(listed, dict) and listed.get("code") == "access_off":
+                raise ToolError(_ACCESS_HELP)
+            raise ToolError("The notifications could not be read, so who the reply goes to is unknown; try again")
         posted = next(
             (item for item in listed.get("notifications") or [] if isinstance(item, dict) and item.get("key") == key),
             None,
@@ -162,13 +168,26 @@ class NotificationReplyTool(_Tool):
         if posted is None:
             raise ToolError("That notification is no longer shown; list them again with active_notifications")
         to = " · ".join(str(part) for part in (posted.get("app"), mask_codes(str(posted.get("title") or ""))) if part)
-        return {**arguments, "to": to[:200]}
+        return to[:200]
+
+    def prepare_for_approval(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """The approval names who the reply really goes to, in place of the name the model gave."""
+        return {**arguments, "to": self._recipient(_key(arguments))}
 
     async def execute(self, arguments: dict[str, Any]) -> str:
         text = arguments.get("text")
         if not isinstance(text, str) or not text.strip() or len(text) > 2000:
             raise ToolArgumentError("'text' must be 1 to 2000 characters")
-        return json_result(await _call({"action": "reply", "key": _key(arguments), "text": text}))
+        key = _key(arguments)
+        # Apps reuse a notification for the next message: by the time the user approves, the same
+        # key can be someone else's.
+        now = await asyncio.to_thread(self._recipient, key)
+        if now != arguments.get("to"):
+            raise ToolError(
+                f"That notification now shows {now}, not who the reply was approved for; list them "
+                "again with active_notifications and ask again"
+            )
+        return json_result(await _call({"action": "reply", "key": key, "text": text}))
 
 
 class NotificationOpenTool(_Tool):

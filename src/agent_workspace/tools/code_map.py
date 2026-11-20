@@ -11,7 +11,13 @@ from agent_workspace.core.models import Capability, ToolSpec
 
 from .base import ToolArgumentError, ToolError, json_result, optional_int
 from .filesystem import _workspace_paths
-from .paths import StrPath, WorkspacePathError, WorkspacePaths, is_sensitive_workspace_path
+from .paths import (
+    StrPath,
+    WorkspacePathError,
+    WorkspacePaths,
+    is_sensitive_workspace_path,
+    open_checked,
+)
 from .process_worker import run_in_process
 
 if TYPE_CHECKING:
@@ -273,7 +279,7 @@ def _index_files(
                 truncated = True
                 continue
             try:
-                with checked.open("rb") as stream:
+                with open_checked(checked) as stream:
                     file_size = WorkspacePaths.assert_safe_file_descriptor(
                         stream.fileno(), checked
                     ).st_size
@@ -281,6 +287,8 @@ def _index_files(
                         truncated = True
                         continue
                     data = stream.read()
+            except WorkspacePathError:
+                continue  # a folder on the way became a link after it was checked
             except OSError as exc:
                 raise ToolError(f"cannot read file while mapping symbols: {checked}") from exc
             try:

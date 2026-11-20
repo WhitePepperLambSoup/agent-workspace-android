@@ -96,6 +96,8 @@ object AgentBrowser {
      */
     private const val FILE_HOST = "workspace.agent-browser.invalid"
     @Volatile private var fileRoot: File? = null
+    // The file the agent opened (checked by the engine), served whatever its kind.
+    @Volatile private var fileOpened: File? = null
 
     private fun openFile(root: String, path: String): JSONObject {
         val folder = runCatching { File(root).canonicalFile }.getOrNull()
@@ -105,6 +107,7 @@ object AgentBrowser {
             return failure("bad_path", "The file is not inside the opened folder")
         }
         fileRoot = folder
+        fileOpened = target
         val relative = target.path.substring(folder.path.length + 1).split(File.separatorChar)
             .joinToString("/") { Uri.encode(it) }
         return navigate("https://$FILE_HOST/$relative", PAGE_TIMEOUT_MS)
@@ -115,9 +118,10 @@ object AgentBrowser {
         val root = fileRoot ?: return notFound()
         val decoded = uri.pathSegments.joinToString(File.separator)
         val file = runCatching { File(root, decoded).canonicalFile }.getOrNull()
-        if (file == null || !file.isFile || !file.path.startsWith(root.path + File.separator) || sensitive(file.name)) {
-            return notFound()
-        }
+        if (file == null || !file.isFile || !file.path.startsWith(root.path + File.separator)) return notFound()
+        // Everything else only as part of a web page, and nothing secret by any part of its path.
+        val segments = file.path.substring(root.path.length + 1).split(File.separatorChar)
+        if (file != fileOpened && !WorkspacePageFiles.servable(segments)) return notFound()
         val type = android.webkit.MimeTypeMap.getSingleton()
             .getMimeTypeFromExtension(file.extension.lowercase()) ?: when (file.extension.lowercase()) {
                 "js", "mjs" -> "text/javascript"
@@ -131,25 +135,19 @@ object AgentBrowser {
             mapOf("Cache-Control" to "no-store"), file.inputStream())
     }
 
-    private fun sensitive(name: String): Boolean {
-        val lower = name.lowercase()
-        return lower.startsWith(".env") || lower.endsWith(".key") || lower.endsWith(".pem") ||
-            lower.endsWith(".p12") || lower.endsWith(".jks") || lower == "id_rsa" || lower == "id_ed25519"
-    }
-
     private fun notFound() = WebResourceResponse("text/plain", "UTF-8", 404, "Not Found",
         mapOf("Cache-Control" to "no-store"), java.io.ByteArrayInputStream(ByteArray(0)))
 
-    /** http(s) only, and never this app's own engine port. */
-    private fun allowed(url: String): Boolean {
-        val uri = runCatching { Uri.parse(url) }.getOrNull() ?: return false
-        val scheme = uri.scheme?.lowercase()
-        if (scheme != "http" && scheme != "https") return false
-        val host = uri.host?.lowercase()?.trim('[', ']') ?: return false
-        val port = if (uri.port != -1) uri.port else if (scheme == "https") 443 else 80
-        val local = host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0"
-        return !(local && port == com.agentworkspace.mobile.embedded.EngineAddress.port(context))
-    }
+    /** http(s) only, and never this app's own engine port, however its address is written. */
+    private fun allowed(url: String): Boolean =
+        BrowserAddress.allowed(url, com.agentworkspace.mobile.embedded.EngineAddress.port(context))
+
+    /** What a page asks for itself (fetch, XHR, frames, images): never the engine's port either. */
+    private fun refused(url: String): WebResourceResponse? =
+        if (BrowserAddress.engine(url, com.agentworkspace.mobile.embedded.EngineAddress.port(context))) {
+            WebResourceResponse("text/plain", "UTF-8", 403, "Forbidden",
+                mapOf("Cache-Control" to "no-store"), java.io.ByteArrayInputStream(ByteArray(0)))
+        } else null
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun webView(): WebView = onMain(15_000L) {
@@ -170,7 +168,7 @@ object AgentBrowser {
                 setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                 webViewClient = object : WebViewClient() {
                     override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
-                        serveFile(request.url)
+                        refused(request.url.toString()) ?: serveFile(request.url)
 
                     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                         val target = request.url.toString()
@@ -182,6 +180,11 @@ object AgentBrowser {
                     override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
                         loading = true
                         mainFrameError = null
+                        // Left the workspace page: its folder is no longer served to anyone.
+                        if (url != null && runCatching { Uri.parse(url).host }.getOrNull() != FILE_HOST) {
+                            fileRoot = null
+                            fileOpened = null
+                        }
                     }
 
                     override fun onPageFinished(view: WebView, url: String?) {

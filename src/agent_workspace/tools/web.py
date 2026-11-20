@@ -332,6 +332,24 @@ def _transport_reason(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
 
 
+def _resolved_addresses(
+    hostname: str, port: int
+) -> dict[str, ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    try:
+        records = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ToolError("web_fetch DNS resolution failed") from exc
+    # Keep the resolver's order: it ranks addresses for this network (RFC 6724), so an IPv6
+    # address on an IPv4-only connection comes last instead of first.
+    addresses = tuple(dict.fromkeys(str(record[4][0]) for record in records))
+    if not addresses:
+        raise ToolError("web_fetch DNS resolution returned no addresses")
+    try:
+        return {address: ipaddress.ip_address(address) for address in addresses}
+    except ValueError:
+        raise ToolError("web_fetch DNS resolution returned an invalid address") from None
+
+
 def _normalize_public_https_url(raw_url: str) -> tuple[str, SplitResult, tuple[str, ...]]:
     if any(ord(character) < 33 or ord(character) == 127 for character in raw_url):
         raise ToolArgumentError("URL may not contain whitespace or control characters")
@@ -352,24 +370,12 @@ def _normalize_public_https_url(raw_url: str) -> tuple[str, SplitResult, tuple[s
         hostname = parsed.hostname.encode("idna").decode("ascii").rstrip(".").casefold()
     except UnicodeError:
         raise ToolArgumentError("URL hostname is invalid") from None
-    try:
-        records = socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
-    except OSError as exc:
-        raise ToolError("web_fetch DNS resolution failed") from exc
-    # Keep the resolver's order: it ranks addresses for this network (RFC 6724), so an IPv6
-    # address on an IPv4-only connection comes last instead of first.
-    addresses = tuple(dict.fromkeys(str(record[4][0]) for record in records))
-    if not addresses:
-        raise ToolError("web_fetch DNS resolution returned no addresses")
-    try:
-        parsed_addresses = tuple(ipaddress.ip_address(address) for address in addresses)
-    except ValueError:
-        raise ToolError("web_fetch DNS resolution returned an invalid address") from None
-    if any(not address.is_global for address in parsed_addresses):
+    addresses = _resolved_addresses(hostname, 443)
+    if any(not address.is_global for address in addresses.values()):
         raise ToolError("web_fetch blocks private, local, reserved, or non-global addresses")
     normalized_host = f"[{hostname}]" if ":" in hostname else hostname
     normalized = urlunsplit(("https", normalized_host, parsed.path or "/", parsed.query, ""))
-    return normalized, urlsplit(normalized), addresses
+    return normalized, urlsplit(normalized), tuple(addresses)
 
 
 def _media_type_and_charset(value: str | None) -> tuple[str, str]:

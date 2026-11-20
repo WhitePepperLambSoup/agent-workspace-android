@@ -673,6 +673,8 @@ class DeviceCommands(GatewayState):
                     session_id=session.id,
                     writer_lock_group=self._writer_lock_group,
                     # The same tools as in the window: the conversation may be opened there next.
+                    tool_guards=True,
+                    long_turns=True,
                     subagents=self._subagents,
                     phone_jobs=self._phone_jobs,
                     extra_tools=(self._skill_tool,),

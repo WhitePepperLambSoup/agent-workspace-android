@@ -7,8 +7,10 @@ user once closed Windows' prompt with Cancel) or incoming connections are blocke
 no rule allows the program.
 
 The fix asks Windows for administrator rights (its own confirmation is the only thing the user
-sees), removes the program's blocking rules and adds one allowing it, only from private
-networks and Tailscale.
+sees), removes the program's blocking rules and adds one allowing it, for the phone connection's
+port only and only from private networks (and Tailscale, when its adapter is up here). The block
+rule Windows' first prompt left for public networks is the user's choice there: it is removed only
+while this computer is on a public network.
 """
 
 from __future__ import annotations
@@ -31,12 +33,15 @@ _REMOTE_ADDRESSES = (
     "10.0.0.0/8",
     "172.16.0.0/12",
     "192.168.0.0/16",
-    "100.64.0.0/10",
 )
+# Tailscale's range, allowed only while its adapter is up here: otherwise these are a carrier's
+# shared addresses (RFC 6598), other customers of the same provider or hotspot.
+_TAILSCALE_ADDRESSES = ("100.64.0.0/10",)
 
 # Through the firewall's COM interface (a few seconds; the NetSecurity cmdlets take ~20). The
 # program path comes in through an environment variable, so it needs no quoting. Profiles are
-# bits: 1 domain, 2 private, 4 public; actions 0 block, 1 allow; direction 1 is inbound.
+# bits: 1 domain, 2 private, 4 public; actions 0 block, 1 allow; direction 1 is inbound;
+# protocol 6 is TCP, 256 any; ports "*" or a list such as "8765,9000-9010".
 _CHECK = r"""
 $ErrorActionPreference = 'SilentlyContinue'
 $fw = New-Object -ComObject HNetCfg.FwPolicy2
@@ -51,7 +56,8 @@ $profiles = @(foreach ($bit in 1, 2, 4) {
 $rules = @(foreach ($rule in $fw.Rules) {
   if ($rule.Enabled -and $rule.Direction -eq 1 -and $rule.ApplicationName) {
     if ([Environment]::ExpandEnvironmentVariables($rule.ApplicationName) -ieq $program) {
-      [pscustomobject]@{ action = [int]$rule.Action; profiles = [int]$rule.Profiles }
+      [pscustomobject]@{ action = [int]$rule.Action; profiles = [int]$rule.Profiles;
+        protocol = [int]$rule.Protocol; ports = [string]$rule.LocalPorts }
     }
   }
 })
@@ -63,30 +69,56 @@ def _quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def fix_script(program: str) -> str:
-    """What runs with administrator rights: the program's blocking rules go, one rule allows it."""
-    remote = ",".join(_quote(item) for item in _REMOTE_ADDRESSES)
+def fix_script(program: str, port: int, *, tailscale: bool = False) -> str:
+    """What runs with administrator rights: the program's blocking rules go (the one for public
+    networks only while on one), and one rule allows it on the phone connection's port."""
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise ValueError("port must be a TCP port")
+    addresses = _REMOTE_ADDRESSES + (_TAILSCALE_ADDRESSES if tailscale else ())
+    remote = ",".join(_quote(item) for item in addresses)
     return (
         "$ErrorActionPreference = 'Stop'\n"
         f"$program = {_quote(program)}\n"
+        "$public = ((New-Object -ComObject HNetCfg.FwPolicy2).CurrentProfileTypes -band 4) -ne 0\n"
         "Get-NetFirewallApplicationFilter -Program $program -ErrorAction SilentlyContinue | "
         "Get-NetFirewallRule | Where-Object { [string]$_.Direction -eq 'Inbound' -and "
-        "[string]$_.Action -eq 'Block' } | Remove-NetFirewallRule\n"
+        "[string]$_.Action -eq 'Block' -and ($public -or [string]$_.Profile -notmatch "
+        "'Public|Any') } | Remove-NetFirewallRule\n"
         f"Get-NetFirewallRule -DisplayName {_quote(RULE_NAME)} -ErrorAction SilentlyContinue | "
         "Remove-NetFirewallRule\n"
         f"New-NetFirewallRule -DisplayName {_quote(RULE_NAME)} -Direction Inbound -Action Allow "
-        f"-Program $program -Protocol TCP -Profile Any -RemoteAddress @({remote}) | Out-Null\n"
+        f"-Program $program -Protocol TCP -LocalPort {port} -Profile Any "
+        f"-RemoteAddress @({remote}) | Out-Null\n"
     )
 
 
-def assess(document: dict[str, Any]) -> str:
+def _covers_port(rule: dict[str, Any], port: int | None) -> bool:
+    """Whether a rule applies to TCP connections on the port (any port when it is not known)."""
+    if rule.get("protocol") not in (None, 6, 256):
+        return False
+    ports = str(rule.get("ports") or "*").replace(" ", "")
+    if port is None or ports in {"*", ""}:
+        return True
+    for item in ports.split(","):
+        low, _, high = item.partition("-")
+        if low.isdigit() and int(low) <= port <= int(high if high.isdigit() else low):
+            return True
+    return False
+
+
+def assess(document: dict[str, Any], port: int | None = None) -> str:
     """ "open", "blocked" or "unknown" from what the check read: blocked when, on a network this
     computer is on, the firewall is on and either a rule blocks the program or nothing allows
-    it while incoming connections are blocked by default."""
+    it while incoming connections are blocked by default. Only rules for the phone connection's
+    port count, so a rule for an earlier port leaves it blocked."""
     profiles = [item for item in document.get("profiles") or [] if isinstance(item, dict)]
     if not profiles:
         return "unknown"  # no network connected
-    rules = [item for item in document.get("rules") or [] if isinstance(item, dict)]
+    rules = [
+        item
+        for item in document.get("rules") or []
+        if isinstance(item, dict) and _covers_port(item, port)
+    ]
     for profile in profiles:
         bit = profile.get("bit")
         if not isinstance(bit, int) or profile.get("enabled") is False:
@@ -122,7 +154,7 @@ def _powershell(
     )
 
 
-def check(program: str) -> str:
+def check(program: str, port: int | None = None) -> str:
     if os.name != "nt":
         return "unknown"
     try:
@@ -130,14 +162,17 @@ def check(program: str) -> str:
         document = json.loads(completed.stdout or "{}")
     except (OSError, ValueError, subprocess.SubprocessError):
         return "unknown"
-    return assess(document) if isinstance(document, dict) else "unknown"
+    return assess(document, port) if isinstance(document, dict) else "unknown"
 
 
-def allow(program: str) -> bool:
+def allow(program: str, port: int | None = None) -> bool:
     """Run the fix with administrator rights; False when the user declined or it failed."""
-    if os.name != "nt":
+    if os.name != "nt" or port is None:
         return False
-    inner = base64.b64encode(fix_script(program).encode("utf-16-le")).decode("ascii")
+    from agent_workspace.ui_gateway.net_adapters import tailscale_present
+
+    script = fix_script(program, port, tailscale=tailscale_present())
+    inner = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     outer = (
         "$p = Start-Process -FilePath powershell.exe -Verb RunAs -WindowStyle Hidden -Wait "
         "-PassThru -ArgumentList '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass',"
@@ -155,18 +190,20 @@ class FirewallWatch:
 
     ``state`` answers at once from the last check ("checking" before the first one) and starts a
     new check when it is old. ``allow`` runs the fix on its own thread; the state is "fixing"
-    until it ends, then "declined" or a fresh check result.
+    until it ends, then "declined" or a fresh check result. ``port`` is the phone connection's,
+    set once it listens: the check and the rule are for that port only.
     """
 
     def __init__(
         self,
         program: str | None = None,
         *,
-        checker: Callable[[str], str] = check,
-        fixer: Callable[[str], bool] = allow,
+        checker: Callable[[str, int | None], str] = check,
+        fixer: Callable[[str, int | None], bool] = allow,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.program = program or sys.executable
+        self.port: int | None = None
         self._checker = checker
         self._fixer = fixer
         self._clock = clock
@@ -201,7 +238,7 @@ class FirewallWatch:
         threading.Thread(target=work, name="device-link-firewall", daemon=True).start()
 
     def _check(self) -> None:
-        result = self._checker(self.program)
+        result = self._checker(self.program, self.port)
         with self._lock:
             if self._state != "fixing":
                 self._state = result
@@ -209,8 +246,8 @@ class FirewallWatch:
             self._busy = False
 
     def _fix(self) -> None:
-        allowed = self._fixer(self.program)
-        result = self._checker(self.program)
+        allowed = self._fixer(self.program, self.port)
+        result = self._checker(self.program, self.port)
         with self._lock:
             self._state = result if allowed or result == "open" else "declined"
             self._checked_at = self._clock()

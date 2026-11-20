@@ -105,6 +105,7 @@ class TranscribeAudioTool:
         },
         side_effect="read",
         capability=Capability.WORKSPACE_READ,
+        sensitive_result=True,
     )
 
     def __init__(self, workspace: WorkspacePaths | StrPath) -> None:

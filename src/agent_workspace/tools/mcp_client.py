@@ -13,7 +13,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 from asyncio import StreamReader, StreamWriter
 from asyncio.subprocess import Process
 from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
@@ -24,6 +23,11 @@ from typing import Any, cast
 from agent_workspace.application.ports import Tool
 from agent_workspace.core.models import Capability, ToolSpec
 from agent_workspace.tools.base import ToolError
+from agent_workspace.tools.helper_servers import (
+    HELPER_SERVER_NEW_SESSION,
+    end_helper_server,
+    helper_server_job,
+)
 
 _PROTOCOL_VERSION = "2024-11-05"
 _CLIENT_NAME = "agent-workspace"
@@ -32,6 +36,7 @@ _MAX_LINE_BYTES = 32 * 1024 * 1024
 _STDERR_TAIL_BYTES = 8 * 1024
 _STDERR_REPORT_BYTES = 2 * 1024
 _TERMINATE_SECONDS = 2.0
+_SHUTDOWN_SECONDS = 1.0
 
 
 class McpClientError(ToolError):
@@ -211,73 +216,12 @@ class StdioMcpClient:
                 stderr=asyncio.subprocess.PIPE,
                 creationflags=creationflags,
                 limit=_MAX_LINE_BYTES,
+                start_new_session=HELPER_SERVER_NEW_SESSION,
             )
         except OSError as exc:
             raise McpClientError(f"cannot start MCP server {self._command[0]!r}: {exc}") from exc
         self._process = process
-        if sys.platform == "win32":
-            try:
-                import ctypes
-                from ctypes import wintypes
-
-                kernel32 = ctypes.windll.kernel32
-                raw_job = kernel32.CreateJobObjectW(None, None)
-                if raw_job:
-                    self._job_handle = raw_job
-
-                    class _IO_COUNTERS(ctypes.Structure):
-                        _fields_ = [
-                            ("ReadOperationCount", ctypes.c_uint64),
-                            ("WriteOperationCount", ctypes.c_uint64),
-                            ("OtherOperationCount", ctypes.c_uint64),
-                            ("ReadTransferCount", ctypes.c_uint64),
-                            ("WriteTransferCount", ctypes.c_uint64),
-                            ("OtherTransferCount", ctypes.c_uint64),
-                        ]
-
-                    class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
-                        _fields_ = [
-                            ("PerProcessUserTimeLimit", ctypes.c_int64),
-                            ("PerJobUserTimeLimit", ctypes.c_int64),
-                            ("LimitFlags", wintypes.DWORD),
-                            ("MinimumWorkingSetSize", ctypes.c_size_t),
-                            ("MaximumWorkingSetSize", ctypes.c_size_t),
-                            ("ActiveProcessLimit", wintypes.DWORD),
-                            ("Affinity", ctypes.c_size_t),
-                            ("PriorityClass", wintypes.DWORD),
-                            ("SchedulingClass", wintypes.DWORD),
-                        ]
-
-                    class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
-                        _fields_ = [
-                            ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
-                            ("IoInfo", _IO_COUNTERS),
-                            ("ProcessMemoryLimit", ctypes.c_size_t),
-                            ("JobMemoryLimit", ctypes.c_size_t),
-                            ("PeakProcessMemoryLimit", ctypes.c_size_t),
-                            ("PeakJobMemoryLimit", ctypes.c_size_t),
-                        ]
-
-                    info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-                    info.BasicLimitInformation.LimitFlags = (
-                        0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-                    )
-                    kernel32.SetInformationJobObject(
-                        raw_job,
-                        9,  # JobObjectExtendedLimitInformation
-                        ctypes.byref(info),
-                        ctypes.sizeof(info),
-                    )
-                    PROCESS_SET_QUOTA = 0x0100
-                    PROCESS_TERMINATE = 0x0001
-                    h_proc = kernel32.OpenProcess(
-                        PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, process.pid
-                    )
-                    if h_proc:
-                        kernel32.AssignProcessToJobObject(raw_job, h_proc)
-                        kernel32.CloseHandle(h_proc)
-            except Exception:
-                pass
+        self._job_handle = helper_server_job(process.pid)
         self._stdin = cast(StreamWriter, process.stdin)
         self._stdout = cast(StreamReader, process.stdout)
         self._stderr = cast(StreamReader, process.stderr)
@@ -369,7 +313,7 @@ class StdioMcpClient:
         await self._request("ping", None, self._call_timeout_seconds)
 
     async def aclose(self) -> None:
-        """Terminate the server subprocess. Idempotent and never raises."""
+        """Stop the server and whatever it started. Idempotent and never raises."""
         stderr_task = self._stderr_task
         self._stderr_task = None
         if stderr_task is not None:
@@ -377,28 +321,26 @@ class StdioMcpClient:
             with suppress(BaseException):
                 await stderr_task
         process = self._process
+        stdin = self._stdin
+        job = self._job_handle
         self._process = None
         self._stdin = None
         self._stdout = None
         self._stderr = None
-        if hasattr(self, "_job_handle") and self._job_handle:
-            try:
-                import ctypes
-
-                ctypes.windll.kernel32.CloseHandle(self._job_handle)
-            except Exception:
-                pass
-            self._job_handle = None
-        if process is None or process.returncode is not None:
+        self._job_handle = None
+        if process is None:
+            if job is not None:
+                job.close()
             return
-        with suppress(Exception):
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=_TERMINATE_SECONDS)
-            except TimeoutError:
-                process.kill()
-                with suppress(BaseException):
-                    await asyncio.wait_for(process.wait(), timeout=_TERMINATE_SECONDS)
+        try:
+            if process.returncode is None and stdin is not None:
+                # The MCP stdio shutdown: closing its input lets the server exit by itself.
+                with suppress(Exception):
+                    stdin.close()
+                with suppress(Exception):
+                    await asyncio.wait_for(process.wait(), timeout=_SHUTDOWN_SECONDS)
+        finally:
+            await end_helper_server(process, job, grace_seconds=_TERMINATE_SECONDS)
 
     async def _initialize(self) -> None:
         params = {
@@ -559,6 +501,7 @@ class McpProxyTool(Tool):
         submit: Callable[[Coroutine[Any, Any, str]], Awaitable[str]] | None = None,
         server_id: str = "",
         tool_name: str | None = None,
+        yolo_opt_in: bool = False,
     ) -> None:
         self._client = client
         self._definition = definition
@@ -575,6 +518,7 @@ class McpProxyTool(Tool):
             side_effect=side_effect,
             capability=capability,
             provider_input_schema=None,
+            yolo_opt_in=yolo_opt_in,
         )
 
     @property

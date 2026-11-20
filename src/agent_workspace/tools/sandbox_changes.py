@@ -785,8 +785,12 @@ class SandboxChangeStatusTool:
             relative,
         )
         target = self.paths.resolve(relative)
+        actual_kind: str | None
         if change.get("apply_supported") is not True:
+            # Not looked at: binaries, large text and the like are for the user to review by hand
+            # (this branch used to leave actual_kind unset, so asking about them raised).
             state = "unsupported"
+            actual_kind = None
             actual_sha256 = None
             actual_executable = None
         else:

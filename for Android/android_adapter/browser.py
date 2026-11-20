@@ -366,6 +366,8 @@ class AndroidBrowserViewTool:
         },
         side_effect="none",
         capability=Capability.NETWORK_READ,
+        # The built-in browser keeps the user's sign-ins: a page can be their mail or account.
+        sensitive_result=True,
     )
 
     def __init__(self, session: BrowserSession | None = None, workspace: Any = None) -> None:

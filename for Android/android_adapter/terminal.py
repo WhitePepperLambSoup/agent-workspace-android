@@ -278,8 +278,11 @@ async def run_bounded_command(
     if not cwd.is_dir():
         raise ToolError("terminal working directory is not a directory")
     cancelled = threading.Event()
+    from .command_guard import status as guard_status
     from .toolchain import command_transport
 
+    # The first command, or the first after a failed check, probes: off the event loop.
+    await asyncio.to_thread(guard_status)
     transported, environment, lease = command_transport(argv, cwd, paths.root)
     argv = transported
     worker = asyncio.create_task(
@@ -361,6 +364,8 @@ class AndroidRunTerminalTool:
         },
         side_effect="process",
         capability=Capability.PROCESS_EXECUTE,
+        # Output can be any file the command prints, as with read_file and run_process.
+        sensitive_result=True,
     )
 
     def __init__(self, workspace: WorkspacePaths | StrPath) -> None:

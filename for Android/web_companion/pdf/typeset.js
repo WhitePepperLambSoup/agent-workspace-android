@@ -150,6 +150,54 @@
     return parts;
   }
 
+  /** Whether text[index] is in a % comment on its line. */
+  function commented(text, index) {
+    for (let at = text.lastIndexOf("\n", index - 1) + 1; at < index; at += 1) {
+      if (text[at] === "\\") { at += 1; continue; }
+      if (text[at] === "%") return true;
+    }
+    return false;
+  }
+
+  // Code and addresses keep every character: % is not a comment in them, and code keeps its
+  // indentation. They are set aside before comments and source indentation go, and put back
+  // where they are used.
+  const verbatimToken = (number) => `⁣VERB${number}⁣`;
+
+  function setAside(text, kept) {
+    const keep = (raw) => { kept.push(raw); return verbatimToken(kept.length - 1); };
+    const environments = /\\begin\{(verbatim\*?|lstlisting|minted|Verbatim|code)\}/g;
+    let out = "";
+    let index = 0;
+    let match;
+    while ((match = environments.exec(text))) {
+      // Judged on what is already set aside, so a % in earlier code on the line does not count.
+      const before = out + text.slice(index, match.index);
+      if (commented(before, before.length)) continue;
+      const close = text.indexOf(`\\end{${match[1]}}`, environments.lastIndex);
+      if (close < 0) break;
+      out += text.slice(index, environments.lastIndex) + keep(text.slice(environments.lastIndex, close));
+      index = close;
+      environments.lastIndex = close;
+    }
+    out += text.slice(index);
+    const inline = /\\verb(\*?)([^A-Za-z*\s])([^\n]*?)\2|\\(url|href)\s*\{([^{}\n]*)\}/g;
+    let result = "";
+    let last = 0;
+    while ((match = inline.exec(out))) {
+      const [whole, star, delimiter, code, command, address] = match;
+      result += out.slice(last, match.index);
+      last = inline.lastIndex;
+      if (commented(result, result.length)) result += whole;
+      else result += command ? `\\${command}{${keep(address)}}` : `\\verb${star}${delimiter}${keep(code)}${delimiter}`;
+    }
+    return result + out.slice(last);
+  }
+
+  function restore(text, state) {
+    return text.replace(/⁣VERB(\d+)⁣/g, (_, number) => (state.verbatim || [])[Number(number)] ?? "");
+  }
+
   function stripComments(text) {
     return text.split("\n").map((line) => {
       for (let index = 0; index < line.length; index += 1) {
@@ -226,7 +274,8 @@
 
   /** A LaTeX document as Markdown, with the macros KaTeX needs. */
   function latexToMarkdown(source) {
-    let text = stripComments(String(source || "").replace(/\r\n?/g, "\n"));
+    const verbatim = [];
+    let text = stripComments(setAside(String(source || "").replace(/\r\n?/g, "\n"), verbatim));
     const macros = collectMacros(text);
     const cjk = /[㐀-鿿]/.test(text) || /\\usepackage(\[[^\]]*\])?\{ctex\}|\\documentclass(\[[^\]]*\])?\{ctex/.test(text);
     const begin = text.indexOf("\\begin{document}");
@@ -241,7 +290,7 @@
     const state = {
       cjk, macros, theorems, footnotes: [], headings: [], counters: { chapter: 0, section: 0, subsection: 0, subsubsection: 0 },
       hasChapters: /\\chapter\b/.test(body), equation: 0, figure: 0, table: 0, theorem: {}, labels: {}, pendingLabels: [],
-      float: null,
+      float: null, verbatim,
       title: firstArgument(preamble + body, "title"), author: firstArgument(preamble + body, "author"),
       date: firstArgument(preamble + body, "date"),
     };
@@ -252,6 +301,8 @@
       markdown += "\n\n" + state.footnotes.map((note, index) => `[^${index + 1}]: ${note.replace(/\n+/g, " ")}`).join("\n");
     }
     markdown = markdown.replace(/⁣⁣REF\{([^}]*)\}⁣⁣/g, (_, name) => state.labels[name] || "??");
+    // Anything set aside that no command took back (\texttt{\url{…}}) is shown as written.
+    markdown = restore(markdown, state);
     if (markdown.includes(TOC)) {
       const contents = state.headings.map(({ level, title }) => `${"  ".repeat(level)}- ${title}`).join("\n");
       markdown = markdown.replace(TOC, `\n\n**${cjk ? "目录" : "Contents"}**\n\n${contents}\n\n`);
@@ -368,7 +419,7 @@
       return table(rest.slice(after), spec, state);
     }
     if (["verbatim", "verbatim*", "lstlisting", "minted", "Verbatim", "code"].includes(name)) {
-      let code = body;
+      let code = restore(body, state);
       let language = "";
       if (name === "minted") { const [lang, after] = argument(code, optional(code, 0)[1]); language = lang; code = code.slice(after); }
       else if (name === "lstlisting") {
@@ -519,7 +570,7 @@
           if (plain === "verb") {
             const delimiter = text[index];
             const end = text.indexOf(delimiter, index + 1);
-            out += "`" + text.slice(index + 1, end < 0 ? text.length : end) + "`";
+            out += "`" + restore(text.slice(index + 1, end < 0 ? text.length : end), state) + "`";
             index = end < 0 ? text.length : end + 1;
             continue;
           }
@@ -541,13 +592,13 @@
         if (plain === "href") {
           const [url, afterUrl] = argument(text, index);
           const [label, after] = argument(text, afterUrl);
-          out += `[${convert(label, state).trim()}](${url.trim().replace(/\\([#%_&])/g, "$1")})`;
+          out += `[${convert(label, state).trim()}](${restore(url, state).trim().replace(/\\([#%_&])/g, "$1")})`;
           index = after;
           continue;
         }
         if (plain === "url") {
           const [url, after] = argument(text, index);
-          const plainUrl = url.trim().replace(/\\([#%_&])/g, "$1");
+          const plainUrl = restore(url, state).trim().replace(/\\([#%_&])/g, "$1");
           out += `[${plainUrl}](${plainUrl})`;
           index = after;
           continue;

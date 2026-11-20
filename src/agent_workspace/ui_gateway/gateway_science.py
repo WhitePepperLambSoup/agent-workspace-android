@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -342,13 +343,12 @@ def _run(
             stderr=subprocess.STDOUT,
             creationflags=flags,
         )
-        try:
-            process.wait(timeout=seconds)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=10)
-        if cancel.is_set() and process.returncode is None:
-            process.kill()
+        deadline = time.monotonic() + seconds
+        while process.poll() is None:
+            if cancel.wait(0.2) or time.monotonic() > deadline:
+                process.kill()
+                process.wait(timeout=10)
+                break
         output.seek(0)
         text = output.read().decode("utf-8", errors="replace")
     return process.returncode if process.returncode is not None else -1, text

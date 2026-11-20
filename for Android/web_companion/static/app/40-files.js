@@ -50,6 +50,8 @@
   }
 
   window.AgentMobileUi = { openMenu, closeMenu, handleBack, notice, reloadForLanguage: () => window.location.reload(), receiveSharedText, openSession, quickAsk, apiJson, setSettingsPage, adoptTask,
+    // openSession is false both while a switch starts and when it was refused: this tells them apart.
+    sessionOpening: () => sessionOpening,
     readLocalContextDraft, setLocalContextDraft, useExpertTeam,
     // ID and bank card numbers in text going to a paired computer (management.js, device link 2.2).
     privateParts: (text) => privateParts(text),

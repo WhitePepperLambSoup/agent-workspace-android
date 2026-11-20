@@ -76,14 +76,22 @@ def _verify(data: bytes, dist: dict[str, Any]) -> None:
 
 
 def _unpack(data: bytes, destination: Path) -> None:
+    inside = destination.resolve()
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
         for member in archive.getmembers():
+            # Names are POSIX paths, but on Windows a backslash separates folders too and a colon
+            # starts a drive ("package/C:/x") or a file's hidden stream: such a name can write
+            # outside the folder, and real packages have none.
+            if "\\" in member.name or ":" in member.name:
+                continue
             parts = PurePosixPath(member.name).parts
             if not parts or parts[0] != "package" or ".." in parts or member.name.startswith("/"):
                 continue
             if not (member.isfile() or member.isdir()):
                 continue  # no links or devices
             target = destination.joinpath(*parts[1:])
+            if not target.resolve().is_relative_to(inside):
+                raise InstallError(f"the package has a file outside its folder: {member.name}")
             if member.isdir():
                 target.mkdir(parents=True, exist_ok=True)
                 continue

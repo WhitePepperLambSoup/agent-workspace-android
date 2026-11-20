@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent_workspace.storage.sqlite import take_skipped_migration_backup
 from agent_workspace.ui_gateway.data_care import (
     DataCareError,
     create_backup_now,
@@ -37,6 +38,8 @@ class DataCommands(GatewayState):
                     "usage": storage_usage(database),
                     "backups": list_backups(database),
                     "lastRestore": last_restore(database),
+                    # An update's migration that ran without its backup (no room, a disk error).
+                    "backupSkipped": take_skipped_migration_backup(database),
                 }
             elif command.type == "data.backup":
                 self._require_payload(command, set())
